@@ -4,17 +4,11 @@ Personal Data Platformの設計、データ仕様、運用手順を管理する�
 
 ## 構成
 
-| ディレクトリ | 管理する内容 |
-|---|---|
-| [`platform/`](platform/) | データソースをまたいで維持する設計、データ契約、運用手順 |
-| [`sources/`](sources/) | データソースごとの取得、データモデル、運用仕様 |
-| [`analytics/`](analytics/) | データソースを横断するmartとmetricの定義 |
-| [`superpowers/`](superpowers/) | 検討中の設計案と実装計画。正式な仕様ではない |
+- [`platform/`](platform/)
+- [`sources/`](sources/)
+- [`analytics/`](analytics/)
+- [`superpowers/`](superpowers/)
 
 ## 管理ルール
 
-- データソース固有の仕様は`sources/<source>/`だけを正本とする。
-- 複数のデータソースに適用する規約と手順だけを`platform/`へ置く。
-- データソースを横断する分析定義だけを`analytics/`へ置く。
 - 同じ情報を複数の文書に書かず、正本となる文書へリンクする。
-- `superpowers/`は下書きとして扱い、正式な仕様はそれ以外のディレクトリで管理する。
