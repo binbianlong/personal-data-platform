@@ -27,4 +27,11 @@ ruff check src tests
 pytest
 ```
 
+## コンテナ実行
+
+```bash
+docker build --tag personal-data-platform:dev .
+docker run --rm personal-data-platform:dev webhook
+```
+
 設計資料は[`docs/`](docs/)を参照する。
