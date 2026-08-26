@@ -34,4 +34,8 @@ docker build --tag personal-data-platform:dev .
 docker run --rm personal-data-platform:dev webhook
 ```
 
+## CI
+
+Pull Requestと`main`へのpushでは、Python、コンテナ、Terraformの検証をGitHub Actionsで実行する。default branchへのマージ条件は[`infra/github/`](infra/github/)のrepository rulesetで管理する。
+
 設計資料は[`docs/`](docs/)を参照する。
