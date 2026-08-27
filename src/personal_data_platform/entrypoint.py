@@ -1,24 +1,8 @@
-"""Shared runtime entrypoint."""
+"""Module entrypoint shared by the container and local CLI."""
 
-import argparse
+from personal_data_platform.cli import main
 
-ROLES = frozenset({"webhook", "fetch", "loader", "dbt", "reconciliation"})
-
-
-def resolve_role(role: str) -> str:
-    """Return a supported runtime role."""
-    if role not in ROLES:
-        raise ValueError(f"unknown role: {role}")
-    return role
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Validate the selected runtime role."""
-    parser = argparse.ArgumentParser(description="Run Personal Data Platform")
-    parser.add_argument("role", choices=sorted(ROLES))
-    args = parser.parse_args(argv)
-    resolve_role(args.role)
-    return 0
+__all__ = ["main"]
 
 
 if __name__ == "__main__":

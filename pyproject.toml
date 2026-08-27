@@ -13,6 +13,9 @@ dependencies = [
   "duckdb>=1.3,<2",
 ]
 
+[project.scripts]
+pdp = "personal_data_platform.cli:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.4,<10",
