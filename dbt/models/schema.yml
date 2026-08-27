@@ -1,0 +1,40 @@
+version: 2
+
+models:
+  - name: screen_time_transition
+    description: One current, decoded iPhone foreground transition per logical event.
+    columns:
+      - name: event_key
+        data_tests: [unique, not_null]
+      - name: device_key
+        data_tests: [not_null]
+      - name: bundle_id
+        data_tests: [not_null]
+      - name: event_at
+        data_tests: [not_null]
+      - name: state
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [start, end]
+
+  - name: screen_time_interval
+    description: Deterministically paired and quality-labelled foreground intervals.
+    columns:
+      - name: interval_key
+        data_tests: [unique, not_null]
+      - name: quality
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [complete, inferred_end_from_next_start, missing_end, missing_start]
+
+  - name: daily_screen_time
+    description: Screen Time seconds split at Asia/Tokyo calendar-day boundaries.
+    columns:
+      - name: activity_date
+        data_tests: [not_null]
+      - name: total_seconds
+        data_tests: [not_null]
