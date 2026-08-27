@@ -56,6 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("loader", help="load pending B2 Raw into MotherDuck")
     commands.add_parser("dbt", help="apply analytics models")
+    commands.add_parser("reconciliation", help="reconcile B2 and MotherDuck")
+    commands.add_parser("preflight", help="validate cloud runtime connectivity")
+    rebuild = commands.add_parser("rebuild", help="rebuild a scratch MotherDuck database")
+    rebuild_mode = rebuild.add_mutually_exclusive_group(required=True)
+    rebuild_mode.add_argument("--dry-run", action="store_true")
+    rebuild_mode.add_argument("--target-db")
     return parser
 
 
@@ -93,6 +99,22 @@ def _dispatch(args: argparse.Namespace) -> int:
         from personal_data_platform.dbt_runner import run_dbt_from_env
 
         return _run_job(run_dbt_from_env)
+    if args.command == "reconciliation":
+        from personal_data_platform.reconciliation.job import run_reconciliation_from_env
+
+        return _run_job(run_reconciliation_from_env)
+    if args.command == "preflight":
+        from personal_data_platform.preflight import run_preflight_from_env
+
+        return _run_job(run_preflight_from_env)
+    if args.command == "rebuild":
+        from personal_data_platform.recovery.rebuild import run_rebuild_from_env
+
+        return _run_job(
+            run_rebuild_from_env,
+            dry_run=args.dry_run,
+            target_db=args.target_db,
+        )
     raise RuntimeError(f"unsupported command: {args.command}")
 
 
