@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install development dependencies
+        run: python -m pip install --disable-pip-version-check -e '.[dev]'
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Check formatting
+        run: ruff format --check src tests
+
+      - name: Test
+        run: pytest -q
+
+      - name: Build package
+        run: python -m pip wheel --no-deps --wheel-dir /tmp/wheels .
+
+  container:
+    name: Container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build image
+        run: docker build --tag personal-data-platform:ci .
+
+      - name: Run entrypoint smoke tests
+        run: |
+          for role in dbt fetch loader reconciliation webhook; do
+            docker run --rm personal-data-platform:ci "$role"
+          done
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.9
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive infra/github
+
+      - name: Initialize providers
+        run: terraform -chdir=infra/github init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate configuration
+        run: terraform -chdir=infra/github validate
+
+      - name: Test ruleset contract
+        run: terraform -chdir=infra/github test
+
+  required:
+    name: CI
+    if: ${{ always() }}
+    needs:
+      - python
+      - container
+      - terraform
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    env:
+      PYTHON_RESULT: ${{ needs.python.result }}
+      CONTAINER_RESULT: ${{ needs.container.result }}
+      TERRAFORM_RESULT: ${{ needs.terraform.result }}
+    steps:
+      - name: Require every check to pass
+        run: |
+          test "$PYTHON_RESULT" = "success"
+          test "$CONTAINER_RESULT" = "success"
+          test "$TERRAFORM_RESULT" = "success"
