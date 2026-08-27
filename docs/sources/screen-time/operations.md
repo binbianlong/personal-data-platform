@@ -24,8 +24,7 @@ pdp screen-time collect --watch  完全走査を一定間隔で反復
 ```
 
 `--watch`の間隔は`PDP_COLLECTOR_POLL_SECONDS`で指定し、defaultは300秒、最小は10秒である。各走査が全segmentを
-再確認するため、過去eventを含むsegmentの後着更新もevent timestampのwatermarkで切り捨てない。LaunchAgentは
-`--watch`をRunAtLoad / KeepAliveで起動し、実行バイナリへFull Disk Accessを付与する。
+再確認するため、過去eventを含むsegmentの後着更新もevent timestampのwatermarkで切り捨てない。
 
 segmentはread前後のinode、size、mtimeを比較し、読込中に変わった場合は短いretry後に再読込する。安定しない
 segmentを途中bytesのままuploadしない。
@@ -58,6 +57,51 @@ pdp screen-time doctor
 
 B2への実write、Raw decode、MotherDuck接続は`doctor`では行わない。B2 writeは`collect --once`、cloud側は
 `pdp preflight`でそれぞれ確認する。
+
+## LaunchAgent
+
+先に`pdp screen-time collect --once`を成功させる。次に、plistへ保存する非secret設定を現在のshellへ設定する。
+
+```bash
+export B2_ENDPOINT="https://<B2 S3 endpoint>"
+export B2_BUCKET="<bucket>"
+export B2_REGION="<region>"
+export PDP_SCREEN_TIME_DEVICE_ALLOWLIST="<device_key>[,<device_key>...]"
+export PDP_COLLECTOR_POLL_SECONDS="300"
+```
+
+疑似化secret、B2 key ID、B2 application keyはplistへ保存せず、macOS Keychain service
+`personal-data-platform`から実行時に読む。plistは次のcommandで生成する。
+
+```bash
+collector_plist="$HOME/Library/LaunchAgents/com.personal-data-platform.screen-time-collector.plist"
+pdp screen-time launch-agent \
+  --output "$collector_plist" \
+  --project-root "$(pwd)" \
+  --python-executable "$(pwd)/.venv/bin/python"
+plutil -lint "$collector_plist"
+plutil -extract ProgramArguments.0 raw -o - "$collector_plist"
+```
+
+最後のcommandが表示したPython executableへ、macOSの「システム設定 > プライバシーとセキュリティ >
+フルディスクアクセス」でFull Disk Accessを付与する。Terminalへの付与だけではLaunchAgentの権限にならない。
+付与後に登録し、service状態とlogを確認する。
+
+```bash
+launchctl bootstrap "gui/$(id -u)" "$collector_plist"
+launchctl print "gui/$(id -u)/com.personal-data-platform.screen-time-collector"
+tail -F "$HOME/Library/Logs/personal-data-platform/screen-time-collector.stdout.log" \
+  "$HOME/Library/Logs/personal-data-platform/screen-time-collector.stderr.log"
+```
+
+設定、Python executable、project pathを変更する場合は、先に停止してplistを再生成し、検証後に再登録する。
+
+```bash
+launchctl bootout "gui/$(id -u)" "$collector_plist"
+```
+
+生成commandはplistをmode `0600`、log directoryをmode `0700`で作成する。`launchctl bootstrap`は自動実行
+しないため、Full Disk AccessとKeychain、`collect --once`の確認前にCollectorが起動することはない。
 
 ## 異常判定
 

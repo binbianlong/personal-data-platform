@@ -26,6 +26,7 @@ pdp screen-time devices
 pdp screen-time doctor
 pdp screen-time collect --once
 pdp screen-time collect --watch
+pdp screen-time launch-agent --output <plist-path>
 pdp loader
 pdp dbt
 pdp reconciliation
@@ -76,6 +77,17 @@ raw/screen_time/v1/<device_key>/app-in-focus/<segment_key>/
 local SQLite stateはupload前に同じobject keyと決定的gzip bytesを`pending`として保存し、B2 upload成功後だけ`uploaded`へ更新する。再起動時はB2のread/list権限を使わず、同じkeyとbytesでpending uploadを再試行する。連続する同一segmentはskipするが、`A → B → A`の観測は3件とも保持する。
 
 `--watch`はdefaultで300秒ごとにcomplete scanを行う。間隔は`PDP_COLLECTOR_POLL_SECONDS`で変更できる。成功時は`raw/screen_time/v1/_control/collector/latest/`の疑似化receiptも更新し、cloud側がevent未発生とCollector停止を区別できるようにする。
+
+常駐実行には、秘密値を含まないLaunchAgent plistを生成してからmacOSへ登録する。生成だけでは登録・起動されない。
+
+```bash
+pdp screen-time launch-agent \
+  --output "$HOME/Library/LaunchAgents/com.personal-data-platform.screen-time-collector.plist" \
+  --project-root "$(pwd)" \
+  --python-executable "$(pwd)/.venv/bin/python"
+```
+
+Full Disk Accessの付与、plistの検証、登録・停止手順は[`Screen Time運用`](docs/sources/screen-time/operations.md)に従う。
 
 ## テスト
 
