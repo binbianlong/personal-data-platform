@@ -1,0 +1,2 @@
+project_id        = "example-project"
+state_bucket_name = "example-project-personal-data-platform-tfstate"
