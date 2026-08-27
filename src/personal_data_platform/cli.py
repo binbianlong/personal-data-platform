@@ -41,6 +41,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="repeat complete scans at the configured interval",
     )
+    launch_agent = screen_time_commands.add_parser(
+        "launch-agent",
+        help="write an unloaded macOS LaunchAgent plist",
+    )
+    launch_agent.add_argument("--output", required=True, type=Path)
+    launch_agent.add_argument("--project-root", default=Path.cwd(), type=Path)
+    launch_agent.add_argument(
+        "--python-executable",
+        default=Path(sys.executable),
+        type=Path,
+    )
+    launch_agent.add_argument("--log-directory", type=Path)
 
     commands.add_parser("loader", help="load pending B2 Raw into MotherDuck")
     return parser
@@ -64,6 +76,13 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _run_doctor()
         if args.screen_time_command == "collect":
             return _run_collect(watch=args.watch)
+        if args.screen_time_command == "launch-agent":
+            return _write_launch_agent(
+                output_path=args.output,
+                project_root=args.project_root,
+                python_executable=args.python_executable,
+                log_directory=args.log_directory,
+            )
         raise RuntimeError(f"unsupported Screen Time command: {args.screen_time_command}")
     if args.command == "loader":
         from personal_data_platform.loader.job import run_loader_from_env
@@ -188,6 +207,24 @@ def _run_collect(*, watch: bool) -> int:
             time.sleep(interval)
     except KeyboardInterrupt:
         return 0
+
+
+def _write_launch_agent(
+    *,
+    output_path: Path,
+    project_root: Path,
+    python_executable: Path,
+    log_directory: Path | None,
+) -> int:
+    from personal_data_platform.launchd import LaunchAgentSettings, write_launch_agent
+
+    settings = LaunchAgentSettings.from_env(
+        project_root=project_root,
+        python_executable=python_executable,
+        log_directory=log_directory,
+    )
+    print(write_launch_agent(settings, output_path))
+    return 0
 
 
 def _print_collection_stats(stats: Any) -> None:

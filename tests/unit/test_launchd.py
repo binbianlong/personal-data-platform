@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from personal_data_platform.config import ConfigurationError
+from personal_data_platform.entrypoint import main
 from personal_data_platform.launchd import (
     LAUNCH_AGENT_LABEL,
     LaunchAgentSettings,
@@ -115,3 +116,33 @@ def test_python_executable_must_be_runnable(tmp_path) -> None:
             python_executable=not_executable,
             environ=_environment(),
         )
+
+
+def test_launch_agent_cli_writes_unloaded_plist(tmp_path, monkeypatch, capsys) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname='test'\n")
+    destination = tmp_path / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
+    log_directory = tmp_path / "logs"
+    for name, value in _environment().items():
+        monkeypatch.setenv(name, value)
+
+    assert (
+        main(
+            [
+                "screen-time",
+                "launch-agent",
+                "--output",
+                str(destination),
+                "--project-root",
+                str(project_root),
+                "--log-directory",
+                str(log_directory),
+            ]
+        )
+        == 0
+    )
+
+    assert capsys.readouterr().out.strip() == str(destination.resolve())
+    assert plistlib.loads(destination.read_bytes())["RunAtLoad"] is True
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
