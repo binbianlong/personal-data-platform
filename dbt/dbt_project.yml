@@ -1,0 +1,18 @@
+name: personal_data_platform
+version: "1.0.0"
+config-version: 2
+
+profile: personal_data_platform
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  personal_data_platform:
+    screen_time:
+      +schema: base
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: view

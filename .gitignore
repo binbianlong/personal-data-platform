@@ -6,6 +6,9 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+dbt/.user.yml
+dbt/logs/
+dbt/target/
 .env
 .env.*
 !.env.example

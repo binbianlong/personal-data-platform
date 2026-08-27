@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: screen_time_base
+    schema: base
+    tables:
+      - name: screen_time_segment_observation
+        description: Immutable raw segment observations successfully decoded by the loader.
+      - name: screen_time_record_occurrence
+        description: Lossless record occurrences, including repeated logical events.
