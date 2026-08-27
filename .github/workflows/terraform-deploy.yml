@@ -1,0 +1,135 @@
+name: Terraform Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile"
+      - "dbt/**"
+      - "infra/terraform/**"
+      - "pyproject.toml"
+      - "sql/**"
+      - "src/**"
+      - ".github/workflows/terraform-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      run_dbt:
+        description: Run dbt after the deployment preflight
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: terraform-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Runtime deploy
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: production
+    env:
+      ARTIFACT_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      IMAGE_NAME: ${{ vars.GCP_IMAGE_NAME }}
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_VAR_alert_email: ${{ vars.GCP_ALERT_EMAIL }}
+      TF_VAR_deployer_service_account_email: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_region: ${{ vars.GCP_REGION }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Validate repository variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in ARTIFACT_REPOSITORY GCP_PROJECT_ID GCP_REGION IMAGE_NAME TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_deployer_service_account_email; do
+            test -n "${!name}"
+          done
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_DEPLOY_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Configure Artifact Registry authentication
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and publish runtime image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_path="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
+          image_tag="${image_path}:${GITHUB_SHA}"
+          docker build --tag "${image_tag}" .
+          docker push "${image_tag}"
+          digest="$(gcloud artifacts docker images describe "${image_tag}" --format='value(image_summary.digest)')"
+          test "${digest#sha256:}" != "${digest}"
+          image_uri="${image_path}@${digest}"
+          echo "image_uri=${image_uri}" >> "${GITHUB_OUTPUT}"
+          echo "TF_VAR_image_uri=${image_uri}" >> "${GITHUB_ENV}"
+          echo "Runtime image: \`${image_uri}\`" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.9
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive infra/terraform
+
+      - name: Initialize runtime state
+        run: terraform -chdir=infra/terraform init -backend-config="bucket=${TF_STATE_BUCKET}" -input=false -lockfile=readonly
+
+      - name: Validate runtime configuration
+        run: terraform -chdir=infra/terraform validate
+
+      - name: Plan and apply runtime changes
+        run: |
+          terraform -chdir=infra/terraform plan -input=false -out=runtime.tfplan
+          terraform -chdir=infra/terraform apply -input=false -auto-approve runtime.tfplan
+
+      - name: Run isolated deployment preflight
+        run: gcloud run jobs execute platform-preflight --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --wait
+
+      - name: Detect dbt model changes
+        id: dbt
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          REQUESTED: ${{ inputs.run_dbt }}
+        run: |
+          set -euo pipefail
+          run_dbt=false
+          if [[ "${REQUESTED}" == "true" ]]; then
+            run_dbt=true
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
+            if ! git diff --quiet "${BEFORE_SHA}" "${GITHUB_SHA}" -- dbt/; then
+              run_dbt=true
+            fi
+          fi
+          echo "run=${run_dbt}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run dbt for model changes
+        if: ${{ steps.dbt.outputs.run == 'true' }}
+        run: gcloud run jobs execute dbt-runner --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --wait
