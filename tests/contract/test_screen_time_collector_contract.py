@@ -1,0 +1,182 @@
+import gzip
+import sqlite3
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from personal_data_platform.collectors.screen_time import (
+    BiomeScreenTimeSource,
+    CollectorSourceError,
+    ScreenTimeCollector,
+)
+from personal_data_platform.collectors.state import CollectorState
+from personal_data_platform.raw.screen_time import build_device_key
+from personal_data_platform.storage.b2 import CollectorScanReceipt
+
+SECRET = bytes.fromhex("42" * 32)
+DEVICE_IDENTIFIER = "synthetic-iphone"
+
+
+class RecordingUploader:
+    def __init__(self, *, fail_once: bool = False) -> None:
+        self.calls: list[tuple[str, bytes]] = []
+        self.receipts: list[CollectorScanReceipt] = []
+        self.fail_once = fail_once
+
+    def put_compressed_raw(self, key: str, compressed_bytes: bytes) -> None:
+        self.calls.append((key, compressed_bytes))
+        if self.fail_once:
+            self.fail_once = False
+            raise RuntimeError("synthetic B2 outage")
+
+    def put_scan_receipt(self, receipt: CollectorScanReceipt) -> None:
+        self.receipts.append(receipt)
+
+
+class AdvancingClock:
+    def __init__(self) -> None:
+        self.current = datetime(2026, 8, 27, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        value = self.current
+        self.current += timedelta(microseconds=1)
+        return value
+
+
+def _source_tree(tmp_path):
+    sync_db = tmp_path / "sync.db"
+    with sqlite3.connect(sync_db) as connection:
+        connection.execute(
+            """
+            CREATE TABLE DevicePeer (
+                device_identifier STRING NOT NULL,
+                name STRING,
+                model STRING,
+                platform INTEGER,
+                protocol_version INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO DevicePeer VALUES (?, 'Synthetic Phone', 'Synthetic1,1', 2, 1)
+            """,
+            (DEVICE_IDENTIFIER,),
+        )
+    remote = tmp_path / "remote"
+    device_dir = remote / DEVICE_IDENTIFIER
+    device_dir.mkdir(parents=True)
+    segment = device_dir / "segment-001"
+    source = BiomeScreenTimeSource(sync_db_path=sync_db, remote_dir=remote)
+    return source, segment
+
+
+def _collector(tmp_path, source, uploader, clock, *, allowlisted: bool = True):
+    device_key = build_device_key(SECRET, DEVICE_IDENTIFIER)
+    allowlist = frozenset({device_key}) if allowlisted else frozenset({"f" * 64})
+    return ScreenTimeCollector(
+        source=source,
+        state=CollectorState(tmp_path / "collector.db"),
+        uploader=uploader,
+        pseudonym_key=SECRET,
+        allowed_device_keys=allowlist,
+        clock=clock,
+    )
+
+
+def test_collects_a_b_a_but_skips_consecutive_same_segment(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    uploader = RecordingUploader()
+    collector = _collector(tmp_path, source, uploader, AdvancingClock())
+
+    segment.write_bytes(b"state-a")
+    assert collector.collect_once().uploaded == 1
+    assert collector.collect_once().skipped == 1
+    segment.write_bytes(b"state-b")
+    assert collector.collect_once().uploaded == 1
+    segment.write_bytes(b"state-a")
+    assert collector.collect_once().uploaded == 1
+
+    keys = [key for key, _ in uploader.calls]
+    assert len(keys) == 3
+    assert len(set(keys)) == 3
+    assert keys[0].rsplit("/", 1)[1] == keys[2].rsplit("/", 1)[1]
+    assert all(DEVICE_IDENTIFIER not in key for key in keys)
+    assert [gzip.decompress(body) for _, body in uploader.calls] == [
+        b"state-a",
+        b"state-b",
+        b"state-a",
+    ]
+    assert len(uploader.receipts) == 4
+    assert all(
+        receipt.device_key == build_device_key(SECRET, DEVICE_IDENTIFIER)
+        for receipt in uploader.receipts
+    )
+
+
+def test_upload_failure_retries_the_same_key_and_bytes_after_restart(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"state-a")
+    failing_uploader = RecordingUploader(fail_once=True)
+    clock = AdvancingClock()
+    collector = _collector(tmp_path, source, failing_uploader, clock)
+
+    with pytest.raises(RuntimeError, match="synthetic B2 outage"):
+        collector.collect_once()
+
+    successful_uploader = RecordingUploader()
+    restarted = _collector(tmp_path, source, successful_uploader, clock)
+    stats = restarted.collect_once()
+
+    assert stats.retried == 1
+    assert failing_uploader.calls[0] == successful_uploader.calls[0]
+    assert len(successful_uploader.receipts) == 1
+
+
+def test_non_allowlisted_device_is_not_collected(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"state-a")
+    uploader = RecordingUploader()
+    collector = _collector(
+        tmp_path,
+        source,
+        uploader,
+        AdvancingClock(),
+        allowlisted=False,
+    )
+
+    with pytest.raises(CollectorSourceError, match="no allowlisted"):
+        collector.collect_once()
+
+    assert uploader.calls == []
+
+
+def test_missing_directory_for_one_allowlisted_device_fails_the_complete_scan(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"state-a")
+    missing_identifier = "synthetic-iphone-without-stream"
+    with sqlite3.connect(source.sync_db_path) as connection:
+        connection.execute(
+            "INSERT INTO DevicePeer VALUES (?, 'Missing Stream', 'Synthetic2,1', 2, 1)",
+            (missing_identifier,),
+        )
+    uploader = RecordingUploader()
+    collector = ScreenTimeCollector(
+        source=source,
+        state=CollectorState(tmp_path / "collector.db"),
+        uploader=uploader,
+        pseudonym_key=SECRET,
+        allowed_device_keys=frozenset(
+            {
+                build_device_key(SECRET, DEVICE_IDENTIFIER),
+                build_device_key(SECRET, missing_identifier),
+            }
+        ),
+        clock=AdvancingClock(),
+    )
+
+    with pytest.raises(CollectorSourceError, match="1 allowlisted device"):
+        collector.collect_once()
+
+    assert uploader.calls == []
+    assert uploader.receipts == []

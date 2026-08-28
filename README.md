@@ -12,13 +12,14 @@ source .venv/bin/activate
 python -m pip install -e '.[dev]'
 ```
 
-現在のentrypointは実行roleを検証するところまでを提供する。
+Screen Timeのローカル収集とRawのLoaderをCLIから実行できる。
 
 ```bash
-python -m personal_data_platform.entrypoint webhook
+pdp screen-time devices
+pdp screen-time doctor
+pdp screen-time collect --once
+pdp loader
 ```
-
-利用できるroleは`webhook`、`fetch`、`loader`、`dbt`、`reconciliation`。
 
 ## テスト
 
@@ -31,7 +32,7 @@ pytest
 
 ```bash
 docker build --tag personal-data-platform:dev .
-docker run --rm personal-data-platform:dev webhook
+docker run --rm personal-data-platform:dev screen-time --help
 ```
 
 ## CI

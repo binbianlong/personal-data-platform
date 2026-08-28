@@ -61,9 +61,11 @@ jobs:
 
       - name: Run entrypoint smoke tests
         run: |
-          for role in dbt fetch loader reconciliation webhook; do
-            docker run --rm personal-data-platform:ci "$role"
-          done
+          # Help paths validate the shared container entrypoint without requiring
+          # local Biome data or production credentials.
+          docker run --rm personal-data-platform:ci --help
+          docker run --rm personal-data-platform:ci screen-time --help
+          docker run --rm personal-data-platform:ci loader --help
 
   terraform:
     name: Terraform
