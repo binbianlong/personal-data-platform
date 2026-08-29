@@ -6,6 +6,7 @@ import math
 import os
 import plistlib
 import re
+import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -53,7 +54,7 @@ class LaunchAgentSettings:
         environ: Mapping[str, str] | None = None,
     ) -> LaunchAgentSettings:
         values = os.environ if environ is None else environ
-        executable = (python_executable or Path(sys.executable)).expanduser().resolve()
+        executable = (python_executable or Path(sys.executable)).expanduser().absolute()
         root = project_root.expanduser().resolve()
         library = Path.home() / "Library"
         logs = (
@@ -66,6 +67,7 @@ class LaunchAgentSettings:
             raise ConfigurationError(f"Python executable is not runnable: {executable}")
         if not (root / "pyproject.toml").is_file():
             raise ConfigurationError(f"project root does not contain pyproject.toml: {root}")
+        _validate_python_runtime(executable, root)
 
         endpoint = _required(values, "B2_ENDPOINT")
         parsed_endpoint = urlsplit(endpoint)
@@ -209,3 +211,25 @@ def _path_from_env(environ: Mapping[str, str], name: str, default: Path) -> Path
     value = environ.get(name)
     path = Path(value) if value is not None else default
     return path.expanduser().resolve()
+
+
+def _validate_python_runtime(executable: Path, project_root: Path) -> None:
+    try:
+        subprocess.run(
+            [
+                str(executable),
+                "-I",
+                "-c",
+                "import personal_data_platform.entrypoint",
+            ],
+            cwd=project_root,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise ConfigurationError(
+            f"Python executable cannot import personal_data_platform.entrypoint: {executable}"
+        ) from error

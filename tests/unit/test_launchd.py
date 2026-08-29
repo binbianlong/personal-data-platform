@@ -132,6 +132,40 @@ def test_python_executable_must_be_runnable(tmp_path) -> None:
         )
 
 
+def test_python_executable_preserves_virtual_environment_path(tmp_path, monkeypatch) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname='test'\n")
+    virtualenv_python = tmp_path / "venv/bin/python"
+    virtualenv_python.parent.mkdir(parents=True)
+    virtualenv_python.symlink_to(sys.executable)
+    monkeypatch.setattr(
+        "personal_data_platform.launchd._validate_python_runtime",
+        lambda *_: None,
+    )
+
+    settings = LaunchAgentSettings.from_env(
+        project_root=project_root,
+        python_executable=virtualenv_python,
+        environ=_environment(tmp_path),
+    )
+
+    assert settings.python_executable == virtualenv_python.absolute()
+
+
+def test_python_executable_must_import_collector_entrypoint(tmp_path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname='test'\n")
+
+    with pytest.raises(ConfigurationError, match="cannot import"):
+        LaunchAgentSettings.from_env(
+            project_root=project_root,
+            python_executable=Path("/bin/sh"),
+            environ=_environment(tmp_path),
+        )
+
+
 def test_launch_agent_cli_writes_unloaded_plist(tmp_path, monkeypatch, capsys) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
