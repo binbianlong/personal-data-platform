@@ -34,6 +34,9 @@ class LaunchAgentSettings:
     python_executable: Path
     project_root: Path
     log_directory: Path
+    sync_db_path: Path
+    app_in_focus_remote_dir: Path
+    state_db_path: Path
     b2_endpoint: str
     b2_bucket: str
     b2_region: str
@@ -52,6 +55,7 @@ class LaunchAgentSettings:
         values = os.environ if environ is None else environ
         executable = (python_executable or Path(sys.executable)).expanduser().resolve()
         root = project_root.expanduser().resolve()
+        library = Path.home() / "Library"
         logs = (
             (log_directory or Path.home() / "Library/Logs/personal-data-platform")
             .expanduser()
@@ -103,6 +107,21 @@ class LaunchAgentSettings:
             python_executable=executable,
             project_root=root,
             log_directory=logs,
+            sync_db_path=_path_from_env(
+                values,
+                "PDP_SYNC_DB_PATH",
+                library / "Biome/sync/sync.db",
+            ),
+            app_in_focus_remote_dir=_path_from_env(
+                values,
+                "PDP_APP_IN_FOCUS_REMOTE_DIR",
+                library / "Biome/streams/restricted/App.InFocus/remote",
+            ),
+            state_db_path=_path_from_env(
+                values,
+                "PDP_COLLECTOR_STATE_DB_PATH",
+                library / "Application Support/personal-data-platform/collector.db",
+            ),
             b2_endpoint=endpoint,
             b2_bucket=_required(values, "B2_BUCKET"),
             b2_region=values.get("B2_REGION", "us-west-004").strip() or "us-west-004",
@@ -119,8 +138,11 @@ def build_launch_agent(settings: LaunchAgentSettings) -> bytes:
         "B2_ENDPOINT": settings.b2_endpoint,
         "B2_REGION": settings.b2_region,
         "PATH": _DEFAULT_PATH,
+        "PDP_APP_IN_FOCUS_REMOTE_DIR": str(settings.app_in_focus_remote_dir),
         "PDP_COLLECTOR_POLL_SECONDS": settings.poll_seconds,
+        "PDP_COLLECTOR_STATE_DB_PATH": str(settings.state_db_path),
         "PDP_SCREEN_TIME_DEVICE_ALLOWLIST": ",".join(settings.device_allowlist),
+        "PDP_SYNC_DB_PATH": str(settings.sync_db_path),
         "PYTHONUNBUFFERED": "1",
     }
     if _SENSITIVE_ENVIRONMENT_NAMES & environment.keys():  # pragma: no cover - invariant
@@ -181,3 +203,9 @@ def _required(environ: Mapping[str, str], name: str) -> str:
     if not value:
         raise ConfigurationError(f"{name} is required")
     return value
+
+
+def _path_from_env(environ: Mapping[str, str], name: str, default: Path) -> Path:
+    value = environ.get(name)
+    path = Path(value) if value is not None else default
+    return path.expanduser().resolve()

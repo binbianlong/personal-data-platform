@@ -18,7 +18,7 @@ from personal_data_platform.launchd import (
 )
 
 
-def _environment() -> dict[str, str]:
+def _environment(tmp_path: Path) -> dict[str, str]:
     return {
         "B2_APPLICATION_KEY": "must-not-be-serialized",
         "B2_BUCKET": "screen-time-raw",
@@ -26,8 +26,11 @@ def _environment() -> dict[str, str]:
         "B2_KEY_ID": "must-not-be-serialized",
         "B2_REGION": "us-west-004",
         "PDP_COLLECTOR_POLL_SECONDS": "60",
+        "PDP_COLLECTOR_STATE_DB_PATH": str(tmp_path / "state/collector.db"),
         "PDP_PSEUDONYM_KEY_HEX": "42" * 32,
+        "PDP_APP_IN_FOCUS_REMOTE_DIR": str(tmp_path / "Biome/App.InFocus/remote"),
         "PDP_SCREEN_TIME_DEVICE_ALLOWLIST": f"{'b' * 64},{'a' * 64}",
+        "PDP_SYNC_DB_PATH": str(tmp_path / "Biome/sync.db"),
     }
 
 
@@ -39,7 +42,7 @@ def _settings(tmp_path, *, environ: dict[str, str] | None = None) -> LaunchAgent
         project_root=project_root,
         python_executable=Path(sys.executable),
         log_directory=tmp_path / "logs",
-        environ=environ or _environment(),
+        environ=_environment(tmp_path) if environ is None else environ,
     )
 
 
@@ -69,6 +72,17 @@ def test_builds_secret_free_keepalive_launch_agent(tmp_path) -> None:
     assert b"must-not-be-serialized" not in build_launch_agent(settings)
 
 
+def test_preserves_collector_paths_in_launch_agent(tmp_path) -> None:
+    configured = _environment(tmp_path)
+    settings = _settings(tmp_path, environ=configured)
+
+    environment = plistlib.loads(build_launch_agent(settings))["EnvironmentVariables"]
+
+    assert environment["PDP_SYNC_DB_PATH"] == configured["PDP_SYNC_DB_PATH"]
+    assert environment["PDP_APP_IN_FOCUS_REMOTE_DIR"] == configured["PDP_APP_IN_FOCUS_REMOTE_DIR"]
+    assert environment["PDP_COLLECTOR_STATE_DB_PATH"] == configured["PDP_COLLECTOR_STATE_DB_PATH"]
+
+
 def test_writes_private_plist_and_log_directory(tmp_path) -> None:
     settings = _settings(tmp_path)
     destination = tmp_path / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
@@ -95,7 +109,7 @@ def test_rejects_unsafe_launch_agent_configuration(
     value: str,
     message: str,
 ) -> None:
-    environment = _environment()
+    environment = _environment(tmp_path)
     environment[name] = value
 
     with pytest.raises(ConfigurationError, match=message):
@@ -114,7 +128,7 @@ def test_python_executable_must_be_runnable(tmp_path) -> None:
         LaunchAgentSettings.from_env(
             project_root=project_root,
             python_executable=not_executable,
-            environ=_environment(),
+            environ=_environment(tmp_path),
         )
 
 
@@ -124,7 +138,7 @@ def test_launch_agent_cli_writes_unloaded_plist(tmp_path, monkeypatch, capsys) -
     (project_root / "pyproject.toml").write_text("[project]\nname='test'\n")
     destination = tmp_path / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
     log_directory = tmp_path / "logs"
-    for name, value in _environment().items():
+    for name, value in _environment(tmp_path).items():
         monkeypatch.setenv(name, value)
 
     assert (
