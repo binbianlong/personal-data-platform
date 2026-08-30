@@ -187,9 +187,12 @@ def test_dbt_pairs_events_and_splits_tokyo_midnight(
             "SELECT interval_key FROM base.screen_time_interval ORDER BY interval_key"
         )
         warehouse.connection.execute("SET TimeZone = 'Asia/Tokyo'")
-        assert warehouse.query_rows(
-            "SELECT interval_key FROM base.screen_time_interval ORDER BY interval_key"
-        ) == utc_keys
+        assert (
+            warehouse.query_rows(
+                "SELECT interval_key FROM base.screen_time_interval ORDER BY interval_key"
+            )
+            == utc_keys
+        )
     finally:
         warehouse.close()
 
