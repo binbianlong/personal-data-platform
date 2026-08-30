@@ -6,6 +6,12 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+dbt/.user.yml
+dbt/dbt_packages/
+dbt/logs/
+dbt/target/
+/var/
+gha-creds-*.json
 .env
 .env.*
 !.env.example

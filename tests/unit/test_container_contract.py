@@ -20,6 +20,13 @@ def test_dockerfile_uses_the_shared_entrypoint() -> None:
     assert 'ENTRYPOINT ["python", "-m", "personal_data_platform.entrypoint"]' in dockerfile
 
 
+def test_dockerfile_includes_the_dbt_project_at_the_configured_root() -> None:
+    dockerfile = DOCKERFILE.read_text()
+
+    assert "COPY dbt /app/dbt" in dockerfile
+    assert "PDP_PROJECT_ROOT=/app" in dockerfile
+
+
 def test_default_warehouse_migrations_are_packaged_with_the_application() -> None:
     assert DEFAULT_MIGRATIONS.name == "migrations"
     assert (DEFAULT_MIGRATIONS / "001_initial.sql").is_file()

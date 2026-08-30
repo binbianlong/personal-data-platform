@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch_agent.add_argument("--log-directory", type=Path)
 
     commands.add_parser("loader", help="load pending B2 Raw into MotherDuck")
+    commands.add_parser("dbt", help="apply analytics models")
     return parser
 
 
@@ -88,6 +89,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         from personal_data_platform.loader.job import run_loader_from_env
 
         return _run_job(run_loader_from_env)
+    if args.command == "dbt":
+        from personal_data_platform.dbt_runner import run_dbt_from_env
+
+        return _run_job(run_dbt_from_env)
     raise RuntimeError(f"unsupported command: {args.command}")
 
 

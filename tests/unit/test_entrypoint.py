@@ -38,3 +38,18 @@ def test_loader_command_lazily_calls_job(monkeypatch) -> None:
 
     assert main(["loader"]) == 0
     assert calls == ["loader"]
+
+
+def test_dbt_command_lazily_calls_job(monkeypatch) -> None:
+    calls = []
+    fake_module = types.ModuleType("personal_data_platform.dbt_runner")
+
+    def run_dbt_from_env() -> int:
+        calls.append("dbt")
+        return 0
+
+    fake_module.run_dbt_from_env = run_dbt_from_env
+    monkeypatch.setitem(sys.modules, "personal_data_platform.dbt_runner", fake_module)
+
+    assert main(["dbt"]) == 0
+    assert calls == ["dbt"]
