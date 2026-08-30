@@ -25,13 +25,6 @@ class JobAlreadyRunning(RuntimeError):
     """Raised when an unexpired warehouse lease belongs to another run."""
 
 
-def raw_prefix_from_env() -> str:
-    prefix = os.environ.get("B2_RAW_PREFIX", RAW_PREFIX).strip().strip("/")
-    if not prefix or ".." in prefix.split("/"):
-        raise ValueError("B2_RAW_PREFIX must be a non-empty normalized object prefix")
-    return f"{prefix}/"
-
-
 class RawRepository(Protocol):
     def list_raw(self, prefix: str = RAW_PREFIX) -> Iterable[Any]: ...
 
@@ -130,7 +123,7 @@ def run_loader_from_env() -> int:
     warehouse = Warehouse(connect(WarehouseConfig.from_env()))
     try:
         warehouse.migrate()
-        summary = run_loader(repository, warehouse, prefix=raw_prefix_from_env())
+        summary = run_loader(repository, warehouse, prefix=RAW_PREFIX)
         LOGGER.info(
             "loader complete discovered=%d skipped=%d succeeded=%d failed=%d records=%d",
             summary.discovered,

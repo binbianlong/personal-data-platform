@@ -12,6 +12,7 @@ dependencies = [
   "ccl-segb @ https://github.com/cclgroupltd/ccl-segb/archive/23c3f7d3d969a79627b738ba0a2486c31d675753.tar.gz",
   "dbt-duckdb>=1.9,<2",
   "duckdb>=1.3,<2",
+  "pytz>=2025.2,<2026",
 ]
 
 [project.scripts]
@@ -25,6 +26,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+personal_data_platform = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers"]

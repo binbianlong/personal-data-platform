@@ -13,8 +13,7 @@ from typing import Any
 
 from personal_data_platform.loader.models import ParsedScreenTimeRecord, RawObject
 
-PROJECT_ROOT = Path(os.environ.get("PDP_PROJECT_ROOT", Path(__file__).resolve().parents[3]))
-DEFAULT_MIGRATIONS = PROJECT_ROOT / "sql" / "base"
+DEFAULT_MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
 
 @dataclass(frozen=True, slots=True)
