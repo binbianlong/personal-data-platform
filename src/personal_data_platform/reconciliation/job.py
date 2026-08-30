@@ -12,7 +12,6 @@ from typing import Any
 from personal_data_platform.loader.job import (
     RAW_PREFIX,
     RawRepository,
-    raw_prefix_from_env,
     run_loader,
 )
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
@@ -38,7 +37,8 @@ def _relation_names(warehouse: Warehouse) -> set[str]:
         """
         SELECT table_schema || '.' || table_name
         FROM information_schema.tables
-        WHERE table_schema IN ('base', 'marts')
+        WHERE table_catalog = current_database()
+          AND table_schema IN ('base', 'marts')
         """
     )
     return {row[0] for row in rows}
@@ -73,16 +73,6 @@ def run_reconciliation(
     run_id = str(uuid.uuid4())
     raw_objects = list(repository.list_raw(prefix))
     raw_keys = {value.key for value in raw_objects}
-    raw_device_keys = {value.device_key for value in raw_objects}
-    receipts = list(repository.list_scan_receipts())
-    receipt_device_keys = {value.device_key for value in receipts}
-    missing_receipt_devices = raw_device_keys - receipt_device_keys
-    stale_receipts = [
-        value
-        for value in receipts
-        if value.completed_at < checked_at - COLLECTOR_FRESHNESS
-        or value.completed_at > checked_at + MAX_CLOCK_SKEW
-    ]
     loaded_keys = warehouse.succeeded_keys()
     missing_before_repair = raw_keys - loaded_keys
     repair_summary: dict[str, Any] | None = None
@@ -97,6 +87,26 @@ def run_reconciliation(
         }
         loaded_keys = warehouse.succeeded_keys()
 
+    # A repair or concurrent loader may have loaded uploads newer than our initial
+    # inventory. Verify those keys against B2 before treating them as deleted Raw.
+    # Unloaded uploads arriving after the inventory belong to the next audit.
+    if loaded_keys - raw_keys:
+        for value in repository.list_raw(prefix):
+            if value.key in loaded_keys and value.key not in raw_keys:
+                raw_objects.append(value)
+                raw_keys.add(value.key)
+
+    raw_device_keys = {value.device_key for value in raw_objects}
+    receipts = list(repository.list_scan_receipts())
+    receipt_device_keys = {value.device_key for value in receipts}
+    missing_receipt_devices = raw_device_keys - receipt_device_keys
+    checked_at = now or datetime.now(UTC)
+    stale_receipts = [
+        value
+        for value in receipts
+        if value.completed_at < checked_at - COLLECTOR_FRESHNESS
+        or value.completed_at > checked_at + MAX_CLOCK_SKEW
+    ]
     missing = raw_keys - loaded_keys
     orphaned = loaded_keys - raw_keys
     failed = warehouse.ingestion_counts().get("failed", 0)
@@ -143,26 +153,34 @@ def run_reconciliation(
         failed_relation_queries=failed_relation_queries,
         details=details,
     )
-    if result.ok:
-        heartbeat_payload = {
-            "run_id": result.run_id,
-            "completed_at": result.completed_at.isoformat(),
-            "raw_object_count": result.raw_object_count,
-            "loaded_object_count": result.loaded_object_count,
-        }
-        try:
-            heartbeat(heartbeat_payload)
-        except Exception as error:
-            result = replace(
-                result,
-                status="failed",
-                details={**result.details, "heartbeat_error": str(error)},
-            )
-        else:
-            warehouse.publish_heartbeat(
-                "screen_time_reconciliation", result.run_id, heartbeat_payload
-            )
-    warehouse.record_reconciliation(result)
+    if not result.ok:
+        warehouse.record_reconciliation(result)
+        return result
+
+    heartbeat_payload = {
+        "run_id": result.run_id,
+        "completed_at": result.completed_at.isoformat(),
+        "raw_object_count": result.raw_object_count,
+        "loaded_object_count": result.loaded_object_count,
+    }
+    warehouse.record_reconciliation(replace(result, status="running"))
+    warehouse.connection.execute("BEGIN TRANSACTION")
+    stage = "warehouse_heartbeat"
+    try:
+        warehouse.publish_heartbeat("screen_time_reconciliation", result.run_id, heartbeat_payload)
+        stage = "heartbeat"
+        heartbeat(heartbeat_payload)
+        stage = "completion"
+        warehouse.record_reconciliation(result)
+        warehouse.connection.execute("COMMIT")
+    except Exception as error:
+        warehouse.connection.execute("ROLLBACK")
+        result = replace(
+            result,
+            status="failed",
+            details={**result.details, f"{stage}_error": str(error)},
+        )
+        warehouse.record_reconciliation(result)
     return result
 
 
@@ -187,7 +205,7 @@ def run_reconciliation_from_env() -> int:
                 repository,
                 warehouse,
                 heartbeat=lambda payload: publish_http_heartbeat(heartbeat_url, payload),
-                prefix=raw_prefix_from_env(),
+                prefix=RAW_PREFIX,
             )
         finally:
             warehouse.release_job_lock("reconciliation", owner_id)
