@@ -13,7 +13,6 @@ from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.loader.job import (
     RAW_PREFIX,
     RawRepository,
-    raw_prefix_from_env,
     run_loader,
 )
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
@@ -48,7 +47,8 @@ def require_empty_rebuild_target(warehouse: Warehouse) -> None:
         """
         SELECT count(*)
         FROM information_schema.tables
-        WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+        WHERE table_catalog = current_database()
+          AND table_schema NOT IN ('information_schema', 'pg_catalog')
         """
     )
     if table_count:
@@ -75,7 +75,10 @@ def run_rebuild(
         warehouse.close()
     if not summary.ok:
         return 1
-    with _temporary_environment("MOTHERDUCK_DATABASE", target_db):
+    with (
+        _temporary_environment("MOTHERDUCK_DATABASE", target_db),
+        _temporary_environment("MOTHERDUCK_TOKEN", token),
+    ):
         run_dbt(target="prod")
     return 0
 
@@ -84,8 +87,7 @@ def run_rebuild_from_env(*, dry_run: bool, target_db: str | None) -> int:
     from personal_data_platform.storage.b2 import B2RawRepository
 
     repository = B2RawRepository.from_env()
-    prefix = raw_prefix_from_env()
-    observations = repository.list_raw(prefix)
+    observations = repository.list_raw(RAW_PREFIX)
     inventory = rebuild_inventory(observations)
     print(json.dumps(inventory, sort_keys=True))
     if dry_run:
@@ -103,7 +105,7 @@ def run_rebuild_from_env(*, dry_run: bool, target_db: str | None) -> int:
         target_db=target_db,
         token=token,
         production_db=production_db,
-        prefix=prefix,
+        prefix=RAW_PREFIX,
     )
 
 
