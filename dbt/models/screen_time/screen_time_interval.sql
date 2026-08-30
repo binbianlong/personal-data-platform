@@ -3,68 +3,73 @@ with events as (
     from {{ ref('screen_time_transition') }}
 ),
 
+next_events as (
+    select
+        *,
+        first_value(case when state = 'start' then event_key end ignore nulls) over (
+            partition by device_key, source_stream
+            order by event_at, event_key
+            rows between 1 following and unbounded following
+        ) as next_start_event_key,
+        first_value(case when state = 'end' then event_key end ignore nulls) over (
+            partition by device_key, source_stream, bundle_id
+            order by event_at, event_key
+            rows between 1 following and unbounded following
+        ) as same_app_end_event_key
+    from events
+),
+
 start_candidates as (
     select
-        start_event.event_key as start_event_key,
-        min(candidate.event_at) filter (
-            where candidate.state = 'end'
-              and candidate.bundle_id = start_event.bundle_id
-        ) as same_app_end_at,
-        min(candidate.event_at) filter (
-            where candidate.state = 'start'
-        ) as next_start_at
-    from events as start_event
-    left join events as candidate
-        on candidate.device_key = start_event.device_key
-        and candidate.source_stream = start_event.source_stream
+        start_event.*,
+        same_app_end.event_at as same_app_end_at,
+        same_app_end.duplicate_occurrence_count as end_duplicate_occurrence_count,
+        next_start.event_at as next_start_at,
+        next_start.duplicate_occurrence_count as next_start_duplicate_occurrence_count,
+        same_app_end.event_key is not null
         and (
-            candidate.event_at > start_event.event_at
-            or (
-                candidate.event_at = start_event.event_at
-                and candidate.event_key > start_event.event_key
-            )
-        )
-        and (
-            candidate.state = 'start'
-            or (candidate.state = 'end' and candidate.bundle_id = start_event.bundle_id)
-        )
+            next_start.event_key is null
+            or (same_app_end.event_at, same_app_end.event_key)
+                < (next_start.event_at, next_start.event_key)
+        ) as end_is_first
+    from next_events as start_event
+    left join events as same_app_end
+        on start_event.same_app_end_event_key = same_app_end.event_key
+    left join events as next_start
+        on start_event.next_start_event_key = next_start.event_key
     where start_event.state = 'start'
-    group by start_event.event_key
 ),
 
 paired_starts as (
     select
-        start_event.*,
+        *,
         case
-            when candidate.same_app_end_at is not null
-             and (
-                 candidate.next_start_at is null
-                 or candidate.same_app_end_at <= candidate.next_start_at
-             )
-                then candidate.same_app_end_at
-            when candidate.next_start_at is not null
-                then candidate.next_start_at
-            else null
+            when end_is_first then same_app_end_at
+            else next_start_at
         end as ended_at,
         case
-            when candidate.same_app_end_at is not null
-             and (
-                 candidate.next_start_at is null
-                 or candidate.same_app_end_at <= candidate.next_start_at
-             )
-                then 'complete'
-            when candidate.next_start_at is not null
-                then 'inferred_end_from_next_start'
+            when end_is_first then same_app_end_event_key
+            else null
+        end as end_event_key,
+        coalesce(
+            case
+                when end_is_first then end_duplicate_occurrence_count
+                else next_start_duplicate_occurrence_count
+            end,
+            0
+        ) as boundary_duplicate_occurrence_count,
+        case
+            when end_is_first then 'complete'
+            when next_start_event_key is not null then 'inferred_end_from_next_start'
             else 'missing_end'
         end as interval_quality
-    from events as start_event
-    inner join start_candidates as candidate
-        on start_event.event_key = candidate.start_event_key
+    from start_candidates
 ),
 
 start_intervals as (
     select
-        md5(concat_ws(chr(31), event_key, coalesce(cast(ended_at as varchar), ''))) as interval_key,
+        md5(concat_ws(chr(31), event_key, coalesce(cast(epoch_us(ended_at) as varchar), '')))
+            as interval_key,
         device_key,
         platform,
         bundle_id,
@@ -77,28 +82,19 @@ start_intervals as (
         end as duration_seconds,
         source_stream,
         interval_quality as quality,
-        duplicate_occurrence_count > 0 as has_duplicate_source,
+        (
+            duplicate_occurrence_count > 0
+            or boundary_duplicate_occurrence_count > 0
+        ) as has_duplicate_source,
         event_key as start_event_key,
-        null::varchar as end_event_key
+        end_event_key
     from paired_starts
 ),
 
 matched_ends as (
-    select
-        start_interval.device_key,
-        start_interval.source_stream,
-        start_interval.bundle_id,
-        start_interval.ended_at,
-        min(end_event.event_key) as end_event_key
-    from start_intervals as start_interval
-    inner join events as end_event
-        on start_interval.device_key = end_event.device_key
-        and start_interval.source_stream = end_event.source_stream
-        and start_interval.bundle_id = end_event.bundle_id
-        and start_interval.ended_at = end_event.event_at
-        and end_event.state = 'end'
-    where start_interval.quality = 'complete'
-    group by all
+    select end_event_key
+    from start_intervals
+    where end_event_key is not null
 ),
 
 unmatched_end_intervals as (
@@ -117,11 +113,7 @@ unmatched_end_intervals as (
         end_event.event_key as end_event_key
     from events as end_event
     left join matched_ends
-        on end_event.device_key = matched_ends.device_key
-        and end_event.source_stream = matched_ends.source_stream
-        and end_event.bundle_id = matched_ends.bundle_id
-        and end_event.event_at = matched_ends.ended_at
-        and end_event.event_key = matched_ends.end_event_key
+        on end_event.event_key = matched_ends.end_event_key
     where end_event.state = 'end'
       and matched_ends.end_event_key is null
 )
