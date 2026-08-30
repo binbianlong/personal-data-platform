@@ -32,8 +32,22 @@ def run_dbt(*, target: str, project_dir: Path = DBT_PROJECT_DIR) -> None:
         "--target",
         target,
     ]
-    _invoke(["run", *common])
-    _invoke(["test", *common])
+    secret_name = "DBT_ENV_SECRET_MOTHERDUCK_TOKEN"
+    previous_secret = os.environ.get(secret_name)
+    if target == "prod":
+        token = os.environ.get("MOTHERDUCK_TOKEN")
+        if not token:
+            raise ValueError("MOTHERDUCK_TOKEN is required for the production dbt target")
+        os.environ[secret_name] = token
+    try:
+        _invoke(["run", *common])
+        _invoke(["test", *common])
+    finally:
+        if target == "prod":
+            if previous_secret is None:
+                os.environ.pop(secret_name, None)
+            else:
+                os.environ[secret_name] = previous_secret
 
 
 def run_dbt_from_env() -> int:
