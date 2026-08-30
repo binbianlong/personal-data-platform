@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import uuid
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ from personal_data_platform.recovery.rebuild import validate_rebuild_target
 from personal_data_platform.storage.motherduck import WarehouseConfig, connect
 
 PREFLIGHT_PREFIX = "test/preflight/"
+LOGGER = logging.getLogger(__name__)
 
 
 def probe_b2(client: Any, *, bucket: str, prefix: str = PREFLIGHT_PREFIX) -> dict[str, object]:
@@ -21,16 +23,19 @@ def probe_b2(client: Any, *, bucket: str, prefix: str = PREFLIGHT_PREFIX) -> dic
 
     payload = uuid.uuid4().bytes
     key = f"{prefix.rstrip('/')}/{uuid.uuid4()}.bin"
-    upload_attempted = False
+    version_id: str | None = None
+    probe_error: Exception | None = None
     try:
-        upload_attempted = True
-        client.put_object(
+        uploaded = client.put_object(
             Bucket=bucket,
             Key=key,
             Body=payload,
             ContentType="application/octet-stream",
             ServerSideEncryption="AES256",
         )
+        version_id = uploaded.get("VersionId")
+        if not version_id:
+            raise RuntimeError("B2 preflight upload did not return a cleanup VersionId")
         response = client.get_object(Bucket=bucket, Key=key)
         body = response["Body"]
         try:
@@ -49,9 +54,17 @@ def probe_b2(client: Any, *, bucket: str, prefix: str = PREFLIGHT_PREFIX) -> dic
             "prefix": prefix,
             "sha256": hashlib.sha256(payload).hexdigest(),
         }
+    except Exception as error:
+        probe_error = error
+        raise
     finally:
-        if upload_attempted:
-            client.delete_object(Bucket=bucket, Key=key)
+        if version_id is not None:
+            try:
+                client.delete_object(Bucket=bucket, Key=key, VersionId=version_id)
+            except Exception:
+                if probe_error is None:
+                    raise
+                LOGGER.exception("B2 preflight cleanup failed after the probe failed")
 
 
 def probe_warehouse(connection: Any) -> dict[str, object]:
