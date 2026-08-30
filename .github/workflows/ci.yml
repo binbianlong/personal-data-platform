@@ -66,6 +66,13 @@ jobs:
           docker run --rm personal-data-platform:ci --help
           docker run --rm personal-data-platform:ci screen-time --help
           docker run --rm personal-data-platform:ci loader --help
+          docker run --rm personal-data-platform:ci dbt --help
+          docker run --rm --entrypoint python personal-data-platform:ci -c '
+          from personal_data_platform.dbt_runner import DBT_PROJECT_DIR
+          assert (DBT_PROJECT_DIR / "dbt_project.yml").is_file()
+          assert (DBT_PROJECT_DIR / "profiles.yml").is_file()
+          assert list((DBT_PROJECT_DIR / "models").rglob("*.sql"))
+          '
 
   terraform:
     name: Terraform
