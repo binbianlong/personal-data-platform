@@ -1,6 +1,6 @@
 # 取得仕様
 
-## iPhone
+## 取得元
 
 デバイス情報:
 
@@ -16,15 +16,14 @@
 
 `sync.db`の`DevicePeer`から`platform = 2`のdeviceを列挙し、対応する`remote/<device_identifier>`を読む。
 
-## Mac
+`pdp screen-time devices`は発見したiPhoneの疑似化`device_key`を表示する。取得対象は環境変数
+`PDP_SCREEN_TIME_DEVICE_ALLOWLIST`へカンマ区切りで指定した`device_key`だけとし、raw device identifierを
+設定へ保存しない。allowlistが空、または許可した端末を1台も`DevicePeer`に発見できない場合は設定エラーと
+する。一部だけ未発見の場合は発見済み端末を収集するため、`devices`の結果とallowlistを照合して対象端末の
+不足を確認する。複数iPhoneは別々の`device_key`として処理する。
 
-アプリ利用イベント:
-
-```text
-~/Library/Biome/streams/restricted/ScreenTime.AppUsage/local/
-```
-
-これらのpathを読むCollectorプロセスにはFull Disk Accessが必要である。開発時のTerminalではなく、本番で実際に起動するCollectorを権限主体にする。
+これらのpathを読むCollectorプロセスにはFull Disk Accessが必要である。開発時のTerminalではなく、
+本番で実際に起動するLaunchAgentの実行バイナリを権限主体にする。
 
 ## SEGB container
 
@@ -40,7 +39,16 @@ SEGB segment
    └─ protobuf payload
 ```
 
-SEGB containerは`ccl-segb`互換decoderで読む。
+SEGB containerはMIT Licenseの`ccl-segb`互換decoderで読む。再現性のため、decoderは次のcommitへ
+固定し、parser versionと一緒に記録する。
+
+```text
+23c3f7d3d969a79627b738ba0a2486c31d675753
+```
+
+Collectorはsegment単位で元bytesを読み、圧縮前bytesのSHA-256を計算する。B2へ保存する本文は元bytesを
+そのままgzipしたもので、gzip headerの`mtime`は`0`に固定する。object keyと疑似化keyは
+[`data-model.md`](data-model.md)に従う。
 
 ## iPhone `App.InFocus` payload
 
@@ -76,24 +84,5 @@ platform flag
 
 表示用アプリ名はpayloadに含まれない場合がある。Bundle IDと表示名の対応は取得処理とは別に管理する。
 
-## Mac `ScreenTime.AppUsage` payload
-
-このstreamの公式schemaは公開されていない。確認済みのwire formatは次のとおり。
-
-| Field | wire type | 型 | 内容 |
-|---:|---:|---|---|
-| 1 | 0 | varint | `1=利用開始`、`0=利用終了` |
-| 2 | 1 | double | Unix timestamp |
-| 3 | 2 | string | Bundle ID |
-| 5 | 0 | varint | platformフラグ |
-
-field 2はUnix timestampである。iPhoneの`cf_absolute_time`用offsetを加算しない。
-
-取得できるデータ:
-
-```text
-Bundle ID
-利用開始・終了
-event発生時刻
-platform flag
-```
+未知protobuf fieldはRaw bytesに保持し、既知fieldのdecodeを妨げない限り収集を継続する。SEGBまたは
+既知fieldをdecodeできない場合は、そのsegment observationをAnalyticsへ成功取込した扱いにしない。

@@ -2,10 +2,13 @@
 
 すべてのデータソースに共通する設計、データ契約、運用手順を管理する。
 
-## 領域
+## 文書
 
-| 領域 | 内容 |
+| 文書 | 内容 |
 |---|---|
-| Architecture | システム全体の構成、データフロー、信頼性原則 |
-| Data contracts | Rawとbaseに共通するデータ契約 |
-| Operations | デプロイ、監視、復旧の共通手順 |
+| [`architecture.md`](architecture.md) | システム構成、データフロー、初期coreの保証 |
+| [`raw-data.md`](raw-data.md) | B2 Rawの保存・観測・再生契約 |
+| [`analytics.md`](analytics.md) | Loader、MotherDuck、dbt、ChatGPTの契約 |
+| [`chatgpt-mcp.md`](chatgpt-mcp.md) | ChatGPTへのread-only MCP接続と受入確認 |
+| [`security.md`](security.md) | IAM、secret、暗号化、個人情報の扱い |
+| [`operations.md`](operations.md) | デプロイ、定期実行、監視、照合、再構築 |
