@@ -19,16 +19,17 @@ MotherDuckのaccess controlは契約によってdatabase単位、またはtable/
 
 ChatGPT workspaceでcustom MCP appを作成できる管理者または許可済みdeveloperが次を行う。
 
-1. SettingsのAppsでdeveloper modeを有効にする。
-2. AppsのCreateから上記endpointを登録する。
+1. SettingsのSecurity and loginでDeveloper modeを有効にする。
+2. ChatGPT Pluginsの＋から上記endpointを登録する。
 3. OAuthで専用MotherDuck readerとして認証し、tool scanを完了する。
-4. Action controlで`query`とcatalog参照に必要なread actionだけを有効にする。
-5. `query_rw`を無効のままpublishする。
+4. app設定の詳細画面で`query`とcatalog参照に必要なread toolだけを有効にする。
+5. `query_rw`などのwrite toolが無効であることを確認し、会話のDeveloper modeから対象appを選ぶ。
 
 ChatGPTの対象plan、設定画面、承認手順は変更される可能性があるため、作業時点の
-[OpenAI公式手順](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt)を確認する。
-MotherDuck endpointとOAuthの現行仕様は
-[MotherDuck Remote MCPの説明](https://motherduck.com/blog/dev-diary-building-mcp/)を確認する。
+[OpenAI公式手順](https://developers.openai.com/api/docs/guides/developer-mode)を確認する。
+MotherDuck endpointとOAuth、tool制限の現行仕様は
+[Remote MCP接続仕様](https://motherduck.com/docs/sql-reference/mcp/)と
+[read-only設定](https://motherduck.com/docs/key-tasks/ai-and-motherduck/securing-read-only-access/)を確認する。
 
 ## 受入確認
 
