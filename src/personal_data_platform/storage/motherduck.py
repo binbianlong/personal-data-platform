@@ -319,6 +319,14 @@ class Warehouse:
         self.connection.execute(
             """
             INSERT INTO ops.reconciliation_run VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (run_id) DO UPDATE SET
+                status = excluded.status,
+                completed_at = excluded.completed_at,
+                raw_object_count = excluded.raw_object_count,
+                loaded_object_count = excluded.loaded_object_count,
+                missing_object_count = excluded.missing_object_count,
+                failed_object_count = excluded.failed_object_count,
+                details = excluded.details
             """,
             [
                 row["run_id"],

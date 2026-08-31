@@ -53,3 +53,49 @@ def test_dbt_command_lazily_calls_job(monkeypatch) -> None:
 
     assert main(["dbt"]) == 0
     assert calls == ["dbt"]
+
+
+@pytest.mark.parametrize(
+    ("command", "module_name", "function_name"),
+    [
+        (
+            "reconciliation",
+            "personal_data_platform.reconciliation.job",
+            "run_reconciliation_from_env",
+        ),
+        ("preflight", "personal_data_platform.preflight", "run_preflight_from_env"),
+    ],
+)
+def test_operational_command_lazily_calls_job(
+    monkeypatch,
+    command: str,
+    module_name: str,
+    function_name: str,
+) -> None:
+    calls = []
+    fake_module = types.ModuleType(module_name)
+
+    def run_job() -> int:
+        calls.append(command)
+        return 0
+
+    setattr(fake_module, function_name, run_job)
+    monkeypatch.setitem(sys.modules, module_name, fake_module)
+
+    assert main([command]) == 0
+    assert calls == [command]
+
+
+def test_rebuild_passes_selected_mode(monkeypatch) -> None:
+    calls = []
+    fake_module = types.ModuleType("personal_data_platform.recovery.rebuild")
+
+    def run_rebuild_from_env(*, dry_run: bool, target_db: str | None) -> int:
+        calls.append((dry_run, target_db))
+        return 0
+
+    fake_module.run_rebuild_from_env = run_rebuild_from_env
+    monkeypatch.setitem(sys.modules, "personal_data_platform.recovery.rebuild", fake_module)
+
+    assert main(["rebuild", "--dry-run"]) == 0
+    assert calls == [(True, None)]
