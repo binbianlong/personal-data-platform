@@ -63,18 +63,6 @@ variable "scheduler_time_zone" {
   default     = "Asia/Tokyo"
 }
 
-variable "analytics_time_zone" {
-  description = "IANA time zone used for analytical day boundaries."
-  type        = string
-  default     = "Asia/Tokyo"
-}
-
-variable "b2_raw_prefix" {
-  description = "Production B2 object prefix consumed by loader and reconciliation."
-  type        = string
-  default     = "raw/screen_time/v1"
-}
-
 variable "preflight_b2_prefix" {
   description = "Isolated B2 prefix used by the deployment preflight Job."
   type        = string

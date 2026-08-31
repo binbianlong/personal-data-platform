@@ -41,6 +41,15 @@ run "runtime_contract" {
   }
 
   assert {
+    condition = alltrue([
+      !contains(keys(local.runtime_jobs.loader.environment), "B2_RAW_PREFIX"),
+      !contains(keys(local.runtime_jobs.reconciliation.environment), "B2_RAW_PREFIX"),
+      local.runtime_jobs.preflight.environment.B2_RAW_PREFIX == var.preflight_b2_prefix,
+    ])
+    error_message = "Only preflight may override the fixed production Raw prefix."
+  }
+
+  assert {
     condition     = local.scheduled_jobs.reconciliation.schedule == "30 4 * * *"
     error_message = "Reconciliation must run daily at 04:30."
   }
@@ -48,6 +57,11 @@ run "runtime_contract" {
   assert {
     condition     = var.scheduler_time_zone == "Asia/Tokyo"
     error_message = "Runtime schedules must use Asia/Tokyo."
+  }
+
+  assert {
+    condition     = alltrue([for job in values(local.runtime_jobs) : !contains(keys(job.environment), "ANALYTICS_TIME_ZONE")])
+    error_message = "Runtime jobs must not expose an unsupported analytics time zone override."
   }
 
   assert {

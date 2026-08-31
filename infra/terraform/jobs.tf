@@ -18,7 +18,6 @@ locals {
       }
       environment = {
         APP_ENV                       = "production"
-        ANALYTICS_TIME_ZONE           = var.analytics_time_zone
         B2_RAW_PREFIX                 = var.preflight_b2_prefix
         MOTHERDUCK_DATABASE           = var.motherduck_database
         PREFLIGHT_MOTHERDUCK_DATABASE = var.preflight_motherduck_database
@@ -42,8 +41,6 @@ locals {
       }
       environment = {
         APP_ENV             = "production"
-        ANALYTICS_TIME_ZONE = var.analytics_time_zone
-        B2_RAW_PREFIX       = var.b2_raw_prefix
         MOTHERDUCK_DATABASE = var.motherduck_database
       }
       secrets = merge(local.b2_secret_environment, {
@@ -61,7 +58,6 @@ locals {
       }
       environment = {
         APP_ENV             = "production"
-        ANALYTICS_TIME_ZONE = var.analytics_time_zone
         MOTHERDUCK_DATABASE = var.motherduck_database
       }
       secrets = {
@@ -79,8 +75,6 @@ locals {
       }
       environment = {
         APP_ENV             = "production"
-        ANALYTICS_TIME_ZONE = var.analytics_time_zone
-        B2_RAW_PREFIX       = var.b2_raw_prefix
         MOTHERDUCK_DATABASE = var.motherduck_database
       }
       secrets = merge(local.b2_secret_environment, {
