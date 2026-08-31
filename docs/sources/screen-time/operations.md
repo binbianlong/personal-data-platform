@@ -109,7 +109,7 @@ launchctl bootout "gui/$(id -u)" "$collector_plist"
 
 ```text
 Biome directoryまたはsync.dbを読めない
-allowlist対象deviceを発見できない
+allowlist対象deviceを1台も発見できない
 segmentが安定して読めない
 B2 Rawまたはscan receiptのuploadに失敗する
 pending stateを復元できない

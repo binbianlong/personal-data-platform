@@ -21,8 +21,9 @@ Cloud Run Reconciliation Job（毎日）
 [`App.InFocus`](../sources/screen-time/)だけとする。Local Collectorはsource固有のRawをB2へ
 直接uploadし、GCPはB2以降の処理を担当する。
 
-単一GCP project内で本番と検証を運用する。ただし、B2 prefix、MotherDuck database、
-Service Accountを環境ごとに分離し、検証処理が本番データを書き換えないようにする。
+単一GCP project内で本番と検証を運用する。本番とは別のRawを使う検証ではB2 bucket、MotherDuck database、
+Service Accountとcredentialを分離する。Screen TimeのRaw prefixは各bucket内で`raw/screen_time/v1/`に
+固定し、prefixの変更で環境を切り替えない。接続確認用preflightは専用の`test/`配下と検証用databaseを使う。
 
 ## データ境界
 
@@ -42,7 +43,8 @@ Service Accountを環境ごとに分離し、検証処理が本番データを�
 3. 同じRaw objectは再実行しても分析行を重複生成しない。
 4. 後着・訂正されたデータを現在の分析結果へ反映し、過去のRaw観測も保持する。
 5. MotherDuckをB2だけからscratch databaseへ再構築し、本番と比較できる。
-6. Reconciliationが完全に成功した場合だけ外部heartbeatを送信する。
+6. Reconciliationの全監査項目が成功した後だけ外部heartbeatを送信する。DB記録との確定順序と制約は
+   [`analytics.md`](analytics.md)に従う。
 7. B2へのupload完了から2時間以内に分析Viewへ反映できることを通常時のfreshness基準とする。
 
 ## 初期coreに含めないもの

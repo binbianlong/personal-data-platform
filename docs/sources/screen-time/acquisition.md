@@ -18,8 +18,9 @@
 
 `pdp screen-time devices`は発見したiPhoneの疑似化`device_key`を表示する。取得対象は環境変数
 `PDP_SCREEN_TIME_DEVICE_ALLOWLIST`へカンマ区切りで指定した`device_key`だけとし、raw device identifierを
-設定へ保存しない。allowlistが空、または指定したkeyが`DevicePeer`に存在しない場合は収集を開始せず、
-設定エラーとして報告する。複数iPhoneは別々の`device_key`として処理する。
+設定へ保存しない。allowlistが空、または許可した端末を1台も`DevicePeer`に発見できない場合は設定エラーと
+する。一部だけ未発見の場合は発見済み端末を収集するため、`devices`の結果とallowlistを照合して対象端末の
+不足を確認する。複数iPhoneは別々の`device_key`として処理する。
 
 これらのpathを読むCollectorプロセスにはFull Disk Accessが必要である。開発時のTerminalではなく、
 本番で実際に起動するLaunchAgentの実行バイナリを権限主体にする。

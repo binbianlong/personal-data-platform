@@ -43,6 +43,7 @@ Raw objectごとの最新取込状態を保持する。
 
 forward-only migrationの`migration_id`、ファイルSHA-256、`applied_at`を保持する。一度適用した
 migrationのchecksumが変わっていた場合は停止し、既存migrationを書き換えない。
+SQLの正本はPython package内の`src/personal_data_platform/migrations/`に置き、wheelにも同梱する。
 
 ### `ops.job_lock`
 
@@ -52,14 +53,19 @@ LoaderとReconciliationの多重実行を防ぐ期限付きleaseである。`job
 
 ### 実行記録
 
-`ops.job_run`、`ops.reconciliation_run`、`ops.heartbeat`にJobの結果を記録する。外部heartbeat送信前の
-途中状態を成功として記録しない。
+`ops.job_run`、`ops.reconciliation_run`、`ops.heartbeat`にJobの結果を記録する。Reconciliationは監査に成功したら
+`running`の監査記録を先に保存する。次にtransaction内でwarehouse heartbeatを更新し、外部heartbeat送信が
+成功した後で成功auditを記録してcommitする。送信や更新に失敗した場合はrollbackし、失敗auditを記録する。
+
+外部HTTP送信とDB commitはatomicではない。送信後の最終commit失敗や送信応答の喪失では、外部に成功pingが
+届いていてもDBに成功が確定しない場合がある。復旧時は`run_id`と実行log、監査記録を照合する。
 
 ## dbt
 
 `base.screen_time_transition`、`base.screen_time_interval`、`marts.daily_screen_time`はdbt Viewである。
-base dataの更新時には再materializeせず、query時点の最新baseを参照する。modelまたはschema定義をdeployした
-場合だけ`dbt run`に続けて`dbt test`を実行する。
+base dataの更新時には再materializeせず、query時点の最新baseを参照する。初回構築、model / schema定義の
+変更、明示した再実行時に`dbt run`に続けて`dbt test`を実行する。deploy時の実行条件は
+[`operations.md`](operations.md)に従う。
 
 モデルの列、重複排除、interval品質、Asia/Tokyoの日境界は
 [`Screen Timeデータモデル`](../sources/screen-time/data-model.md)を正本とする。

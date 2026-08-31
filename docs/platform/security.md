@@ -6,7 +6,8 @@
 - Raw object key、B2 metadata、ログに、端末identifierやBundle IDなどの直接値を含めない。
 - ログへ出してよい識別情報は疑似化key、object hash、件数、error codeに限定する。
 - Rawの通常削除権限をCollector、Loader、Reconciliationへ与えない。
-- productionとtestはB2 prefixとMotherDuck databaseを分離し、credentialも共有しない。
+- productionと別のRawを使うtestはB2 bucketとMotherDuck databaseを分離し、credentialも共有しない。
+  preflightは専用の`test/` prefixと検証用databaseに権限を限定する。
 
 疑似化方法とsource固有のkeyはsource packageで定義する。Screen Timeは
 [`data-model.md`](../sources/screen-time/data-model.md)に従う。
@@ -15,10 +16,10 @@
 
 | 実行主体 | capability |
 |---|---|
-| Local Collector | 対象environmentのRaw prefixとscan receiptへのwriteだけ |
+| Local Collector | 対象bucketの固定Raw prefixとscan receiptへのwriteだけ |
 | Loader | 対象Raw prefixへのlist / readだけ |
 | Reconciliation / rebuild | 対象Raw prefixとscan receiptへのlist / readだけ |
-| Preflight | test prefixへのwrite / read / list / deleteだけ |
+| Preflight | test prefixへのwrite / read / listと作成したobject versionのdeleteだけ |
 
 application keyはbucket全体や別environmentへ権限を広げない。uploadに必要な最小capability以外を
 Collectorへ付与せず、read、list、deleteを許可しない。

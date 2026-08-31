@@ -44,8 +44,9 @@ Screen Timeは[`data-model.md`](../sources/screen-time/data-model.md)を正本�
 Collectorまたは取得処理は、upload予定のobject keyをlocal stateへ先に永続化する。B2がupload成功を
 返した後だけ、直前hashとwatermarkを進める。途中で停止した場合は、次回も同じobject keyで再開する。
 
-同じkeyへのretryは同一bytesでなければならない。既存objectのbytesまたはSHA-256が異なる場合は
-上書きせず、整合性エラーとして停止する。
+同じkeyへのretryは同一bytesでなければならない。Collectorはlocal stateへ永続化した同じkeyとgzip bytesを
+再送する。write-only credentialを使うため、upload前にB2の既存objectをreadして比較することはない。
+異なる内容を同じkeyへ保存してはならず、取込時のSHA-256不一致はLoaderで検出して成功取込を拒否する。
 
 ## 検証と再生
 

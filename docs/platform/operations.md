@@ -6,6 +6,12 @@
 Federation、plan用・deploy用Service Accountを作る。その後にruntime TerraformでSecret Manager、
 Cloud Run Jobs、Cloud Scheduler、Logging / Monitoringを作る。
 
+具体的な準備は[`bootstrap`](../../infra/bootstrap/)と[`runtime`](../../infra/terraform/)の手順に従う。
+Secret Managerのsecret resourceを先に作成し、secret versionを登録してからJobsをdeployする。
+必要なrepository variablesも事前に設定する。`GCP_PLAN_WIF_PROVIDER`未設定時はTerraform Plan、
+`GCP_DEPLOY_WIF_PROVIDER`未設定時は
+Terraform DeployのJobをskipする。これらを設定した後の実行成功を、コードのCI成功とは別に確認する。
+
 runtimeはcommit SHAに対応するimmutable image digestを参照する。mutable tagだけをdeploy入力にしない。
 
 初回およびIAM変更後は`pdp preflight`を専用B2 test prefixとMotherDuck test databaseへ接続して実行し、
@@ -13,6 +19,9 @@ runtimeはcommit SHAに対応するimmutable image digestを参照する。mutab
 
 - B2 test objectのwrite / read / list / delete round trip
 - MotherDuck test databaseでの一時table作成 / write / read / delete
+
+B2ではupload応答の`VersionId`を使って作成したversionを削除する。`VersionId`を取得できない場合や削除に
+失敗した場合は成功扱いにせず、検証prefixに残ったobject versionを確認する。
 
 deploy workflowからCloud Run preflightが完了することで、WIF deploy、image取得、JobのSecret注入、外部通信も
 合わせて確認する。preflight用B2 keyとMotherDuck tokenは本番用と分離し、production prefixまたはproduction
@@ -34,21 +43,31 @@ objectを再試行できるようにする。
 
 ## dbt
 
-`pdp dbt`はmodel / schema定義のdeploy時にだけ実行し、`dbt run`に続けて`dbt test`を行う。
-通常のLoaderとReconciliationは、martsがViewである間はdbtを起動しない。
+`pdp dbt`は`dbt run`に続けて`dbt test`を行う。deploy workflowはapplyと隔離preflightの成功後、次のいずれかの
+場合に`dbt-runner`を実行する。
+
+- Terraform planがdbt Jobの新規作成または再作成を含む。
+- push差分に`dbt/`または`src/personal_data_platform/migrations/`の変更がある。
+- 手動実行で`run_dbt=true`を指定した。
+
+初回判定はTerraform plan上のJob作成によるもので、MotherDuck内のViewの有無を調べるものではない。
+通常のLoaderとReconciliationは、martsがViewである間はdbtを起動しない。日常のbase更新にはdbt再実行は不要である。
 
 ## Reconciliation
 
 `pdp reconciliation`を毎日04:30 Asia/Tokyoに実行する。
 
-1. B2 control prefixにあるdevice別collector scan receiptが24時間以内であることを確認する。
-2. B2 objectと`ops.ingestion_metadata`を照合し、未取込objectをLoader契約で再処理する。
-3. `failed` ingestionが監査対象期間に残っていないことを確認する。
+1. B2 objectと`ops.ingestion_metadata`を照合し、未取込objectをLoader契約で再処理する。
+2. 修復や並行Loaderが追加した取込済みkeyはB2を再確認してから、Raw欠損と判定する。
+3. device別collector scan receiptの欠損・24時間超過と、未取込・Raw欠損・`failed` ingestionがないことを確認する。
 4. 必須base / Viewの存在と各relationの代表`count(*)` queryを確認する。
-5. 全stageと必要な再処理が成功した後だけHealthchecks.ioへ成功heartbeatを送る。
+5. 全監査項目と必要な再処理が成功した後、監査記録を保存し、Healthchecks.ioへ成功heartbeatを送る。
 
-Jobの開始、retry開始、Loaderへの引き渡しだけでは成功heartbeatを送らない。いずれかのstageが失敗したら
+Jobの開始、retry開始、Loaderへの引き渡しだけでは成功heartbeatを送らない。監査結果を構築できた失敗では、
 失敗object、欠損relation、stale receiptなどの構造化した結果を記録し、Jobをnon-zeroで終了する。
+B2 listingやDB接続など結果構築前の失敗では監査行が残らない場合がある。この場合も成功heartbeatは送らず、
+Jobの失敗とlogで原因を確認する。
+DB更新と外部通知の順序、および配送後のcommit失敗に関する制約は[`analytics.md`](analytics.md)に従う。
 
 ## 監視
 
@@ -57,7 +76,10 @@ Cloud Logging / MonitoringとEmailで次を通知する。
 - LoaderまたはReconciliation Jobの失敗
 - decode失敗
 - Collectorの成功scanが24時間以上ない状態
-- Healthchecks.io heartbeatのschedule + grace period超過
+
+Collector停止はReconciliationのreceipt検査で検出する。Job自体が起動しない場合の検出には、Healthchecks.io側で
+毎日04:30 Asia/Tokyoのschedule、許容するgrace period、通知先を別途設定する。この未着監視はTerraformでは
+作成しないため、通知が届くことを運用開始前に確認する。
 
 新しいsource eventがないことだけを障害とみなさない。scan完了、B2 listing、取込状態、query成功を
 組み合わせて判定する。
@@ -68,12 +90,10 @@ Cloud Logging / MonitoringとEmailで次を通知する。
 
 1. `pdp rebuild --dry-run`で対象prefixのobject数、device数、segment数、期間を表示する。
 2. `pdp rebuild --target-db <scratch-db>`で空のscratch databaseを指定する。
-3. forward-only migrationを適用する。
-4. B2を全page listingし、`(observed_at, object_key)`順に全objectを再生する。
-5. `ops.ingestion_metadata`とbaseを再構築する。
-6. dbt modelをdeployし、`dbt test`を実行する。
-7. productionと件数、stable key集合、代表martを手動で比較する。
-8. 差分を確認した後、参照先を手動で切り替える。
+   command内部でmigrationを適用し、B2の全pageをlistingして`(observed_at, object_key)`順に再生する。
+   `ops.ingestion_metadata`とbaseの再構築後、同じscratch databaseへ`dbt run`と`dbt test`を実行する。
+3. commandの成功後、productionと件数、stable key集合、代表martを手動で比較する。
+4. 差分を確認した後、参照先を手動で切り替える。
 
 target databaseがproductionと同一、既存tableを持つ、または環境識別が不明な場合は開始前に停止する。
 
