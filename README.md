@@ -91,8 +91,11 @@ Full Disk Accessの付与、plistの検証、登録・停止手順は[`Screen Ti
 
 ## テスト
 
+workflowの回帰テストには、Pythonに加えてBashとjqが必要になる。
+
 ```bash
 ruff check src tests
+ruff format --check src tests
 pytest
 ```
 
