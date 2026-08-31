@@ -21,7 +21,9 @@ concurrency:
 jobs:
   plan:
     name: Runtime plan
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: >-
+      ${{ vars.GCP_PLAN_WIF_PROVIDER != '' &&
+          (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -61,11 +63,14 @@ jobs:
           current_image="$(gcloud run jobs describe screen-time-loader \
             --project="${TF_VAR_project_id}" \
             --region="${TF_VAR_region}" \
-            --format='value(template.template.containers[0].image)' 2>/dev/null || true)"
+            --format='value(spec.template.spec.template.spec.containers[0].image)' 2>/dev/null || true)"
           if [[ ! "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
             current_image="${TF_VAR_image_uri}"
           fi
-          [[ "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]]
+          if [[ ! "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+            echo "A digest-pinned runtime image is required for planning." >&2
+            exit 1
+          fi
           echo "TF_VAR_image_uri=${current_image}" >> "${GITHUB_ENV}"
 
       - name: Set up Terraform

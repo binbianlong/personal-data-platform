@@ -9,7 +9,6 @@ on:
       - "dbt/**"
       - "infra/terraform/**"
       - "pyproject.toml"
-      - "sql/**"
       - "src/**"
       - ".github/workflows/terraform-deploy.yml"
   workflow_dispatch:
@@ -31,7 +30,7 @@ concurrency:
 jobs:
   deploy:
     name: Runtime deploy
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: ${{ vars.GCP_DEPLOY_WIF_PROVIDER != '' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: production
@@ -104,32 +103,44 @@ jobs:
       - name: Validate runtime configuration
         run: terraform -chdir=infra/terraform validate
 
-      - name: Plan and apply runtime changes
+      - name: Plan runtime changes
+        id: plan
+        shell: bash
         run: |
+          set -euo pipefail
           terraform -chdir=infra/terraform plan -input=false -out=runtime.tfplan
-          terraform -chdir=infra/terraform apply -input=false -auto-approve runtime.tfplan
+          first_deployment="$(terraform -chdir=infra/terraform show -json runtime.tfplan | jq -r '
+            any(.resource_changes[]?;
+              .address == "google_cloud_run_v2_job.runtime[\"dbt\"]" and
+              (.change.actions | index("create")) != null)
+          ')"
+          echo "first_deployment=${first_deployment}" >> "${GITHUB_OUTPUT}"
+
+      - name: Apply runtime changes
+        run: terraform -chdir=infra/terraform apply -input=false -auto-approve runtime.tfplan
 
       - name: Run isolated deployment preflight
         run: gcloud run jobs execute platform-preflight --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --wait
 
-      - name: Detect dbt model changes
+      - name: Determine whether to run dbt
         id: dbt
         shell: bash
         env:
           BEFORE_SHA: ${{ github.event.before }}
+          FIRST_DEPLOYMENT: ${{ steps.plan.outputs.first_deployment }}
           REQUESTED: ${{ inputs.run_dbt }}
         run: |
           set -euo pipefail
           run_dbt=false
-          if [[ "${REQUESTED}" == "true" ]]; then
+          if [[ "${FIRST_DEPLOYMENT}" == "true" || "${REQUESTED}" == "true" ]]; then
             run_dbt=true
           elif [[ "${GITHUB_EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
-            if ! git diff --quiet "${BEFORE_SHA}" "${GITHUB_SHA}" -- dbt/; then
+            if ! git diff --quiet "${BEFORE_SHA}" "${GITHUB_SHA}" -- dbt/ src/personal_data_platform/migrations/; then
               run_dbt=true
             fi
           fi
           echo "run=${run_dbt}" >> "${GITHUB_OUTPUT}"
 
-      - name: Run dbt for model changes
+      - name: Initialize or update dbt models
         if: ${{ steps.dbt.outputs.run == 'true' }}
         run: gcloud run jobs execute dbt-runner --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --wait

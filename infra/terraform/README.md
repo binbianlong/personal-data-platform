@@ -32,7 +32,7 @@ printf '%s' "$SECRET_VALUE" | gcloud secrets versions add SECRET_ID --data-file=
 - imageはtagではなく`@sha256:`付きdigestだけを受け付ける。
 - `platform-preflight`は隔離したB2 prefixとMotherDuck test databaseを使い、deployごとにworkflowから実行する。
 - `screen-time-loader`は毎時15分、`reconciliation`は毎日04:30に、どちらも`Asia/Tokyo`で起動する。
-- `dbt-runner`はSchedulerから起動せず、dbt定義変更時または明示したdeploy時だけ実行する。
+- `dbt-runner`はSchedulerから起動せず、初回構築、dbt定義・SQL migration変更時、または`run_dbt=true`を指定したdeploy時に実行する。初回はapply前のTerraform planでdbt Jobの新規作成を検出し、applyと隔離preflightが成功した後にmodelを作成する。Job再作成も同じ扱いとする。
 - 各Jobは専用Service Accountを持ち、必要なSecretだけを参照する。
 - deploy identityの`actAs`は、Terraformが作成するJob用Service AccountとScheduler用Service Accountだけへ付与する。
 

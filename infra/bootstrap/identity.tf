@@ -70,6 +70,8 @@ resource "google_service_account" "github_plan" {
   account_id   = "github-tf-plan"
   display_name = "GitHub Terraform plan"
   description  = "Read-only identity used only by terraform-plan.yml"
+
+  depends_on = [google_project_service.bootstrap]
 }
 
 resource "google_service_account" "github_deploy" {
@@ -77,6 +79,8 @@ resource "google_service_account" "github_deploy" {
   account_id   = "github-tf-deploy"
   display_name = "GitHub Terraform deploy"
   description  = "Deployment identity used only by terraform-deploy.yml on main"
+
+  depends_on = [google_project_service.bootstrap]
 }
 
 resource "google_service_account_iam_member" "github_plan_wif" {

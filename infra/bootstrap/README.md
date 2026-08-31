@@ -30,3 +30,5 @@ apply後、outputを次のGitHub Actions Repository Variablesへ登録する。
 | `artifact_repository` | `GCP_ARTIFACT_REPOSITORY` |
 
 併せて`GCP_PROJECT_ID`、`GCP_REGION`、`GCP_IMAGE_NAME`、初回planのfallbackとなるdigest URIを表す`GCP_RUNTIME_IMAGE_URI`、通知先の`GCP_ALERT_EMAIL`をRepository Variablesへ登録する。いずれもcredentialではなく、secret payloadは登録しない。runtime構築後のplanは、現在`screen-time-loader`へ適用済みのdigest URIをGoogle Cloudから読み取って使用する。
+
+対応するWIF providerのRepository Variableが未設定の間、Terraform Plan / Deployのjobはskipされる。bootstrapとruntimeの初回準備を完了してから登録する。Deployは登録後、対象pathを変更するmainへのpushでも起動する。
