@@ -1,0 +1,92 @@
+name: Terraform Plan
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "infra/terraform/**"
+      - ".github/workflows/terraform-plan.yml"
+      - ".github/workflows/terraform-deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: terraform-plan-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Runtime plan
+    if: >-
+      ${{ vars.GCP_PLAN_WIF_PROVIDER != '' &&
+          (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_VAR_alert_email: ${{ vars.GCP_ALERT_EMAIL }}
+      TF_VAR_deployer_service_account_email: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      TF_VAR_image_uri: ${{ vars.GCP_RUNTIME_IMAGE_URI }}
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_region: ${{ vars.GCP_REGION }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate repository variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_deployer_service_account_email TF_VAR_project_id TF_VAR_region; do
+            test -n "${!name}"
+          done
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_PLAN_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_PLAN_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Resolve current runtime image
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_image="$(gcloud run jobs describe screen-time-loader \
+            --project="${TF_VAR_project_id}" \
+            --region="${TF_VAR_region}" \
+            --format='value(spec.template.spec.template.spec.containers[0].image)' 2>/dev/null || true)"
+          if [[ ! "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+            current_image="${TF_VAR_image_uri}"
+          fi
+          if [[ ! "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+            echo "A digest-pinned runtime image is required for planning." >&2
+            exit 1
+          fi
+          echo "TF_VAR_image_uri=${current_image}" >> "${GITHUB_ENV}"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.9
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive infra/terraform
+
+      - name: Initialize runtime state
+        run: terraform -chdir=infra/terraform init -backend-config="bucket=${TF_STATE_BUCKET}" -input=false -lockfile=readonly
+
+      - name: Validate runtime configuration
+        run: terraform -chdir=infra/terraform validate
+
+      - name: Plan runtime changes
+        run: terraform -chdir=infra/terraform plan -input=false -lock=false -no-color

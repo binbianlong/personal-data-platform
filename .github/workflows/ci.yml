@@ -67,6 +67,8 @@ jobs:
           docker run --rm personal-data-platform:ci screen-time --help
           docker run --rm personal-data-platform:ci loader --help
           docker run --rm personal-data-platform:ci dbt --help
+          docker run --rm personal-data-platform:ci reconciliation --help
+          docker run --rm personal-data-platform:ci preflight --help
           docker run --rm --entrypoint python personal-data-platform:ci -c '
           from personal_data_platform.dbt_runner import DBT_PROJECT_DIR
           assert (DBT_PROJECT_DIR / "dbt_project.yml").is_file()
@@ -89,16 +91,15 @@ jobs:
           terraform_wrapper: false
 
       - name: Check formatting
-        run: terraform fmt -check -recursive infra/github
+        run: terraform fmt -check -recursive infra
 
-      - name: Initialize providers
-        run: terraform -chdir=infra/github init -backend=false -input=false -lockfile=readonly
-
-      - name: Validate configuration
-        run: terraform -chdir=infra/github validate
-
-      - name: Test ruleset contract
-        run: terraform -chdir=infra/github test
+      - name: Validate Terraform roots
+        run: |
+          for root in infra/bootstrap infra/github infra/terraform; do
+            terraform -chdir="$root" init -backend=false -input=false -lockfile=readonly
+            terraform -chdir="$root" validate
+            terraform -chdir="$root" test
+          done
 
   required:
     name: CI
