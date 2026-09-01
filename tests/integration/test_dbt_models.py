@@ -32,6 +32,8 @@ def raw() -> RawObject:
         segment_key="segment",
         observed_at=datetime(2026, 8, 27, tzinfo=UTC),
         sha256="a" * 64,
+        storage_created_at=datetime(2026, 8, 27, 1, tzinfo=UTC),
+        storage_generation=1,
     )
 
 

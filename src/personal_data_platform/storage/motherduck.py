@@ -31,6 +31,17 @@ class WarehouseConfig:
         return cls(database=database, token=os.environ.get("MOTHERDUCK_TOKEN"))
 
 
+@dataclass(frozen=True, slots=True)
+class IngestionState:
+    """Retention-relevant state for one object known to the warehouse."""
+
+    object_key: str
+    status: str
+    storage_created_at: datetime | None
+    storage_generation: int | None
+    retention_expired_at: datetime | None
+
+
 def connect(config: WarehouseConfig) -> Any:
     """Connect to MotherDuck, or to a local DuckDB file for tests."""
 
@@ -92,15 +103,109 @@ class Warehouse:
 
     def succeeded_keys(self) -> set[str]:
         rows = self.connection.execute(
-            "SELECT object_key FROM ops.ingestion_metadata WHERE status = 'succeeded'"
+            """
+            SELECT object_key
+            FROM ops.ingestion_metadata
+            WHERE status = 'succeeded' AND retention_expired_at IS NULL
+            """
         ).fetchall()
         return {row[0] for row in rows}
 
+    def succeeded_keys_for(self, raw_objects: Iterable[Any]) -> set[str]:
+        """Return active successes whose stored GCS generation matches the live object."""
+
+        live_generations = {value.key: int(value.storage_generation) for value in raw_objects}
+        if not live_generations:
+            return set()
+        rows = self.connection.execute(
+            """
+            SELECT object_key, storage_generation
+            FROM ops.ingestion_metadata
+            WHERE status = 'succeeded' AND retention_expired_at IS NULL
+            """
+        ).fetchall()
+        return {
+            str(object_key)
+            for object_key, storage_generation in rows
+            if storage_generation is not None
+            and live_generations.get(str(object_key)) == int(storage_generation)
+        }
+
     def ingestion_counts(self) -> dict[str, int]:
         rows = self.connection.execute(
-            "SELECT status, count(*) FROM ops.ingestion_metadata GROUP BY status"
+            """
+            SELECT status, count(*)
+            FROM ops.ingestion_metadata
+            WHERE retention_expired_at IS NULL
+            GROUP BY status
+            """
         ).fetchall()
         return {str(status): int(count) for status, count in rows}
+
+    def active_ingestion_states(self) -> dict[str, IngestionState]:
+        """Return metadata that has not already been accepted as lifecycle-expired."""
+
+        rows = self.connection.execute(
+            """
+            SELECT object_key, status, storage_created_at, storage_generation,
+                   retention_expired_at
+            FROM ops.ingestion_metadata
+            WHERE retention_expired_at IS NULL
+            """
+        ).fetchall()
+        return {
+            row[0]: IngestionState(
+                object_key=row[0],
+                status=row[1],
+                storage_created_at=row[2],
+                storage_generation=row[3],
+                retention_expired_at=row[4],
+            )
+            for row in rows
+        }
+
+    def retention_inventory_counts(self) -> dict[str, int]:
+        row = self.connection.execute(
+            """
+            SELECT
+                count(*),
+                count(*) FILTER (WHERE retention_expired_at IS NOT NULL)
+            FROM ops.ingestion_metadata
+            """
+        ).fetchone()
+        return {
+            "total_object_count": int(row[0]),
+            "expired_object_count": int(row[1]),
+        }
+
+    def mark_retention_expired(
+        self, states: Iterable[IngestionState], *, expired_at: datetime
+    ) -> set[str]:
+        """Expire only the exact storage incarnation audited as absent."""
+
+        expired: set[str] = set()
+        for state in sorted(states, key=lambda value: value.object_key):
+            row = self.connection.execute(
+                """
+            UPDATE ops.ingestion_metadata
+            SET retention_expired_at = ?
+            WHERE object_key = ?
+              AND status = 'succeeded'
+              AND retention_expired_at IS NULL
+              AND storage_created_at IS NOT DISTINCT FROM ?
+              AND storage_generation IS NOT DISTINCT FROM ?
+            RETURNING object_key
+                """,
+                [
+                    expired_at,
+                    state.object_key,
+                    state.storage_created_at,
+                    state.storage_generation,
+                ],
+            ).fetchone()
+            if row is not None:
+                expired.add(str(row[0]))
+        return expired
 
     def load_object(
         self,
@@ -114,12 +219,21 @@ class Warehouse:
         self.connection.execute("BEGIN TRANSACTION")
         try:
             current = self.connection.execute(
-                "SELECT status, content_sha256 FROM ops.ingestion_metadata WHERE object_key = ?",
+                """
+                SELECT status, content_sha256, retention_expired_at, storage_generation
+                FROM ops.ingestion_metadata
+                WHERE object_key = ?
+                """,
                 [raw.key],
             ).fetchone()
             if current and current[1] != raw.sha256:
                 raise RuntimeError(f"immutable object identity changed: {raw.key}")
-            if current and current[0] == "succeeded":
+            if (
+                current
+                and current[0] == "succeeded"
+                and current[2] is None
+                and current[3] == raw.storage_generation
+            ):
                 self.connection.execute("ROLLBACK")
                 return 0
 
@@ -128,12 +242,16 @@ class Warehouse:
                 INSERT INTO ops.ingestion_metadata (
                     object_key, device_key, source_stream, segment_key, observed_at,
                     content_sha256, byte_size, status, parser_version, record_count,
-                    started_at, completed_at, error_type, error_message, retry_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'loading', ?, NULL, ?, NULL, NULL, NULL, 0)
+                    started_at, completed_at, error_type, error_message, retry_count,
+                    storage_created_at, storage_generation, retention_expired_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'loading', ?, NULL, ?, NULL, NULL, NULL, 0, ?, ?, NULL)
                 ON CONFLICT (object_key) DO UPDATE SET
                     status = 'loading', parser_version = excluded.parser_version,
                     started_at = excluded.started_at, completed_at = NULL,
                     error_type = NULL, error_message = NULL,
+                    storage_created_at = excluded.storage_created_at,
+                    storage_generation = excluded.storage_generation,
+                    retention_expired_at = NULL,
                     retry_count = ops.ingestion_metadata.retry_count + 1
                 """,
                 [
@@ -146,6 +264,8 @@ class Warehouse:
                     byte_size,
                     materialized[0].parser_version if materialized else "app-in-focus-v1",
                     now,
+                    raw.storage_created_at,
+                    raw.storage_generation,
                 ],
             )
             self.connection.execute(
@@ -233,11 +353,15 @@ class Warehouse:
             INSERT INTO ops.ingestion_metadata (
                 object_key, device_key, source_stream, segment_key, observed_at,
                 content_sha256, byte_size, status, parser_version, record_count,
-                started_at, completed_at, error_type, error_message, retry_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', NULL, NULL, ?, ?, ?, ?, 0)
+                started_at, completed_at, error_type, error_message, retry_count,
+                storage_created_at, storage_generation, retention_expired_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', NULL, NULL, ?, ?, ?, ?, 0, ?, ?, NULL)
             ON CONFLICT (object_key) DO UPDATE SET
                 status = 'failed', completed_at = excluded.completed_at,
                 error_type = excluded.error_type, error_message = excluded.error_message,
+                storage_created_at = excluded.storage_created_at,
+                storage_generation = excluded.storage_generation,
+                retention_expired_at = NULL,
                 retry_count = ops.ingestion_metadata.retry_count + 1
             """,
             [
@@ -252,6 +376,8 @@ class Warehouse:
                 now,
                 type(error).__name__,
                 str(error)[:4000],
+                raw.storage_created_at,
+                raw.storage_generation,
             ],
         )
 

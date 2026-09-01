@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import stat
@@ -19,13 +20,28 @@ from personal_data_platform.launchd import (
 
 
 def _environment(tmp_path: Path) -> dict[str, str]:
+    service_account = "collector@synthetic-project.iam.gserviceaccount.com"
+    adc_path = tmp_path / "gcloud/application_default_credentials.json"
+    adc_path.parent.mkdir(parents=True, exist_ok=True)
+    adc_path.write_text(
+        json.dumps(
+            {
+                "type": "impersonated_service_account",
+                "service_account_impersonation_url": (
+                    "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+                    f"{service_account}:generateAccessToken"
+                ),
+                "source_credentials": {"type": "authorized_user"},
+            }
+        )
+    )
+    os.chmod(adc_path, 0o600)
     return {
-        "B2_APPLICATION_KEY": "must-not-be-serialized",
-        "B2_BUCKET": "screen-time-raw",
-        "B2_ENDPOINT": "https://s3.us-west-004.backblazeb2.com",
-        "B2_KEY_ID": "must-not-be-serialized",
-        "B2_REGION": "us-west-004",
+        "GCS_BUCKET": "screen-time-raw",
+        "GOOGLE_APPLICATION_CREDENTIALS": str(adc_path),
+        "GOOGLE_CLOUD_PROJECT": "synthetic-project",
         "PDP_COLLECTOR_POLL_SECONDS": "60",
+        "PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL": service_account,
         "PDP_COLLECTOR_STATE_DB_PATH": str(tmp_path / "state/collector.db"),
         "PDP_PSEUDONYM_KEY_HEX": "42" * 32,
         "PDP_APP_IN_FOCUS_REMOTE_DIR": str(tmp_path / "Biome/App.InFocus/remote"),
@@ -66,10 +82,15 @@ def test_builds_secret_free_keepalive_launch_agent(tmp_path) -> None:
     environment = decoded["EnvironmentVariables"]
     assert environment["PDP_SCREEN_TIME_DEVICE_ALLOWLIST"] == f"{'a' * 64},{'b' * 64}"
     assert environment["PDP_COLLECTOR_POLL_SECONDS"] == "60"
+    assert environment["GOOGLE_CLOUD_PROJECT"] == "synthetic-project"
+    assert environment["GCS_BUCKET"] == "screen-time-raw"
+    assert environment["GOOGLE_APPLICATION_CREDENTIALS"] == str(
+        settings.google_application_credentials
+    )
+    assert environment["PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL"] == (
+        "collector@synthetic-project.iam.gserviceaccount.com"
+    )
     assert "PDP_PSEUDONYM_KEY_HEX" not in environment
-    assert "B2_KEY_ID" not in environment
-    assert "B2_APPLICATION_KEY" not in environment
-    assert b"must-not-be-serialized" not in build_launch_agent(settings)
 
 
 def test_preserves_collector_paths_in_launch_agent(tmp_path) -> None:
@@ -98,7 +119,11 @@ def test_writes_private_plist_and_log_directory(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("name", "value", "message"),
     [
-        ("B2_ENDPOINT", "http://example.invalid", "credential-free HTTPS URL"),
+        (
+            "PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL",
+            "other@synthetic-project.iam.gserviceaccount.com",
+            "target does not match",
+        ),
         ("PDP_SCREEN_TIME_DEVICE_ALLOWLIST", "raw-device-id", "HMAC-SHA-256"),
         ("PDP_COLLECTOR_POLL_SECONDS", "nan", "finite value"),
     ],
@@ -130,6 +155,14 @@ def test_python_executable_must_be_runnable(tmp_path) -> None:
             python_executable=not_executable,
             environ=_environment(tmp_path),
         )
+
+
+def test_collector_adc_file_must_be_private(tmp_path) -> None:
+    environment = _environment(tmp_path)
+    os.chmod(environment["GOOGLE_APPLICATION_CREDENTIALS"], 0o644)
+
+    with pytest.raises(ConfigurationError, match="mode 0600"):
+        _settings(tmp_path, environ=environment)
 
 
 def test_python_executable_preserves_virtual_environment_path(tmp_path, monkeypatch) -> None:

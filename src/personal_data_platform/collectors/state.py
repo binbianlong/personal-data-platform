@@ -207,7 +207,7 @@ class CollectorState:
             connection.commit()
 
     def record_successful_scan(self, scan: SuccessfulScan) -> None:
-        """Persist liveness only after all Raw uploads and B2 receipts succeeded."""
+        """Persist liveness only after all Raw uploads and GCS receipts succeeded."""
         with self._connect() as connection:
             connection.execute(
                 """

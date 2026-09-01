@@ -16,6 +16,8 @@ class RawObject:
     segment_key: str
     observed_at: datetime
     sha256: str
+    storage_created_at: datetime
+    storage_generation: int
 
 
 @dataclass(frozen=True, slots=True)

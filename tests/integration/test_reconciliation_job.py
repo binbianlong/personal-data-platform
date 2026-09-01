@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+from personal_data_platform.loader.models import RawObject
 from personal_data_platform.reconciliation.job import _relation_names, run_reconciliation
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
@@ -13,6 +14,22 @@ class _Repository:
 
     def list_scan_receipts(self):
         return [SimpleNamespace(device_key="a" * 64, completed_at=datetime.now(UTC))]
+
+    def get_device_manifest(self):
+        return SimpleNamespace(device_keys=("a" * 64,), completed_at=datetime.now(UTC))
+
+
+def _raw(storage_created_at: datetime) -> RawObject:
+    return RawObject(
+        key="raw/screen_time/v1/device/app-in-focus/segment/created/hash.segb.gz",
+        device_key="a" * 64,
+        stream="app-in-focus",
+        segment_key="segment",
+        observed_at=storage_created_at,
+        sha256="a" * 64,
+        storage_created_at=storage_created_at,
+        storage_generation=1,
+    )
 
 
 def _warehouse() -> Warehouse:
@@ -85,5 +102,53 @@ def test_relation_inventory_ignores_other_attached_databases() -> None:
         )
 
         assert "marts.daily_screen_time" not in _relation_names(warehouse)
+    finally:
+        warehouse.close()
+
+
+def test_successful_audit_persists_expected_lifecycle_expiry() -> None:
+    warehouse = _warehouse()
+    try:
+        now = datetime.now(UTC)
+        raw = _raw(now - timedelta(days=60))
+        warehouse.load_object(raw, byte_size=0, records=[])
+
+        result = run_reconciliation(_Repository(), warehouse, heartbeat=lambda _: None, now=now)
+
+        assert result.ok
+        assert result.loaded_object_count == 0
+        assert result.details["newly_expired_object_count"] == 1
+        assert (
+            warehouse.query_value(
+                "SELECT retention_expired_at FROM ops.ingestion_metadata WHERE object_key = ?",
+                [raw.key],
+            )
+            == now
+        )
+    finally:
+        warehouse.close()
+
+
+def test_failed_heartbeat_rolls_back_expected_expiry() -> None:
+    warehouse = _warehouse()
+    try:
+        now = datetime.now(UTC)
+        raw = _raw(now - timedelta(days=61))
+        warehouse.load_object(raw, byte_size=0, records=[])
+
+        def fail(_):
+            raise RuntimeError("external monitor unreachable")
+
+        result = run_reconciliation(_Repository(), warehouse, heartbeat=fail, now=now)
+
+        assert not result.ok
+        assert result.details["newly_expired_object_count"] == 0
+        assert (
+            warehouse.query_value(
+                "SELECT retention_expired_at FROM ops.ingestion_metadata WHERE object_key = ?",
+                [raw.key],
+            )
+            is None
+        )
     finally:
         warehouse.close()

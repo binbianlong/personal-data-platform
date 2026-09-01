@@ -9,15 +9,21 @@ import os
 import uuid
 from collections.abc import Iterable
 from dataclasses import asdict
-from typing import Any, Protocol
+from typing import Protocol
 
+from personal_data_platform.raw.screen_time import (
+    RAW_PREFIX as SCREEN_TIME_RAW_PREFIX,
+)
+from personal_data_platform.raw.screen_time import (
+    RawObservationRef,
+)
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 from .models import LoadSummary, RawObject, SegmentDecodeError
 from .parser import parse_segb_bytes
 
 LOGGER = logging.getLogger(__name__)
-RAW_PREFIX = "raw/screen_time/v1/"
+RAW_PREFIX = f"{SCREEN_TIME_RAW_PREFIX}/"
 LOADER_LEASE_SECONDS = 65 * 60
 
 
@@ -26,14 +32,16 @@ class JobAlreadyRunning(RuntimeError):
 
 
 class RawRepository(Protocol):
-    def list_raw(self, prefix: str = RAW_PREFIX) -> Iterable[Any]: ...
+    def list_raw(self, prefix: str = RAW_PREFIX) -> Iterable[RawObservationRef]: ...
 
-    def get_raw(self, key: str) -> bytes: ...
+    def get_raw(self, key: str, *, generation: int) -> bytes: ...
 
-    def list_scan_receipts(self) -> Iterable[Any]: ...
+    def list_scan_receipts(self) -> Iterable[object]: ...
+
+    def get_device_manifest(self) -> object | None: ...
 
 
-def _normalize_ref(value: Any) -> RawObject:
+def _normalize_ref(value: RawObservationRef | RawObject) -> RawObject:
     return RawObject(
         key=value.key,
         device_key=value.device_key,
@@ -41,6 +49,8 @@ def _normalize_ref(value: Any) -> RawObject:
         segment_key=value.segment_key,
         observed_at=value.observed_at,
         sha256=value.sha256,
+        storage_created_at=value.storage_created_at,
+        storage_generation=value.storage_generation,
     )
 
 
@@ -71,7 +81,7 @@ def run_loader(
     if len({value.key for value in refs}) != len(refs):
         raise RuntimeError("raw object listing returned duplicate keys")
 
-    already_loaded = warehouse.succeeded_keys()
+    already_loaded = warehouse.succeeded_keys_for(refs)
     pending = [value for value in refs if value.key not in already_loaded]
     run_id = str(uuid.uuid4())
     if not warehouse.acquire_job_lock("loader", run_id, lease_seconds=LOADER_LEASE_SECONDS):
@@ -86,7 +96,7 @@ def run_loader(
         for raw in pending:
             byte_size = 0
             try:
-                stored = repository.get_raw(raw.key)
+                stored = repository.get_raw(raw.key, generation=raw.storage_generation)
                 segment = _decompress_and_verify(raw, stored)
                 byte_size = len(segment)
                 records = parse_segb_bytes(raw, segment)
@@ -116,10 +126,10 @@ def run_loader(
 def run_loader_from_env() -> int:
     """Runtime entrypoint used by the Cloud Run loader job."""
 
-    from personal_data_platform.storage.b2 import B2RawRepository
+    from personal_data_platform.storage.gcs import GCSRawRepository
 
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    repository = B2RawRepository.from_env()
+    repository = GCSRawRepository.from_env()
     warehouse = Warehouse(connect(WarehouseConfig.from_env()))
     try:
         warehouse.migrate()

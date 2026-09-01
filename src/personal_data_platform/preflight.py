@@ -1,4 +1,4 @@
-"""Explicit connectivity checks against isolated B2 and MotherDuck test namespaces."""
+"""Explicit connectivity checks against isolated GCS and MotherDuck test namespaces."""
 
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from personal_data_platform.config import B2Config
+from google.cloud import storage
+
+from personal_data_platform.config import GCSConfig
 from personal_data_platform.recovery.rebuild import validate_rebuild_target
 from personal_data_platform.storage.motherduck import WarehouseConfig, connect
 
@@ -18,37 +20,34 @@ PREFLIGHT_PREFIX = "test/preflight/"
 LOGGER = logging.getLogger(__name__)
 
 
-def probe_b2(client: Any, *, bucket: str, prefix: str = PREFLIGHT_PREFIX) -> dict[str, object]:
-    """Write, read, and remove one uniquely named object under the test prefix."""
+def probe_gcs(client: Any, *, bucket: str, prefix: str = PREFLIGHT_PREFIX) -> dict[str, object]:
+    """Write, read, list, and generation-delete one object in the test bucket."""
 
     payload = uuid.uuid4().bytes
     key = f"{prefix.rstrip('/')}/{uuid.uuid4()}.bin"
-    version_id: str | None = None
+    bucket_ref = client.bucket(bucket)
+    generation: int | None = None
     probe_error: Exception | None = None
     try:
-        uploaded = client.put_object(
-            Bucket=bucket,
-            Key=key,
-            Body=payload,
-            ContentType="application/octet-stream",
-            ServerSideEncryption="AES256",
+        uploaded = bucket_ref.blob(key)
+        uploaded.upload_from_string(
+            payload,
+            content_type="application/octet-stream",
+            if_generation_match=0,
         )
-        version_id = uploaded.get("VersionId")
-        if not version_id:
-            raise RuntimeError("B2 preflight upload did not return a cleanup VersionId")
-        response = client.get_object(Bucket=bucket, Key=key)
-        body = response["Body"]
-        try:
-            downloaded = body.read()
-        finally:
-            close = getattr(body, "close", None)
-            if close is not None:
-                close()
+        generation = uploaded.generation
+        if generation is None:
+            raise RuntimeError("GCS preflight upload did not return a cleanup generation")
+
+        exact_generation = bucket_ref.blob(key, generation=generation)
+        downloaded = exact_generation.download_as_bytes(
+            raw_download=True,
+            if_generation_match=generation,
+        )
         if downloaded != payload:
-            raise RuntimeError("B2 preflight round trip changed the object bytes")
-        listed = client.list_objects_v2(Bucket=bucket, Prefix=key).get("Contents", [])
-        if not any(item.get("Key") == key for item in listed):
-            raise RuntimeError("B2 preflight object was not returned by listing")
+            raise RuntimeError("GCS preflight round trip changed the object bytes")
+        if not any(blob.name == key for blob in client.list_blobs(bucket_ref, prefix=key)):
+            raise RuntimeError("GCS preflight object was not returned by listing")
         return {
             "ok": True,
             "prefix": prefix,
@@ -58,13 +57,15 @@ def probe_b2(client: Any, *, bucket: str, prefix: str = PREFLIGHT_PREFIX) -> dic
         probe_error = error
         raise
     finally:
-        if version_id is not None:
+        if generation is not None:
             try:
-                client.delete_object(Bucket=bucket, Key=key, VersionId=version_id)
+                bucket_ref.blob(key, generation=generation).delete(
+                    if_generation_match=generation,
+                )
             except Exception:
                 if probe_error is None:
                     raise
-                LOGGER.exception("B2 preflight cleanup failed after the probe failed")
+                LOGGER.exception("GCS preflight cleanup failed after the probe failed")
 
 
 def probe_warehouse(connection: Any) -> dict[str, object]:
@@ -84,12 +85,13 @@ def probe_warehouse(connection: Any) -> dict[str, object]:
 
 
 def run_preflight_from_env() -> int:
-    try:
-        import boto3
-    except ImportError as error:  # pragma: no cover - packaging failure
-        raise RuntimeError("boto3 is required for B2 preflight") from error
+    gcs = GCSConfig.from_env()
+    preflight_bucket = os.environ.get("GCS_PREFLIGHT_BUCKET", "").strip()
+    if not preflight_bucket:
+        raise ValueError("GCS_PREFLIGHT_BUCKET is required")
+    if preflight_bucket == gcs.bucket:
+        raise ValueError("GCS_PREFLIGHT_BUCKET must differ from GCS_BUCKET")
 
-    b2 = B2Config.from_env()
     test_database = os.environ.get("PREFLIGHT_MOTHERDUCK_DATABASE")
     if not test_database:
         raise ValueError("PREFLIGHT_MOTHERDUCK_DATABASE is required")
@@ -101,17 +103,8 @@ def run_preflight_from_env() -> int:
     if not token:
         raise ValueError("MOTHERDUCK_TOKEN is required")
 
-    b2_client = boto3.client(
-        "s3",
-        endpoint_url=b2.endpoint,
-        aws_access_key_id=b2.key_id,
-        aws_secret_access_key=b2.application_key,
-        region_name=b2.region,
-    )
-    test_prefix = os.environ.get("B2_RAW_PREFIX", PREFLIGHT_PREFIX).strip().strip("/")
-    if not test_prefix.startswith("test/") or ".." in test_prefix.split("/"):
-        raise ValueError("preflight B2 prefix must be isolated below test/")
-    results = {"b2": probe_b2(b2_client, bucket=b2.bucket, prefix=f"{test_prefix}/")}
+    client = storage.Client(project=gcs.project_id)
+    results = {"gcs": probe_gcs(client, bucket=preflight_bucket)}
     warehouse_connection = connect(WarehouseConfig(test_database, token))
     try:
         results["motherduck"] = probe_warehouse(warehouse_connection)
