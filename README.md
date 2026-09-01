@@ -31,7 +31,7 @@ pdp loader
 pdp dbt
 pdp reconciliation
 pdp rebuild --dry-run
-pdp rebuild --target-db <scratch-database>
+pdp rebuild --target-db <scratch-database> --allow-partial-history
 pdp preflight
 ```
 
@@ -39,15 +39,14 @@ pdp preflight
 
 ## iPhone Screen Time Collector
 
-CollectorはMacへ同期されたBiomeの`sync.db`から`platform = 2`のiPhoneを列挙し、allowlistに含まれるdeviceの`App.InFocus/remote` segmentをB2へ保存する。Full Disk AccessはTerminalではなく、実際にCollectorを起動するプロセスへ付与する。
+CollectorはMacへ同期されたBiomeの`sync.db`から`platform = 2`のiPhoneを列挙し、allowlistに含まれるdeviceの`App.InFocus/remote` segmentをGCSへ保存する。Full Disk AccessはTerminalではなく、実際にCollectorを起動するプロセスへ付与する。
 
-疑似化secret、B2 key ID、B2 application keyはmacOS Keychain service `personal-data-platform`の次のaccountから読む。対応する環境変数があれば環境変数を優先する。
+疑似化secretはmacOS Keychain service `personal-data-platform`から読む。対応する環境変数があれば環境変数を
+優先する。GCS認証には専用Collector Service AccountをimpersonateするADCを使う。
 
 | Keychain account | 環境変数 |
 |---|---|
 | `screen-time-pseudonym-key-hex` | `PDP_PSEUDONYM_KEY_HEX` |
-| `b2-key-id` | `B2_KEY_ID` |
-| `b2-application-key` | `B2_APPLICATION_KEY` |
 
 疑似化secretには32 bytes以上のhex値を使う。まずsecretをKeychainへ登録し、device候補を確認する。
 
@@ -57,7 +56,9 @@ pdp screen-time devices
 
 出力された`device_key`のうち収集対象だけをカンマ区切りで`PDP_SCREEN_TIME_DEVICE_ALLOWLIST`へ設定する。Raw device identifierはallowlistへ保存しない。
 
-接続先には`B2_ENDPOINT`、`B2_BUCKET`を設定する。必要に応じて`B2_REGION`も設定できる。Collector用B2 application keyは対象bucketと`raw/screen_time/v1/` prefixに限定し、`writeFiles`だけを許可する。
+接続先には`GOOGLE_CLOUD_PROJECT`、`GCS_BUCKET`、`PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL`、
+`GOOGLE_APPLICATION_CREDENTIALS`を設定する。Collector Service Accountは`raw/screen_time/v1/`へのcreateと
+scan receipt・active-device manifestの更新だけを許可し、Rawのread / list / deleteを許可しない。
 
 ```bash
 pdp screen-time doctor
@@ -65,7 +66,8 @@ pdp screen-time collect --once
 pdp screen-time collect --watch
 ```
 
-`doctor`はBiome、allowlist、local state、B2設定を診断する。実際のB2書込権限は`collect --once`で検証する。
+`doctor`はBiome、allowlist、local state、GCS設定、impersonated ADCの種類・所有者・mode・target
+Service Accountを診断する。実際のtoken発行とGCS書込権限は`collect --once`で検証する。
 
 Raw object keyは次の形式で、device identifierとsegment pathはHMAC-SHA-256で疑似化する。SHA-256はgzip前のsegment bytesに対して計算する。
 
@@ -74,9 +76,16 @@ raw/screen_time/v1/<device_key>/app-in-focus/<segment_key>/
   <YYYYMMDDTHHMMSSffffffZ>/<sha256>.segb.gz
 ```
 
-local SQLite stateはupload前に同じobject keyと決定的gzip bytesを`pending`として保存し、B2 upload成功後だけ`uploaded`へ更新する。再起動時はB2のread/list権限を使わず、同じkeyとbytesでpending uploadを再試行する。連続する同一segmentはskipするが、`A → B → A`の観測は3件とも保持する。
+local SQLite stateはupload前に同じobject keyと決定的gzip bytesを`pending`として保存し、GCS upload成功後だけ`uploaded`へ更新する。再起動時はGCSのread/list権限を使わず、同じkeyとbytesでpending uploadを再試行する。連続する同一segmentはskipするが、`A → B → A`の観測は3件とも保持する。
 
-`--watch`はdefaultで300秒ごとにcomplete scanを行う。間隔は`PDP_COLLECTOR_POLL_SECONDS`で変更できる。成功時は`raw/screen_time/v1/_control/collector/latest/`の疑似化receiptも更新し、cloud側がevent未発生とCollector停止を区別できるようにする。
+`--watch`はdefaultで300秒ごとにcomplete scanを行う。間隔は`PDP_COLLECTOR_POLL_SECONDS`で変更できる。成功時は
+`raw/screen_time/v1/_control/collector/latest/`の疑似化receiptと`_control/collector/active.json`の
+active-device manifestを更新し、cloud側がevent未発生とCollector停止を区別できるようにする。端末の正式な
+decommissionはallowlistから削除した後、次のcomplete scanがmanifest更新まで成功した時点とする。
+
+`pdp rebuild`はCollectorのwrite-only ADCを使わない。Terraformが作るread-only Rebuild Service Account用の
+別ADCを`PDP_REBUILD_GOOGLE_APPLICATION_CREDENTIALS`で指定する。作成手順は
+[`Platform運用`](docs/platform/operations.md#rebuild)に従う。
 
 常駐実行には、秘密値を含まないLaunchAgent plistを生成してからmacOSへ登録する。生成だけでは登録・起動されない。
 

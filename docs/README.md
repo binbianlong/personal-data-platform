@@ -7,7 +7,6 @@ Personal Data Platformの設計、データ仕様、運用手順を管理する�
 - [`platform/`](platform/)
 - [`sources/`](sources/)
 - [`analytics/`](analytics/)
-- [`superpowers/`](superpowers/)
 
 ## 管理ルール
 

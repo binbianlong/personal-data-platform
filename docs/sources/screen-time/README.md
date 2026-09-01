@@ -11,4 +11,4 @@ Macへ同期されたiPhoneのBiome `App.InFocus`から、アプリのforeground
 - [`data-model.md`](data-model.md)
 - [`operations.md`](operations.md)
 
-共通のB2 Raw、MotherDuck、セキュリティ、復旧契約は[`../../platform/`](../../platform/)を参照する。
+共通のGCS Raw、MotherDuck、セキュリティ、復旧契約は[`../../platform/`](../../platform/)を参照する。
