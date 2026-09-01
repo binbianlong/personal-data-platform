@@ -11,7 +11,12 @@ variable "project_id" {
 variable "region" {
   description = "Google Cloud region used for the Artifact Registry repository."
   type        = string
-  default     = "asia-northeast1"
+  default     = "us-central1"
+
+  validation {
+    condition     = var.region == "us-central1"
+    error_message = "region is fixed to us-central1 for the Artifact Registry repository."
+  }
 }
 
 variable "state_bucket_name" {

@@ -12,7 +12,6 @@ locals {
   ])
 
   plan_project_roles = toset([
-    "roles/iam.securityReviewer",
     "roles/viewer",
   ])
 
@@ -55,7 +54,7 @@ resource "google_storage_bucket" "terraform_state" {
   depends_on = [google_project_service.bootstrap]
 }
 
-resource "google_artifact_registry_repository" "runtime" {
+resource "google_artifact_registry_repository" "runtime_us" {
   project       = var.project_id
   location      = var.region
   repository_id = var.artifact_repository_id
@@ -63,4 +62,14 @@ resource "google_artifact_registry_repository" "runtime" {
   format        = "DOCKER"
 
   depends_on = [google_project_service.bootstrap]
+}
+
+# Keep a previously provisioned Asia repository and its images intact while
+# creating the new us-central1 repository at a separate Terraform address.
+removed {
+  from = google_artifact_registry_repository.runtime
+
+  lifecycle {
+    destroy = false
+  }
 }

@@ -11,7 +11,12 @@ variable "project_id" {
 variable "region" {
   description = "Google Cloud region for Cloud Run and Cloud Scheduler."
   type        = string
-  default     = "asia-northeast1"
+  default     = "us-central1"
+
+  validation {
+    condition     = var.region == "us-central1"
+    error_message = "region is fixed to us-central1 for the runtime, Raw storage, and Artifact Registry."
+  }
 }
 
 variable "deployer_service_account_email" {
@@ -21,6 +26,16 @@ variable "deployer_service_account_email" {
   validation {
     condition     = var.deployer_service_account_email == "github-tf-deploy@${var.project_id}.iam.gserviceaccount.com"
     error_message = "deployer_service_account_email must be the bootstrap-created github-tf-deploy account for project_id."
+  }
+}
+
+variable "collector_impersonator_member" {
+  description = "Google user or group allowed to impersonate the dedicated Mac Collector and rebuild Service Accounts."
+  type        = string
+
+  validation {
+    condition     = can(regex("^(user|group):[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$", var.collector_impersonator_member))
+    error_message = "collector_impersonator_member must be a user: or group: IAM principal with an email address."
   }
 }
 
@@ -61,12 +76,6 @@ variable "scheduler_time_zone" {
   description = "IANA time zone used by Cloud Scheduler."
   type        = string
   default     = "Asia/Tokyo"
-}
-
-variable "preflight_b2_prefix" {
-  description = "Isolated B2 prefix used by the deployment preflight Job."
-  type        = string
-  default     = "test/preflight"
 }
 
 variable "motherduck_database" {
