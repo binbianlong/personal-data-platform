@@ -62,6 +62,8 @@ def test_pinned_ccl_segb_decodes_shared_offset_trailer_entries() -> None:
         segment_key="segment",
         observed_at=datetime(2026, 8, 27, tzinfo=UTC),
         sha256="a" * 64,
+        storage_created_at=datetime(2026, 8, 27, 1, tzinfo=UTC),
+        storage_generation=1,
     )
 
     records = parse_segb_bytes(raw, segment)

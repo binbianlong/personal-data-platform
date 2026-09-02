@@ -1,11 +1,4 @@
 locals {
-  b2_secret_environment = {
-    B2_KEY_ID          = "b2_key_id"
-    B2_APPLICATION_KEY = "b2_application_key"
-    B2_ENDPOINT        = "b2_endpoint"
-    B2_BUCKET          = "b2_bucket"
-  }
-
   runtime_jobs = {
     preflight = {
       name        = "platform-preflight"
@@ -18,16 +11,14 @@ locals {
       }
       environment = {
         APP_ENV                       = "production"
-        B2_RAW_PREFIX                 = var.preflight_b2_prefix
+        GCS_BUCKET                    = local.raw_bucket_name
+        GCS_PREFLIGHT_BUCKET          = local.preflight_bucket_name
+        GOOGLE_CLOUD_PROJECT          = var.project_id
         MOTHERDUCK_DATABASE           = var.motherduck_database
         PREFLIGHT_MOTHERDUCK_DATABASE = var.preflight_motherduck_database
       }
       secrets = {
-        B2_KEY_ID          = "preflight_b2_key_id"
-        B2_APPLICATION_KEY = "preflight_b2_application_key"
-        B2_ENDPOINT        = "b2_endpoint"
-        B2_BUCKET          = "b2_bucket"
-        MOTHERDUCK_TOKEN   = "motherduck_preflight_token"
+        MOTHERDUCK_TOKEN = "motherduck_preflight_token"
       }
     }
     loader = {
@@ -40,12 +31,14 @@ locals {
         memory = "1Gi"
       }
       environment = {
-        APP_ENV             = "production"
-        MOTHERDUCK_DATABASE = var.motherduck_database
+        APP_ENV              = "production"
+        GCS_BUCKET           = local.raw_bucket_name
+        GOOGLE_CLOUD_PROJECT = var.project_id
+        MOTHERDUCK_DATABASE  = var.motherduck_database
       }
-      secrets = merge(local.b2_secret_environment, {
+      secrets = {
         MOTHERDUCK_TOKEN = "motherduck_token"
-      })
+      }
     }
     dbt = {
       name        = "dbt-runner"
@@ -74,13 +67,15 @@ locals {
         memory = "1Gi"
       }
       environment = {
-        APP_ENV             = "production"
-        MOTHERDUCK_DATABASE = var.motherduck_database
+        APP_ENV              = "production"
+        GCS_BUCKET           = local.raw_bucket_name
+        GOOGLE_CLOUD_PROJECT = var.project_id
+        MOTHERDUCK_DATABASE  = var.motherduck_database
       }
-      secrets = merge(local.b2_secret_environment, {
+      secrets = {
         RECONCILIATION_HEARTBEAT_URL = "healthchecks_ping_url"
         MOTHERDUCK_TOKEN             = "motherduck_token"
-      })
+      }
     }
   }
 
@@ -93,6 +88,36 @@ locals {
       }
     }
   ]...)
+}
+
+resource "google_service_account" "collector" {
+  project      = var.project_id
+  account_id   = "screen-time-collector"
+  display_name = "personal-data-platform Mac Collector"
+  description  = "Dedicated identity impersonated by the unattended Mac Screen Time Collector"
+
+  depends_on = [google_project_service.runtime]
+}
+
+resource "google_service_account_iam_member" "collector_impersonator" {
+  service_account_id = google_service_account.collector.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = var.collector_impersonator_member
+}
+
+resource "google_service_account" "rebuild_operator" {
+  project      = var.project_id
+  account_id   = "raw-rebuild-operator"
+  display_name = "personal-data-platform Raw rebuild operator"
+  description  = "Read-only identity impersonated for explicit local partial-history rebuilds"
+
+  depends_on = [google_project_service.runtime]
+}
+
+resource "google_service_account_iam_member" "rebuild_operator_impersonator" {
+  service_account_id = google_service_account.rebuild_operator.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = var.collector_impersonator_member
 }
 
 resource "google_service_account" "runtime" {

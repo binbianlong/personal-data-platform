@@ -2,36 +2,44 @@
 
 ## データ保護
 
-- B2 bucketはprivateとし、SSE-B2を有効にする。
-- Raw object key、B2 metadata、ログに、端末identifierやBundle IDなどの直接値を含めない。
+- GCS bucketはUniform Bucket-Level AccessとPublic Access Preventionを有効にし、Google管理鍵で暗号化する。
+- Raw object key、GCS metadata、ログに、端末identifierやBundle IDなどの直接値を含めない。
 - ログへ出してよい識別情報は疑似化key、object hash、件数、error codeに限定する。
 - Rawの通常削除権限をCollector、Loader、Reconciliationへ与えない。
-- productionと別のRawを使うtestはB2 bucketとMotherDuck databaseを分離し、credentialも共有しない。
-  preflightは専用の`test/` prefixと検証用databaseに権限を限定する。
+- productionと別のRawを使うtestはGCS bucketとMotherDuck databaseを分離し、権限も共有しない。
+  preflightは専用bucketの`test/preflight/`と検証用databaseに権限を限定する。
 
 疑似化方法とsource固有のkeyはsource packageで定義する。Screen Timeは
 [`data-model.md`](../sources/screen-time/data-model.md)に従う。
 
-## B2 credential
+## GCS IAM
 
 | 実行主体 | capability |
 |---|---|
-| Local Collector | 対象bucketの固定Raw prefixとscan receiptへのwriteだけ |
-| Loader | 対象Raw prefixへのlist / readだけ |
-| Reconciliation / rebuild | 対象Raw prefixとscan receiptへのlist / readだけ |
-| Preflight | test prefixへのwrite / read / listと作成したobject versionのdeleteだけ |
+| Local Collector | 固定Raw prefixへのcreateとscan receipt prefix・固定manifest keyへのcreate / deleteだけ |
+| Loader | production bucketへのlist / readだけ |
+| Reconciliation | production bucketのRawとcontrol JSONへのlist / readだけ |
+| Preflight | preflight bucketへのwrite / read / listと作成generationのdeleteだけ |
+| Rebuild operator | 専用read-only Service Accountでproduction bucketへのlist / read |
 
-application keyはbucket全体や別environmentへ権限を広げない。uploadに必要な最小capability以外を
-Collectorへ付与せず、read、list、deleteを許可しない。
+CollectorへRawのread、list、deleteを許可しない。control JSONの同名上書きに必要なdeleteはreceipt prefixと
+`raw/screen_time/v1/_control/collector/active.json`の完全一致だけへIAM conditionで限定する。bucket IAM policyは
+Terraformでauthoritativeに管理し、projectの
+Viewer / Editor / Owner convenience valueによるobject accessを残さない。
+
+ローカルrebuildはCollector ADCを再利用せず、別のRebuild Service Accountをimpersonateする専用ADCを使う。
+このService AccountはRaw bucketのobject Viewerだけを持ち、write / delete権限を持たない。
 
 ## Secret
 
-MacではCollectorのB2 application keyと疑似化secretをmacOS Keychainへ保存する。設定ファイル、
-SQLite state、shell履歴、Git管理ファイルへ平文で保存しない。
+Macでは疑似化secretをmacOS Keychainへ保存する。GCSには専用Collector Service Accountをimpersonateする
+project専用ADCを使い、Service Account keyを発行しない。ADCはmode `0600`で保存し、LaunchAgentの
+`GOOGLE_APPLICATION_CREDENTIALS`からだけ参照する。疑似化secretやcredentialをSQLite state、shell履歴、
+Git管理ファイルへ平文で保存しない。
 
-GCPではLoader用B2 read key、MotherDuck writer token、Healthchecks.io ping URLをSecret Managerへ
-保存する。secret値をTerraform variable、Terraform state、container image、GitHub Actions outputへ
-含めない。
+Cloud Run Jobsは各Service AccountのADCでGCSへ接続する。MotherDuck writer tokenとHealthchecks.io ping URLは
+Secret Managerへ保存し、secret値をTerraform variable、Terraform state、container image、GitHub Actions
+outputへ含めない。
 
 ChatGPT接続にはMotherDuckのread-only user/shareを使い、Loader / dbt writer tokenを再利用しない。toolの
 `query_rw`無効化はwrite防止の追加境界であり、database visibilityの代わりにはならない。公開範囲は
@@ -47,6 +55,6 @@ ChatGPT接続にはMotherDuckのread-only user/shareを使い、Loader / dbt wri
 
 ## インシデント時
 
-credential漏えいが疑われる場合は、該当keyをrevokeして新しいkeyへ差し替える。Raw objectを一括削除したり、
+credential漏えいが疑われる場合は、該当するIAM bindingまたはADCをrevokeして再認証する。Raw objectを一括削除したり、
 疑似化secretだけを先に変更したりしない。疑似化secretの変更はdevice / segment keyが変わり、同一性比較と
 rebuildへ影響するため、移行手順と対応表を用意した独立migrationとして扱う。

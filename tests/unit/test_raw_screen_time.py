@@ -9,9 +9,9 @@ from personal_data_platform.raw.screen_time import (
     build_device_key,
     build_segment_key,
     gzip_raw_bytes,
+    parse_raw_object_key,
     sha256_hex,
 )
-from personal_data_platform.storage.b2 import parse_raw_object_key
 
 SECRET = bytes.fromhex("11" * 32)
 OBSERVED_AT = datetime(2026, 8, 27, 1, 2, 3, 456789, tzinfo=UTC)
@@ -75,7 +75,11 @@ def test_parse_raw_object_key_round_trips_identity() -> None:
         sha256="c" * 64,
     )
 
-    parsed = parse_raw_object_key(identity.object_key)
+    parsed = parse_raw_object_key(
+        identity.object_key,
+        storage_created_at=OBSERVED_AT,
+        storage_generation=7,
+    )
 
     assert parsed.key == identity.object_key
     assert parsed.device_key == identity.device_key
@@ -83,6 +87,8 @@ def test_parse_raw_object_key_round_trips_identity() -> None:
     assert parsed.segment_key == identity.segment_key
     assert parsed.observed_at == identity.observed_at
     assert parsed.sha256 == identity.sha256
+    assert parsed.storage_created_at == OBSERVED_AT
+    assert parsed.storage_generation == 7
 
 
 @pytest.mark.parametrize(
@@ -103,7 +109,7 @@ def test_parse_raw_object_key_round_trips_identity() -> None:
 )
 def test_parse_raw_object_key_rejects_noncanonical_keys(key: str) -> None:
     with pytest.raises(ValueError, match="invalid Screen Time Raw object key"):
-        parse_raw_object_key(key)
+        parse_raw_object_key(key, storage_created_at=OBSERVED_AT, storage_generation=1)
 
 
 def test_raw_identity_rejects_naive_observation_time() -> None:

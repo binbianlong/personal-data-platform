@@ -111,6 +111,18 @@ resource "google_project_iam_member" "github_deploy" {
   member  = "serviceAccount:${google_service_account.github_deploy.email}"
 }
 
+resource "google_project_iam_member" "github_deploy_bucket_manager" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.runtime_bucket_manager.name
+  member  = "serviceAccount:${google_service_account.github_deploy.email}"
+}
+
+resource "google_project_iam_member" "github_plan_bucket_reader" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.runtime_bucket_reader.name
+  member  = "serviceAccount:${google_service_account.github_plan.email}"
+}
+
 resource "google_storage_bucket_iam_member" "github_plan_state" {
   bucket = google_storage_bucket.terraform_state.name
   role   = "roles/storage.objectViewer"
@@ -124,9 +136,9 @@ resource "google_storage_bucket_iam_member" "github_deploy_state" {
 }
 
 resource "google_artifact_registry_repository_iam_member" "github_deploy_writer" {
-  project    = google_artifact_registry_repository.runtime.project
-  location   = google_artifact_registry_repository.runtime.location
-  repository = google_artifact_registry_repository.runtime.name
+  project    = google_artifact_registry_repository.runtime_us.project
+  location   = google_artifact_registry_repository.runtime_us.location
+  repository = google_artifact_registry_repository.runtime_us.name
   role       = "roles/artifactregistry.writer"
   member     = "serviceAccount:${google_service_account.github_deploy.email}"
 }

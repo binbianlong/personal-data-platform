@@ -1,6 +1,6 @@
 # データモデル
 
-## B2 Raw observation
+## GCS Raw observation
 
 Rawの保存単位はSEGB segmentの観測版である。object keyを次に固定する。
 
@@ -44,10 +44,10 @@ segment_key = HMAC-SHA256(
 
 ## Observation semantics
 
-同じ`device_key + app-in-focus + segment_key`をlogical scopeとする。直前にB2保存を完了した観測と
+同じ`device_key + app-in-focus + segment_key`をlogical scopeとする。直前にGCS保存を完了した観測と
 SHA-256が同じ場合だけ新規保存をskipする。`A -> B -> A`は3観測として保存する。
 
-`observed_at`を含む予定object keyとdeterministic gzip bytesをSQLiteへ先にcommitし、B2 upload成功後だけ
+`observed_at`を含む予定object keyとdeterministic gzip bytesをSQLiteへ先にcommitし、GCS upload成功後だけ
 `uploaded`へ進める。再起動後のretryでも同じobject keyとgzip bytesを使う。
 
 ## Collector scan receipt
@@ -62,9 +62,19 @@ raw/screen_time/v1/_control/collector/latest/<device_key>.json
 RawのSystem of Recordではなく稼働確認用であり、端末identifier、path、Bundle IDは含めない。全segmentの
 Raw uploadが成功した後だけ更新する。
 
+今回発見できたallowlist対象deviceのreceiptを更新した後、次のmutable manifestを最後に更新する。
+
+```text
+raw/screen_time/v1/_control/collector/active.json
+```
+
+本文は`schema_version`、sort済みの`device_keys`、UTCの`completed_at`、`status=succeeded`だけを持つ。
+Reconciliationはこのmanifestを最新のactive-device集合の正本として扱う。allowlistから外したdeviceのRawは
+90日Lifecycleまで残り得るが、そのdeviceのreceipt更新は要求しない。
+
 ## `base.screen_time_segment_observation`
 
-B2 objectごとに1行を保持する。
+GCS objectごとに1行を保持する。
 
 ```text
 object_key                 primary key
@@ -101,7 +111,8 @@ parser_version / loaded_at
 
 SEGBまたは既知fieldを安全にdecodeできないobjectはtransaction全体をrollbackして
 `ops.ingestion_metadata.status=failed`にする。CRC failureはoccurrenceへ記録し、成功decodeしたobject内でも
-dbt Viewのtransition候補から除外する。元segment bytesはB2に残るため、decoder更新後に再試行できる。
+dbt Viewのtransition候補から除外する。元segment bytesがGCSに残る90日間はdecoder更新後に再試行できる。
+未取込のまま期限切れになったobjectは復元できず、Reconciliationを失敗させて明示的な運用対応を要求する。
 
 ## `event_key`
 

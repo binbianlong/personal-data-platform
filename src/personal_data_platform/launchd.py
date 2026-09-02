@@ -12,20 +12,17 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
 
-from personal_data_platform.config import ConfigurationError
+from personal_data_platform.config import (
+    CollectorADCConfig,
+    ConfigurationError,
+    GCSConfig,
+)
 
 LAUNCH_AGENT_LABEL = "com.personal-data-platform.screen-time-collector"
 _DEVICE_KEY = re.compile(r"^[0-9a-f]{64}$")
 _DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-_SENSITIVE_ENVIRONMENT_NAMES = frozenset(
-    {
-        "B2_APPLICATION_KEY",
-        "B2_KEY_ID",
-        "PDP_PSEUDONYM_KEY_HEX",
-    }
-)
+_SENSITIVE_ENVIRONMENT_NAMES = frozenset({"PDP_PSEUDONYM_KEY_HEX"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,9 +35,10 @@ class LaunchAgentSettings:
     sync_db_path: Path
     app_in_focus_remote_dir: Path
     state_db_path: Path
-    b2_endpoint: str
-    b2_bucket: str
-    b2_region: str
+    google_application_credentials: Path
+    google_cloud_project: str
+    gcs_bucket: str
+    collector_service_account_email: str
     device_allowlist: tuple[str, ...]
     poll_seconds: str
 
@@ -69,17 +67,8 @@ class LaunchAgentSettings:
             raise ConfigurationError(f"project root does not contain pyproject.toml: {root}")
         _validate_python_runtime(executable, root)
 
-        endpoint = _required(values, "B2_ENDPOINT")
-        parsed_endpoint = urlsplit(endpoint)
-        if (
-            parsed_endpoint.scheme != "https"
-            or not parsed_endpoint.hostname
-            or parsed_endpoint.username is not None
-            or parsed_endpoint.password is not None
-            or parsed_endpoint.query
-            or parsed_endpoint.fragment
-        ):
-            raise ConfigurationError("B2_ENDPOINT must be a credential-free HTTPS URL")
+        gcs = GCSConfig.from_env(values)
+        adc = CollectorADCConfig.from_env(values)
 
         allowlist = tuple(
             sorted(
@@ -124,9 +113,10 @@ class LaunchAgentSettings:
                 "PDP_COLLECTOR_STATE_DB_PATH",
                 library / "Application Support/personal-data-platform/collector.db",
             ),
-            b2_endpoint=endpoint,
-            b2_bucket=_required(values, "B2_BUCKET"),
-            b2_region=values.get("B2_REGION", "us-west-004").strip() or "us-west-004",
+            google_application_credentials=adc.credentials_path,
+            google_cloud_project=gcs.project_id,
+            gcs_bucket=gcs.bucket,
+            collector_service_account_email=adc.service_account_email,
             device_allowlist=allowlist,
             poll_seconds=poll_seconds,
         )
@@ -136,13 +126,14 @@ def build_launch_agent(settings: LaunchAgentSettings) -> bytes:
     """Serialize the collector LaunchAgent without embedding Keychain secrets."""
 
     environment = {
-        "B2_BUCKET": settings.b2_bucket,
-        "B2_ENDPOINT": settings.b2_endpoint,
-        "B2_REGION": settings.b2_region,
+        "GCS_BUCKET": settings.gcs_bucket,
+        "GOOGLE_APPLICATION_CREDENTIALS": str(settings.google_application_credentials),
+        "GOOGLE_CLOUD_PROJECT": settings.google_cloud_project,
         "PATH": _DEFAULT_PATH,
         "PDP_APP_IN_FOCUS_REMOTE_DIR": str(settings.app_in_focus_remote_dir),
         "PDP_COLLECTOR_POLL_SECONDS": settings.poll_seconds,
         "PDP_COLLECTOR_STATE_DB_PATH": str(settings.state_db_path),
+        "PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL": settings.collector_service_account_email,
         "PDP_SCREEN_TIME_DEVICE_ALLOWLIST": ",".join(settings.device_allowlist),
         "PDP_SYNC_DB_PATH": str(settings.sync_db_path),
         "PYTHONUNBUFFERED": "1",

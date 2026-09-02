@@ -12,6 +12,24 @@ output "runtime_service_accounts" {
   }
 }
 
+output "collector_service_account" {
+  description = "Dedicated Service Account impersonated by the Mac Collector."
+  value       = google_service_account.collector.email
+}
+
+output "rebuild_operator_service_account" {
+  description = "Read-only Service Account impersonated for explicit local Raw rebuilds."
+  value       = google_service_account.rebuild_operator.email
+}
+
+output "storage_buckets" {
+  description = "Production Raw and isolated preflight bucket names."
+  value = {
+    raw       = google_storage_bucket.raw.name
+    preflight = google_storage_bucket.preflight.name
+  }
+}
+
 output "scheduler_jobs" {
   description = "Cloud Scheduler job names and schedules."
   value = {
@@ -26,7 +44,7 @@ output "scheduler_jobs" {
 output "secret_ids" {
   description = "Secret Manager resources that require out-of-band secret versions."
   value = {
-    for key, secret in google_secret_manager_secret.runtime : key => secret.secret_id
+    for key in keys(local.runtime_secrets) : key => google_secret_manager_secret.runtime[key].secret_id
   }
 }
 

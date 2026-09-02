@@ -2,10 +2,10 @@
 
 ## Loader
 
-LoaderはB2 Rawを型付きMotherDuck baseへ変換する。
+LoaderはGCS Rawを型付きMotherDuck baseへ変換する。
 
 ```text
-B2 object
+GCS object
   -> gzip展開
   -> 展開後bytesのSHA-256検証
   -> ccl-segb decode
@@ -13,8 +13,9 @@ B2 object
   -> MotherDuck transaction
 ```
 
-同じobject keyの`ops.ingestion_metadata.status`が`succeeded`ならdownloadを省略する。未処理または
-`failed`のobjectだけを`(observed_at, object_key)`順に再試行する。1 object内のrecord、segment
+同じobject keyとGCS generationの`ops.ingestion_metadata.status`が`succeeded`ならdownloadを省略する。同じ
+keyが別generationで再作成された場合は未検証objectとして再取得する。未処理または`failed`のobjectだけを
+`(observed_at, object_key)`順に再試行する。1 object内のrecord、segment
 observation、`succeeded`更新は同じtransactionでcommitする。1 recordでもdecodeできなければobject全体を
 rollbackし、`failed`とerror種別を別transactionで保存する。
 
@@ -28,9 +29,12 @@ Raw objectごとの最新取込状態を保持する。
 
 | column | 契約 |
 |---|---|
-| `object_key` | B2 object key。primary key |
+| `object_key` | GCS object key。primary key |
 | `device_key` / `source_stream` / `segment_key` | object keyから復元したscope |
 | `observed_at` | UTC観測時刻 |
+| `storage_created_at` | GCS upload完了時刻。Lifecycle期限判定の正本 |
+| `storage_generation` | listingとdownloadを結び付けるGCS object generation |
+| `retention_expired_at` | 90日以降のLifecycle削除をReconciliationが確認した時刻 |
 | `content_sha256` | 展開後Raw bytesのSHA-256 |
 | `byte_size` | 展開後bytes数 |
 | `status` | `loading` / `succeeded` / `failed` |
@@ -38,6 +42,9 @@ Raw objectごとの最新取込状態を保持する。
 | `started_at` / `completed_at` | 最新試行のUTC時刻 |
 | `error_type` / `error_message` | 最新失敗。成功時はnull |
 | `retry_count` | 同じobject keyの再試行回数 |
+
+`storage_created_at`が不明な欠損objectは安全側に失敗させる。`retention_expired_at`を持つ成功行は長期分析履歴と
+監査証跡として残すが、日次のlive Raw照合対象から外す。
 
 ### `ops.schema_migration`
 

@@ -12,10 +12,8 @@ def _environment(tmp_path: Path) -> dict[str, str]:
         "PDP_APP_IN_FOCUS_REMOTE_DIR": str(tmp_path / "remote"),
         "PDP_COLLECTOR_STATE_DB_PATH": str(tmp_path / "collector.db"),
         "PDP_SCREEN_TIME_DEVICE_ALLOWLIST": "a" * 64 + "," + "b" * 64,
-        "B2_ENDPOINT": "https://s3.example.invalid",
-        "B2_KEY_ID": "synthetic-key-id",
-        "B2_APPLICATION_KEY": "synthetic-application-key",
-        "B2_BUCKET": "synthetic-bucket",
+        "GOOGLE_CLOUD_PROJECT": "synthetic-project",
+        "GCS_BUCKET": "synthetic-bucket",
     }
 
 
@@ -24,8 +22,9 @@ def test_collector_configuration_loads_allowlist_without_raw_device_ids(tmp_path
 
     assert config.device_allowlist == frozenset({"a" * 64, "b" * 64})
     assert config.pseudonym_key == bytes.fromhex("11" * 32)
-    assert config.b2 is not None
-    assert config.b2.bucket == "synthetic-bucket"
+    assert config.gcs is not None
+    assert config.gcs.project_id == "synthetic-project"
+    assert config.gcs.bucket == "synthetic-bucket"
 
 
 def test_collection_requires_nonempty_device_allowlist(tmp_path) -> None:
@@ -42,9 +41,9 @@ def test_devices_command_configuration_can_load_before_allowlist_is_chosen(tmp_p
 
     config = CollectorConfig.from_env(
         environment,
-        require_b2=False,
+        require_gcs=False,
         require_allowlist=False,
     )
 
     assert config.device_allowlist == frozenset()
-    assert config.b2 is None
+    assert config.gcs is None

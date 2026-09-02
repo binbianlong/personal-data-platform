@@ -90,12 +90,17 @@ def test_rebuild_passes_selected_mode(monkeypatch) -> None:
     calls = []
     fake_module = types.ModuleType("personal_data_platform.recovery.rebuild")
 
-    def run_rebuild_from_env(*, dry_run: bool, target_db: str | None) -> int:
-        calls.append((dry_run, target_db))
+    def run_rebuild_from_env(
+        *, dry_run: bool, target_db: str | None, allow_partial_history: bool
+    ) -> int:
+        calls.append((dry_run, target_db, allow_partial_history))
         return 0
 
     fake_module.run_rebuild_from_env = run_rebuild_from_env
     monkeypatch.setitem(sys.modules, "personal_data_platform.recovery.rebuild", fake_module)
 
     assert main(["rebuild", "--dry-run"]) == 0
-    assert calls == [(True, None)]
+    assert calls == [(True, None, False)]
+
+    assert main(["rebuild", "--target-db", "scratch", "--allow-partial-history"]) == 0
+    assert calls[-1] == (False, "scratch", True)

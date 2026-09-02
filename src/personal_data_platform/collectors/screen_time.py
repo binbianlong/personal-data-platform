@@ -18,10 +18,11 @@ from personal_data_platform.collectors.state import (
 )
 from personal_data_platform.raw.screen_time import (
     APP_IN_FOCUS_STREAM,
+    CollectorDeviceManifest,
+    CollectorScanReceipt,
     build_device_key,
     build_segment_key,
 )
-from personal_data_platform.storage.b2 import CollectorScanReceipt
 
 
 class CollectorSourceError(RuntimeError):
@@ -34,6 +35,8 @@ class CompressedRawUploader(Protocol):
     def put_compressed_raw(self, key: str, compressed_bytes: bytes) -> None: ...
 
     def put_scan_receipt(self, receipt: CollectorScanReceipt) -> None: ...
+
+    def put_device_manifest(self, manifest: CollectorDeviceManifest) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,8 +159,7 @@ class ScreenTimeCollector:
         retried = 0
         uploaded = 0
         for observation in self._state.pending():
-            if observation.identity.device_key not in self._allowed_device_keys:
-                continue
+            # The observation was allowlisted when this durable upload intent was created.
             self._upload(observation)
             retried += 1
             uploaded += 1
@@ -229,6 +231,12 @@ class ScreenTimeCollector:
                     segment_count=device_segment_counts[device_key],
                 )
             )
+        self._uploader.put_device_manifest(
+            CollectorDeviceManifest(
+                device_keys=tuple(sorted(self._allowed_device_keys)),
+                completed_at=completed_at,
+            )
+        )
         self._state.record_successful_scan(
             SuccessfulScan(
                 completed_at=completed_at,

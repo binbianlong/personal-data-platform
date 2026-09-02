@@ -1,4 +1,6 @@
 project_id                     = "example-project"
 deployer_service_account_email = "github-tf-deploy@example-project.iam.gserviceaccount.com"
-image_uri                      = "asia-northeast1-docker.pkg.dev/example-project/personal-data-platform/personal-data-platform@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+collector_impersonator_member  = "user:operator@example.com"
+image_uri                      = "us-central1-docker.pkg.dev/example-project/personal-data-platform/personal-data-platform@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 alert_email                    = "operator@example.com"
+region                         = "us-central1"

@@ -16,9 +16,14 @@ from personal_data_platform.collectors.screen_time import (
     ScreenTimeCollector,
 )
 from personal_data_platform.collectors.state import CollectorState
-from personal_data_platform.config import B2Config, CollectorConfig, ConfigurationError
+from personal_data_platform.config import (
+    CollectorADCConfig,
+    CollectorConfig,
+    ConfigurationError,
+    GCSConfig,
+)
 from personal_data_platform.raw.screen_time import build_device_key
-from personal_data_platform.storage.b2 import B2RawRepository
+from personal_data_platform.storage.gcs import GCSRawRepository
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,14 +59,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     launch_agent.add_argument("--log-directory", type=Path)
 
-    commands.add_parser("loader", help="load pending B2 Raw into MotherDuck")
+    commands.add_parser("loader", help="load pending GCS Raw into MotherDuck")
     commands.add_parser("dbt", help="apply analytics models")
-    commands.add_parser("reconciliation", help="reconcile B2 and MotherDuck")
+    commands.add_parser("reconciliation", help="reconcile GCS and MotherDuck")
     commands.add_parser("preflight", help="validate cloud runtime connectivity")
     rebuild = commands.add_parser("rebuild", help="rebuild a scratch MotherDuck database")
     rebuild_mode = rebuild.add_mutually_exclusive_group(required=True)
     rebuild_mode.add_argument("--dry-run", action="store_true")
     rebuild_mode.add_argument("--target-db")
+    rebuild.add_argument(
+        "--allow-partial-history",
+        action="store_true",
+        help="acknowledge that only Raw retained for 90 days can be rebuilt",
+    )
     return parser
 
 
@@ -114,12 +124,13 @@ def _dispatch(args: argparse.Namespace) -> int:
             run_rebuild_from_env,
             dry_run=args.dry_run,
             target_db=args.target_db,
+            allow_partial_history=args.allow_partial_history,
         )
     raise RuntimeError(f"unsupported command: {args.command}")
 
 
 def _run_devices() -> int:
-    config = CollectorConfig.from_env(require_b2=False, require_allowlist=False)
+    config = CollectorConfig.from_env(require_gcs=False, require_allowlist=False)
     source = _source(config)
     for device in source.list_iphone_devices():
         device_key = build_device_key(config.pseudonym_key, device.identifier)
@@ -142,7 +153,7 @@ def _run_devices() -> int:
 def _run_doctor() -> int:
     checks: list[tuple[str, bool, str]] = []
     try:
-        config = CollectorConfig.from_env(require_b2=False, require_allowlist=False)
+        config = CollectorConfig.from_env(require_gcs=False, require_allowlist=False)
     except ConfigurationError as error:
         _print_check("collector secret", False, str(error))
         return 1
@@ -195,15 +206,27 @@ def _run_doctor() -> int:
         )
     )
     try:
-        B2Config.from_env()
+        GCSConfig.from_env()
     except ConfigurationError as error:
-        checks.append(("B2 configuration", False, str(error)))
+        checks.append(("GCS configuration", False, str(error)))
     else:
         checks.append(
             (
-                "B2 configuration",
+                "GCS configuration",
                 True,
-                "credentials loaded; upload is verified by collect --once",
+                "project and bucket loaded; upload is verified by collect --once",
+            )
+        )
+    try:
+        adc = CollectorADCConfig.from_env()
+    except ConfigurationError as error:
+        checks.append(("collector ADC", False, str(error)))
+    else:
+        checks.append(
+            (
+                "collector ADC",
+                True,
+                f"impersonates {adc.service_account_email}",
             )
         )
 
@@ -213,13 +236,15 @@ def _run_doctor() -> int:
 
 
 def _run_collect(*, watch: bool) -> int:
+    adc = CollectorADCConfig.from_env()
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc.credentials_path)
     config = CollectorConfig.from_env()
-    if config.b2 is None:
-        raise ConfigurationError("B2 configuration is required for collection")
+    if config.gcs is None:
+        raise ConfigurationError("GCS configuration is required for collection")
     collector = ScreenTimeCollector(
         source=_source(config),
         state=CollectorState(config.state_db_path),
-        uploader=B2RawRepository.from_config(config.b2),
+        uploader=GCSRawRepository.from_config(config.gcs),
         pseudonym_key=config.pseudonym_key,
         allowed_device_keys=config.device_allowlist,
     )

@@ -46,7 +46,7 @@ SEGB containerはMIT Licenseの`ccl-segb`互換decoderで読む。再現性の�
 23c3f7d3d969a79627b738ba0a2486c31d675753
 ```
 
-Collectorはsegment単位で元bytesを読み、圧縮前bytesのSHA-256を計算する。B2へ保存する本文は元bytesを
+Collectorはsegment単位で元bytesを読み、圧縮前bytesのSHA-256を計算する。GCSへ保存する本文は元bytesを
 そのままgzipしたもので、gzip headerの`mtime`は`0`に固定する。object keyと疑似化keyは
 [`data-model.md`](data-model.md)に従う。
 

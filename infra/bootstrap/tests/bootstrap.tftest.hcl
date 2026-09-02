@@ -24,8 +24,31 @@ run "secure_bootstrap_contract" {
   }
 
   assert {
-    condition     = google_artifact_registry_repository.runtime.format == "DOCKER"
+    condition     = google_storage_bucket.terraform_state.location == "ASIA"
+    error_message = "The existing Terraform state location contract must remain ASIA by default."
+  }
+
+  assert {
+    condition     = google_artifact_registry_repository.runtime_us.format == "DOCKER" && google_artifact_registry_repository.runtime_us.location == "us-central1"
     error_message = "The runtime registry must be a Docker repository."
+  }
+
+  assert {
+    condition = alltrue([
+      toset(google_project_iam_custom_role.collector_raw_creator.permissions) == toset(["storage.objects.create"]),
+      toset(google_project_iam_custom_role.collector_receipt_writer.permissions) == toset(["storage.objects.create", "storage.objects.delete"]),
+      toset(google_project_iam_custom_role.preflight_object_operator.permissions) == toset(["storage.objects.create", "storage.objects.delete", "storage.objects.get", "storage.objects.list"]),
+    ])
+    error_message = "Runtime object roles must contain only their required data-plane permissions."
+  }
+
+  assert {
+    condition = alltrue([
+      contains(google_project_iam_custom_role.runtime_bucket_manager.permissions, "storage.buckets.setIamPolicy"),
+      !contains(google_project_iam_custom_role.runtime_bucket_manager.permissions, "storage.objects.get"),
+      toset(google_project_iam_custom_role.runtime_bucket_reader.permissions) == toset(["storage.buckets.get", "storage.buckets.getIamPolicy"]),
+    ])
+    error_message = "Deploy and plan identities must receive only the required bucket control-plane permissions."
   }
 
   assert {
