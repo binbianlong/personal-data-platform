@@ -20,7 +20,7 @@ from personal_data_platform.loader.job import (
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 _SAFE_DATABASE = re.compile(r"^[A-Za-z0-9_-]+$")
-RAW_RETENTION_DAYS = 60
+RAW_RETENTION_DAYS = 90
 
 
 @dataclass(frozen=True, slots=True)

@@ -96,7 +96,7 @@ def test_loader_revalidates_a_recreated_object_generation(tmp_path, monkeypatch)
         recreated = _raw(
             original.key,
             content,
-            now + timedelta(days=61),
+            now + timedelta(days=91),
             storage_generation=2,
         )
         repository.observations = [recreated]

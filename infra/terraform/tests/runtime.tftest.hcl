@@ -102,13 +102,13 @@ run "runtime_contract" {
       !google_storage_bucket.raw.force_destroy,
       google_storage_bucket.raw.soft_delete_policy[0].retention_duration_seconds == 0,
       one(one(google_storage_bucket.raw.lifecycle_rule).action).type == "Delete",
-      one(one(google_storage_bucket.raw.lifecycle_rule).condition).age == 60,
+      one(one(google_storage_bucket.raw.lifecycle_rule).condition).age == 90,
       toset(one(one(google_storage_bucket.raw.lifecycle_rule).condition).matches_prefix) == toset(["raw/screen_time/v1/"]),
       toset(one(one(google_storage_bucket.raw.lifecycle_rule).condition).matches_suffix) == toset([".segb.gz"]),
       length(google_storage_bucket.raw.versioning) == 0,
       length(google_storage_bucket.raw.autoclass) == 0,
     ])
-    error_message = "Raw storage must be a protected Standard bucket with permanent 60-day segment deletion."
+    error_message = "Raw storage must be a protected Standard bucket with permanent 90-day segment deletion."
   }
 
   assert {

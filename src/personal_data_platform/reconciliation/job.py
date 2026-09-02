@@ -35,8 +35,8 @@ REQUIRED_RELATIONS = (
 RECONCILIATION_LEASE_SECONDS = 65 * 60
 COLLECTOR_FRESHNESS = timedelta(hours=24)
 MAX_CLOCK_SKEW = timedelta(minutes=10)
-RAW_RETENTION = timedelta(days=60)
-LIFECYCLE_OVERDUE = timedelta(days=63)
+RAW_RETENTION = timedelta(days=90)
+LIFECYCLE_OVERDUE = timedelta(days=93)
 
 
 def _relation_names(warehouse: Warehouse) -> set[str]:

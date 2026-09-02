@@ -110,7 +110,7 @@ def test_successful_audit_persists_expected_lifecycle_expiry() -> None:
     warehouse = _warehouse()
     try:
         now = datetime.now(UTC)
-        raw = _raw(now - timedelta(days=60))
+        raw = _raw(now - timedelta(days=90))
         warehouse.load_object(raw, byte_size=0, records=[])
 
         result = run_reconciliation(_Repository(), warehouse, heartbeat=lambda _: None, now=now)
@@ -133,7 +133,7 @@ def test_failed_heartbeat_rolls_back_expected_expiry() -> None:
     warehouse = _warehouse()
     try:
         now = datetime.now(UTC)
-        raw = _raw(now - timedelta(days=61))
+        raw = _raw(now - timedelta(days=91))
         warehouse.load_object(raw, byte_size=0, records=[])
 
         def fail(_):

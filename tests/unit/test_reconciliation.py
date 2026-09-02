@@ -252,7 +252,7 @@ def test_stale_collector_receipt_blocks_success() -> None:
 
 
 def test_expected_lifecycle_expiry_is_persisted_and_does_not_block_heartbeat() -> None:
-    warehouse = _Warehouse({"expired"}, created_at={"expired": NOW - timedelta(days=60)})
+    warehouse = _Warehouse({"expired"}, created_at={"expired": NOW - timedelta(days=90)})
     published: list[dict[str, object]] = []
 
     result = run_reconciliation(
@@ -273,7 +273,7 @@ def test_expected_lifecycle_expiry_is_persisted_and_does_not_block_heartbeat() -
 
 
 def test_retention_state_change_blocks_expiry_and_heartbeat(monkeypatch) -> None:
-    warehouse = _Warehouse({"expired"}, created_at={"expired": NOW - timedelta(days=60)})
+    warehouse = _Warehouse({"expired"}, created_at={"expired": NOW - timedelta(days=90)})
     published: list[dict[str, object]] = []
 
     monkeypatch.setattr(warehouse, "mark_retention_expired", lambda *_, **__: set())
@@ -295,7 +295,7 @@ def test_retention_state_change_blocks_expiry_and_heartbeat(monkeypatch) -> None
 
 
 def test_premature_missing_raw_blocks_success() -> None:
-    warehouse = _Warehouse({"premature"}, created_at={"premature": NOW - timedelta(days=59)})
+    warehouse = _Warehouse({"premature"}, created_at={"premature": NOW - timedelta(days=89)})
 
     result = run_reconciliation(
         _Repository([]),
@@ -355,7 +355,7 @@ def test_unknown_storage_creation_time_fails_closed(is_live: bool) -> None:
 
 
 def test_lifecycle_lag_is_allowed_until_the_third_day() -> None:
-    created_at = NOW - timedelta(days=62)
+    created_at = NOW - timedelta(days=92)
     warehouse = _Warehouse({"lagging"}, created_at={"lagging": created_at})
 
     result = run_reconciliation(
@@ -371,8 +371,8 @@ def test_lifecycle_lag_is_allowed_until_the_third_day() -> None:
     assert result.details["overdue_deletion_object_count"] == 0
 
 
-def test_raw_still_live_on_day_63_is_an_overdue_deletion() -> None:
-    created_at = NOW - timedelta(days=63)
+def test_raw_still_live_on_day_93_is_an_overdue_deletion() -> None:
+    created_at = NOW - timedelta(days=93)
     warehouse = _Warehouse({"overdue"}, created_at={"overdue": created_at})
 
     result = run_reconciliation(
@@ -390,7 +390,7 @@ def test_raw_still_live_on_day_63_is_an_overdue_deletion() -> None:
 def test_expected_expiry_is_not_persisted_when_another_audit_check_fails() -> None:
     warehouse = _Warehouse(
         {"expired"},
-        created_at={"expired": NOW - timedelta(days=61)},
+        created_at={"expired": NOW - timedelta(days=91)},
     )
 
     result = run_reconciliation(

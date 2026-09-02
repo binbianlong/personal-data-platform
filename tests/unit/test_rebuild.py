@@ -78,7 +78,7 @@ def test_rebuild_inventory_is_order_independent() -> None:
     assert inventory["first_observed_at"] == first.isoformat()
     assert inventory["first_storage_created_at"] == (first + timedelta(hours=1)).isoformat()
     assert inventory["last_storage_created_at"] == (first + timedelta(days=2)).isoformat()
-    assert inventory["retention_days"] == 60
+    assert inventory["retention_days"] == 90
     assert inventory["full_history_rebuild_guaranteed"] is False
 
 

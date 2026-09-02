@@ -27,7 +27,7 @@ resource "google_storage_bucket" "raw" {
     }
 
     condition {
-      age            = 60
+      age            = 90
       matches_prefix = [local.raw_object_prefix]
       matches_suffix = [".segb.gz"]
     }

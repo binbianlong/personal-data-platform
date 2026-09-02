@@ -143,7 +143,7 @@ def test_runtime_uses_fixed_gcs_buckets_without_a_prefix_override() -> None:
     assert 'variable "preflight_b2_prefix"' not in variables
 
 
-def test_raw_bucket_is_standard_and_permanently_deletes_segments_after_60_days() -> None:
+def test_raw_bucket_is_standard_and_permanently_deletes_segments_after_90_days() -> None:
     storage = _read("infra/terraform/storage.tf")
     raw = storage.split('resource "google_storage_bucket" "raw" {', 1)[1]
     raw = raw.split('resource "google_storage_bucket" "preflight" {', 1)[0]
@@ -155,7 +155,7 @@ def test_raw_bucket_is_standard_and_permanently_deletes_segments_after_60_days()
     assert "uniform_bucket_level_access = true" in raw
     assert 'public_access_prevention    = "enforced"' in raw
     assert 'type = "Delete"' in raw
-    assert "age            = 60" in raw
+    assert "age            = 90" in raw
     assert "matches_prefix = [local.raw_object_prefix]" in raw
     assert 'matches_suffix = [".segb.gz"]' in raw
     assert "retention_duration_seconds = 0" in raw

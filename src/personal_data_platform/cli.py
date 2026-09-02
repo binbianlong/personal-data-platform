@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild.add_argument(
         "--allow-partial-history",
         action="store_true",
-        help="acknowledge that only Raw retained for 60 days can be rebuilt",
+        help="acknowledge that only Raw retained for 90 days can be rebuilt",
     )
     return parser
 
