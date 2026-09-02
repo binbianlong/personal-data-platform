@@ -76,7 +76,7 @@ raw/screen_time/v1/<device_key>/app-in-focus/<segment_key>/
   <YYYYMMDDTHHMMSSffffffZ>/<sha256>.segb.gz
 ```
 
-local SQLite stateはupload前に同じobject keyと決定的gzip bytesを`pending`として保存し、GCS upload成功後だけ`uploaded`へ更新する。再起動時はGCSのread/list権限を使わず、同じkeyとbytesでpending uploadを再試行する。連続する同一segmentはskipするが、`A → B → A`の観測は3件とも保持する。
+local SQLite stateはupload前に同じobject keyと決定的gzip bytesを`pending`として保存し、GCS upload成功後だけ`uploaded`へ更新する。再起動時は現在のallowlistから削除済みのdeviceも含め、GCSのread/list権限を使わずに同じkeyとbytesでpending uploadを再試行する。連続する同一segmentはskipするが、`A → B → A`の観測は3件とも保持する。
 
 `--watch`はdefaultで300秒ごとにcomplete scanを行う。間隔は`PDP_COLLECTOR_POLL_SECONDS`で変更できる。成功時は
 `raw/screen_time/v1/_control/collector/latest/`の疑似化receiptと`_control/collector/active.json`の

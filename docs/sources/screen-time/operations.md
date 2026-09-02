@@ -31,11 +31,11 @@ segmentを途中bytesのままuploadしない。
 
 ## Crash recovery
 
-走査開始時にpending uploadを先に再送する。Collector credentialにはread / list権限がないため、GCSの事前存在
-確認へ依存しない。同じpending keyにはSQLiteへ保存した同じgzip bytesだけを送る。すべてのRaw uploadが成功
-した後、deviceごとのcollector scan receipt、active-device manifestの順に更新し、最後にlocal scan成功時刻を
-commitする。manifestはfull allowlistを持つため、一部のallowlist対象deviceが未発見ならそのdeviceのreceipt欠損を
-Reconciliationが検出する。
+走査開始時に、現在のallowlistから削除済みのdeviceも含めてpending uploadを先に再送する。Collector credentialには
+read / list権限がないため、GCSの事前存在確認へ依存しない。同じpending keyにはSQLiteへ保存した同じgzip bytesだけを
+送る。すべてのRaw uploadが成功した後、deviceごとのcollector scan receipt、active-device manifestの順に更新し、
+最後にlocal scan成功時刻をcommitする。manifestはfull allowlistを持つため、一部のallowlist対象deviceが未発見なら
+そのdeviceのreceipt欠損をReconciliationが検出する。
 
 Macが停止またはofflineでもRawを捏造しない。LaunchAgent再起動後のcomplete scanとpending retryで回復する。
 

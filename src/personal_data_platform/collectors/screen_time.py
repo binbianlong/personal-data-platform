@@ -159,8 +159,7 @@ class ScreenTimeCollector:
         retried = 0
         uploaded = 0
         for observation in self._state.pending():
-            if observation.identity.device_key not in self._allowed_device_keys:
-                continue
+            # The observation was allowlisted when this durable upload intent was created.
             self._upload(observation)
             retried += 1
             uploaded += 1

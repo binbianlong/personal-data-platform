@@ -25,18 +25,22 @@ class RecordingUploader:
         self.calls: list[tuple[str, bytes]] = []
         self.receipts: list[CollectorScanReceipt] = []
         self.manifests: list[CollectorDeviceManifest] = []
+        self.operations: list[str] = []
         self.fail_once = fail_once
 
     def put_compressed_raw(self, key: str, compressed_bytes: bytes) -> None:
+        self.operations.append("raw")
         self.calls.append((key, compressed_bytes))
         if self.fail_once:
             self.fail_once = False
             raise RuntimeError("synthetic GCS outage")
 
     def put_scan_receipt(self, receipt: CollectorScanReceipt) -> None:
+        self.operations.append("receipt")
         self.receipts.append(receipt)
 
     def put_device_manifest(self, manifest: CollectorDeviceManifest) -> None:
+        self.operations.append("manifest")
         self.manifests.append(manifest)
 
 
@@ -141,6 +145,46 @@ def test_upload_failure_retries_the_same_key_and_bytes_after_restart(tmp_path) -
     assert failing_uploader.calls[0] == successful_uploader.calls[0]
     assert len(successful_uploader.receipts) == 1
     assert len(successful_uploader.manifests) == 1
+
+
+def test_decommissioned_device_pending_is_retried_before_manifest_update(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"state-a")
+    failing_uploader = RecordingUploader(fail_once=True)
+    clock = AdvancingClock()
+
+    with pytest.raises(RuntimeError, match="synthetic GCS outage"):
+        _collector(tmp_path, source, failing_uploader, clock).collect_once()
+
+    active_identifier = "synthetic-active-iphone"
+    with sqlite3.connect(source.sync_db_path) as connection:
+        connection.execute(
+            "INSERT INTO DevicePeer VALUES (?, 'Active Phone', 'Synthetic2,1', 2, 1)",
+            (active_identifier,),
+        )
+    (source.remote_dir / active_identifier).mkdir()
+
+    active_device_key = build_device_key(SECRET, active_identifier)
+    state = CollectorState(tmp_path / "collector.db")
+    successful_uploader = RecordingUploader()
+    restarted = ScreenTimeCollector(
+        source=source,
+        state=state,
+        uploader=successful_uploader,
+        pseudonym_key=SECRET,
+        allowed_device_keys=frozenset({active_device_key}),
+        clock=clock,
+    )
+
+    stats = restarted.collect_once()
+
+    assert stats.retried == 1
+    assert stats.uploaded == 1
+    assert failing_uploader.calls[0] == successful_uploader.calls[0]
+    assert state.pending() == []
+    assert successful_uploader.operations == ["raw", "receipt", "manifest"]
+    assert [receipt.device_key for receipt in successful_uploader.receipts] == [active_device_key]
+    assert successful_uploader.manifests[-1].device_keys == (active_device_key,)
 
 
 def test_non_allowlisted_device_is_not_collected(tmp_path) -> None:
