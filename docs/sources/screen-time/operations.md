@@ -88,7 +88,7 @@ read-only rebuildにはこのCollector ADCを使わず、[`Platform運用`](../.
 
 端末を運用対象から外す場合は`PDP_SCREEN_TIME_DEVICE_ALLOWLIST`からdevice keyを削除し、残る対象deviceで
 `collect --once`を成功させる。最後に更新されたmanifestから外れた時点で正式なdecommissionとなる。旧receiptは
-残っていても監査対象外となり、旧Rawはuploadから60日のLifecycle期限まで保持される。
+残っていても監査対象外となり、旧Rawはuploadから90日のLifecycle期限まで保持される。
 
 ```bash
 collector_plist="$HOME/Library/LaunchAgents/com.personal-data-platform.screen-time-collector.plist"

@@ -34,7 +34,7 @@ Raw objectごとの最新取込状態を保持する。
 | `observed_at` | UTC観測時刻 |
 | `storage_created_at` | GCS upload完了時刻。Lifecycle期限判定の正本 |
 | `storage_generation` | listingとdownloadを結び付けるGCS object generation |
-| `retention_expired_at` | 60日以降のLifecycle削除をReconciliationが確認した時刻 |
+| `retention_expired_at` | 90日以降のLifecycle削除をReconciliationが確認した時刻 |
 | `content_sha256` | 展開後Raw bytesのSHA-256 |
 | `byte_size` | 展開後bytes数 |
 | `status` | `loading` / `succeeded` / `failed` |

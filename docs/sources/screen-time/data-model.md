@@ -70,7 +70,7 @@ raw/screen_time/v1/_control/collector/active.json
 
 本文は`schema_version`、sort済みの`device_keys`、UTCの`completed_at`、`status=succeeded`だけを持つ。
 Reconciliationはこのmanifestを最新のactive-device集合の正本として扱う。allowlistから外したdeviceのRawは
-60日Lifecycleまで残り得るが、そのdeviceのreceipt更新は要求しない。
+90日Lifecycleまで残り得るが、そのdeviceのreceipt更新は要求しない。
 
 ## `base.screen_time_segment_observation`
 
@@ -111,7 +111,7 @@ parser_version / loaded_at
 
 SEGBまたは既知fieldを安全にdecodeできないobjectはtransaction全体をrollbackして
 `ops.ingestion_metadata.status=failed`にする。CRC failureはoccurrenceへ記録し、成功decodeしたobject内でも
-dbt Viewのtransition候補から除外する。元segment bytesがGCSに残る60日間はdecoder更新後に再試行できる。
+dbt Viewのtransition候補から除外する。元segment bytesがGCSに残る90日間はdecoder更新後に再試行できる。
 未取込のまま期限切れになったobjectは復元できず、Reconciliationを失敗させて明示的な運用対応を要求する。
 
 ## `event_key`

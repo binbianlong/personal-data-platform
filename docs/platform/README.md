@@ -7,7 +7,7 @@
 | 文書 | 内容 |
 |---|---|
 | [`architecture.md`](architecture.md) | システム構成、データフロー、初期coreの保証 |
-| [`raw-data.md`](raw-data.md) | GCS Rawの保存・60日保持・再生契約 |
+| [`raw-data.md`](raw-data.md) | GCS Rawの保存・90日保持・再生契約 |
 | [`analytics.md`](analytics.md) | Loader、MotherDuck、dbt、ChatGPTの契約 |
 | [`chatgpt-mcp.md`](chatgpt-mcp.md) | ChatGPTへのread-only MCP接続と受入確認 |
 | [`security.md`](security.md) | IAM、secret、暗号化、個人情報の扱い |

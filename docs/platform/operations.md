@@ -59,8 +59,8 @@ objectを再試行できるようにする。
 
 1. GCS objectとactiveな`ops.ingestion_metadata`を照合し、未取込objectをLoader契約で再処理する。
 2. 修復や並行Loaderが追加した取込済みkeyはGCSを再確認してから、Raw欠損と判定する。
-3. 取込成功済みobjectの欠損をGCS作成時刻で分類する。60日前は失敗、60日以降は予定された期限切れとする。
-4. `failed` / `loading` / 作成時刻不明の欠損と、63日を超えて残るRawを失敗にする。
+3. 取込成功済みobjectの欠損をGCS作成時刻で分類する。90日前は失敗、90日以降は予定された期限切れとする。
+4. `failed` / `loading` / 作成時刻不明の欠損と、93日を超えて残るRawを失敗にする。
 5. 最新active-device manifestの欠損・24時間超過と、manifest内deviceのscan receipt欠損・24時間超過を確認する。
    manifestから外れたdeviceの残存Rawや古いreceiptはactive Collectorの異常に数えない。
 6. 未取込・`failed` ingestionがないことを確認する。
@@ -80,9 +80,9 @@ Cloud Logging / MonitoringとEmailで次を通知する。
 - LoaderまたはReconciliation Jobの失敗
 - decode失敗
 - Collectorの成功scanが24時間以上ない状態
-- 期限前のRaw欠損、未取込Rawの期限切れ、63日を超えたLifecycle未削除
+- 期限前のRaw欠損、未取込Rawの期限切れ、93日を超えたLifecycle未削除
 
-63日判定はLifecycleの遅延を検知するこのprojectの運用SLOであり、GCSが60日ちょうどの削除時刻を保証するものではない。
+93日判定はLifecycleの遅延を検知するこのprojectの運用SLOであり、GCSが90日ちょうどの削除時刻を保証するものではない。
 
 Collector停止はReconciliationのreceipt検査で検出する。Job自体が起動しない場合の検出には、Healthchecks.io側で
 毎日04:30 Asia/Tokyoのschedule、許容するgrace period、通知先を別途設定する。この未着監視はTerraformでは
@@ -95,7 +95,7 @@ Collector停止はReconciliationのreceipt検査で検出する。Job自体が�
 
 本番MotherDuck databaseを直接空にして再構築してはならない。
 
-GCS Rawはuploadから60日で永久削除されるため、全期間のrebuildは保証しない。
+GCS Rawはuploadから90日で永久削除されるため、全期間のrebuildは保証しない。
 
 Collectorのwrite-only ADCとは別に、Terraform output
 `rebuild_operator_service_account`のread-only Service AccountをimpersonateするADCを作る。Collector用の
@@ -120,7 +120,7 @@ chmod 600 "$PDP_REBUILD_GOOGLE_APPLICATION_CREDENTIALS"
 確認し、実行中だけ`GOOGLE_APPLICATION_CREDENTIALS`として使う。CollectorのADCは変更しない。
 
 1. `pdp rebuild --dry-run`で対象prefixのobject数、device数、segment数、GCS作成期間、
-   `retention_days=60`、`full_history_rebuild_guaranteed=false`を表示する。
+   `retention_days=90`、`full_history_rebuild_guaranteed=false`を表示する。
 2. `pdp rebuild --target-db <scratch-db> --allow-partial-history`で空のscratch databaseを指定する。
    command内部でmigrationを適用し、GCSに現在残る全pageを1回だけlistingしてinventoryを固定する。各objectは
    inventoryに記録したgenerationを指定し、`(observed_at, object_key)`順に再生する。途中でそのgenerationが
@@ -130,7 +130,7 @@ chmod 600 "$PDP_REBUILD_GOOGLE_APPLICATION_CREDENTIALS"
 4. 差分を確認した後、参照先を手動で切り替える。
 
 target databaseがproductionと同一、既存tableを持つ、環境識別が不明、または
-`--allow-partial-history`がない場合は開始前に停止する。MotherDuckの60日より古い履歴を失った場合、GCSからは
+`--allow-partial-history`がない場合は開始前に停止する。MotherDuckの90日より古い履歴を失った場合、GCSからは
 復元できない。
 
 ## CLI

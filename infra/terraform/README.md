@@ -40,8 +40,8 @@ printf '%s' "$SECRET_VALUE" | gcloud secrets versions add SECRET_ID --data-file=
 ## GCS保持と権限
 
 - `${project_id}-pdp-raw`: `STANDARD`、flat namespace、UBLA、public access prevention、`force_destroy=false`、`prevent_destroy=true`。
-- Raw Lifecycleは`raw/screen_time/v1/`かつ`.segb.gz`だけを作成から60日でDeleteする。60日間はStandardのまま保持し、Coldline / Archiveへ遷移しない。Soft Deleteは0秒、Object VersioningとAutoclassは無効で、削除後は復元できない。Lifecycle実行は非同期で、60日ちょうどの削除を保証するprovider SLAはない。
-- device別receipt JSONと`_control/collector/active.json` manifestはsuffix条件に合わないため60日削除の対象外で、最新objectを上書きする。
+- Raw Lifecycleは`raw/screen_time/v1/`かつ`.segb.gz`だけを作成から90日でDeleteする。90日間はStandardのまま保持し、Coldline / Archiveへ遷移しない。Soft Deleteは0秒、Object VersioningとAutoclassは無効で、削除後は復元できない。Lifecycle実行は非同期で、90日ちょうどの削除を保証するprovider SLAはない。
+- device別receipt JSONと`_control/collector/active.json` manifestはsuffix条件に合わないため90日削除の対象外で、最新objectを上書きする。
 - `${project_id}-pdp-preflight`: 本番と別の`STANDARD` bucket。Soft Deleteは0秒で、`test/preflight/`の孤立objectを1日で削除する。
 - Raw bucket IAM policyとpreflight bucket IAM policyはauthoritative管理する。手動で追加したbucket bindingは次回applyで削除される。
 - Mac CollectorはRaw segmentのcreateとlatest receipt・active-device manifestのcreate/deleteだけを持ち、read/listは持たない。`collector_impersonator_member`は専用Collector Service Accountとread-only Rebuild Service AccountだけをToken Creatorとしてimpersonateできる。

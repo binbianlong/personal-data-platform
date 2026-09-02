@@ -5,7 +5,7 @@
 ```text
 Macへ同期されたsource data
   -> Local Collector
-  -> GCS Raw（us-central1 Standard、60日保持）
+  -> GCS Raw（us-central1 Standard、90日保持）
   -> Cloud Run Loader Job（1時間ごと）
   -> MotherDuck base
   -> dbt View
@@ -28,7 +28,7 @@ Service Accountとcredentialを分離する。Screen TimeのRaw prefixは各buck
 
 ## データ境界
 
-- GCS Rawを直近60日間の再生可能な正本とし、MotherDuck baseを長期分析履歴とする。
+- GCS Rawを直近90日間の再生可能な正本とし、MotherDuck baseを長期分析履歴とする。
 - CollectorはRawの保存までを担当し、interval生成や日次集計を行わない。
 - LoaderはRawの検証、decode、型付きbaseへの書き込みまでを担当する。
 - dbtはinterval、日境界、集計などの分析上の意味変換をViewとして提供する。
@@ -39,7 +39,7 @@ Service Accountとcredentialを分離する。Screen TimeのRaw prefixは各buck
 
 ## Core guarantees
 
-1. downstreamの処理が失敗しても、60日の保持期間内はGCS Rawから再試行できる。
+1. downstreamの処理が失敗しても、90日の保持期間内はGCS Rawから再試行できる。
 2. 同一scopeの無意味な連続重複を省きつつ、`A -> B -> A`の観測順序を保持する。
 3. 同じRaw objectは再実行しても分析行を重複生成しない。
 4. 後着・訂正されたデータを現在の分析結果へ反映し、取込済み分析履歴をMotherDuckへ保持する。
