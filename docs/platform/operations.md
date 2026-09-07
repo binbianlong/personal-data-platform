@@ -29,10 +29,11 @@ production databaseへ書き込まない。
 
 ## Loader
 
-`screen-time-loader` Cloud Run Jobを毎時15分に起動する。task数とparallelismはともに1とし、さらに
-MotherDuckの期限付き`ops.job_lock`を取得して多重実行を防ぐ。
+source / streamごとにLoader Jobを持つ。既存のiPhoneは`screen-time-loader`を毎時15分に起動する。
+各Jobのtask数とparallelismは1とし、さらにMotherDuckの期限付き`loader` leaseを取得する。
+異なるsourceのLoaderもこのleaseを共有するため、scheduleは所要時間を踏まえてずらす。
 
-1. GCSの対象prefixを全page listingする。
+1. 選択source / streamの対応schema版のprefixを全page listingする。
 2. `ops.ingestion_metadata`で、同じGCS generationの取込に成功していないobjectを選ぶ。
 3. `(observed_at, object_key)`の昇順に処理する。
 4. [`analytics.md`](analytics.md)のtransaction契約でbaseと取込状態を更新する。
@@ -55,17 +56,18 @@ objectを再試行できるようにする。
 
 ## Reconciliation
 
-`pdp reconciliation`を毎日04:30 Asia/Tokyoに実行する。
+監査もsource / streamごとのJobとして実行する。既存iPhoneの`reconciliation`は毎日04:30 Asia/Tokyoに起動する。
+`reconciliation` leaseは同じroleの全sourceで共有し、Loaderとは別leaseである。
 
-1. GCS objectとactiveな`ops.ingestion_metadata`を照合し、未取込objectをLoader契約で再処理する。
+1. 選択source / streamのGCS objectとactiveな取込状態だけを照合し、未取込objectを同じadapterで再処理する。
 2. 修復や並行Loaderが追加した取込済みkeyはGCSを再確認してから、Raw欠損と判定する。
-3. 取込成功済みobjectの欠損をGCS作成時刻で分類する。90日前は失敗、90日以降は予定された期限切れとする。
-4. `failed` / `loading` / 作成時刻不明の欠損と、93日を超えて残るRawを失敗にする。
-5. 最新active-device manifestの欠損・24時間超過と、manifest内deviceのscan receipt欠損・24時間超過を確認する。
-   manifestから外れたdeviceの残存Rawや古いreceiptはactive Collectorの異常に数えない。
+3. 取込成功済みobjectの欠損をGCS作成時刻とsourceの保持期限で分類する。期限前は失敗、期限以降は予定された期限切れとする。
+4. 対象scopeの`failed` / `loading` / 作成時刻不明の欠損と、保持期限にgrace日数を加えた時点で残るRawを失敗にする。
+5. adapterの取得状態監査を実行する。iPhoneではmanifestとreceiptの欠損・24時間超過を確認する。
+   manifestから外れたdeviceの残存Rawや古いreceiptはactive Collectorの異常に数えない。他sourceへ同じcontrol形式を要求しない。
 6. 未取込・`failed` ingestionがないことを確認する。
 7. 必須base / Viewの存在と各relationの代表`count(*)` queryを確認する。
-8. 全監査項目と必要な再処理が成功した後、監査記録を保存し、Healthchecks.ioへ成功heartbeatを送る。
+8. 対象scopeの全監査項目と再処理が成功した後、監査記録を保存し、そのscope専用URLへ成功heartbeatを送る。
 
 Jobの開始、retry開始、Loaderへの引き渡しだけでは成功heartbeatを送らない。監査結果を構築できた失敗では、
 失敗object、欠損relation、stale receiptなどの構造化した結果を記録し、Jobをnon-zeroで終了する。
@@ -95,7 +97,7 @@ Collector停止はReconciliationのreceipt検査で検出する。Job自体が�
 
 本番MotherDuck databaseを直接空にして再構築してはならない。
 
-GCS Rawはuploadから90日で永久削除されるため、全期間のrebuildは保証しない。
+GCS Rawはsourceの保持期限で永久削除されるため、全期間のrebuildは保証しない。iPhoneの保持期限は90日である。
 
 Collectorのwrite-only ADCとは別に、Terraform output
 `rebuild_operator_service_account`のread-only Service AccountをimpersonateするADCを作る。Collector用の
@@ -119,13 +121,13 @@ chmod 600 "$PDP_REBUILD_GOOGLE_APPLICATION_CREDENTIALS"
 `pdp rebuild`はこのADCがimpersonated Service Account形式、現在user所有、mode `0600`、指定target一致であることを
 確認し、実行中だけ`GOOGLE_APPLICATION_CREDENTIALS`として使う。CollectorのADCは変更しない。
 
-1. `pdp rebuild --dry-run`で対象prefixのobject数、device数、segment数、GCS作成期間、
-   `retention_days=90`、`full_history_rebuild_guaranteed=false`を表示する。
+1. `pdp rebuild --dry-run`でsource / stream、object数、subject数、scope数、GCS作成期間、保持日数、
+   `full_history_rebuild_guaranteed=false`を表示する。iPhoneは従来のdevice数・segment数も表示する。
 2. `pdp rebuild --target-db <scratch-db> --allow-partial-history`で空のscratch databaseを指定する。
    command内部でmigrationを適用し、GCSに現在残る全pageを1回だけlistingしてinventoryを固定する。各objectは
-   inventoryに記録したgenerationを指定し、`(observed_at, object_key)`順に再生する。途中でそのgenerationが
+   選択source / streamのinventoryに記録したgenerationを指定し、`(observed_at, object_key)`順に再生する。途中でそのgenerationが
    Lifecycle削除された場合は別generationへ読み替えず失敗する。
-   `ops.ingestion_metadata`とbaseの再構築後、同じscratch databaseへ`dbt run`と`dbt test`を実行する。
+   `ops.ingestion_metadata`とbaseの再構築後、同じscratch databaseへadapterのselectorで選択した`dbt run`と`dbt test`を実行する。
 3. commandの成功後、productionと件数、stable key集合、代表martを手動で比較する。
 4. 差分を確認した後、参照先を手動で切り替える。
 
@@ -133,7 +135,37 @@ target databaseがproductionと同一、既存tableを持つ、環境識別が�
 `--allow-partial-history`がない場合は開始前に停止する。MotherDuckの90日より古い履歴を失った場合、GCSからは
 復元できない。
 
+## 更新時の互換性
+
+`003_source_ingestion.sql`は既存のiPhone履歴を残す追加migrationである。旧列を読めることと、旧runtimeが
+新sourceを監査できることは別の条件である。旧Reconciliationは全sourceの取込状態をiPhoneのRawと照合するため、
+新sourceを先に有効化してはならない。
+
+1. iPhoneのRawキー、疑似化キー、Collectorのstate DB、LaunchAgent labelとCLIを維持したまま、対応runtimeを用意する。
+2. 更新時は既存Loader・Reconciliationの定期実行を一時停止し、実行中Jobが終了したことを確認する。
+   CollectorのRaw保存は継続できる。migrationは競合するJobがない状態で一度適用する。
+3. 新runtimeを既存の全Jobへ反映し、隔離preflightとdbtを実行する。iPhoneの手動Loader・監査が成功したら
+   定期実行を再開する。旧Jobの再試行が残っていないことも確認する。
+4. 新sourceの取得処理、必要なsecret version、control権限と外部monitorを用意する。
+   新sourceを登録したruntimeが動作している状態で、追加pipelineと取得処理を有効にする。
+5. 新scopeの初回Raw、型付きbase、監査と停止検出を確認する。新sourceを有効にした後は、全件監査を行う
+   旧runtimeへのrollbackは行わず、新scopeの取得・定期実行を止めて対応runtimeで修復する。
+
+旧scope列と旧writer向けdefaultの削除は、別migrationとして扱う。
+
 ## CLI
+
+`loader`、`reconciliation`、`rebuild`はsource / stream未指定なら既存iPhoneを選ぶ。
+sourceのみ指定できるのは、そのsourceの登録streamが一つの場合だけである。streamだけの指定や未登録の組合せは拒否する。
+`pdp dbt`は未指定時には全modelを実行する。
+
+```text
+pdp loader --source screen_time --stream app-in-focus
+pdp reconciliation --source screen_time --stream app-in-focus
+pdp rebuild --source screen_time --stream app-in-focus --dry-run
+pdp dbt --source screen_time --stream app-in-focus
+```
+
 
 ```text
 pdp preflight
