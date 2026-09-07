@@ -7,12 +7,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from personal_data_platform.loader.models import PayloadDecodeError, RawObject
-from personal_data_platform.loader.parser import (
+from personal_data_platform.raw.models import RawObject
+from personal_data_platform.sources.screen_time.models import PayloadDecodeError
+from personal_data_platform.sources.screen_time.parser import (
     CF_ABSOLUTE_TIME_EPOCH,
     decode_app_in_focus_payload,
     event_key,
     parse_segb_records,
+)
+from personal_data_platform.sources.screen_time.raw import (
+    ScreenTimeRawIdentity,
+    parse_raw_object_key,
 )
 
 
@@ -54,13 +59,15 @@ def _payload(*, foreground: int = 1, timestamp: float = 10.5) -> bytes:
 
 
 def _raw() -> RawObject:
-    return RawObject(
-        key="raw/screen_time/v1/device/App.InFocus/segment/2026-08-27T00:00:00Z/hash.segb.gz",
-        device_key="device",
-        stream="App.InFocus",
-        segment_key="segment",
+    identity = ScreenTimeRawIdentity(
+        device_key="b" * 64,
+        stream="app-in-focus",
+        segment_key="c" * 64,
         observed_at=datetime(2026, 8, 27, tzinfo=UTC),
         sha256="a" * 64,
+    )
+    return parse_raw_object_key(
+        identity.object_key,
         storage_created_at=datetime(2026, 8, 27, 1, tzinfo=UTC),
         storage_generation=1,
     )

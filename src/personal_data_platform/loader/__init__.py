@@ -1,5 +1,5 @@
-"""Raw Screen Time loading and payload decoding."""
+"""Source-independent Raw loading."""
 
-from .models import LoadSummary, ParsedScreenTimeRecord, RawObject
+from .models import LoadSummary, RawDecodeError
 
-__all__ = ["LoadSummary", "ParsedScreenTimeRecord", "RawObject"]
+__all__ = ["LoadSummary", "RawDecodeError"]

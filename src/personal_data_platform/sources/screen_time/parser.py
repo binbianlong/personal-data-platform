@@ -12,7 +12,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .models import ParsedScreenTimeRecord, PayloadDecodeError, RawObject, SegmentDecodeError
+from personal_data_platform.raw.models import RawObject
+
+from .models import ParsedScreenTimeRecord, PayloadDecodeError, SegmentDecodeError
 
 PARSER_VERSION = "app-in-focus-v1"
 CF_ABSOLUTE_TIME_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
@@ -208,7 +210,7 @@ def parse_segb_records(
         parsed.append(
             ParsedScreenTimeRecord(
                 event_key=event_key(
-                    device_key=raw.device_key,
+                    device_key=raw.subject_key,
                     stream=raw.stream,
                     bundle_id=decoded["bundle_id"],
                     cf_absolute_time=decoded["cf_absolute_time"],
@@ -216,9 +218,9 @@ def parse_segb_records(
                     kind=decoded["kind"],
                 ),
                 object_key=raw.key,
-                device_key=raw.device_key,
+                device_key=raw.subject_key,
                 source_stream=raw.stream,
-                segment_key=raw.segment_key,
+                segment_key=raw.logical_key,
                 segment_sha256=raw.sha256,
                 observed_at=raw.observed_at,
                 segment_filename=Path(raw.key).name.removesuffix(".gz"),

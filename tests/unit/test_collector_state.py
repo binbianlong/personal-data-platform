@@ -1,7 +1,7 @@
 import gzip
 from datetime import UTC, datetime
 
-from personal_data_platform.collectors.state import CollectorState, SuccessfulScan
+from personal_data_platform.sources.screen_time.state import CollectorState, SuccessfulScan
 
 NOW = datetime(2026, 8, 27, 1, 2, 3, tzinfo=UTC)
 

@@ -4,17 +4,17 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from personal_data_platform.collectors.screen_time import (
+from personal_data_platform.sources.screen_time.collector import (
     BiomeScreenTimeSource,
     CollectorSourceError,
     ScreenTimeCollector,
 )
-from personal_data_platform.collectors.state import CollectorState
-from personal_data_platform.raw.screen_time import (
+from personal_data_platform.sources.screen_time.raw import (
     CollectorDeviceManifest,
     CollectorScanReceipt,
     build_device_key,
 )
+from personal_data_platform.sources.screen_time.state import CollectorState
 
 SECRET = bytes.fromhex("42" * 32)
 DEVICE_IDENTIFIER = "synthetic-iphone"

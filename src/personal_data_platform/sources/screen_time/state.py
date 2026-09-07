@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from personal_data_platform.raw.screen_time import (
+from personal_data_platform.sources.screen_time.raw import (
     ScreenTimeRawIdentity,
     format_observed_at,
     gzip_raw_bytes,

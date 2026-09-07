@@ -79,3 +79,13 @@ def test_dbt_rejects_missing_production_token_before_invocation(monkeypatch) -> 
 
     with pytest.raises(ValueError, match="MOTHERDUCK_TOKEN is required"):
         dbt_runner.run_dbt(target="prod")
+
+
+def test_selected_dbt_models_and_tests_use_the_same_scope(monkeypatch):
+    calls = []
+    monkeypatch.setattr(dbt_runner, "_invoke", calls.append)
+    dbt_runner.run_dbt(target="local", selector="tag:screen_time_app_in_focus")
+    assert [arguments[0] for arguments in calls] == ["run", "test"]
+    assert all(
+        arguments[-2:] == ["--select", "tag:screen_time_app_in_focus"] for arguments in calls
+    )

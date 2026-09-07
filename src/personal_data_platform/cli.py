@@ -11,19 +11,18 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from personal_data_platform.collectors.screen_time import (
-    BiomeScreenTimeSource,
-    ScreenTimeCollector,
-)
-from personal_data_platform.collectors.state import CollectorState
 from personal_data_platform.config import (
-    CollectorADCConfig,
-    CollectorConfig,
     ConfigurationError,
     GCSConfig,
 )
-from personal_data_platform.raw.screen_time import build_device_key
-from personal_data_platform.storage.gcs import GCSRawRepository
+from personal_data_platform.sources.screen_time.collector import (
+    BiomeScreenTimeSource,
+    ScreenTimeCollector,
+)
+from personal_data_platform.sources.screen_time.config import CollectorADCConfig, CollectorConfig
+from personal_data_platform.sources.screen_time.raw import build_device_key
+from personal_data_platform.sources.screen_time.state import CollectorState
+from personal_data_platform.sources.screen_time.storage import ScreenTimeGCSRepository
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild.add_argument(
         "--allow-partial-history",
         action="store_true",
-        help="acknowledge that only Raw retained for 90 days can be rebuilt",
+        help="acknowledge that only currently retained Raw can be rebuilt",
     )
     return parser
 
@@ -244,7 +243,7 @@ def _run_collect(*, watch: bool) -> int:
     collector = ScreenTimeCollector(
         source=_source(config),
         state=CollectorState(config.state_db_path),
-        uploader=GCSRawRepository.from_config(config.gcs),
+        uploader=ScreenTimeGCSRepository.from_config(config.gcs),
         pseudonym_key=config.pseudonym_key,
         allowed_device_keys=config.device_allowlist,
     )
@@ -268,7 +267,10 @@ def _write_launch_agent(
     python_executable: Path,
     log_directory: Path | None,
 ) -> int:
-    from personal_data_platform.launchd import LaunchAgentSettings, write_launch_agent
+    from personal_data_platform.sources.screen_time.launchd import (
+        LaunchAgentSettings,
+        write_launch_agent,
+    )
 
     settings = LaunchAgentSettings.from_env(
         project_root=project_root,

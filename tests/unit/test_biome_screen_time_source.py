@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from personal_data_platform.collectors.screen_time import (
+from personal_data_platform.sources.screen_time.collector import (
     BiomeScreenTimeSource,
     CollectorSourceError,
 )

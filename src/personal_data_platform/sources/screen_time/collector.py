@@ -11,17 +11,17 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
 
-from personal_data_platform.collectors.state import (
-    CollectorState,
-    PendingObservation,
-    SuccessfulScan,
-)
-from personal_data_platform.raw.screen_time import (
+from personal_data_platform.sources.screen_time.raw import (
     APP_IN_FOCUS_STREAM,
     CollectorDeviceManifest,
     CollectorScanReceipt,
     build_device_key,
     build_segment_key,
+)
+from personal_data_platform.sources.screen_time.state import (
+    CollectorState,
+    PendingObservation,
+    SuccessfulScan,
 )
 
 

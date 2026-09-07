@@ -14,10 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from personal_data_platform.config import (
-    CollectorADCConfig,
     ConfigurationError,
     GCSConfig,
 )
+from personal_data_platform.sources.screen_time.config import CollectorADCConfig
 
 LAUNCH_AGENT_LABEL = "com.personal-data-platform.screen-time-collector"
 _DEVICE_KEY = re.compile(r"^[0-9a-f]{64}$")

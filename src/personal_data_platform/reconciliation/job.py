@@ -9,11 +9,16 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from personal_data_platform.loader.job import (
-    RAW_PREFIX,
+from personal_data_platform.loader.job import run_loader
+from personal_data_platform.raw.models import RawObject
+from personal_data_platform.sources.contracts import (
     RawRepository,
-    run_loader,
+    SourceAdapter,
+    list_source_raw,
+    selected_prefixes,
+    validate_runtime_policy,
 )
+from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.motherduck import (
     IngestionState,
     Warehouse,
@@ -25,18 +30,7 @@ from .heartbeat import HeartbeatPublisher, publish_http_heartbeat
 from .models import ReconciliationResult
 
 LOGGER = logging.getLogger(__name__)
-REQUIRED_RELATIONS = (
-    "base.screen_time_segment_observation",
-    "base.screen_time_record_occurrence",
-    "base.screen_time_transition",
-    "base.screen_time_interval",
-    "marts.daily_screen_time",
-)
 RECONCILIATION_LEASE_SECONDS = 65 * 60
-COLLECTOR_FRESHNESS = timedelta(hours=24)
-MAX_CLOCK_SKEW = timedelta(minutes=10)
-RAW_RETENTION = timedelta(days=90)
-LIFECYCLE_OVERDUE = timedelta(days=93)
 
 
 def _relation_names(warehouse: Warehouse) -> set[str]:
@@ -51,9 +45,11 @@ def _relation_names(warehouse: Warehouse) -> set[str]:
     return {row[0] for row in rows}
 
 
-def _failed_relation_queries(warehouse: Warehouse, relations: set[str]) -> tuple[str, ...]:
+def _failed_relation_queries(
+    warehouse: Warehouse, relations: set[str], required_relations: tuple[str, ...]
+) -> tuple[str, ...]:
     failed: list[str] = []
-    for relation in REQUIRED_RELATIONS:
+    for relation in required_relations:
         if relation not in relations:
             continue
         try:
@@ -74,12 +70,10 @@ def _active_status_keys(states: dict[str, IngestionState], status: str) -> set[s
     return {key for key, value in states.items() if value.status == status}
 
 
-def _list_raw_by_key(repository: RawRepository, prefix: str) -> dict[str, Any]:
-    raw_objects = list(repository.list_raw(prefix))
-    raw_by_key = {value.key: value for value in raw_objects}
-    if len(raw_by_key) != len(raw_objects):
-        raise RuntimeError("raw object listing returned duplicate keys")
-    return raw_by_key
+def _list_raw_by_key(
+    repository: RawRepository, source: SourceAdapter, prefix: str | None
+) -> dict[str, RawObject]:
+    return {value.key: value for value in list_source_raw(repository, source, prefix)}
 
 
 def run_reconciliation(
@@ -87,24 +81,30 @@ def run_reconciliation(
     warehouse: Warehouse,
     *,
     heartbeat: HeartbeatPublisher,
-    prefix: str = RAW_PREFIX,
+    source: SourceAdapter | None = None,
+    prefix: str | None = None,
     repair_missing: bool = True,
     now: datetime | None = None,
 ) -> ReconciliationResult:
     """Audit raw/warehouse parity, repair missing loads, and publish success."""
 
+    source = source or get_source()
+    if selected_prefixes(source, prefix) != source.raw_prefixes:
+        raise ValueError("reconciliation must audit every canonical prefix for the source stream")
+    raw_retention = timedelta(days=source.retention_days)
+    lifecycle_overdue = timedelta(days=source.retention_days + source.lifecycle_grace_days)
     started_at = _aware_utc(now or datetime.now(UTC))
     if started_at is None:
         raise ValueError("reconciliation time must be timezone-aware")
     run_id = str(uuid.uuid4())
-    raw_by_key = _list_raw_by_key(repository, prefix)
+    raw_by_key = _list_raw_by_key(repository, source, prefix)
     raw_objects = list(raw_by_key.values())
     raw_keys = set(raw_by_key)
     loaded_keys = warehouse.succeeded_keys_for(raw_objects)
     missing_before_repair = raw_keys - loaded_keys
     repair_summary: dict[str, Any] | None = None
     if missing_before_repair and repair_missing:
-        summary = run_loader(repository, warehouse, prefix=prefix)
+        summary = run_loader(repository, warehouse, source=source, prefix=prefix)
         repair_summary = {
             "discovered": summary.discovered,
             "skipped": summary.skipped,
@@ -112,26 +112,20 @@ def run_reconciliation(
             "failed": summary.failed,
             "records": summary.records,
         }
-    states = warehouse.active_ingestion_states()
+    states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
     # A repair or concurrent loader can commit keys newer than the initial listing.
     # Refresh before classifying any active warehouse key as absent from GCS.
     if set(states) - raw_keys:
-        latest_raw_by_key = _list_raw_by_key(repository, prefix)
+        latest_raw_by_key = _list_raw_by_key(repository, source, prefix)
         for key in set(states):
             if key in latest_raw_by_key:
                 raw_by_key[key] = latest_raw_by_key[key]
         raw_objects = list(raw_by_key.values())
         raw_keys = set(raw_by_key)
-        states = warehouse.active_ingestion_states()
+        states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
 
     checked_at = started_at if now is not None else datetime.now(UTC)
-    succeeded_keys = {
-        key
-        for key, state in states.items()
-        if state.status == "succeeded"
-        and key in raw_by_key
-        and state.storage_generation == raw_by_key[key].storage_generation
-    }
+    succeeded_keys = warehouse.succeeded_keys_for(raw_objects)
     failed_keys = _active_status_keys(states, "failed")
     loading_keys = _active_status_keys(states, "loading")
     live_loaded_keys = raw_keys & succeeded_keys
@@ -151,7 +145,7 @@ def run_reconciliation(
             unrecoverable_uningested.add(key)
         elif created_at is None:
             unknown_creation_time.add(key)
-        elif created_at <= checked_at - RAW_RETENTION:
+        elif created_at <= checked_at - raw_retention:
             expected_expired.add(key)
         else:
             premature_missing.add(key)
@@ -162,51 +156,27 @@ def run_reconciliation(
         created_at = _aware_utc(getattr(value, "storage_created_at", None))
         if created_at is None:
             unknown_creation_time.add(key)
-        elif created_at <= checked_at - LIFECYCLE_OVERDUE:
+        elif created_at <= checked_at - lifecycle_overdue:
             overdue_deletion.add(key)
-        elif created_at <= checked_at - RAW_RETENTION:
+        elif created_at <= checked_at - raw_retention:
             lifecycle_lag.add(key)
 
-    raw_device_keys = {value.device_key for value in raw_by_key.values()}
-    device_manifest = repository.get_device_manifest()
-    configured_device_keys = (
-        set(device_manifest.device_keys) if device_manifest is not None else set()
-    )
-    # The manifest is written only after a complete allowlist scan and is the
-    # authoritative active-device set. Retained Raw from a removed device must
-    # not keep requiring a fresh receipt until lifecycle deletion catches up.
-    expected_device_keys = configured_device_keys
-    retained_inactive_device_keys = raw_device_keys - configured_device_keys
-    receipts = list(repository.list_scan_receipts())
-    receipt_device_keys = {value.device_key for value in receipts}
-    missing_receipt_devices = expected_device_keys - receipt_device_keys
-    stale_receipts = [
-        value
-        for value in receipts
-        if value.device_key in expected_device_keys
-        and (
-            value.completed_at < checked_at - COLLECTOR_FRESHNESS
-            or value.completed_at > checked_at + MAX_CLOCK_SKEW
-        )
-    ]
-    manifest_stale = device_manifest is not None and (
-        device_manifest.completed_at < checked_at - COLLECTOR_FRESHNESS
-        or device_manifest.completed_at > checked_at + MAX_CLOCK_SKEW
-    )
+    source_health = source.audit(repository, raw_objects, checked_at)
     unexpected_absent_succeeded = premature_missing | (
         (unknown_creation_time & succeeded_keys) - raw_keys
     )
     failed = len(failed_keys)
     loading = len(loading_keys)
-    inventory_counts = warehouse.retention_inventory_counts()
+    inventory_counts = warehouse.retention_inventory_counts(
+        source_id=source.source_id, stream=source.stream
+    )
     available_relations = _relation_names(warehouse)
-    missing_relations = tuple(sorted(set(REQUIRED_RELATIONS) - available_relations))
-    failed_relation_queries = _failed_relation_queries(warehouse, available_relations)
+    missing_relations = tuple(sorted(set(source.required_relations) - available_relations))
+    failed_relation_queries = _failed_relation_queries(
+        warehouse, available_relations, source.required_relations
+    )
     succeeded = (
-        device_manifest is not None
-        and not manifest_stale
-        and not missing_receipt_devices
-        and not stale_receipts
+        source_health.ok
         and not missing
         and not premature_missing
         and not unrecoverable_uningested
@@ -220,6 +190,10 @@ def run_reconciliation(
     completed_at = datetime.now(UTC)
     existing_expired_count = inventory_counts["expired_object_count"]
     details: dict[str, object] = {
+        **source_health.details,
+        "source_id": source.source_id,
+        "stream": source.stream,
+        "schema_versions": list(source.schema_versions),
         "missing_before_repair": len(missing_before_repair),
         "repair_summary": repair_summary,
         "total_object_count": inventory_counts["total_object_count"],
@@ -237,16 +211,7 @@ def run_reconciliation(
         "live_unloaded_object_count": len(missing),
         "active_loading_object_count": loading,
         "orphaned_loaded_object_count": len(unexpected_absent_succeeded),
-        "collector_receipt_count": len(receipts),
-        "collector_manifest_present": device_manifest is not None,
-        "collector_manifest_stale": manifest_stale,
-        "configured_collector_device_count": len(configured_device_keys),
-        "retained_inactive_device_count": len(retained_inactive_device_keys),
-        "stale_collector_count": len(stale_receipts),
-        "missing_collector_receipt_count": len(missing_receipt_devices),
         "missing_relations": list(missing_relations),
-        "missing_collector_receipt_devices": sorted(missing_receipt_devices),
-        "stale_collector_receipt_devices": sorted(value.device_key for value in stale_receipts),
         "failed_relation_queries": list(failed_relation_queries),
     }
     result = ReconciliationResult(
@@ -259,9 +224,6 @@ def run_reconciliation(
         missing_object_count=len(missing),
         failed_object_count=failed,
         orphaned_loaded_object_count=len(unexpected_absent_succeeded),
-        collector_receipt_count=len(receipts),
-        stale_collector_count=len(stale_receipts),
-        missing_collector_receipt_count=len(missing_receipt_devices),
         missing_relations=missing_relations,
         failed_relation_queries=failed_relation_queries,
         details=details,
@@ -271,6 +233,8 @@ def run_reconciliation(
         return result
 
     heartbeat_payload = {
+        "source_id": source.source_id,
+        "stream": source.stream,
         "run_id": result.run_id,
         "completed_at": result.completed_at.isoformat(),
         "raw_object_count": result.raw_object_count,
@@ -289,7 +253,7 @@ def run_reconciliation(
         if marked_expired != expected_expired:
             raise RuntimeError("retention state changed during reconciliation; retry the audit")
         stage = "warehouse_heartbeat"
-        warehouse.publish_heartbeat("screen_time_reconciliation", result.run_id, heartbeat_payload)
+        warehouse.publish_heartbeat(source.monitor_name, result.run_id, heartbeat_payload)
         stage = "heartbeat"
         heartbeat(heartbeat_payload)
         stage = "completion"
@@ -311,14 +275,15 @@ def run_reconciliation(
     return result
 
 
-def run_reconciliation_from_env() -> int:
-    from personal_data_platform.storage.gcs import GCSRawRepository
+def run_reconciliation_from_env(*, source_id: str | None = None, stream: str | None = None) -> int:
 
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
     heartbeat_url = os.environ.get("RECONCILIATION_HEARTBEAT_URL")
     if not heartbeat_url:
         raise ValueError("RECONCILIATION_HEARTBEAT_URL is required")
-    repository = GCSRawRepository.from_env()
+    source = get_source(source_id=source_id, stream=stream)
+    validate_runtime_policy(source)
+    repository = source.repository_from_env()
     warehouse = Warehouse(connect(WarehouseConfig.from_env()))
     try:
         warehouse.migrate()
@@ -332,21 +297,21 @@ def run_reconciliation_from_env() -> int:
                 repository,
                 warehouse,
                 heartbeat=lambda payload: publish_http_heartbeat(heartbeat_url, payload),
-                prefix=RAW_PREFIX,
+                source=source,
             )
         finally:
             warehouse.release_job_lock("reconciliation", owner_id)
         LOGGER.info(
             "reconciliation status=%s raw=%d loaded=%d missing=%d failed=%d "
-            "orphaned=%d stale_collectors=%d missing_receipts=%d",
+            "orphaned=%d source=%s stream=%s",
             result.status,
             result.raw_object_count,
             result.loaded_object_count,
             result.missing_object_count,
             result.failed_object_count,
             result.orphaned_loaded_object_count,
-            result.stale_collector_count,
-            result.missing_collector_receipt_count,
+            source.source_id,
+            source.stream,
         )
         return 0 if result.ok else 1
     finally:

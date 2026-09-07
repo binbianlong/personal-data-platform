@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from personal_data_platform.config import CollectorConfig, ConfigurationError
+from personal_data_platform.config import ConfigurationError
+from personal_data_platform.sources.screen_time.config import CollectorConfig
 
 
 def _environment(tmp_path: Path) -> dict[str, str]:

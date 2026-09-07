@@ -11,7 +11,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from personal_data_platform.loader.models import ParsedScreenTimeRecord, RawObject
+from personal_data_platform.raw.models import RawObject
+from personal_data_platform.sources.contracts import DecodedBatch
 
 DEFAULT_MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
@@ -59,6 +60,18 @@ def connect(config: WarehouseConfig) -> Any:
     return duckdb.connect(f"md:{config.database}", config={"motherduck_token": config.token})
 
 
+def _raw_identity(raw: RawObject) -> tuple[Any, ...]:
+    return (
+        raw.source_id,
+        raw.schema_version,
+        raw.subject_key,
+        raw.stream,
+        raw.logical_key,
+        raw.observed_at,
+        raw.sha256,
+    )
+
+
 class Warehouse:
     """Small repository that makes a raw object's load status atomic."""
 
@@ -101,48 +114,63 @@ class Warehouse:
                 self.connection.execute("ROLLBACK")
                 raise
 
-    def succeeded_keys(self) -> set[str]:
+    def succeeded_keys(self, *, source_id: str, stream: str) -> set[str]:
         rows = self.connection.execute(
             """
             SELECT object_key
             FROM ops.ingestion_metadata
-            WHERE status = 'succeeded' AND retention_expired_at IS NULL
-            """
+            WHERE source_id = ? AND source_stream = ?
+              AND status = 'succeeded' AND retention_expired_at IS NULL
+            """,
+            [source_id, stream],
         ).fetchall()
         return {row[0] for row in rows}
 
-    def succeeded_keys_for(self, raw_objects: Iterable[Any]) -> set[str]:
-        """Return active successes whose stored GCS generation matches the live object."""
+    def succeeded_keys_for(self, raw_objects: Iterable[RawObject]) -> set[str]:
+        """Return active successes matching the live Raw identity and GCS generation."""
 
-        live_generations = {value.key: int(value.storage_generation) for value in raw_objects}
-        if not live_generations:
+        materialized = tuple(raw_objects)
+        live_identities = {
+            value.key: (*_raw_identity(value), value.storage_generation) for value in materialized
+        }
+        if not live_identities:
             return set()
-        rows = self.connection.execute(
-            """
-            SELECT object_key, storage_generation
-            FROM ops.ingestion_metadata
-            WHERE status = 'succeeded' AND retention_expired_at IS NULL
-            """
-        ).fetchall()
+        rows: list[tuple[Any, ...]] = []
+        for source_id, stream in sorted(
+            {(value.source_id, value.stream) for value in materialized}
+        ):
+            rows.extend(
+                self.connection.execute(
+                    """
+                    SELECT object_key, source_id, schema_version, COALESCE(subject_key, device_key),
+                           source_stream, COALESCE(logical_key, segment_key), observed_at,
+                           content_sha256, storage_generation
+                    FROM ops.ingestion_metadata
+                    WHERE source_id = ? AND source_stream = ?
+                      AND status = 'succeeded' AND retention_expired_at IS NULL
+                    """,
+                    [source_id, stream],
+                ).fetchall()
+            )
         return {
             str(object_key)
-            for object_key, storage_generation in rows
-            if storage_generation is not None
-            and live_generations.get(str(object_key)) == int(storage_generation)
+            for object_key, *identity in rows
+            if live_identities.get(str(object_key)) == tuple(identity)
         }
 
-    def ingestion_counts(self) -> dict[str, int]:
+    def ingestion_counts(self, *, source_id: str, stream: str) -> dict[str, int]:
         rows = self.connection.execute(
             """
             SELECT status, count(*)
             FROM ops.ingestion_metadata
-            WHERE retention_expired_at IS NULL
+            WHERE source_id = ? AND source_stream = ? AND retention_expired_at IS NULL
             GROUP BY status
-            """
+            """,
+            [source_id, stream],
         ).fetchall()
         return {str(status): int(count) for status, count in rows}
 
-    def active_ingestion_states(self) -> dict[str, IngestionState]:
+    def active_ingestion_states(self, *, source_id: str, stream: str) -> dict[str, IngestionState]:
         """Return metadata that has not already been accepted as lifecycle-expired."""
 
         rows = self.connection.execute(
@@ -150,8 +178,9 @@ class Warehouse:
             SELECT object_key, status, storage_created_at, storage_generation,
                    retention_expired_at
             FROM ops.ingestion_metadata
-            WHERE retention_expired_at IS NULL
-            """
+            WHERE source_id = ? AND source_stream = ? AND retention_expired_at IS NULL
+            """,
+            [source_id, stream],
         ).fetchall()
         return {
             row[0]: IngestionState(
@@ -164,14 +193,16 @@ class Warehouse:
             for row in rows
         }
 
-    def retention_inventory_counts(self) -> dict[str, int]:
+    def retention_inventory_counts(self, *, source_id: str, stream: str) -> dict[str, int]:
         row = self.connection.execute(
             """
             SELECT
                 count(*),
                 count(*) FILTER (WHERE retention_expired_at IS NOT NULL)
             FROM ops.ingestion_metadata
-            """
+            WHERE source_id = ? AND source_stream = ?
+            """,
+            [source_id, stream],
         ).fetchone()
         return {
             "total_object_count": int(row[0]),
@@ -207,27 +238,35 @@ class Warehouse:
                 expired.add(str(row[0]))
         return expired
 
+    def _existing_object(self, raw: RawObject) -> tuple[Any, ...] | None:
+        current = self.connection.execute(
+            """
+            SELECT status, content_sha256, retention_expired_at, storage_generation,
+                   source_id, schema_version, COALESCE(subject_key, device_key), source_stream,
+                   COALESCE(logical_key, segment_key), observed_at
+            FROM ops.ingestion_metadata
+            WHERE object_key = ?
+            """,
+            [raw.key],
+        ).fetchone()
+        if current and (*current[4:], current[1]) != _raw_identity(raw):
+            raise RuntimeError(f"immutable object identity changed: {raw.key}")
+        return current
+
     def load_object(
         self,
         raw: RawObject,
         *,
         byte_size: int,
-        records: Iterable[ParsedScreenTimeRecord],
+        batch: DecodedBatch,
+        legacy_scope: tuple[str, str] | None = None,
     ) -> int:
-        materialized = list(records)
+        """Commit source records and their success state in one transaction."""
+
         now = datetime.now(UTC)
         self.connection.execute("BEGIN TRANSACTION")
         try:
-            current = self.connection.execute(
-                """
-                SELECT status, content_sha256, retention_expired_at, storage_generation
-                FROM ops.ingestion_metadata
-                WHERE object_key = ?
-                """,
-                [raw.key],
-            ).fetchone()
-            if current and current[1] != raw.sha256:
-                raise RuntimeError(f"immutable object identity changed: {raw.key}")
+            current = self._existing_object(raw)
             if (
                 current
                 and current[0] == "succeeded"
@@ -240,13 +279,18 @@ class Warehouse:
             self.connection.execute(
                 """
                 INSERT INTO ops.ingestion_metadata (
-                    object_key, device_key, source_stream, segment_key, observed_at,
-                    content_sha256, byte_size, status, parser_version, record_count,
-                    started_at, completed_at, error_type, error_message, retry_count,
-                    storage_created_at, storage_generation, retention_expired_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'loading', ?, NULL, ?, NULL, NULL, NULL, 0, ?, ?, NULL)
+                    object_key, source_id, schema_version, subject_key, source_stream,
+                    logical_key, observed_at, content_sha256, byte_size, status,
+                    parser_version, record_count, started_at, completed_at, error_type,
+                    error_message, retry_count, storage_created_at, storage_generation,
+                    retention_expired_at, device_key, segment_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'loading', ?, NULL, ?, NULL,
+                          NULL, NULL, 0, ?, ?, NULL, ?, ?)
                 ON CONFLICT (object_key) DO UPDATE SET
                     status = 'loading', parser_version = excluded.parser_version,
+                    subject_key = excluded.subject_key, logical_key = excluded.logical_key,
+                    device_key = COALESCE(excluded.device_key, ops.ingestion_metadata.device_key),
+                    segment_key = COALESCE(excluded.segment_key, ops.ingestion_metadata.segment_key),
                     started_at = excluded.started_at, completed_at = NULL,
                     error_type = NULL, error_message = NULL,
                     storage_created_at = excluded.storage_created_at,
@@ -256,130 +300,92 @@ class Warehouse:
                 """,
                 [
                     raw.key,
-                    raw.device_key,
+                    raw.source_id,
+                    raw.schema_version,
+                    raw.subject_key,
                     raw.stream,
-                    raw.segment_key,
+                    raw.logical_key,
                     raw.observed_at,
                     raw.sha256,
                     byte_size,
-                    materialized[0].parser_version if materialized else "app-in-focus-v1",
+                    batch.parser_version,
                     now,
                     raw.storage_created_at,
                     raw.storage_generation,
+                    *(legacy_scope or (None, None)),
                 ],
             )
-            self.connection.execute(
-                "DELETE FROM base.screen_time_record_occurrence WHERE object_key = ?", [raw.key]
-            )
-            if materialized:
-                self.connection.executemany(
-                    """
-                    INSERT INTO base.screen_time_record_occurrence VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    )
-                    """,
-                    [self._record_row(record, now) for record in materialized],
-                )
-            self.connection.execute(
-                """
-                INSERT INTO base.screen_time_segment_observation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (object_key) DO UPDATE SET
-                    record_count = excluded.record_count,
-                    parser_version = excluded.parser_version,
-                    loaded_at = excluded.loaded_at
-                """,
-                [
-                    raw.key,
-                    raw.device_key,
-                    raw.stream,
-                    raw.segment_key,
-                    raw.observed_at,
-                    raw.sha256,
-                    byte_size,
-                    len(materialized),
-                    materialized[0].parser_version if materialized else "app-in-focus-v1",
-                    now,
-                ],
-            )
+            batch.write(self.connection, raw, byte_size=byte_size, loaded_at=now)
             self.connection.execute(
                 """
                 UPDATE ops.ingestion_metadata
                 SET status = 'succeeded', record_count = ?, completed_at = ?
                 WHERE object_key = ?
                 """,
-                [len(materialized), now, raw.key],
+                [batch.record_count, now, raw.key],
             )
             self.connection.execute("COMMIT")
-            return len(materialized)
+            return batch.record_count
         except Exception:
             self.connection.execute("ROLLBACK")
             raise
 
-    @staticmethod
-    def _record_row(record: ParsedScreenTimeRecord, loaded_at: datetime) -> list[Any]:
-        return [
-            record.object_key,
-            record.record_offset,
-            record.record_metadata_offset,
-            record.event_key,
-            record.device_key,
-            record.source_stream,
-            record.segment_key,
-            record.segment_sha256,
-            record.observed_at,
-            record.segment_filename,
-            record.record_state,
-            record.segment_record_timestamp,
-            record.crc_passed,
-            record.transition_reason,
-            record.kind,
-            record.in_foreground,
-            record.cf_absolute_time,
-            record.event_at,
-            record.bundle_id,
-            record.app_version,
-            record.app_build,
-            record.platform_flag,
-            record.unknown_field_count,
-            record.original_payload,
-            record.parser_version,
-            loaded_at,
-        ]
-
-    def mark_failed(self, raw: RawObject, *, byte_size: int, error: Exception) -> None:
+    def mark_failed(
+        self,
+        raw: RawObject,
+        *,
+        byte_size: int,
+        error: Exception,
+        legacy_scope: tuple[str, str] | None = None,
+    ) -> None:
         now = datetime.now(UTC)
-        self.connection.execute(
-            """
-            INSERT INTO ops.ingestion_metadata (
-                object_key, device_key, source_stream, segment_key, observed_at,
-                content_sha256, byte_size, status, parser_version, record_count,
-                started_at, completed_at, error_type, error_message, retry_count,
-                storage_created_at, storage_generation, retention_expired_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', NULL, NULL, ?, ?, ?, ?, 0, ?, ?, NULL)
-            ON CONFLICT (object_key) DO UPDATE SET
-                status = 'failed', completed_at = excluded.completed_at,
-                error_type = excluded.error_type, error_message = excluded.error_message,
-                storage_created_at = excluded.storage_created_at,
-                storage_generation = excluded.storage_generation,
-                retention_expired_at = NULL,
-                retry_count = ops.ingestion_metadata.retry_count + 1
-            """,
-            [
-                raw.key,
-                raw.device_key,
-                raw.stream,
-                raw.segment_key,
-                raw.observed_at,
-                raw.sha256,
-                byte_size,
-                now,
-                now,
-                type(error).__name__,
-                str(error)[:4000],
-                raw.storage_created_at,
-                raw.storage_generation,
-            ],
-        )
+        self.connection.execute("BEGIN TRANSACTION")
+        try:
+            self._existing_object(raw)
+            self.connection.execute(
+                """
+                INSERT INTO ops.ingestion_metadata (
+                    object_key, source_id, schema_version, subject_key, source_stream, logical_key,
+                    observed_at, content_sha256, byte_size, status, parser_version, record_count,
+                    started_at, completed_at, error_type, error_message, retry_count,
+                    storage_created_at, storage_generation, retention_expired_at,
+                    device_key, segment_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'failed', NULL, NULL, ?, ?, ?, ?,
+                          0, ?, ?, NULL, ?, ?)
+                ON CONFLICT (object_key) DO UPDATE SET
+                    status = 'failed', completed_at = excluded.completed_at,
+                    subject_key = excluded.subject_key, logical_key = excluded.logical_key,
+                    device_key = COALESCE(excluded.device_key, ops.ingestion_metadata.device_key),
+                    segment_key = COALESCE(excluded.segment_key, ops.ingestion_metadata.segment_key),
+                    error_type = excluded.error_type, error_message = excluded.error_message,
+                    storage_created_at = excluded.storage_created_at,
+                    storage_generation = excluded.storage_generation,
+                    retention_expired_at = NULL,
+                    retry_count = ops.ingestion_metadata.retry_count + 1
+                """,
+                [
+                    raw.key,
+                    raw.source_id,
+                    raw.schema_version,
+                    raw.subject_key,
+                    raw.stream,
+                    raw.logical_key,
+                    raw.observed_at,
+                    raw.sha256,
+                    byte_size,
+                    now,
+                    now,
+                    type(error).__name__,
+                    str(error)[:4000],
+                    raw.storage_created_at,
+                    raw.storage_generation,
+                    *(legacy_scope or (None, None)),
+                ],
+            )
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def begin_job(self, job_name: str, run_id: str) -> None:
         self.connection.execute(

@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from personal_data_platform.dbt_runner import DBT_PROJECT_DIR, run_dbt
-from personal_data_platform.loader.models import ParsedScreenTimeRecord, RawObject
+from personal_data_platform.raw.models import RawObject
+from personal_data_platform.sources.screen_time.models import ParsedScreenTimeRecord
+from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 
@@ -27,9 +29,11 @@ def dbt_project(tmp_path: Path) -> Path:
 def raw() -> RawObject:
     return RawObject(
         key="raw/screen_time/v1/device/App.InFocus/segment/2026-08-27T00:00:00Z/hash.segb.gz",
-        device_key="device",
+        source_id="screen_time",
+        schema_version=1,
+        subject_key="device",
         stream="App.InFocus",
-        segment_key="segment",
+        logical_key="segment",
         observed_at=datetime(2026, 8, 27, tzinfo=UTC),
         sha256="a" * 64,
         storage_created_at=datetime(2026, 8, 27, 1, tzinfo=UTC),
@@ -49,9 +53,9 @@ def _record(
     return ParsedScreenTimeRecord(
         event_key=event_key,
         object_key=raw.key,
-        device_key=raw.device_key,
+        device_key=raw.subject_key,
         source_stream=raw.stream,
-        segment_key=raw.segment_key,
+        segment_key=raw.logical_key,
         segment_sha256=raw.sha256,
         observed_at=raw.observed_at,
         segment_filename="segment.segb",
@@ -138,7 +142,7 @@ def test_dbt_pairs_events_and_splits_tokyo_midnight(
 
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     warehouse.migrate()
-    warehouse.load_object(raw, byte_size=100, records=records)
+    warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch(records))
     warehouse.close()
 
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
@@ -288,7 +292,7 @@ def test_dbt_preserves_boundary_order_and_evidence(
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
         warehouse.migrate()
-        warehouse.load_object(raw, byte_size=100, records=records)
+        warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch(records))
     finally:
         warehouse.close()
 
@@ -336,7 +340,7 @@ def test_dbt_views_follow_late_segment_corrections(tmp_path, monkeypatch, dbt_pr
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
         warehouse.migrate()
-        warehouse.load_object(raw, byte_size=100, records=records)
+        warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch(records))
     finally:
         warehouse.close()
 
@@ -366,7 +370,7 @@ def test_dbt_views_follow_late_segment_corrections(tmp_path, monkeypatch, dbt_pr
             event_key="corrected-end",
             event_at=raw.observed_at + timedelta(seconds=60),
         )
-        warehouse.load_object(correction, byte_size=100, records=corrected_records)
+        warehouse.load_object(correction, byte_size=100, batch=ScreenTimeBatch(corrected_records))
         assert warehouse.query_value("SELECT count(*) FROM base.screen_time_transition") == 2
         assert warehouse.query_rows(
             "SELECT end_event_key, duration_seconds FROM base.screen_time_interval"

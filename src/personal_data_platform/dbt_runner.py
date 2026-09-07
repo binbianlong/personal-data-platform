@@ -23,7 +23,9 @@ def _invoke(arguments: list[str]) -> None:
         raise RuntimeError(f"dbt {' '.join(arguments)} failed") from raised
 
 
-def run_dbt(*, target: str, project_dir: Path = DBT_PROJECT_DIR) -> None:
+def run_dbt(
+    *, target: str, project_dir: Path = DBT_PROJECT_DIR, selector: str | None = None
+) -> None:
     common = [
         "--project-dir",
         str(project_dir),
@@ -32,6 +34,10 @@ def run_dbt(*, target: str, project_dir: Path = DBT_PROJECT_DIR) -> None:
         "--target",
         target,
     ]
+    if selector is not None:
+        if not selector.strip():
+            raise ValueError("dbt selector must not be empty")
+        common.extend(["--select", selector])
     secret_name = "DBT_ENV_SECRET_MOTHERDUCK_TOKEN"
     previous_secret = os.environ.get(secret_name)
     if target == "prod":
@@ -50,7 +56,10 @@ def run_dbt(*, target: str, project_dir: Path = DBT_PROJECT_DIR) -> None:
                 os.environ[secret_name] = previous_secret
 
 
-def run_dbt_from_env() -> int:
+def run_dbt_from_env(*, source_id: str | None = None, stream: str | None = None) -> int:
+    from personal_data_platform.sources.registry import get_source
+
+    source = get_source(source_id, stream) if source_id is not None or stream is not None else None
     target = os.environ.get("DBT_TARGET", "prod")
     if target != "prod":
         raise ValueError("Cloud dbt entrypoint requires DBT_TARGET=prod")
@@ -60,5 +69,5 @@ def run_dbt_from_env() -> int:
         warehouse.migrate()
     finally:
         warehouse.close()
-    run_dbt(target=target)
+    run_dbt(target=target, **({"selector": source.dbt_selector} if source is not None else {}))
     return 0

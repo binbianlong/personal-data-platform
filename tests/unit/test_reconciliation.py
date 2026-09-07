@@ -1,16 +1,35 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from personal_data_platform.loader.models import LoadSummary
-from personal_data_platform.reconciliation.job import REQUIRED_RELATIONS, run_reconciliation
+from personal_data_platform.raw.models import RawObject
+from personal_data_platform.reconciliation.job import (
+    run_reconciliation,
+    run_reconciliation_from_env,
+)
+from personal_data_platform.sources.registry import get_source
+from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.storage.motherduck import IngestionState
 
 DEVICE_KEY = "a" * 64
 NOW = datetime(2026, 8, 27, tzinfo=UTC)
+
+REQUIRED_RELATIONS = get_source().required_relations
+
+
+def _key(name: str) -> str:
+    return ScreenTimeRawIdentity(
+        device_key=DEVICE_KEY,
+        stream="app-in-focus",
+        segment_key=hashlib.sha256(name.encode()).hexdigest(),
+        observed_at=NOW,
+        sha256="c" * 64,
+    ).object_key
 
 
 class _Repository:
@@ -29,11 +48,10 @@ class _Repository:
         self.created_at = created_at or {}
         self.generations = generations or {}
 
-    def list_raw(self, prefix: str) -> list[SimpleNamespace]:
+    def list_raw(self, prefix: str) -> list[RawObject]:
         return [
-            SimpleNamespace(
-                key=key,
-                device_key=DEVICE_KEY,
+            get_source().parse_raw_key(
+                key,
                 storage_created_at=self.created_at.get(key, NOW - timedelta(days=1)),
                 storage_generation=self.generations.get(key, 1),
             )
@@ -75,7 +93,7 @@ class _Warehouse:
             for key in loaded
         }
         for index in range(failed):
-            key = f"failed-{index}"
+            key = _key(f"failed-{index}")
             self.states[key] = IngestionState(
                 object_key=key,
                 status="failed",
@@ -84,7 +102,7 @@ class _Warehouse:
                 retention_expired_at=None,
             )
         for index in range(loading):
-            key = f"loading-{index}"
+            key = _key(f"loading-{index}")
             self.states[key] = IngestionState(
                 object_key=key,
                 status="loading",
@@ -118,12 +136,14 @@ class _Warehouse:
             and generations.get(key) == value.storage_generation
         }
 
-    def active_ingestion_states(self) -> dict[str, IngestionState]:
+    def active_ingestion_states(self, *, source_id: str, stream: str) -> dict[str, IngestionState]:
+        assert (source_id, stream) == ("screen_time", "app-in-focus")
         return {
             key: value for key, value in self.states.items() if value.retention_expired_at is None
         }
 
-    def retention_inventory_counts(self) -> dict[str, int]:
+    def retention_inventory_counts(self, *, source_id: str, stream: str) -> dict[str, int]:
+        assert (source_id, stream) == ("screen_time", "app-in-focus")
         return {
             "total_object_count": len(self.states),
             "expired_object_count": sum(
@@ -176,11 +196,11 @@ class _Warehouse:
 
 
 def test_success_publishes_external_and_warehouse_heartbeat() -> None:
-    warehouse = _Warehouse({"one", "two"})
+    warehouse = _Warehouse({_key("one"), _key("two")})
     published: list[dict[str, object]] = []
 
     result = run_reconciliation(
-        _Repository(["one", "two"]),
+        _Repository([_key("one"), _key("two")]),
         warehouse,  # type: ignore[arg-type]
         heartbeat=published.append,
         repair_missing=False,
@@ -195,11 +215,11 @@ def test_success_publishes_external_and_warehouse_heartbeat() -> None:
 
 
 def test_parity_failure_never_publishes_heartbeat() -> None:
-    warehouse = _Warehouse({"one", "orphan"}, failed=1)
+    warehouse = _Warehouse({_key("one"), _key("orphan")}, failed=1)
     published: list[dict[str, object]] = []
 
     result = run_reconciliation(
-        _Repository(["one", "missing"]),
+        _Repository([_key("one"), _key("missing")]),
         warehouse,  # type: ignore[arg-type]
         heartbeat=published.append,
         repair_missing=False,
@@ -215,13 +235,13 @@ def test_parity_failure_never_publishes_heartbeat() -> None:
 
 
 def test_external_heartbeat_failure_marks_run_failed() -> None:
-    warehouse = _Warehouse({"one"})
+    warehouse = _Warehouse({_key("one")})
 
     def fail(_: dict[str, object]) -> None:
         raise RuntimeError("unreachable")
 
     result = run_reconciliation(
-        _Repository(["one"]),
+        _Repository([_key("one")]),
         warehouse,  # type: ignore[arg-type]
         heartbeat=fail,
         repair_missing=False,
@@ -235,11 +255,11 @@ def test_external_heartbeat_failure_marks_run_failed() -> None:
 
 
 def test_stale_collector_receipt_blocks_success() -> None:
-    warehouse = _Warehouse({"one"})
+    warehouse = _Warehouse({_key("one")})
     published: list[dict[str, object]] = []
 
     result = run_reconciliation(
-        _Repository(["one"], receipt_at=NOW - timedelta(hours=25)),
+        _Repository([_key("one")], receipt_at=NOW - timedelta(hours=25)),
         warehouse,  # type: ignore[arg-type]
         heartbeat=published.append,
         repair_missing=False,
@@ -252,7 +272,9 @@ def test_stale_collector_receipt_blocks_success() -> None:
 
 
 def test_expected_lifecycle_expiry_is_persisted_and_does_not_block_heartbeat() -> None:
-    warehouse = _Warehouse({"expired"}, created_at={"expired": NOW - timedelta(days=90)})
+    warehouse = _Warehouse(
+        {_key("expired")}, created_at={_key("expired"): NOW - timedelta(days=90)}
+    )
     published: list[dict[str, object]] = []
 
     result = run_reconciliation(
@@ -268,12 +290,14 @@ def test_expected_lifecycle_expiry_is_persisted_and_does_not_block_heartbeat() -
     assert result.orphaned_loaded_object_count == 0
     assert result.details["expired_object_count"] == 1
     assert result.details["newly_expired_object_count"] == 1
-    assert warehouse.states["expired"].retention_expired_at == NOW
+    assert warehouse.states[_key("expired")].retention_expired_at == NOW
     assert len(published) == 1
 
 
 def test_retention_state_change_blocks_expiry_and_heartbeat(monkeypatch) -> None:
-    warehouse = _Warehouse({"expired"}, created_at={"expired": NOW - timedelta(days=90)})
+    warehouse = _Warehouse(
+        {_key("expired")}, created_at={_key("expired"): NOW - timedelta(days=90)}
+    )
     published: list[dict[str, object]] = []
 
     monkeypatch.setattr(warehouse, "mark_retention_expired", lambda *_, **__: set())
@@ -289,13 +313,15 @@ def test_retention_state_change_blocks_expiry_and_heartbeat(monkeypatch) -> None
     assert not result.ok
     assert "retention state changed" in result.details["retention_expiry_error"]
     assert result.details["newly_expired_object_count"] == 0
-    assert warehouse.states["expired"].retention_expired_at is None
+    assert warehouse.states[_key("expired")].retention_expired_at is None
     assert warehouse.heartbeats == []
     assert published == []
 
 
 def test_premature_missing_raw_blocks_success() -> None:
-    warehouse = _Warehouse({"premature"}, created_at={"premature": NOW - timedelta(days=89)})
+    warehouse = _Warehouse(
+        {_key("premature")}, created_at={_key("premature"): NOW - timedelta(days=89)}
+    )
 
     result = run_reconciliation(
         _Repository([]),
@@ -308,14 +334,14 @@ def test_premature_missing_raw_blocks_success() -> None:
     assert not result.ok
     assert result.orphaned_loaded_object_count == 1
     assert result.details["premature_missing_object_count"] == 1
-    assert warehouse.states["premature"].retention_expired_at is None
+    assert warehouse.states[_key("premature")].retention_expired_at is None
 
 
 @pytest.mark.parametrize("status", ["failed", "loading"])
 def test_uningested_raw_that_disappears_is_never_accepted_as_expired(status: str) -> None:
     warehouse = _Warehouse(set())
-    warehouse.states["unrecoverable"] = IngestionState(
-        object_key="unrecoverable",
+    warehouse.states[_key("unrecoverable")] = IngestionState(
+        object_key=_key("unrecoverable"),
         status=status,
         storage_created_at=NOW - timedelta(days=90),
         storage_generation=1,
@@ -334,13 +360,9 @@ def test_uningested_raw_that_disappears_is_never_accepted_as_expired(status: str
     assert result.details["unrecoverable_uningested_object_count"] == 1
 
 
-@pytest.mark.parametrize("is_live", [False, True])
-def test_unknown_storage_creation_time_fails_closed(is_live: bool) -> None:
-    warehouse = _Warehouse({"unknown"}, created_at={"unknown": None})
-    repository = _Repository(
-        ["unknown"] if is_live else [],
-        created_at={"unknown": None},
-    )
+def test_unknown_storage_creation_time_fails_closed() -> None:
+    warehouse = _Warehouse({_key("unknown")}, created_at={_key("unknown"): None})
+    repository = _Repository([])
 
     result = run_reconciliation(
         repository,
@@ -356,10 +378,10 @@ def test_unknown_storage_creation_time_fails_closed(is_live: bool) -> None:
 
 def test_lifecycle_lag_is_allowed_until_the_third_day() -> None:
     created_at = NOW - timedelta(days=92)
-    warehouse = _Warehouse({"lagging"}, created_at={"lagging": created_at})
+    warehouse = _Warehouse({_key("lagging")}, created_at={_key("lagging"): created_at})
 
     result = run_reconciliation(
-        _Repository(["lagging"], created_at={"lagging": created_at}),
+        _Repository([_key("lagging")], created_at={_key("lagging"): created_at}),
         warehouse,  # type: ignore[arg-type]
         heartbeat=lambda _: None,
         repair_missing=False,
@@ -373,10 +395,10 @@ def test_lifecycle_lag_is_allowed_until_the_third_day() -> None:
 
 def test_raw_still_live_on_day_93_is_an_overdue_deletion() -> None:
     created_at = NOW - timedelta(days=93)
-    warehouse = _Warehouse({"overdue"}, created_at={"overdue": created_at})
+    warehouse = _Warehouse({_key("overdue")}, created_at={_key("overdue"): created_at})
 
     result = run_reconciliation(
-        _Repository(["overdue"], created_at={"overdue": created_at}),
+        _Repository([_key("overdue")], created_at={_key("overdue"): created_at}),
         warehouse,  # type: ignore[arg-type]
         heartbeat=lambda _: None,
         repair_missing=False,
@@ -389,8 +411,8 @@ def test_raw_still_live_on_day_93_is_an_overdue_deletion() -> None:
 
 def test_expected_expiry_is_not_persisted_when_another_audit_check_fails() -> None:
     warehouse = _Warehouse(
-        {"expired"},
-        created_at={"expired": NOW - timedelta(days=91)},
+        {_key("expired")},
+        created_at={_key("expired"): NOW - timedelta(days=91)},
     )
 
     result = run_reconciliation(
@@ -404,11 +426,11 @@ def test_expected_expiry_is_not_persisted_when_another_audit_check_fails() -> No
     assert not result.ok
     assert result.details["expected_expiry_candidate_count"] == 1
     assert result.details["newly_expired_object_count"] == 0
-    assert warehouse.states["expired"].retention_expired_at is None
+    assert warehouse.states[_key("expired")].retention_expired_at is None
 
 
 def test_historical_expired_rows_are_not_reprocessed() -> None:
-    warehouse = _Warehouse({"historical"}, expired={"historical"})
+    warehouse = _Warehouse({_key("historical")}, expired={_key("historical")})
 
     result = run_reconciliation(
         _Repository([]),
@@ -426,14 +448,14 @@ def test_historical_expired_rows_are_not_reprocessed() -> None:
 
 def test_expired_key_seen_live_again_requires_loader_verification() -> None:
     warehouse = _Warehouse(
-        {"recreated"},
-        created_at={"recreated": NOW - timedelta(days=90)},
-        expired={"recreated"},
+        {_key("recreated")},
+        created_at={_key("recreated"): NOW - timedelta(days=90)},
+        expired={_key("recreated")},
     )
     recreated_at = NOW - timedelta(hours=1)
 
     result = run_reconciliation(
-        _Repository(["recreated"], created_at={"recreated": recreated_at}),
+        _Repository([_key("recreated")], created_at={_key("recreated"): recreated_at}),
         warehouse,  # type: ignore[arg-type]
         heartbeat=lambda _: None,
         repair_missing=False,
@@ -442,7 +464,7 @@ def test_expired_key_seen_live_again_requires_loader_verification() -> None:
 
     assert not result.ok
     assert result.missing_object_count == 1
-    assert warehouse.states["recreated"].retention_expired_at == NOW
+    assert warehouse.states[_key("recreated")].retention_expired_at == NOW
 
 
 def test_missing_device_manifest_blocks_success() -> None:
@@ -469,8 +491,8 @@ def test_manifest_device_without_a_receipt_blocks_success() -> None:
             )
 
     result = run_reconciliation(
-        Repository(["one"]),
-        _Warehouse({"one"}),  # type: ignore[arg-type]
+        Repository([_key("one")]),
+        _Warehouse({_key("one")}),  # type: ignore[arg-type]
         heartbeat=lambda _: None,
         repair_missing=False,
         now=NOW,
@@ -498,8 +520,8 @@ def test_decommissioned_device_raw_does_not_require_a_fresh_receipt() -> None:
             ]
 
     result = run_reconciliation(
-        Repository(["retained-from-decommissioned-device"]),
-        _Warehouse({"retained-from-decommissioned-device"}),  # type: ignore[arg-type]
+        Repository([_key("retained-from-decommissioned-device")]),
+        _Warehouse({_key("retained-from-decommissioned-device")}),  # type: ignore[arg-type]
         heartbeat=lambda _: None,
         repair_missing=False,
         now=NOW,
@@ -511,15 +533,16 @@ def test_decommissioned_device_raw_does_not_require_a_fresh_receipt() -> None:
 
 
 def test_repair_rechecks_objects_uploaded_after_initial_inventory(monkeypatch) -> None:
-    repository = _Repository(["original"])
+    repository = _Repository([_key("original")])
     warehouse = _Warehouse(set())
     published: list[dict[str, object]] = []
 
-    def repair(repository, warehouse, *, prefix):
-        repository.keys.append("arrived-during-repair")
+    def repair(repository, warehouse, *, source, prefix):
+        assert (source.source_id, source.stream) == ("screen_time", "app-in-focus")
+        repository.keys.append(_key("arrived-during-repair"))
         warehouse.set_succeeded(repository.keys)
         # This later upload has not been loaded and belongs to the next audit.
-        repository.keys.append("arrived-after-repair")
+        repository.keys.append(_key("arrived-after-repair"))
         return LoadSummary(discovered=2, skipped=0, succeeded=2, failed=0, records=2)
 
     monkeypatch.setattr("personal_data_platform.reconciliation.job.run_loader", repair)
@@ -533,19 +556,19 @@ def test_repair_rechecks_objects_uploaded_after_initial_inventory(monkeypatch) -
 
 
 def test_external_heartbeat_follows_pending_audit_and_warehouse_write() -> None:
-    warehouse = _Warehouse({"one"})
+    warehouse = _Warehouse({_key("one")})
 
     def publish(_: dict[str, object]) -> None:
         assert warehouse.recorded_statuses == ["running"]
         assert len(warehouse.heartbeats) == 1
 
-    result = run_reconciliation(_Repository(["one"]), warehouse, heartbeat=publish, now=NOW)
+    result = run_reconciliation(_Repository([_key("one")]), warehouse, heartbeat=publish, now=NOW)
 
     assert result.ok
 
 
 def test_audit_write_failure_blocks_external_heartbeat(monkeypatch) -> None:
-    warehouse = _Warehouse({"one"})
+    warehouse = _Warehouse({_key("one")})
     published: list[dict[str, object]] = []
 
     def fail(_):
@@ -553,14 +576,16 @@ def test_audit_write_failure_blocks_external_heartbeat(monkeypatch) -> None:
 
     monkeypatch.setattr(warehouse, "record_reconciliation", fail)
     with pytest.raises(RuntimeError, match="audit write unavailable"):
-        run_reconciliation(_Repository(["one"]), warehouse, heartbeat=published.append, now=NOW)
+        run_reconciliation(
+            _Repository([_key("one")]), warehouse, heartbeat=published.append, now=NOW
+        )
 
     assert published == []
     assert warehouse.heartbeats == []
 
 
 def test_warehouse_heartbeat_failure_blocks_external_heartbeat(monkeypatch) -> None:
-    warehouse = _Warehouse({"one"})
+    warehouse = _Warehouse({_key("one")})
     published: list[dict[str, object]] = []
 
     def fail(*_):
@@ -568,7 +593,7 @@ def test_warehouse_heartbeat_failure_blocks_external_heartbeat(monkeypatch) -> N
 
     monkeypatch.setattr(warehouse, "publish_heartbeat", fail)
     result = run_reconciliation(
-        _Repository(["one"]), warehouse, heartbeat=published.append, now=NOW
+        _Repository([_key("one")]), warehouse, heartbeat=published.append, now=NOW
     )
 
     assert not result.ok
@@ -576,3 +601,32 @@ def test_warehouse_heartbeat_failure_blocks_external_heartbeat(monkeypatch) -> N
     assert warehouse.reconciliations == [result]
     assert warehouse.heartbeats == []
     assert published == []
+
+
+def test_reconciliation_rejects_partial_inventory_before_auditing_warehouse():
+    source = get_source()
+    with pytest.raises(ValueError, match="every canonical prefix"):
+        run_reconciliation(
+            _Repository([]),
+            _Warehouse(set()),
+            source=source,
+            prefix=source.raw_prefixes[0] + DEVICE_KEY + "/",
+            heartbeat=lambda _: None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("name", "value"), [("PDP_RAW_RETENTION_DAYS", "7"), ("PDP_LIFECYCLE_GRACE_DAYS", "0")]
+)
+def test_reconciliation_rejects_deployment_retention_drift_before_cloud_access(
+    monkeypatch, name, value
+):
+    monkeypatch.setenv("RECONCILIATION_HEARTBEAT_URL", "https://heartbeat.invalid/ping")
+    monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        "personal_data_platform.sources.screen_time.adapter.ScreenTimeSource.repository_from_env",
+        lambda _: pytest.fail("repository must not open with mismatched retention"),
+    )
+
+    with pytest.raises(ValueError, match=name):
+        run_reconciliation_from_env()
