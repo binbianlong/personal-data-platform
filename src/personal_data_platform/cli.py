@@ -11,19 +11,18 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from personal_data_platform.collectors.screen_time import (
-    BiomeScreenTimeSource,
-    ScreenTimeCollector,
-)
-from personal_data_platform.collectors.state import CollectorState
 from personal_data_platform.config import (
-    CollectorADCConfig,
-    CollectorConfig,
     ConfigurationError,
     GCSConfig,
 )
-from personal_data_platform.raw.screen_time import build_device_key
-from personal_data_platform.storage.gcs import GCSRawRepository
+from personal_data_platform.sources.screen_time.collector import (
+    BiomeScreenTimeSource,
+    ScreenTimeCollector,
+)
+from personal_data_platform.sources.screen_time.config import CollectorADCConfig, CollectorConfig
+from personal_data_platform.sources.screen_time.raw import build_device_key
+from personal_data_platform.sources.screen_time.state import CollectorState
+from personal_data_platform.sources.screen_time.storage import ScreenTimeGCSRepository
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,9 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     launch_agent.add_argument("--log-directory", type=Path)
 
-    commands.add_parser("loader", help="load pending GCS Raw into MotherDuck")
-    commands.add_parser("dbt", help="apply analytics models")
-    commands.add_parser("reconciliation", help="reconcile GCS and MotherDuck")
+    loader = commands.add_parser("loader", help="load pending GCS Raw into MotherDuck")
+    dbt = commands.add_parser("dbt", help="apply analytics models")
+    reconciliation = commands.add_parser("reconciliation", help="reconcile GCS and MotherDuck")
     commands.add_parser("preflight", help="validate cloud runtime connectivity")
     rebuild = commands.add_parser("rebuild", help="rebuild a scratch MotherDuck database")
     rebuild_mode = rebuild.add_mutually_exclusive_group(required=True)
@@ -70,8 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild.add_argument(
         "--allow-partial-history",
         action="store_true",
-        help="acknowledge that only Raw retained for 90 days can be rebuilt",
+        help="acknowledge that only currently retained Raw can be rebuilt",
     )
+    for command in (loader, dbt, reconciliation, rebuild):
+        command.add_argument("--source", dest="source_id", help="registered data source")
+        command.add_argument("--stream", help="registered stream within the selected source")
     return parser
 
 
@@ -104,15 +106,15 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "loader":
         from personal_data_platform.loader.job import run_loader_from_env
 
-        return _run_job(run_loader_from_env)
+        return _run_job(run_loader_from_env, source_id=args.source_id, stream=args.stream)
     if args.command == "dbt":
         from personal_data_platform.dbt_runner import run_dbt_from_env
 
-        return _run_job(run_dbt_from_env)
+        return _run_job(run_dbt_from_env, source_id=args.source_id, stream=args.stream)
     if args.command == "reconciliation":
         from personal_data_platform.reconciliation.job import run_reconciliation_from_env
 
-        return _run_job(run_reconciliation_from_env)
+        return _run_job(run_reconciliation_from_env, source_id=args.source_id, stream=args.stream)
     if args.command == "preflight":
         from personal_data_platform.preflight import run_preflight_from_env
 
@@ -125,6 +127,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             target_db=args.target_db,
             allow_partial_history=args.allow_partial_history,
+            source_id=args.source_id,
+            stream=args.stream,
         )
     raise RuntimeError(f"unsupported command: {args.command}")
 
@@ -244,7 +248,7 @@ def _run_collect(*, watch: bool) -> int:
     collector = ScreenTimeCollector(
         source=_source(config),
         state=CollectorState(config.state_db_path),
-        uploader=GCSRawRepository.from_config(config.gcs),
+        uploader=ScreenTimeGCSRepository.from_config(config.gcs),
         pseudonym_key=config.pseudonym_key,
         allowed_device_keys=config.device_allowlist,
     )
@@ -268,7 +272,10 @@ def _write_launch_agent(
     python_executable: Path,
     log_directory: Path | None,
 ) -> int:
-    from personal_data_platform.launchd import LaunchAgentSettings, write_launch_agent
+    from personal_data_platform.sources.screen_time.launchd import (
+        LaunchAgentSettings,
+        write_launch_agent,
+    )
 
     settings = LaunchAgentSettings.from_env(
         project_root=project_root,

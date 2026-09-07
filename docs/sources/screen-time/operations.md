@@ -140,3 +140,13 @@ Reconciliationはactive-device manifestまたはmanifest内deviceのscan receipt
 失敗にする。新しいeventがないことだけを障害とみなさず、complete scanの成功証跡を使用する。
 
 Loader、通知、rebuildは[`Platform運用`](../../platform/operations.md)に従う。
+
+
+## 他streamとの共存
+
+このCollectorのstate DB、active-device manifestとreceiptはiPhoneの`app-in-focus`取得専用である。
+Mac自身のScreen Timeを別Collectorで取得する場合は、stateとcontrol objectを別に所有する。
+別Collectorから同じmanifestを上書きしたり、iPhoneのscan成功で別streamの稼働を証明したりしない。
+
+Loader・監査・再構築は`--source screen_time --stream app-in-focus`でこのstreamを明示できる。
+共通runtimeの更新順序は[`Platform運用`](../../platform/operations.md#更新時の互換性)に従う。

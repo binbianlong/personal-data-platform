@@ -11,7 +11,7 @@ import pytest
 
 from personal_data_platform.config import ConfigurationError
 from personal_data_platform.entrypoint import main
-from personal_data_platform.launchd import (
+from personal_data_platform.sources.screen_time.launchd import (
     LAUNCH_AGENT_LABEL,
     LaunchAgentSettings,
     build_launch_agent,
@@ -173,7 +173,7 @@ def test_python_executable_preserves_virtual_environment_path(tmp_path, monkeypa
     virtualenv_python.parent.mkdir(parents=True)
     virtualenv_python.symlink_to(sys.executable)
     monkeypatch.setattr(
-        "personal_data_platform.launchd._validate_python_runtime",
+        "personal_data_platform.sources.screen_time.launchd._validate_python_runtime",
         lambda *_: None,
     )
 

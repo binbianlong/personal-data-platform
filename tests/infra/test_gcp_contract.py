@@ -23,17 +23,22 @@ def _workflow_step_script(relative_path: str, step_name: str) -> str:
 def test_runtime_uses_only_approved_jobs_and_schedules() -> None:
     jobs = _read("infra/terraform/jobs.tf")
     scheduler = _read("infra/terraform/scheduler.tf")
+    sources = _read("infra/terraform/sources.tf")
 
-    for role in ("preflight", "loader", "dbt", "reconciliation"):
+    for role in ("preflight", "dbt"):
         assert f"    {role} = {{" in jobs
-    assert "cloudtasks" not in (jobs + scheduler).lower()
-    assert "webhook" not in (jobs + scheduler).lower()
-    assert "fetch" not in (jobs + scheduler).lower()
+    assert 'for role in ["loader", "reconciliation"]' in sources
+    assert "runtime_jobs = merge(local.shared_jobs, local.ingestion_jobs)" in jobs
+    assert "for key, job in local.ingestion_jobs" in scheduler
+    assert "cloudtasks" not in (jobs + sources + scheduler).lower()
+    assert "webhook" not in (jobs + sources + scheduler).lower()
+    assert "fetch" not in (jobs + sources + scheduler).lower()
     assert 'default     = "15 * * * *"' in _read("infra/terraform/variables.tf")
     assert 'default     = "30 4 * * *"' in _read("infra/terraform/variables.tf")
     assert 'default     = "Asia/Tokyo"' in _read("infra/terraform/variables.tf")
     assert "PREFLIGHT_MOTHERDUCK_DATABASE = var.preflight_motherduck_database" in jobs
-    assert 'RECONCILIATION_HEARTBEAT_URL = "healthchecks_ping_url"' in jobs
+    assert 'RECONCILIATION_HEARTBEAT_URL = key == "screen_time_app_in_focus"' in sources
+    assert '? "healthchecks_ping_url" : "${key}_heartbeat"' in sources
 
 
 def test_preflight_uses_an_isolated_gcs_bucket_and_token() -> None:
@@ -137,9 +142,12 @@ def test_runtime_uses_fixed_gcs_buckets_without_a_prefix_override() -> None:
     jobs = _read("infra/terraform/jobs.tf")
     variables = _read("infra/terraform/variables.tf")
 
+    sources = _read("infra/terraform/sources.tf")
     assert jobs.count("GCS_PREFLIGHT_BUCKET") == 1
-    assert jobs.count("GCS_BUCKET") == 3
-    assert "B2_RAW_PREFIX" not in jobs
+    assert "GCS_BUCKET                    = local.raw_bucket_name" in jobs
+    assert "GCS_BUCKET               = local.raw_bucket_name" in sources
+    assert "GCS_PREFLIGHT_BUCKET" not in sources
+    assert "B2_RAW_PREFIX" not in jobs + sources
     assert 'variable "preflight_b2_prefix"' not in variables
 
 
@@ -155,9 +163,16 @@ def test_raw_bucket_is_standard_and_permanently_deletes_segments_after_90_days()
     assert "uniform_bucket_level_access = true" in raw
     assert 'public_access_prevention    = "enforced"' in raw
     assert 'type = "Delete"' in raw
-    assert "age            = 90" in raw
-    assert "matches_prefix = [local.raw_object_prefix]" in raw
-    assert 'matches_suffix = [".segb.gz"]' in raw
+    sources = _read("infra/terraform/sources.tf")
+    default_pipeline = sources.split("screen_time_app_in_focus = {", 1)[1].split("\n    }", 1)[0]
+    assert 'raw_prefixes            = ["raw/screen_time/v1/"]' in default_pipeline
+    assert 'raw_suffixes            = [".segb.gz"]' in default_pipeline
+    assert "retention_days          = 90" in default_pipeline
+    assert "for_each = local.ingestion_pipelines" in raw
+    assert "age            = lifecycle_rule.value.retention_days" in raw
+    assert "matches_prefix = lifecycle_rule.value.raw_prefixes" in raw
+    assert "matches_suffix = lifecycle_rule.value.raw_suffixes" in raw
+    assert "condition     = local.compatible_raw_retention" in raw
     assert "retention_duration_seconds = 0" in raw
     assert "prevent_destroy = true" in raw
     assert "versioning" not in raw
@@ -186,8 +201,11 @@ def test_bucket_iam_is_authoritative_and_service_specific() -> None:
     assert "google_storage_bucket_iam_member" not in storage
     assert 'permissions = ["storage.objects.create"]' in roles
     assert 'role = "roles/storage.objectViewer"' in storage
-    assert 'google_service_account.runtime["loader"]' in storage
-    assert 'google_service_account.runtime["reconciliation"]' in storage
+    assert "for key in keys(local.ingestion_jobs)" in storage
+    assert "google_service_account.runtime[key].email" in storage
+    assert "members = binding.value.raw_creator_members" in storage
+    assert "for prefix in binding.value.raw_prefixes" in storage
+    assert "for suffix in binding.value.raw_suffixes" in storage
     assert "google_service_account.rebuild_operator" in storage
     assert "collector_raw_create_only" in storage
     assert "collector_control_state_only" in storage

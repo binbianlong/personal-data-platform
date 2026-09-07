@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from personal_data_platform.raw.models import RawObject
 from personal_data_platform.recovery.rebuild import (
     rebuild_inventory,
     require_empty_rebuild_target,
@@ -15,7 +17,24 @@ from personal_data_platform.recovery.rebuild import (
     run_rebuild_from_env,
     validate_rebuild_target,
 )
+from personal_data_platform.sources.registry import get_source
+from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+
+
+def _raw(
+    name: str, subject: str, observed_at: datetime, created_at: datetime, *, generation: int = 1
+) -> RawObject:
+    identity = ScreenTimeRawIdentity(
+        device_key=hashlib.sha256(subject.encode()).hexdigest(),
+        stream="app-in-focus",
+        segment_key=hashlib.sha256(name.encode()).hexdigest(),
+        observed_at=observed_at,
+        sha256="c" * 64,
+    )
+    return get_source().parse_raw_key(
+        identity.object_key, storage_created_at=created_at, storage_generation=generation
+    )
 
 
 def _configure_rebuild_adc(tmp_path: Path, monkeypatch) -> Path:
@@ -44,30 +63,9 @@ def _configure_rebuild_adc(tmp_path: Path, monkeypatch) -> Path:
 def test_rebuild_inventory_is_order_independent() -> None:
     first = datetime(2026, 8, 26, tzinfo=UTC)
     observations = [
-        SimpleNamespace(
-            key="later",
-            device_key="a",
-            stream="app-in-focus",
-            segment_key="one",
-            observed_at=first + timedelta(days=1),
-            storage_created_at=first + timedelta(days=2),
-        ),
-        SimpleNamespace(
-            key="first",
-            device_key="a",
-            stream="app-in-focus",
-            segment_key="one",
-            observed_at=first,
-            storage_created_at=first + timedelta(hours=1),
-        ),
-        SimpleNamespace(
-            key="second-device",
-            device_key="b",
-            stream="app-in-focus",
-            segment_key="two",
-            observed_at=first,
-            storage_created_at=first + timedelta(hours=2),
-        ),
+        _raw("one", "a", first + timedelta(days=1), first + timedelta(days=2)),
+        _raw("one", "a", first, first + timedelta(hours=1)),
+        _raw("two", "b", first, first + timedelta(hours=2)),
     ]
 
     inventory = rebuild_inventory(observations)
@@ -129,12 +127,13 @@ def test_rebuild_dry_run_uses_canonical_raw_prefix(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setenv("GCS_RAW_PREFIX", "test/not-screen-time/")
 
-    def repository_from_env():
+    def repository_from_env(**_):
         assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == str(rebuild_adc.resolve())
         return Repository()
 
     monkeypatch.setattr(
-        "personal_data_platform.storage.gcs.GCSRawRepository.from_env", repository_from_env
+        "personal_data_platform.sources.screen_time.storage.ScreenTimeGCSRepository.from_env",
+        repository_from_env,
     )
 
     assert run_rebuild_from_env(dry_run=True, target_db=None) == 0
@@ -164,8 +163,8 @@ def test_rebuild_uses_scratch_credentials_and_restores_environment(monkeypatch, 
         connections.append(config)
         return connect(WarehouseConfig(":memory:"))
 
-    def transform(*, target):
-        dbt_calls.append(target)
+    def transform(*, target, selector):
+        dbt_calls.append((target, selector))
         assert os.environ["MOTHERDUCK_DATABASE"] == "scratch_database"
         assert os.environ["MOTHERDUCK_TOKEN"] == "scratch_token"
         if dbt_fails:
@@ -190,7 +189,7 @@ def test_rebuild_uses_scratch_credentials_and_restores_environment(monkeypatch, 
         assert rebuild() == 0
 
     assert connections == [WarehouseConfig(database="scratch_database", token="scratch_token")]
-    assert dbt_calls == ["prod"]
+    assert dbt_calls == [("prod", get_source().dbt_selector)]
     assert os.environ["MOTHERDUCK_DATABASE"] == "ambient_database"
     assert os.environ["MOTHERDUCK_TOKEN"] == "ambient_token"
 
@@ -209,16 +208,7 @@ def test_rebuild_uses_one_inventory_and_fails_if_a_listed_generation_disappears(
     monkeypatch,
 ) -> None:
     observed_at = datetime(2026, 8, 27, tzinfo=UTC)
-    raw = SimpleNamespace(
-        key="raw/disappeared.segb.gz",
-        device_key="a" * 64,
-        stream="app-in-focus",
-        segment_key="b" * 64,
-        observed_at=observed_at,
-        sha256="c" * 64,
-        storage_created_at=observed_at,
-        storage_generation=9,
-    )
+    raw = _raw("disappeared", "a", observed_at, observed_at, generation=9)
 
     class Repository:
         def __init__(self) -> None:
@@ -249,3 +239,132 @@ def test_rebuild_uses_one_inventory_and_fails_if_a_listed_generation_disappears(
         == 1
     )
     assert repository.list_calls == 1
+
+
+def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(monkeypatch):
+    import gzip
+    from dataclasses import replace
+
+    from personal_data_platform.sources.contracts import SourceHealth
+
+    observed_at = datetime(2026, 8, 27, tzinfo=UTC)
+    payload = b"synthetic-payload"
+    observations = [
+        RawObject(
+            key=f"raw/synthetic/v{version}/metrics/account/day.json.gz",
+            source_id="synthetic",
+            schema_version=version,
+            subject_key="account",
+            stream="metrics",
+            logical_key="day",
+            observed_at=observed_at,
+            sha256=hashlib.sha256(payload).hexdigest(),
+            storage_created_at=observed_at,
+            storage_generation=version + 10,
+        )
+        for version in (1, 2)
+    ]
+    listed = []
+    read = []
+    written = []
+    dbt_calls = []
+
+    class Batch:
+        parser_version = "synthetic-1"
+        record_count = 1
+
+        def write(self, connection, raw, *, byte_size, loaded_at):
+            written.append(raw)
+
+    class Source:
+        source_id = "synthetic"
+        stream = "metrics"
+        schema_versions = (1, 2)
+        raw_prefixes = ("raw/synthetic/v1/metrics/", "raw/synthetic/v2/metrics/")
+        raw_suffixes = (".json.gz",)
+        retention_days = 7
+        lifecycle_grace_days = 2
+        required_relations = ()
+        dbt_selector = "tag:synthetic_metrics"
+        monitor_name = "synthetic_metrics_reconciliation"
+
+        def validate_raw_key(self, key):
+            assert key.startswith(self.raw_prefixes)
+
+        def parse_raw_key(self, key, *, storage_created_at, storage_generation):
+            return replace(
+                next(raw for raw in observations if raw.key == key),
+                storage_created_at=storage_created_at,
+                storage_generation=storage_generation,
+            )
+
+        def decode(self, raw, value):
+            assert value == payload
+            return Batch()
+
+        def legacy_scope(self, raw):
+            return None
+
+        def audit(self, repository, values, now):
+            return SourceHealth(ok=True, details={})
+
+        def inventory(self, values):
+            return {"synthetic_count": len(values)}
+
+    class Repository:
+        def list_raw(self, prefix):
+            listed.append(prefix)
+            return [raw for raw in observations if raw.key.startswith(prefix)]
+
+        def get_raw(self, key, *, generation):
+            read.append((key, generation))
+            return gzip.compress(payload)
+
+    source = Source()
+    monkeypatch.setattr(
+        "personal_data_platform.recovery.rebuild.connect",
+        lambda config: connect(WarehouseConfig(":memory:")),
+    )
+    monkeypatch.setattr(
+        "personal_data_platform.recovery.rebuild.run_dbt",
+        lambda **kwargs: dbt_calls.append(kwargs),
+    )
+
+    assert (
+        run_rebuild(
+            Repository(),
+            target_db="scratch_database",
+            token="scratch_token",
+            production_db="production_database",
+            allow_partial_history=True,
+            source=source,
+        )
+        == 0
+    )
+
+    assert listed == list(source.raw_prefixes)
+    assert read == [(raw.key, raw.storage_generation) for raw in observations]
+    assert written == observations
+    assert dbt_calls == [{"target": "prod", "selector": source.dbt_selector}]
+    inventory = rebuild_inventory(observations, source=source)
+    assert inventory["source_id"] == "synthetic"
+    assert inventory["stream"] == "metrics"
+    assert inventory["schema_versions"] == [1, 2]
+    assert inventory["retention_days"] == 7
+    assert inventory["subject_count"] == inventory["scope_count"] == 1
+    assert inventory["synthetic_count"] == 2
+    assert "device_count" not in inventory
+
+
+@pytest.mark.parametrize(
+    ("name", "value"), [("PDP_RAW_RETENTION_DAYS", "7"), ("PDP_LIFECYCLE_GRACE_DAYS", "0")]
+)
+def test_rebuild_rejects_deployment_retention_drift_before_cloud_access(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        "personal_data_platform.sources.screen_time.adapter.ScreenTimeSource.repository_from_env",
+        lambda _: pytest.fail("repository must not open with mismatched retention"),
+    )
+
+    with pytest.raises(ValueError, match=name):
+        run_rebuild_from_env(dry_run=True, target_db=None)

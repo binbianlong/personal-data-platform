@@ -1,14 +1,9 @@
 locals {
   scheduled_jobs = {
-    loader = {
-      name        = "screen-time-loader-hourly"
-      schedule    = var.loader_schedule
-      description = "Run the Screen Time loader at minute 15 of every hour"
-    }
-    reconciliation = {
-      name        = "reconciliation-daily"
-      schedule    = var.reconciliation_schedule
-      description = "Run full reconciliation every day at 04:30 Asia/Tokyo"
+    for key, job in local.ingestion_jobs : key => {
+      name        = job.scheduler_name
+      schedule    = job.schedule
+      description = "Run ${job.role} for ${job.source_id}/${job.stream}"
     }
   }
 }

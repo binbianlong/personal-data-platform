@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from personal_data_platform.raw.screen_time import (
+from personal_data_platform.sources.screen_time.raw import (
     APP_IN_FOCUS_STREAM,
     ScreenTimeRawIdentity,
     build_device_key,
@@ -82,9 +82,9 @@ def test_parse_raw_object_key_round_trips_identity() -> None:
     )
 
     assert parsed.key == identity.object_key
-    assert parsed.device_key == identity.device_key
+    assert parsed.subject_key == identity.device_key
     assert parsed.stream == identity.stream
-    assert parsed.segment_key == identity.segment_key
+    assert parsed.logical_key == identity.segment_key
     assert parsed.observed_at == identity.observed_at
     assert parsed.sha256 == identity.sha256
     assert parsed.storage_created_at == OBSERVED_AT

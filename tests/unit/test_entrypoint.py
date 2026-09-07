@@ -29,7 +29,8 @@ def test_loader_command_lazily_calls_job(monkeypatch) -> None:
     calls = []
     fake_module = types.ModuleType("personal_data_platform.loader.job")
 
-    def run_loader_from_env() -> int:
+    def run_loader_from_env(*, source_id=None, stream=None) -> int:
+        assert (source_id, stream) == (None, None)
         calls.append("loader")
         return 0
 
@@ -44,7 +45,8 @@ def test_dbt_command_lazily_calls_job(monkeypatch) -> None:
     calls = []
     fake_module = types.ModuleType("personal_data_platform.dbt_runner")
 
-    def run_dbt_from_env() -> int:
+    def run_dbt_from_env(*, source_id=None, stream=None) -> int:
+        assert (source_id, stream) == (None, None)
         calls.append("dbt")
         return 0
 
@@ -75,7 +77,10 @@ def test_operational_command_lazily_calls_job(
     calls = []
     fake_module = types.ModuleType(module_name)
 
-    def run_job() -> int:
+    def run_job(**kwargs) -> int:
+        assert kwargs == (
+            {"source_id": None, "stream": None} if command == "reconciliation" else {}
+        )
         calls.append(command)
         return 0
 
@@ -91,8 +96,14 @@ def test_rebuild_passes_selected_mode(monkeypatch) -> None:
     fake_module = types.ModuleType("personal_data_platform.recovery.rebuild")
 
     def run_rebuild_from_env(
-        *, dry_run: bool, target_db: str | None, allow_partial_history: bool
+        *,
+        dry_run: bool,
+        target_db: str | None,
+        allow_partial_history: bool,
+        source_id=None,
+        stream=None,
     ) -> int:
+        assert (source_id, stream) == (None, None)
         calls.append((dry_run, target_db, allow_partial_history))
         return 0
 
@@ -104,3 +115,49 @@ def test_rebuild_passes_selected_mode(monkeypatch) -> None:
 
     assert main(["rebuild", "--target-db", "scratch", "--allow-partial-history"]) == 0
     assert calls[-1] == (False, "scratch", True)
+
+
+@pytest.mark.parametrize(
+    ("command", "module_name", "function_name", "mode"),
+    [
+        ("loader", "personal_data_platform.loader.job", "run_loader_from_env", []),
+        (
+            "reconciliation",
+            "personal_data_platform.reconciliation.job",
+            "run_reconciliation_from_env",
+            [],
+        ),
+        (
+            "rebuild",
+            "personal_data_platform.recovery.rebuild",
+            "run_rebuild_from_env",
+            ["--dry-run"],
+        ),
+        ("dbt", "personal_data_platform.dbt_runner", "run_dbt_from_env", []),
+    ],
+)
+def test_cli_passes_explicit_source_and_stream(
+    monkeypatch, command, module_name, function_name, mode
+):
+    calls = []
+    fake = types.ModuleType(module_name)
+
+    def run_job(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    setattr(fake, function_name, run_job)
+    monkeypatch.setitem(sys.modules, module_name, fake)
+    assert main([command, *mode, "--source", "synthetic", "--stream", "daily"]) == 0
+    assert calls[0]["source_id"] == "synthetic"
+    assert calls[0]["stream"] == "daily"
+
+
+def test_unknown_source_is_rejected_before_cloud_access(monkeypatch, capsys):
+    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+
+    monkeypatch.setattr(
+        ScreenTimeSource, "repository_from_env", lambda self: pytest.fail("cloud accessed")
+    )
+    assert main(["loader", "--source", "unknown"]) == 1
+    assert "unsupported source" in capsys.readouterr().err

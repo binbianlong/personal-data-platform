@@ -4,8 +4,12 @@ import struct
 import zlib
 from datetime import UTC, datetime
 
-from personal_data_platform.loader.models import RawObject
-from personal_data_platform.loader.parser import parse_segb_bytes
+from personal_data_platform.sources.screen_time.parser import parse_segb_bytes
+from personal_data_platform.sources.screen_time.raw import (
+    ScreenTimeRawIdentity,
+    parse_raw_object_key,
+    sha256_hex,
+)
 
 
 def _varint(value: int) -> bytes:
@@ -55,13 +59,15 @@ def _segb_v2_with_written_and_deleted(payload: bytes) -> bytes:
 
 def test_pinned_ccl_segb_decodes_shared_offset_trailer_entries() -> None:
     segment = _segb_v2_with_written_and_deleted(_app_in_focus_payload())
-    raw = RawObject(
-        key="raw/screen_time/v1/device/app-in-focus/segment/time/hash.segb.gz",
-        device_key="device",
+    identity = ScreenTimeRawIdentity(
+        device_key="b" * 64,
         stream="app-in-focus",
-        segment_key="segment",
+        segment_key="c" * 64,
         observed_at=datetime(2026, 8, 27, tzinfo=UTC),
-        sha256="a" * 64,
+        sha256=sha256_hex(segment),
+    )
+    raw = parse_raw_object_key(
+        identity.object_key,
         storage_created_at=datetime(2026, 8, 27, 1, tzinfo=UTC),
         storage_generation=1,
     )

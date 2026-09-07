@@ -17,9 +17,6 @@ class ReconciliationResult:
     missing_object_count: int
     failed_object_count: int
     orphaned_loaded_object_count: int
-    collector_receipt_count: int
-    stale_collector_count: int
-    missing_collector_receipt_count: int
     missing_relations: tuple[str, ...] = ()
     failed_relation_queries: tuple[str, ...] = ()
     details: dict[str, object] = field(default_factory=dict)
@@ -27,3 +24,15 @@ class ReconciliationResult:
     @property
     def ok(self) -> bool:
         return self.status == "succeeded"
+
+    @property
+    def collector_receipt_count(self) -> int:
+        return int(self.details.get("collector_receipt_count", 0))
+
+    @property
+    def stale_collector_count(self) -> int:
+        return int(self.details.get("stale_collector_count", 0))
+
+    @property
+    def missing_collector_receipt_count(self) -> int:
+        return int(self.details.get("missing_collector_receipt_count", 0))

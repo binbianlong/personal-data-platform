@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from personal_data_platform.raw.models import RawObject
+
 APP_IN_FOCUS_STREAM = "app-in-focus"
 RAW_PREFIX = "raw/screen_time/v1"
 _DEVICE_DOMAIN = b"screen-time/device/v1\0"
@@ -119,26 +121,6 @@ class ScreenTimeRawIdentity:
 
 
 @dataclass(frozen=True, slots=True)
-class RawObservationRef:
-    """Screen Time observation metadata returned by object-storage listing."""
-
-    key: str
-    device_key: str
-    stream: str
-    segment_key: str
-    observed_at: datetime
-    sha256: str
-    storage_created_at: datetime
-    storage_generation: int
-
-    def __post_init__(self) -> None:
-        if self.storage_created_at.tzinfo is None or self.storage_created_at.utcoffset() is None:
-            raise ValueError("storage_created_at must be timezone-aware")
-        if self.storage_generation < 1:
-            raise ValueError("storage_generation must be positive")
-
-
-@dataclass(frozen=True, slots=True)
 class CollectorScanReceipt:
     """Mutable liveness receipt for one pseudonymized iPhone collector scope."""
 
@@ -240,14 +222,16 @@ class CollectorDeviceManifest:
 
 def parse_raw_object_key(
     key: str, *, storage_created_at: datetime, storage_generation: int
-) -> RawObservationRef:
+) -> RawObject:
     """Parse a canonical Screen Time v1 Raw key and its storage creation time."""
     values = _match_raw_object_key(key).groupdict()
-    return RawObservationRef(
+    return RawObject(
         key=key,
-        device_key=values["device_key"],
+        source_id="screen_time",
+        schema_version=1,
+        subject_key=values["device_key"],
         stream=values["stream"],
-        segment_key=values["segment_key"],
+        logical_key=values["segment_key"],
         observed_at=parse_observed_at(values["observed_at"]),
         sha256=values["sha256"],
         storage_created_at=storage_created_at,

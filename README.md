@@ -1,6 +1,10 @@
 # Personal Data Platform
 
-個人データ基盤を構築するためのPythonプロジェクト。
+個人データの取得、Raw保存、MotherDuckへの取込、dbt分析を行うPythonプロジェクト。
+
+Loader、監査、再構築はsourceとstreamを選んで実行する。実データを取得するsourceは現在iPhoneのScreen Time
+`App.InFocus`のみで、Mac自身のScreen TimeとFitbitは未実装である。共通処理とsourceの分離・追加手順は
+[`アーキテクチャ`](docs/platform/architecture.md)を参照する。
 
 ## 開発環境
 
@@ -34,6 +38,10 @@ pdp rebuild --dry-run
 pdp rebuild --target-db <scratch-database> --allow-partial-history
 pdp preflight
 ```
+
+`loader`、`reconciliation`、`rebuild`は指定を省略すると既存iPhoneの`screen_time / app-in-focus`を対象にする。
+明示する場合は`--source screen_time --stream app-in-focus`を付ける。複数streamを持つsourceは`--stream`が必要で、
+未登録の組合せは拒否する。`pdp dbt`は指定なしでは全model、source / stream指定時は対応するmodelとtestを実行する。
 
 未実装の`webhook`と`fetch`はcommandとして受理しない。
 
