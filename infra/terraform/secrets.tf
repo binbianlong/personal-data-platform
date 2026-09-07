@@ -1,5 +1,5 @@
 locals {
-  runtime_secrets = {
+  runtime_secrets = merge({
     motherduck_token = {
       secret_id = "motherduck-token"
     }
@@ -9,7 +9,11 @@ locals {
     healthchecks_ping_url = {
       secret_id = "healthchecks-ping-url"
     }
-  }
+    }, {
+    for key, pipeline in var.additional_ingestion_pipelines : "${key}_heartbeat" => {
+      secret_id = "pdp-${replace(key, "_", "-")}-heartbeat"
+    }
+  })
 
 }
 

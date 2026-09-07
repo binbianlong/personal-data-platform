@@ -1,5 +1,5 @@
 locals {
-  runtime_jobs = {
+  shared_jobs = {
     preflight = {
       name        = "platform-preflight"
       role        = "preflight"
@@ -21,25 +21,6 @@ locals {
         MOTHERDUCK_TOKEN = "motherduck_preflight_token"
       }
     }
-    loader = {
-      name        = "screen-time-loader"
-      role        = "loader"
-      timeout     = "3600s"
-      max_retries = 2
-      resources = {
-        cpu    = "1"
-        memory = "1Gi"
-      }
-      environment = {
-        APP_ENV              = "production"
-        GCS_BUCKET           = local.raw_bucket_name
-        GOOGLE_CLOUD_PROJECT = var.project_id
-        MOTHERDUCK_DATABASE  = var.motherduck_database
-      }
-      secrets = {
-        MOTHERDUCK_TOKEN = "motherduck_token"
-      }
-    }
     dbt = {
       name        = "dbt-runner"
       role        = "dbt"
@@ -57,27 +38,10 @@ locals {
         MOTHERDUCK_TOKEN = "motherduck_token"
       }
     }
-    reconciliation = {
-      name        = "reconciliation"
-      role        = "reconciliation"
-      timeout     = "3600s"
-      max_retries = 1
-      resources = {
-        cpu    = "1"
-        memory = "1Gi"
-      }
-      environment = {
-        APP_ENV              = "production"
-        GCS_BUCKET           = local.raw_bucket_name
-        GOOGLE_CLOUD_PROJECT = var.project_id
-        MOTHERDUCK_DATABASE  = var.motherduck_database
-      }
-      secrets = {
-        RECONCILIATION_HEARTBEAT_URL = "healthchecks_ping_url"
-        MOTHERDUCK_TOKEN             = "motherduck_token"
-      }
-    }
+
   }
+
+  runtime_jobs = merge(local.shared_jobs, local.ingestion_jobs)
 
   job_secret_access = merge([
     for job_key, job in local.runtime_jobs : {
@@ -174,7 +138,7 @@ resource "google_cloud_run_v2_job" "runtime" {
       containers {
         name  = each.value.name
         image = var.image_uri
-        args  = [each.value.role]
+        args  = lookup(each.value, "args", [each.value.role])
 
         resources {
           limits = each.value.resources
