@@ -295,6 +295,7 @@ def _print_collection_stats(stats: Any) -> None:
                 "uploaded": stats.uploaded,
                 "skipped": stats.skipped,
                 "retried": stats.retried,
+                "deferred": stats.deferred,
             },
             sort_keys=True,
         ),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from collections.abc import Callable
@@ -68,6 +69,7 @@ class CollectionStats:
     uploaded: int = 0
     skipped: int = 0
     retried: int = 0
+    deferred: int = 0
 
 
 class BiomeScreenTimeSource:
@@ -105,15 +107,37 @@ class BiomeScreenTimeSource:
 
     def list_segments(self, device: IPhoneDevice) -> list[tuple[Path, str]]:
         directory = self.device_directory(device)
-        if not directory.is_dir():
-            return []
         segments: list[tuple[Path, str]] = []
-        for path in directory.rglob("*"):
-            if path.is_symlink() or not path.is_file():
-                continue
-            relative_path = path.relative_to(directory).as_posix()
-            segments.append((path, relative_path))
+        directories = [directory]
+        try:
+            while directories:
+                with os.scandir(directories.pop()) as entries:
+                    for entry in entries:
+                        if entry.is_dir(follow_symlinks=False):
+                            directories.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            path = Path(entry.path)
+                            segments.append((path, path.relative_to(directory).as_posix()))
+        except OSError as error:
+            raise CollectorSourceError("failed to enumerate Screen Time segments") from error
         return sorted(segments, key=lambda item: item[1])
+
+
+def select_completed_segments(segments: list[tuple[Path, str]]) -> list[tuple[Path, str]]:
+    """Treat a numeric segment as complete only when its directory has a newer one."""
+    newest: dict[Path, int] = {}
+    numbered: list[tuple[Path, str, int]] = []
+    for path, relative_path in segments:
+        if not path.name.isascii() or not path.name.isdecimal():
+            raise CollectorSourceError("cannot determine completion of a non-numeric segment name")
+        number = int(path.name)
+        numbered.append((path, relative_path, number))
+        newest[path.parent] = max(newest.get(path.parent, number), number)
+    return [
+        (path, relative_path)
+        for path, relative_path, number in numbered
+        if number < newest[path.parent]
+    ]
 
 
 class ScreenTimeCollector:
@@ -187,12 +211,14 @@ class ScreenTimeCollector:
         segment_count = 0
         device_segment_counts: dict[str, int] = {}
         skipped = 0
+        deferred = 0
         for device in devices:
             device_key = build_device_key(self._pseudonym_key, device.identifier)
-            current_device_segment_count = 0
-            for path, relative_path in self._source.list_segments(device):
-                segment_count += 1
-                current_device_segment_count += 1
+            segments = self._source.list_segments(device)
+            completed_segments = select_completed_segments(segments)
+            segment_count += len(segments)
+            deferred += len(segments) - len(completed_segments)
+            for path, relative_path in completed_segments:
                 raw_bytes = _read_stable_bytes(path)
                 segment_key = build_segment_key(
                     self._pseudonym_key,
@@ -212,7 +238,7 @@ class ScreenTimeCollector:
                     continue
                 self._upload(observation)
                 uploaded += 1
-            device_segment_counts[device_key] = current_device_segment_count
+            device_segment_counts[device_key] = len(segments)
 
         stats = CollectionStats(
             devices=len(devices),
@@ -220,6 +246,7 @@ class ScreenTimeCollector:
             uploaded=uploaded,
             skipped=skipped,
             retried=retried,
+            deferred=deferred,
         )
         completed_at = self._clock()
         for device in devices:
