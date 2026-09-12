@@ -23,8 +23,22 @@ pdp screen-time collect --once   1回走査して終了
 pdp screen-time collect --watch  完全走査を一定間隔で反復
 ```
 
-`--watch`の間隔は`PDP_COLLECTOR_POLL_SECONDS`で指定し、defaultは300秒、最小は10秒である。各走査が全segmentを
-再確認するため、過去eventを含むsegmentの後着更新もevent timestampのwatermarkで切り捨てない。
+`--watch`の確認間隔は`PDP_COLLECTOR_POLL_SECONDS`で指定し、defaultは300秒、最小は10秒である。
+5分ごとの確認でRawを必ず保存するわけではない。端末・親directoryごとに数値のファイル名を数値順で比較し、
+より大きい名前の後続ファイルが存在するsegmentだけを転送対象とする。通常directoryと`tombstone`を含む
+各子directoryは独立して判定する。同じ数値の名前が複数ある場合、それだけでは後続とみなさない。
+
+各directoryの最新segmentは内容が変わっても転送待ちにする。時間経過による強制転送はなく、最新データの
+反映には数日以上かかる場合がある。初回・再起動・`--once`でも同じ条件を使い、最新以外の未送信segmentを
+回収する。数値でない名前は完成判定できないため、走査をエラーにする。
+
+完成扱いのsegmentも毎回再確認し、内容が直前の送信済み版と同じなら保存を省略する。後着segmentや過去の
+segmentへの修正はevent timestampのwatermarkで切り捨てず、内容が変わっていれば新しい観測版を保存する。
+
+実行結果のJSONは`devices`、`segments`、`uploaded`、`skipped`、`retried`に加えて、最新ファイルとして待機した
+件数`deferred`を出力する。`segments`とscan receiptの`segment_count`は待機分を含む発見総数、`skipped`は
+完成扱いの転送対象のうち内容が同じだった件数である。待機分しかなくても正常走査ならreceiptとmanifestを
+更新する。`deferred`は実行結果だけに追加し、既存SQLiteとcontrol objectの形式は変更しない。
 
 segmentはread前後のinode、size、mtimeを比較し、読込中に変わった場合は短いretry後に再読込する。安定しない
 segmentを途中bytesのままuploadしない。
@@ -33,7 +47,8 @@ segmentを途中bytesのままuploadしない。
 
 走査開始時に、現在のallowlistから削除済みのdeviceも含めてpending uploadを先に再送する。Collector credentialには
 read / list権限がないため、GCSの事前存在確認へ依存しない。同じpending keyにはSQLiteへ保存した同じgzip bytesだけを
-送る。すべてのRaw uploadが成功した後、deviceごとのcollector scan receipt、active-device manifestの順に更新し、
+送る。既存pendingは最新ファイルの待機条件より優先し、後続ファイルが消えていても再送する。pendingと今回の
+転送対象すべてのRaw uploadが成功した後、deviceごとのcollector scan receipt、active-device manifestの順に更新し、
 最後にlocal scan成功時刻をcommitする。manifestはfull allowlistを持つため、一部のallowlist対象deviceが未発見なら
 そのdeviceのreceipt欠損をReconciliationが検出する。
 
@@ -131,7 +146,8 @@ ADCが失効またはrevokeされた場合も先にLaunchAgentを停止し、同
 ```text
 Biome directoryまたはsync.dbを読めない
 allowlist対象deviceを1台も発見できない
-segmentが安定して読めない
+走査中のdirectoryの権限エラーや消失、または数値でないsegment名
+転送対象segmentが安定して読めない
 GCS Raw、scan receipt、またはactive-device manifestのuploadに失敗する
 pending stateを復元できない
 ```

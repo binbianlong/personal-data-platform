@@ -46,7 +46,11 @@ SEGB containerはMIT Licenseの`ccl-segb`互換decoderで読む。再現性の�
 23c3f7d3d969a79627b738ba0a2486c31d675753
 ```
 
-Collectorはsegment単位で元bytesを読み、圧縮前bytesのSHA-256を計算する。GCSへ保存する本文は元bytesを
+Collectorは同じ端末・親directoryに数値名がより大きいsegmentが存在する場合、その前のsegmentを完成扱いに
+する。通常directoryと`tombstone`を含む各子directoryは別々に判定する。これはOSの完成通知ではなく、後続
+ファイルの存在を使う運用上の判定である。最新segmentは後続ができるまで転送せず、数日以上待つ場合もある。
+
+転送対象のsegment単位で元bytesを読み、圧縮前bytesのSHA-256を計算する。GCSへ保存する本文は元bytesを
 そのままgzipしたもので、gzip headerの`mtime`は`0`に固定する。object keyと疑似化keyは
 [`data-model.md`](data-model.md)に従う。
 

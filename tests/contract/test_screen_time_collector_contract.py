@@ -1,4 +1,5 @@
 import gzip
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
@@ -6,6 +7,7 @@ import pytest
 
 from personal_data_platform.sources.screen_time.collector import (
     BiomeScreenTimeSource,
+    CollectionStats,
     CollectorSourceError,
     ScreenTimeCollector,
 )
@@ -54,7 +56,7 @@ class AdvancingClock:
         return value
 
 
-def _source_tree(tmp_path):
+def _source_tree(tmp_path, *, successor: bool = True):
     sync_db = tmp_path / "sync.db"
     with sqlite3.connect(sync_db) as connection:
         connection.execute(
@@ -77,7 +79,9 @@ def _source_tree(tmp_path):
     remote = tmp_path / "remote"
     device_dir = remote / DEVICE_IDENTIFIER
     device_dir.mkdir(parents=True)
-    segment = device_dir / "segment-001"
+    segment = device_dir / "100"
+    if successor:
+        (device_dir / "200").write_bytes(b"still-active")
     source = BiomeScreenTimeSource(sync_db_path=sync_db, remote_dir=remote)
     return source, segment
 
@@ -254,3 +258,146 @@ def test_missing_directory_for_one_allowlisted_device_fails_the_complete_scan(tm
 
     assert uploader.calls == []
     assert uploader.receipts == []
+
+
+def test_waits_through_updates_and_restart_until_successor_exists(tmp_path, capsys) -> None:
+    from personal_data_platform.cli import _print_collection_stats
+
+    source, segment = _source_tree(tmp_path, successor=False)
+    uploader = RecordingUploader()
+    clock = AdvancingClock()
+    collector = _collector(tmp_path, source, uploader, clock)
+    for payload in (b"partial", b"appended"):
+        segment.write_bytes(payload)
+        assert collector.collect_once() == CollectionStats(devices=1, segments=1, deferred=1)
+    assert uploader.calls == []
+    state = CollectorState(tmp_path / "collector.db")
+    assert state.pending() == []
+    assert state.last_successful_scan() is not None
+    assert len(uploader.receipts) == len(uploader.manifests) == 2
+    assert uploader.receipts[-1].segment_count == 1
+
+    clock.current += timedelta(days=30)
+    restarted = _collector(tmp_path, source, uploader, clock)
+    stats = restarted.collect_once()
+    _print_collection_stats(stats)
+    assert json.loads(capsys.readouterr().out)["deferred"] == 1
+    assert uploader.calls == []
+
+    (segment.parent / "200").write_bytes(b"next-active")
+    assert restarted.collect_once().uploaded == 1
+    assert [gzip.decompress(body) for _, body in uploader.calls] == [b"appended"]
+    assert restarted.collect_once() == CollectionStats(devices=1, segments=2, skipped=1, deferred=1)
+
+
+def test_initial_backfill_and_late_arrival_use_numeric_order(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path, successor=False)
+    for name in ("9", "10", "100"):
+        (segment.parent / name).write_bytes(name.encode())
+    uploader = RecordingUploader()
+    collector = _collector(tmp_path, source, uploader, AdvancingClock())
+    assert collector.collect_once() == CollectionStats(
+        devices=1, segments=3, uploaded=2, deferred=1
+    )
+    assert {gzip.decompress(body) for _, body in uploader.calls} == {b"9", b"10"}
+    (segment.parent / "8").write_bytes(b"late")
+    assert collector.collect_once().uploaded == 1
+    assert gzip.decompress(uploader.calls[-1][1]) == b"late"
+
+
+def test_devices_and_parent_directories_have_independent_successors(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"normal-complete")
+    tombstone = segment.parent / "tombstone"
+    tombstone.mkdir()
+    (tombstone / "1").write_bytes(b"tombstone-complete")
+    (tombstone / "2").write_bytes(b"tombstone-active")
+    other_identifier = "other-iphone"
+    with sqlite3.connect(source.sync_db_path) as connection:
+        connection.execute(
+            "INSERT INTO DevicePeer VALUES (?, 'Other', 'Synthetic', 2, 1)",
+            (other_identifier,),
+        )
+    other_dir = source.remote_dir / other_identifier
+    other_dir.mkdir()
+    (other_dir / "1").write_bytes(b"other-active")
+    uploader = RecordingUploader()
+    collector = ScreenTimeCollector(
+        source=source,
+        state=CollectorState(tmp_path / "collector.db"),
+        uploader=uploader,
+        pseudonym_key=SECRET,
+        allowed_device_keys=frozenset(
+            build_device_key(SECRET, identifier)
+            for identifier in (DEVICE_IDENTIFIER, other_identifier)
+        ),
+        clock=AdvancingClock(),
+    )
+    assert collector.collect_once() == CollectionStats(
+        devices=2, segments=5, uploaded=2, deferred=3
+    )
+    assert {gzip.decompress(body) for _, body in uploader.calls} == {
+        b"normal-complete",
+        b"tombstone-complete",
+    }
+
+
+def test_pending_is_retried_even_if_successor_disappears(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"durable")
+    failed = RecordingUploader(fail_once=True)
+    clock = AdvancingClock()
+    with pytest.raises(RuntimeError, match="outage"):
+        _collector(tmp_path, source, failed, clock).collect_once()
+    (segment.parent / "200").unlink()
+    segment.write_bytes(b"new-active-content")
+    uploader = RecordingUploader()
+    assert _collector(tmp_path, source, uploader, clock).collect_once() == CollectionStats(
+        devices=1, segments=1, uploaded=1, retried=1, deferred=1
+    )
+    assert uploader.calls == failed.calls
+
+
+@pytest.mark.parametrize("failure", ["unknown-name", "unstable", "permission", "missing"])
+def test_incomplete_scan_does_not_advance_liveness(tmp_path, monkeypatch, failure) -> None:
+    from personal_data_platform.sources.screen_time import collector as module
+
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"complete")
+    uploader = RecordingUploader()
+    collector = _collector(tmp_path, source, uploader, AdvancingClock())
+    collector.collect_once()
+    previous = CollectorState(tmp_path / "collector.db").last_successful_scan()
+    uploader.calls.clear()
+    uploader.receipts.clear()
+    uploader.manifests.clear()
+
+    if failure == "unknown-name":
+        (segment.parent / "unexpected").write_bytes(b"unknown")
+    elif failure == "unstable":
+        original_read = module.Path.read_bytes
+
+        def changing_read(path):
+            value = original_read(path)
+            if path == segment:
+                path.write_bytes(value + b"changed")
+            return value
+
+        monkeypatch.setattr(module.Path, "read_bytes", changing_read)
+    else:
+        nested = segment.parent / "tombstone"
+        nested.mkdir()
+        original_scandir = module.os.scandir
+
+        def failed_scan(path):
+            if module.Path(path) == nested:
+                error = PermissionError if failure == "permission" else FileNotFoundError
+                raise error("synthetic scan failure")
+            return original_scandir(path)
+
+        monkeypatch.setattr(module.os, "scandir", failed_scan)
+
+    with pytest.raises(CollectorSourceError):
+        collector.collect_once()
+    assert uploader.calls == uploader.receipts == uploader.manifests == []
+    assert CollectorState(tmp_path / "collector.db").last_successful_scan() == previous
