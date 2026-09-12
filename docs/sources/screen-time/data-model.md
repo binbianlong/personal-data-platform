@@ -45,7 +45,8 @@ segment_key = HMAC-SHA256(
 ## Observation semantics
 
 同じ`device_key + app-in-focus + segment_key`をlogical scopeとする。直前にGCS保存を完了した観測と
-SHA-256が同じ場合だけ新規保存をskipする。`A -> B -> A`は3観測として保存する。
+SHA-256が同じ場合だけ新規保存をskipする。転送対象の`A -> B -> A`は3観測として保存する。
+最新segmentの転送待ち中には観測版を作成しない。後続ファイルを確認した時点のbytesを保存対象にする。
 
 `observed_at`を含む予定object keyとdeterministic gzip bytesをSQLiteへ先にcommitし、GCS upload成功後だけ
 `uploaded`へ進める。再起動後のretryでも同じobject keyとgzip bytesを使う。
@@ -59,8 +60,9 @@ raw/screen_time/v1/_control/collector/latest/<device_key>.json
 ```
 
 本文は`schema_version`、`device_key`、UTCの`completed_at`、`segment_count`、`status=succeeded`だけを持つ。
-RawのSystem of Recordではなく稼働確認用であり、端末identifier、path、Bundle IDは含めない。全segmentの
-Raw uploadが成功した後だけ更新する。
+RawのSystem of Recordではなく稼働確認用であり、端末identifier、path、Bundle IDは含めない。`segment_count`は
+最新ファイルとして転送待ちの分も含む発見総数である。走査が正常に完了し、pendingと完成扱いの転送対象の
+Raw uploadがすべて成功した後だけ更新する。完成待ちだけの場合も更新する。
 
 今回発見できたallowlist対象deviceのreceiptを更新した後、次のmutable manifestを最後に更新する。
 
