@@ -27,7 +27,7 @@ production bucketは`us-central1`のStandardを使う。source / streamごとに
 `observed_at`ではなくGCS upload完了時刻から数える。保持中のstorage-class遷移は行わず、Soft Deleteと
 Object Versioningは無効にするため、Lifecycle action後のobjectは復元できない。
 
-実装済みのiPhoneは`raw/screen_time/v1/`かつ`.segb.gz`だけを`age=90`のDelete対象とし、control JSONを除外する。
+実装済みのiPhoneは`raw/screen_time/v1/`または`raw/screen_time/v2/`配下の`.segb.gz`だけを`age=90`のDelete対象とし、control JSONを除外する。
 追加pipelineはRaw namespaceとsuffixを指定する。control objectへ削除条件を重ねず、他streamとRaw領域を共有する場合は保持日数を一致させる。
 複数schema版を保持する場合は、再生に対応する全prefixをadapterとTerraformの両方へ含める。
 

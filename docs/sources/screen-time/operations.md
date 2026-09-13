@@ -166,3 +166,20 @@ Mac自身のScreen Timeを別Collectorで取得する場合は、stateとcontrol
 
 Loader・監査・再構築は`--source screen_time --stream app-in-focus`でこのstreamを明示できる。
 共通runtimeの更新順序は[`Platform運用`](../../platform/operations.md#更新時の互換性)に従う。
+
+## Parser v2とRaw v2への移行
+
+1. GCSのv1/v2両prefixの90日Lifecycle、Collector create権限、Loader/Reconciliationのprefix設定をTerraformで揃える。
+2. 新runtimeへ更新し、migration `004_screen_time_tombstones.sql`を適用する。既存行を保持し、nullable列・削除情報を追加する。
+3. Loaderは利用可能なRawのparser versionが古い場合も再解析する。同一objectの置換と取込成功更新は1 transactionで行う。
+4. dbtを実行し、削除照合・診断Viewと集計Viewを更新する。Reconciliationで新Viewの存在も確認する。
+5. Mac Collectorを新コードで起動する。既存pendingは元のv1/v2 keyとbytesで先に再送し、新規観測はv2で保存する。
+
+Collectorの5分確認・後続ファイル待ち条件は継続する。v1からv2への切替時は、完成扱いの既存segmentも照合情報を
+伴うv2として一度保存し直す。その後の同内容はskipする。v2を理解しない旧Loaderと同時運用しない。
+Terraform apply、クラウド再解析、Mac Collector起動はローカルのテストとは別に実施する。
+
+v1は元segment名を持たないため、同じlogical segmentのv2が未取得ならファイル間の削除照合ができない。
+`base.screen_time_tombstone_status`の`unmatched`と`unsupported_reason`を確認する。古いRawが期限切れの場合、
+新parserで再解析できる範囲は現在残っているRawに限られる。既に失われた利用内容は作らない。
+期限切れの履歴保持は、取得済みの正常イベントと照合可能なTTL tombstoneがある場合に限る。
