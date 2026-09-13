@@ -18,6 +18,7 @@ from personal_data_platform.sources.screen_time.raw import (
     CollectorScanReceipt,
     build_device_key,
     build_segment_key,
+    encode_segment_envelope,
 )
 from personal_data_platform.sources.screen_time.state import (
     CollectorState,
@@ -230,7 +231,12 @@ class ScreenTimeCollector:
                     device_key=device_key,
                     stream=APP_IN_FOCUS_STREAM,
                     segment_key=segment_key,
-                    raw_bytes=raw_bytes,
+                    raw_bytes=encode_segment_envelope(
+                        raw_bytes,
+                        name=path.name,
+                        kind="tombstones" if path.parent.name == "tombstone" else "events",
+                    ),
+                    schema_version=2,
                     observed_at=self._clock(),
                 )
                 if observation is None:

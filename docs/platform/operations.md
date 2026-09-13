@@ -34,7 +34,7 @@ source / streamごとにLoader Jobを持つ。既存のiPhoneは`screen-time-loa
 異なるsourceのLoaderもこのleaseを共有するため、scheduleは所要時間を踏まえてずらす。
 
 1. 選択source / streamの対応schema版のprefixを全page listingする。
-2. `ops.ingestion_metadata`で、同じGCS generationの取込に成功していないobjectを選ぶ。
+2. `ops.ingestion_metadata`で、同じGCS generationの取込に成功していないobjectを選ぶ。sourceがparser versionを指定する場合は旧parser成功分も対象にする。
 3. `(observed_at, object_key)`の昇順に処理する。
 4. [`analytics.md`](analytics.md)のtransaction契約でbaseと取込状態を更新する。
 5. 1件でも未処理の失敗が残ればJobをnon-zeroで終了する。

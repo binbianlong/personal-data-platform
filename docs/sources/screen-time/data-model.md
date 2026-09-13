@@ -2,10 +2,10 @@
 
 ## GCS Raw observation
 
-Rawの保存単位はSEGB segmentの観測版である。object keyを次に固定する。
+Rawの保存単位はSEGB segmentの観測版である。既存v1を読み取り、新規Collectorはv2を保存する。
 
 ```text
-raw/screen_time/v1/<device_key>/app-in-focus/<segment_key>/
+raw/screen_time/v<1または2>/<device_key>/app-in-focus/<segment_key>/
   <observed_at>/<sha256>.segb.gz
 ```
 
@@ -15,9 +15,20 @@ raw/screen_time/v1/<device_key>/app-in-focus/<segment_key>/
 | `app-in-focus` | 初期coreで固定するstream識別子 |
 | `segment_key` | deviceとsegment相対pathを疑似化した64文字のlowercase hex |
 | `observed_at` | 取得完了UTC時刻。`YYYYMMDDTHHMMSSffffffZ` |
-| `sha256` | gzip前のSEGB segment bytesに対するlowercase SHA-256 hex |
+| `sha256` | gzip前のRaw本文に対するlowercase SHA-256 hex。v1はSEGB、v2はenvelope全体 |
 
-gzip本文を展開すると、観測時点のSEGB segment bytesとbyte-for-byteで一致しなければならない。
+v1のgzip本文は元SEGB bytesそのものである。v2のgzip本文は次のbinary envelopeとする。
+
+```text
+6 bytes: ASCII PDPST + 0x02
+4 bytes: big-endian unsigned JSON metadata length
+JSON: {"segment_kind":"events"または"tombstones","source_segment_name":"数値のファイル名"}
+残り: 元SEGB bytes（変更なし）
+```
+
+JSONはUTF-8・key順・空白なしの決定的表現とし、最大1024 bytes。端末identifier・絶対path・親directory名は
+追加しない。元SEGBをbyte-for-byteで復元できる。`device_key`と`segment_key`はv1と同じ計算式のため、
+v2で得た元ファイル名を同一logical segmentのv1観測にも対応付けられる。control JSONはv1の既存keyを継続する。
 
 ## 疑似化key
 
@@ -89,6 +100,8 @@ byte_size                  gzip展開後
 record_count
 parser_version
 loaded_at                  UTC
+source_segment_name       v2で既知。v1はnull
+segment_kind              events / tombstones。v1はnull
 ```
 
 ## `base.screen_time_record_occurrence`
@@ -109,12 +122,39 @@ app_version / app_build / platform_flag
 unknown_field_count
 original_payload           protobuf bytes
 parser_version / loaded_at
+record_kind               event / deleted / crc_failure / tombstone
+payload_length / record_timestamp_cocoa
+target_segment_name / target_offset / target_length / target_event_timestamp / deletion_reason
 ```
 
-SEGBまたは既知fieldを安全にdecodeできないobjectはtransaction全体をrollbackして
-`ops.ingestion_metadata.status=failed`にする。CRC failureはoccurrenceへ記録し、成功decodeしたobject内でも
-dbt Viewのtransition候補から除外する。元segment bytesがGCSに残る90日間はdecoder更新後に再試行できる。
-未取込のまま期限切れになったobjectは復元できず、Reconciliationを失敗させて明示的な運用対応を要求する。
+`event_key`、前面状態、event時刻、Bundle IDは非イベント行ではnullを許容する。`record_count`はイベントだけ
+でなく保存した全occurrence数。parser versionは`app-in-focus-v2`とする。
+
+削除済みレコードは本文がゼロ埋めでもstate・offset・元bytesを保存する。CRC不一致は`crc_failure`として
+元bytesを保存し、イベントを生成しない。CRC正常の未知payload形式や壊れたSEGB構造はobject全体を失敗させ、
+部分的な成功として扱わない。元Rawが残る90日間は再解析できる。
+
+### Tombstone
+
+macOSの`BMTombstoneEvent`による合成データのdecode結果と実機の構造を照合した形式:
+
+| protobuf field | 型 | 内容 |
+|---|---|---|
+| 1 | string | 対象segment名 |
+| 2 | uint32 | 対象recordのmetadata offset |
+| 3 | uint32 | 対象payload長 |
+| 4 | uint32 | 削除理由: 1=TTL、2=UserInitiated |
+| 5 | string | processName |
+| 6 | double | 対象event timestamp（Cocoa秒） |
+| 7 | string、省略可 | policyID |
+
+private frameworkは形式検証だけに使い、本番パーサーはPythonで実装する。未知の削除理由は保持するが自動適用しない。
+`base.screen_time_tombstone_match`で端末・stream・元segment名・metadata offset・payload長・元record時刻を照合する。
+時刻の許容差は旧datetime列のmicrosecond丸め分の1 microsecondだけ。元ファイル名の対応が曖昧なsegmentは適用しない。
+
+`base.screen_time_tombstone_status`は`user_deletion_applied`、`ttl_history_retained`、`unmatched`、
+`unsupported_reason`と一致イベント数を公開する。`unmatched`には未到着・保存期間外・v1の元ファイル名不明も
+含まれ、削除適用済みとは扱わない。後から対応する観測が届けばView上で再評価する。
 
 ## `event_key`
 
@@ -137,10 +177,13 @@ eventが別segmentに現れるため`event_key`へ含めない。
 
 現在の各segmentとlogical eventを選ぶdbt Viewである。
 
-1. `device_key + source_stream + segment_key`ごとに最新の`(observed_at, object_key)`を選ぶ。
-2. 同じ`object_key + record_offset`では最大の`record_metadata_offset`を現在stateとして選ぶ。
-3. 現在stateが`WRITTEN`かつCRC failureでないrecordを選び、後続`DELETED`があるrecordを除外する。
-4. 同じ`event_key`を1件へまとめ、除外したoccurrence数を`duplicate_occurrence_count`に保持する。
+1. 通常の候補はlogical segmentの最新観測から選び、同じrecord offsetの最後のmetadataを現在stateとする。
+2. `event`かつ`WRITTEN`かつCRC不一致でないrecordだけを候補にする。
+3. TTL tombstoneに完全照合できた過去観測の正常イベントを候補へ戻す。Apple側の期限切れだけでは既取得の履歴を消さない。
+4. UserInitiated tombstoneに完全照合できた`event_key`は、別segmentの重複コピーも含めて候補から除外する。
+5. 同一物理イベントの過去観測を重複計上せず、最後に同じ`event_key`を1件にまとめる。
+
+これは集計からの除外であり、GCS Rawやbaseの証跡を物理削除する処理ではない。取得前に消えたpayloadは復元できない。
 
 ```text
 event_key / device_key / platform / source_stream

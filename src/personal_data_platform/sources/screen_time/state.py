@@ -78,6 +78,7 @@ class CollectorState:
         segment_key: str,
         raw_bytes: bytes,
         observed_at: datetime,
+        schema_version: int = 1,
     ) -> PendingObservation | None:
         """Persist an upload intent, or skip a consecutive uploaded duplicate."""
         format_observed_at(observed_at)
@@ -109,6 +110,7 @@ class CollectorState:
                         segment_key=segment_key,
                         observed_at=latest[0],
                         sha256=latest[1],
+                        object_key=latest[2],
                     ),
                     compressed_payload=bytes(payload),
                     created=False,
@@ -129,6 +131,7 @@ class CollectorState:
                 segment_key=segment_key,
                 observed_at=effective_observed_at,
                 sha256=content_sha256,
+                schema_version=schema_version,
             )
             connection.execute(
                 """
@@ -176,6 +179,7 @@ class CollectorState:
                 segment_key=row[2],
                 observed_at=row[3],
                 sha256=row[4],
+                object_key=row[5],
             )
             if identity.object_key != row[5]:
                 raise RuntimeError("collector state contains an inconsistent object key")
@@ -259,6 +263,7 @@ def _identity_from_row(
     segment_key: str,
     observed_at: str,
     sha256: str,
+    object_key: str,
 ) -> ScreenTimeRawIdentity:
     return ScreenTimeRawIdentity(
         device_key=device_key,
@@ -266,4 +271,5 @@ def _identity_from_row(
         segment_key=segment_key,
         observed_at=parse_observed_at(observed_at),
         sha256=sha256,
+        schema_version=int(object_key.split("/")[2].removeprefix("v")),
     )

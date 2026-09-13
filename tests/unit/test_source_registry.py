@@ -60,6 +60,6 @@ def test_storage_policy_drift_is_rejected(name, value, monkeypatch):
 def test_storage_policy_accepts_the_registered_namespace(monkeypatch):
     from personal_data_platform.sources.contracts import validate_runtime_policy
 
-    monkeypatch.setenv("PDP_RAW_PREFIXES_JSON", '["raw/screen_time/v1/"]')
+    monkeypatch.setenv("PDP_RAW_PREFIXES_JSON", '["raw/screen_time/v1/", "raw/screen_time/v2/"]')
     monkeypatch.setenv("PDP_RAW_SUFFIXES_JSON", '[".segb.gz"]')
     validate_runtime_policy(registry.get_source())

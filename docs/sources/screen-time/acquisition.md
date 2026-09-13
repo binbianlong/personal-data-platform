@@ -50,8 +50,8 @@ Collectorは同じ端末・親directoryに数値名がより大きいsegmentが�
 する。通常directoryと`tombstone`を含む各子directoryは別々に判定する。これはOSの完成通知ではなく、後続
 ファイルの存在を使う運用上の判定である。最新segmentは後続ができるまで転送せず、数日以上待つ場合もある。
 
-転送対象のsegment単位で元bytesを読み、圧縮前bytesのSHA-256を計算する。GCSへ保存する本文は元bytesを
-そのままgzipしたもので、gzip headerの`mtime`は`0`に固定する。object keyと疑似化keyは
+転送対象のsegment単位で元bytesを読み、元segment名・種別とともにv2 envelopeへ格納する。
+envelope全体のSHA-256を計算してgzipし、gzip headerの`mtime`は`0`に固定する。object keyと疑似化keyは
 [`data-model.md`](data-model.md)に従う。
 
 ## iPhone `App.InFocus` payload
@@ -88,5 +88,6 @@ platform flag
 
 表示用アプリ名はpayloadに含まれない場合がある。Bundle IDと表示名の対応は取得処理とは別に管理する。
 
-未知protobuf fieldはRaw bytesに保持し、既知fieldのdecodeを妨げない限り収集を継続する。SEGBまたは
-既知fieldをdecodeできない場合は、そのsegment observationをAnalyticsへ成功取込した扱いにしない。
+未知protobuf fieldはRaw bytesに保持する。削除済み・CRC不一致はイベント本文を要求せず、元bytesとメタデータを
+保持する。CRC正常の通常イベントやtombstoneの既知field、またはSEGB構造をdecodeできない場合は、
+そのsegment observationをAnalyticsへ成功取込した扱いにしない。

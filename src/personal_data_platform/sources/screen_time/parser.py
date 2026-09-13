@@ -16,7 +16,7 @@ from personal_data_platform.raw.models import RawObject
 
 from .models import ParsedScreenTimeRecord, PayloadDecodeError, SegmentDecodeError
 
-PARSER_VERSION = "app-in-focus-v1"
+PARSER_VERSION = "app-in-focus-v2"
 CF_ABSOLUTE_TIME_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
 EVENT_KEY_DOMAIN = b"screen-time/event/v1\0"
 
@@ -193,30 +193,91 @@ def _record_timestamp(record: Any) -> datetime | None:
     return None
 
 
-def parse_segb_records(
-    raw: RawObject, segment: bytes, records: Iterable[Any]
-) -> list[ParsedScreenTimeRecord]:
-    """Normalize decoded ccl-segb records for one immutable raw object."""
+def decode_tombstone_payload(payload: bytes) -> dict[str, Any] | None:
+    """Recognize BMTombstoneEvent, not an incompatible App.InFocus event.
 
+    Tags verified with macOS BMTombstoneEvent.initWithProtoData/jsonDictionary:
+    1 segmentName, 2 offset, 3 length, 4 reason, 5 processName,
+    6 eventTimestamp, 7 policyID. Reasons: 1 TTL, 2 UserInitiated.
+    """
+    values = _decode_wire(payload)
+    signature = {(v.field_number, v.wire_type) for v in values}
+    if not {(1, 2), (2, 0), (3, 0), (4, 0), (5, 2), (6, 1)} <= signature:
+        return None
+    name = _utf8(_one(values, 1, 2), 1)
+    if not name or not name.isascii() or not name.isdecimal():
+        raise PayloadDecodeError("invalid tombstone segment name")
+    timestamp = struct.unpack("<d", _one(values, 6, 1))[0]
+    if not math.isfinite(timestamp):
+        raise PayloadDecodeError("invalid tombstone event timestamp")
+    _utf8(_one(values, 5, 2), 5)
+    _utf8(_one(values, 7, 2), 7)
+    return {
+        "target_segment_name": name,
+        "target_offset": _uint(_one(values, 2, 0), 2),
+        "target_length": _uint(_one(values, 3, 0), 3),
+        "deletion_reason": _uint(_one(values, 4, 0), 4),
+        "target_event_timestamp": timestamp,
+    }
+
+
+def parse_segb_records(
+    raw: RawObject, segment: bytes, records: Iterable[Any], *, segment_kind: str | None = None
+) -> list[ParsedScreenTimeRecord]:
+    """Keep deletion/CRC metadata without requiring a surviving event payload."""
     parsed: list[ParsedScreenTimeRecord] = []
     for record in records:
         payload = bytes(record.data)
-        decoded = decode_app_in_focus_payload(payload)
         state = getattr(record, "state", "UNKNOWN")
         state_name = getattr(state, "name", str(state)).upper()
         record_offset = int(getattr(record, "data_start_offset"))
         metadata = getattr(record, "metadata", None)
-        record_metadata_offset = int(getattr(metadata, "metadata_offset", record_offset))
-        parsed.append(
-            ParsedScreenTimeRecord(
-                event_key=event_key(
+        metadata_offset = int(getattr(metadata, "metadata_offset", record_offset))
+        timestamp = _record_timestamp(record)
+        timestamp_cocoa = (
+            (timestamp - CF_ABSOLUTE_TIME_EPOCH).total_seconds() if timestamp else None
+        )
+        if segment.startswith(b"SEGB") and metadata is not None:
+            if metadata_offset < 32 or metadata_offset + 16 > len(segment):
+                raise SegmentDecodeError("SEGB metadata offset is outside the source bytes")
+            timestamp_cocoa = struct.unpack_from("<d", segment, metadata_offset + 8)[0]
+        crc = getattr(record, "crc_passed", None)
+        decoded: dict[str, Any] = {}
+        tombstone: dict[str, Any] = {}
+        identity = None
+        if state_name == "DELETED":
+            kind = "deleted"
+            if crc is not False:
+                try:
+                    decoded = decode_app_in_focus_payload(payload)
+                except PayloadDecodeError:
+                    pass
+        elif state_name != "WRITTEN":
+            raise SegmentDecodeError("unsupported SEGB record state")
+        elif crc is False:
+            kind = "crc_failure"
+        else:
+            tombstone = decode_tombstone_payload(payload) or {}
+            if tombstone:
+                if segment_kind == "events":
+                    raise PayloadDecodeError("tombstone payload in an events segment")
+                kind = "tombstone"
+            else:
+                if segment_kind == "tombstones":
+                    raise PayloadDecodeError("unrecognized tombstone payload")
+                kind = "event"
+                decoded = decode_app_in_focus_payload(payload)
+                identity = event_key(
                     device_key=raw.subject_key,
                     stream=raw.stream,
                     bundle_id=decoded["bundle_id"],
                     cf_absolute_time=decoded["cf_absolute_time"],
                     in_foreground=decoded["in_foreground"],
                     kind=decoded["kind"],
-                ),
+                )
+        parsed.append(
+            ParsedScreenTimeRecord(
+                event_key=identity,
                 object_key=raw.key,
                 device_key=raw.subject_key,
                 source_stream=raw.stream,
@@ -225,28 +286,34 @@ def parse_segb_records(
                 observed_at=raw.observed_at,
                 segment_filename=Path(raw.key).name.removesuffix(".gz"),
                 record_offset=record_offset,
-                record_metadata_offset=record_metadata_offset,
+                record_metadata_offset=metadata_offset,
                 record_state=state_name,
-                segment_record_timestamp=_record_timestamp(record),
-                crc_passed=getattr(record, "crc_passed", None),
-                transition_reason=decoded["transition_reason"],
-                kind=decoded["kind"],
-                in_foreground=decoded["in_foreground"],
-                cf_absolute_time=decoded["cf_absolute_time"],
-                event_at=decoded["event_at"],
-                bundle_id=decoded["bundle_id"],
-                app_version=decoded["app_version"],
-                app_build=decoded["app_build"],
-                platform_flag=decoded["platform_flag"],
-                unknown_field_count=decoded["unknown_field_count"],
+                segment_record_timestamp=timestamp,
+                crc_passed=crc,
+                transition_reason=decoded.get("transition_reason"),
+                kind=decoded.get("kind"),
+                in_foreground=decoded.get("in_foreground"),
+                cf_absolute_time=decoded.get("cf_absolute_time"),
+                event_at=decoded.get("event_at"),
+                bundle_id=decoded.get("bundle_id"),
+                app_version=decoded.get("app_version"),
+                app_build=decoded.get("app_build"),
+                platform_flag=decoded.get("platform_flag"),
+                unknown_field_count=decoded.get("unknown_field_count", 0),
                 original_payload=payload,
                 parser_version=PARSER_VERSION,
+                record_kind=kind,
+                payload_length=len(payload),
+                record_timestamp_cocoa=timestamp_cocoa,
+                **tombstone,
             )
         )
     return parsed
 
 
-def parse_segb_bytes(raw: RawObject, segment: bytes) -> list[ParsedScreenTimeRecord]:
+def parse_segb_bytes(
+    raw: RawObject, segment: bytes, *, segment_kind: str | None = None
+) -> list[ParsedScreenTimeRecord]:
     """Decode one complete uncompressed SEGB object.
 
     ``ccl-segb`` currently accepts paths, so the immutable bytes are exposed
@@ -265,7 +332,7 @@ def parse_segb_bytes(raw: RawObject, segment: bytes) -> list[ParsedScreenTimeRec
             temporary.write(segment)
             temporary.flush()
             records = list(read_segb_file(temporary.name))
-        return parse_segb_records(raw, segment, records)
+        return parse_segb_records(raw, segment, records, segment_kind=segment_kind)
     except PayloadDecodeError:
         raise
     except Exception as error:

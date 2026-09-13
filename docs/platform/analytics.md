@@ -17,7 +17,7 @@ GCS object
 
 同じRaw identityとGCS generationの`ops.ingestion_metadata.status`が`succeeded`ならdownloadを省略する。同じ
 keyが別generationで再作成された場合は未検証objectとして再取得する。未処理または`failed`のobjectだけを
-`(observed_at, object_key)`順に再試行する。1 object内の型付きrecordと`succeeded`更新は同じtransactionで
+`(observed_at, object_key)`順に再試行する。sourceがparser versionを指定する場合、利用可能なRawの旧parser成功分も再解析する。1 object内の型付きrecordと`succeeded`更新は同じtransactionで
 commitする。batchはparser version、record数、型付きtableへの書込を提供し、transactionの開始・commit・rollbackは
 Warehouseだけが行う。decodeまたは書込に失敗したobjectの分析行は確定せず、`failed`とerror種別を別transactionで
 保存する。

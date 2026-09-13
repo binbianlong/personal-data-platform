@@ -401,10 +401,10 @@ def test_empty_screen_time_batch_keeps_its_decoder_version_and_legacy_scope() ->
             SELECT parser_version, record_count, device_key, segment_key
             FROM ops.ingestion_metadata
             """
-        ) == [("app-in-focus-v1", 0, raw.subject_key, raw.logical_key)]
+        ) == [("app-in-focus-v2", 0, raw.subject_key, raw.logical_key)]
         assert warehouse.query_rows(
             "SELECT parser_version, record_count FROM base.screen_time_segment_observation"
-        ) == [("app-in-focus-v1", 0)]
+        ) == [("app-in-focus-v2", 0)]
         failed_raw = replace(raw, key="raw/failed")
         warehouse.mark_failed(
             failed_raw,

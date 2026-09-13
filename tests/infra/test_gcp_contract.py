@@ -165,7 +165,10 @@ def test_raw_bucket_is_standard_and_permanently_deletes_segments_after_90_days()
     assert 'type = "Delete"' in raw
     sources = _read("infra/terraform/sources.tf")
     default_pipeline = sources.split("screen_time_app_in_focus = {", 1)[1].split("\n    }", 1)[0]
-    assert 'raw_prefixes            = ["raw/screen_time/v1/"]' in default_pipeline
+    assert (
+        'raw_prefixes            = ["raw/screen_time/v1/", "raw/screen_time/v2/"]'
+        in default_pipeline
+    )
     assert 'raw_suffixes            = [".segb.gz"]' in default_pipeline
     assert "retention_days          = 90" in default_pipeline
     assert "for_each = local.ingestion_pipelines" in raw

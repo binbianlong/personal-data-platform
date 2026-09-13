@@ -121,3 +121,34 @@ def test_raw_identity_rejects_naive_observation_time() -> None:
             observed_at=datetime(2026, 8, 27),
             sha256="c" * 64,
         )
+
+
+def test_v2_envelope_preserves_source_bytes_and_round_trips_key() -> None:
+    from personal_data_platform.sources.screen_time.raw import (
+        decode_segment_envelope,
+        encode_segment_envelope,
+    )
+
+    payload = encode_segment_envelope(b"SEGB-source-bytes", name="123", kind="events")
+    assert decode_segment_envelope(payload) == (b"SEGB-source-bytes", "123", "events")
+    identity = ScreenTimeRawIdentity(
+        device_key="a" * 64,
+        stream="app-in-focus",
+        segment_key="b" * 64,
+        observed_at=datetime(2026, 9, 13, tzinfo=UTC),
+        sha256=sha256_hex(payload),
+        schema_version=2,
+    )
+    parsed = parse_raw_object_key(
+        identity.object_key, storage_created_at=identity.observed_at, storage_generation=1
+    )
+    assert parsed.schema_version == 2
+    assert parsed.sha256 == sha256_hex(payload)
+
+
+@pytest.mark.parametrize("payload", [b"", b"SEGB", b"PDPST\x02\0\0\0\xff{}"])
+def test_v2_rejects_truncated_envelopes(payload) -> None:
+    from personal_data_platform.sources.screen_time.raw import decode_segment_envelope
+
+    with pytest.raises(ValueError):
+        decode_segment_envelope(payload)

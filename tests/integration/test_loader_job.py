@@ -68,7 +68,7 @@ def test_loader_continues_after_poison_object_and_retries_it(tmp_path, monkeypat
     )
     monkeypatch.setattr(
         "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",
-        lambda raw, segment: [],
+        lambda raw, segment, **kwargs: [],
     )
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "loader.duckdb"))))
     warehouse.migrate()
@@ -104,7 +104,7 @@ def test_loader_revalidates_a_recreated_object_generation(tmp_path, monkeypatch)
     repository = _Repository([original], {original.key: gzip.compress(content)})
     monkeypatch.setattr(
         "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",
-        lambda raw, segment: [],
+        lambda raw, segment, **kwargs: [],
     )
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "loader.duckdb"))))
     warehouse.migrate()
@@ -324,7 +324,7 @@ def test_loader_uses_source_decoder_across_schema_versions_and_preserves_other_s
         phone_repository = _Repository([phone], {phone.key: gzip.compress(phone_content)})
         monkeypatch.setattr(
             "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",
-            lambda raw, payload: [],
+            lambda raw, payload, **kwargs: [],
         )
         assert run_loader(phone_repository, warehouse).succeeded == 1
         assert warehouse.ingestion_counts(source_id="screen_time", stream="app-in-focus") == {

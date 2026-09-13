@@ -56,6 +56,7 @@ class _Repository:
                 storage_generation=self.generations.get(key, 1),
             )
             for key in self.keys
+            if key.startswith(prefix)
         ]
 
     def list_scan_receipts(self) -> list[SimpleNamespace]:
