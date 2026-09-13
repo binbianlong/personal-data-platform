@@ -26,7 +26,37 @@ current_occurrences as (
     from ranked_record_states
     where record_state_rank = 1
       and upper(record_state) = 'WRITTEN'
+      and record_kind = 'event'
+      and event_key is not null
       and crc_passed is distinct from false
+),
+
+ttl_history as (
+    select occurrence.*
+    from {{ source('screen_time_base', 'screen_time_record_occurrence') }} as occurrence
+    inner join {{ ref('screen_time_tombstone_match') }} as matched
+        on occurrence.object_key = matched.event_object_key
+        and occurrence.record_metadata_offset = matched.event_metadata_offset
+    where matched.deletion_reason = 1
+),
+
+candidates as (
+    select * exclude (record_state_rank) from current_occurrences
+    union
+    select * from ttl_history
+),
+
+retained_occurrences as (
+    select candidates.*
+    from candidates
+    where not exists (
+        select 1 from {{ ref('screen_time_tombstone_match') }} as deletion
+        where deletion.deletion_reason = 2 and deletion.event_key = candidates.event_key
+    )
+    qualify row_number() over (
+        partition by device_key, source_stream, segment_key, record_offset, event_key
+        order by observed_at desc, object_key desc, record_metadata_offset desc
+    ) = 1
 ),
 
 ranked_events as (
@@ -37,7 +67,7 @@ ranked_events as (
             partition by event_key
             order by observed_at desc, object_key desc, record_metadata_offset desc
         ) as event_rank
-    from current_occurrences
+    from retained_occurrences
 )
 
 select

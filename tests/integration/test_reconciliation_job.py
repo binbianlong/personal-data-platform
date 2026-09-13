@@ -43,6 +43,8 @@ def _warehouse() -> Warehouse:
     warehouse.migrate()
     for relation in (
         "base.screen_time_transition",
+        "base.screen_time_tombstone_match",
+        "base.screen_time_tombstone_status",
         "base.screen_time_interval",
         "marts.daily_screen_time",
     ):

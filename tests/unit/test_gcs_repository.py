@@ -94,7 +94,12 @@ class FakeGCSClient:
     def list_blobs(self, bucket: _Bucket, **kwargs: Any) -> _Iterator:
         assert bucket is self.bucket_ref
         self.list_calls.append(kwargs)
-        return _Iterator(self.list_pages)
+        return _Iterator(
+            [
+                [blob for blob in page if blob.name.startswith(kwargs["prefix"])]
+                for page in self.list_pages
+            ]
+        )
 
 
 def _identity(observed_at: datetime, marker: str = "a") -> ScreenTimeRawIdentity:
@@ -189,7 +194,10 @@ def test_list_raw_follows_pages_ignores_other_objects_and_sorts_replay_order() -
     assert [item.key for item in observations] == [earlier.object_key, later.object_key]
     assert [item.storage_created_at for item in observations] == [earlier_created, later_created]
     assert [item.storage_generation for item in observations] == [1, 1]
-    assert client.list_calls == [{"prefix": "raw/screen_time/v1/"}]
+    assert client.list_calls == [
+        {"prefix": "raw/screen_time/v1/"},
+        {"prefix": "raw/screen_time/v2/"},
+    ]
 
 
 def test_list_raw_rejects_missing_gcs_creation_time() -> None:
@@ -310,16 +318,21 @@ def test_gcs_rejects_unregistered_stream_and_unknown_schema() -> None:
     from dataclasses import replace
 
     identity = _identity(datetime(2026, 8, 27, tzinfo=UTC))
-    source_keys = (
-        replace(identity, stream="unregistered").object_key,
-        identity.object_key.replace("/v1/", "/v2/"),
-    )
+    source_keys = (replace(identity, stream="unregistered").object_key,)
     for key in source_keys:
         client = FakeGCSClient()
         client.list_pages = [[_ListedBlob(key, identity.observed_at)]]
         repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
         with pytest.raises(RuntimeError, match="noncanonical"):
             repository.list_raw()
+
+
+def test_raw_codec_rejects_unknown_schema() -> None:
+    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+
+    identity = _identity(datetime(2026, 8, 27, tzinfo=UTC))
+    with pytest.raises(ValueError, match="invalid Screen Time"):
+        ScreenTimeSource().validate_raw_key(identity.object_key.replace("/v1/", "/v3/"))
 
 
 def test_gcs_rejects_foreign_listing_prefix_before_cloud_access() -> None:

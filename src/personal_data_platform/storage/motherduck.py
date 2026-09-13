@@ -126,7 +126,9 @@ class Warehouse:
         ).fetchall()
         return {row[0] for row in rows}
 
-    def succeeded_keys_for(self, raw_objects: Iterable[RawObject]) -> set[str]:
+    def succeeded_keys_for(
+        self, raw_objects: Iterable[RawObject], *, parser_version: str | None = None
+    ) -> set[str]:
         """Return active successes matching the live Raw identity and GCS generation."""
 
         materialized = tuple(raw_objects)
@@ -148,8 +150,9 @@ class Warehouse:
                     FROM ops.ingestion_metadata
                     WHERE source_id = ? AND source_stream = ?
                       AND status = 'succeeded' AND retention_expired_at IS NULL
+                      AND (? IS NULL OR parser_version = ?)
                     """,
-                    [source_id, stream],
+                    [source_id, stream, parser_version, parser_version],
                 ).fetchall()
             )
         return {
@@ -243,13 +246,13 @@ class Warehouse:
             """
             SELECT status, content_sha256, retention_expired_at, storage_generation,
                    source_id, schema_version, COALESCE(subject_key, device_key), source_stream,
-                   COALESCE(logical_key, segment_key), observed_at
+                   COALESCE(logical_key, segment_key), observed_at, parser_version
             FROM ops.ingestion_metadata
             WHERE object_key = ?
             """,
             [raw.key],
         ).fetchone()
-        if current and (*current[4:], current[1]) != _raw_identity(raw):
+        if current and (*current[4:10], current[1]) != _raw_identity(raw):
             raise RuntimeError(f"immutable object identity changed: {raw.key}")
         return current
 
@@ -272,6 +275,7 @@ class Warehouse:
                 and current[0] == "succeeded"
                 and current[2] is None
                 and current[3] == raw.storage_generation
+                and current[10] == batch.parser_version
             ):
                 self.connection.execute("ROLLBACK")
                 return 0

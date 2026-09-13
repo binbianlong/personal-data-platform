@@ -15,6 +15,7 @@ from personal_data_platform.sources.screen_time.raw import (
     CollectorDeviceManifest,
     CollectorScanReceipt,
     build_device_key,
+    decode_segment_envelope,
 )
 from personal_data_platform.sources.screen_time.state import CollectorState
 
@@ -117,7 +118,7 @@ def test_collects_a_b_a_but_skips_consecutive_same_segment(tmp_path) -> None:
     assert len(set(keys)) == 3
     assert keys[0].rsplit("/", 1)[1] == keys[2].rsplit("/", 1)[1]
     assert all(DEVICE_IDENTIFIER not in key for key in keys)
-    assert [gzip.decompress(body) for _, body in uploader.calls] == [
+    assert [decode_segment_envelope(gzip.decompress(body))[0] for _, body in uploader.calls] == [
         b"state-a",
         b"state-b",
         b"state-a",
@@ -286,7 +287,9 @@ def test_waits_through_updates_and_restart_until_successor_exists(tmp_path, caps
 
     (segment.parent / "200").write_bytes(b"next-active")
     assert restarted.collect_once().uploaded == 1
-    assert [gzip.decompress(body) for _, body in uploader.calls] == [b"appended"]
+    assert [decode_segment_envelope(gzip.decompress(body))[0] for _, body in uploader.calls] == [
+        b"appended"
+    ]
     assert restarted.collect_once() == CollectionStats(devices=1, segments=2, skipped=1, deferred=1)
 
 
@@ -299,10 +302,13 @@ def test_initial_backfill_and_late_arrival_use_numeric_order(tmp_path) -> None:
     assert collector.collect_once() == CollectionStats(
         devices=1, segments=3, uploaded=2, deferred=1
     )
-    assert {gzip.decompress(body) for _, body in uploader.calls} == {b"9", b"10"}
+    assert {decode_segment_envelope(gzip.decompress(body))[0] for _, body in uploader.calls} == {
+        b"9",
+        b"10",
+    }
     (segment.parent / "8").write_bytes(b"late")
     assert collector.collect_once().uploaded == 1
-    assert gzip.decompress(uploader.calls[-1][1]) == b"late"
+    assert decode_segment_envelope(gzip.decompress(uploader.calls[-1][1]))[0] == b"late"
 
 
 def test_devices_and_parent_directories_have_independent_successors(tmp_path) -> None:
@@ -336,7 +342,7 @@ def test_devices_and_parent_directories_have_independent_successors(tmp_path) ->
     assert collector.collect_once() == CollectionStats(
         devices=2, segments=5, uploaded=2, deferred=3
     )
-    assert {gzip.decompress(body) for _, body in uploader.calls} == {
+    assert {decode_segment_envelope(gzip.decompress(body))[0] for _, body in uploader.calls} == {
         b"normal-complete",
         b"tombstone-complete",
     }

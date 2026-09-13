@@ -3,7 +3,7 @@ locals {
     screen_time_app_in_focus = {
       source_id               = "screen_time"
       stream                  = "app-in-focus"
-      raw_prefixes            = ["raw/screen_time/v1/"]
+      raw_prefixes            = ["raw/screen_time/v1/", "raw/screen_time/v2/"]
       raw_suffixes            = [".segb.gz"]
       retention_days          = 90
       lifecycle_grace_days    = 3

@@ -137,7 +137,7 @@ def test_rebuild_dry_run_uses_canonical_raw_prefix(tmp_path, monkeypatch) -> Non
     )
 
     assert run_rebuild_from_env(dry_run=True, target_db=None) == 0
-    assert prefixes == ["raw/screen_time/v1/"]
+    assert prefixes == ["raw/screen_time/v1/", "raw/screen_time/v2/"]
     assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == "ambient-collector-adc.json"
 
 
@@ -216,7 +216,7 @@ def test_rebuild_uses_one_inventory_and_fails_if_a_listed_generation_disappears(
 
         def list_raw(self, prefix):
             self.list_calls += 1
-            return [raw]
+            return [raw] if raw.key.startswith(prefix) else []
 
         def get_raw(self, key, *, generation):
             assert (key, generation) == (raw.key, 9)
@@ -238,7 +238,7 @@ def test_rebuild_uses_one_inventory_and_fails_if_a_listed_generation_disappears(
         )
         == 1
     )
-    assert repository.list_calls == 1
+    assert repository.list_calls == 2
 
 
 def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(monkeypatch):

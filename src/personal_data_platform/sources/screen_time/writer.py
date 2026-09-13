@@ -16,6 +16,8 @@ from .parser import PARSER_VERSION
 @dataclass(frozen=True, slots=True)
 class ScreenTimeBatch:
     records: Sequence[ParsedScreenTimeRecord]
+    source_segment_name: str | None = None
+    segment_kind: str | None = None
 
     @property
     def parser_version(self) -> str:
@@ -35,18 +37,21 @@ class ScreenTimeBatch:
             connection.executemany(
                 """
                 INSERT INTO base.screen_time_record_occurrence VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 [_record_row(record, loaded_at) for record in self.records],
             )
         connection.execute(
             """
-            INSERT INTO base.screen_time_segment_observation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO base.screen_time_segment_observation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (object_key) DO UPDATE SET
                 record_count = excluded.record_count,
                 parser_version = excluded.parser_version,
-                loaded_at = excluded.loaded_at
+                loaded_at = excluded.loaded_at,
+                source_segment_name = excluded.source_segment_name,
+                segment_kind = excluded.segment_kind
             """,
             [
                 raw.key,
@@ -59,6 +64,8 @@ class ScreenTimeBatch:
                 self.record_count,
                 self.parser_version,
                 loaded_at,
+                self.source_segment_name,
+                self.segment_kind,
             ],
         )
 
@@ -91,4 +98,12 @@ def _record_row(record: ParsedScreenTimeRecord, loaded_at: datetime) -> list[Any
         record.original_payload,
         record.parser_version,
         loaded_at,
+        record.record_kind,
+        record.payload_length or len(record.original_payload),
+        record.record_timestamp_cocoa,
+        record.target_segment_name,
+        record.target_offset,
+        record.target_length,
+        record.target_event_timestamp,
+        record.deletion_reason,
     ]

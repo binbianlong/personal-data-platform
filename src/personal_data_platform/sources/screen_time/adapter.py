@@ -3,27 +3,38 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import DecodedBatch, RawRepository, SourceHealth
 
-from .parser import parse_segb_bytes
-from .raw import APP_IN_FOCUS_STREAM, RAW_PREFIX, parse_raw_object_key, validate_raw_object_key
+from .parser import PARSER_VERSION, parse_segb_bytes
+from .raw import (
+    APP_IN_FOCUS_STREAM,
+    RAW_PREFIX,
+    RAW_V2_PREFIX,
+    decode_segment_envelope,
+    parse_raw_object_key,
+    validate_raw_object_key,
+)
 
 
 class ScreenTimeSource:
-    """Keep the established Screen Time v1 format behind one source boundary."""
+    """Read legacy SEGB and v2 observations with source identities for deletion matching."""
 
     source_id = "screen_time"
     stream = APP_IN_FOCUS_STREAM
-    schema_versions = (1,)
-    raw_prefixes = (f"{RAW_PREFIX}/",)
+    schema_versions = (1, 2)
+    parser_version = PARSER_VERSION
+    raw_prefixes = (f"{RAW_PREFIX}/", f"{RAW_V2_PREFIX}/")
     raw_suffixes = (".segb.gz",)
     required_relations = (
         "base.screen_time_segment_observation",
         "base.screen_time_record_occurrence",
         "base.screen_time_transition",
+        "base.screen_time_tombstone_match",
+        "base.screen_time_tombstone_status",
         "base.screen_time_interval",
         "marts.daily_screen_time",
     )
@@ -39,7 +50,7 @@ class ScreenTimeSource:
         validate_raw_object_key(key)
         # Listing a version prefix can include other registered streams. Their
         # identities can be parsed, while decode remains scoped to this stream.
-        stream = key.removeprefix(self.raw_prefixes[0]).split("/")[1]
+        stream = key.split("/")[4]
         if stream not in self._known_streams:
             raise ValueError(f"unsupported Screen Time stream: {stream}")
 
@@ -63,7 +74,17 @@ class ScreenTimeSource:
         ):
             raise ValueError("Raw source, stream or schema version does not match Screen Time")
         self.validate_raw_key(raw.key)
-        return ScreenTimeBatch(parse_segb_bytes(raw, payload))
+        name = kind = None
+        if raw.schema_version == 2:
+            payload, name, kind = decode_segment_envelope(payload)
+        records = parse_segb_bytes(raw, payload, segment_kind=kind)
+        if name is not None:
+            records = [replace(record, segment_filename=name) for record in records]
+        return ScreenTimeBatch(
+            records,
+            source_segment_name=name,
+            segment_kind=kind,
+        )
 
     def repository_from_env(self) -> RawRepository:
         from .storage import ScreenTimeGCSRepository

@@ -66,3 +66,26 @@ def test_successful_scan_is_updated_only_when_explicitly_recorded(tmp_path) -> N
     state.record_successful_scan(scan)
 
     assert state.last_successful_scan() == scan
+
+
+def test_pending_recovery_keeps_original_v1_and_v2_identities(tmp_path) -> None:
+    from personal_data_platform.sources.screen_time.raw import encode_segment_envelope
+
+    state = CollectorState(tmp_path / "state.db")
+    first = _prepare(state, b"legacy")
+    second = state.prepare(
+        device_key="a" * 64,
+        stream="app-in-focus",
+        segment_key="b" * 64,
+        raw_bytes=encode_segment_envelope(b"segb", name="123", kind="events"),
+        observed_at=NOW,
+        schema_version=2,
+    )
+    restarted = CollectorState(tmp_path / "state.db")
+    pending = restarted.pending()
+    assert [p.identity for p in pending] == [first.identity, second.identity]
+    assert [p.identity.schema_version for p in pending] == [1, 2]
+    assert [p.compressed_payload for p in pending] == [
+        first.compressed_payload,
+        second.compressed_payload,
+    ]

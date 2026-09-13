@@ -56,7 +56,9 @@ def run_loader(
     refs = sorted(
         list_source_raw(repository, source, prefix), key=lambda raw: (raw.observed_at, raw.key)
     )
-    already_loaded = warehouse.succeeded_keys_for(refs)
+    already_loaded = warehouse.succeeded_keys_for(
+        refs, parser_version=getattr(source, "parser_version", None)
+    )
     pending = [raw for raw in refs if raw.key not in already_loaded]
     run_id = str(uuid.uuid4())
     # All source streams share one warehouse write lease. Source selection does not

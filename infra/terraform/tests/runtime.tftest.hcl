@@ -113,7 +113,7 @@ run "runtime_contract" {
       google_storage_bucket.raw.soft_delete_policy[0].retention_duration_seconds == 0,
       one(one(google_storage_bucket.raw.lifecycle_rule).action).type == "Delete",
       one(one(google_storage_bucket.raw.lifecycle_rule).condition).age == 90,
-      toset(one(one(google_storage_bucket.raw.lifecycle_rule).condition).matches_prefix) == toset(["raw/screen_time/v1/"]),
+      toset(one(one(google_storage_bucket.raw.lifecycle_rule).condition).matches_prefix) == toset(["raw/screen_time/v1/", "raw/screen_time/v2/"]),
       toset(one(one(google_storage_bucket.raw.lifecycle_rule).condition).matches_suffix) == toset([".segb.gz"]),
       length(google_storage_bucket.raw.versioning) == 0,
       length(google_storage_bucket.raw.autoclass) == 0,
@@ -339,7 +339,7 @@ run "additional_source_and_stream_contract" {
 
   assert {
     condition = alltrue([
-      anytrue([for rule in google_storage_bucket.raw.lifecycle_rule : one(rule.condition).age == 90 && toset(one(rule.condition).matches_prefix) == toset(["raw/screen_time/v1/"]) && toset(one(rule.condition).matches_suffix) == toset([".segb.gz"])]),
+      anytrue([for rule in google_storage_bucket.raw.lifecycle_rule : one(rule.condition).age == 90 && toset(one(rule.condition).matches_prefix) == toset(["raw/screen_time/v1/", "raw/screen_time/v2/"]) && toset(one(rule.condition).matches_suffix) == toset([".segb.gz"])]),
       anytrue([for rule in google_storage_bucket.raw.lifecycle_rule : one(rule.condition).age == 30 && toset(one(rule.condition).matches_prefix) == toset(["raw/fixture_health/v1/", "raw/fixture_health/v2/"]) && toset(one(rule.condition).matches_suffix) == toset([".json.gz"])]),
       alltrue([for rule in google_storage_bucket.raw.lifecycle_rule : one(rule.action).type == "Delete"]),
     ])

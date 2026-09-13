@@ -157,3 +157,69 @@ def test_shared_v2_data_offset_keeps_distinct_trailer_occurrences() -> None:
     assert [record.record_offset for record in records] == [12, 12]
     assert [record.record_metadata_offset for record in records] == [900, 916]
     assert [record.record_state for record in records] == ["WRITTEN", "DELETED"]
+
+
+def test_erased_deleted_payload_keeps_evidence_without_decoding() -> None:
+    record = SimpleNamespace(
+        data=b"\0" * 100,
+        data_start_offset=32,
+        metadata=SimpleNamespace(metadata_offset=500, creation=None),
+        state=SimpleNamespace(name="Deleted"),
+        crc_passed=False,
+    )
+    parsed = parse_segb_records(_raw(), b"ignored", [record])[0]
+    assert parsed.record_kind == "deleted"
+    assert parsed.event_key is None and parsed.bundle_id is None
+    assert parsed.original_payload == b"\0" * 100
+    assert parsed.payload_length == 100 and parsed.record_metadata_offset == 500
+
+
+def test_crc_failure_preserves_corrupt_bytes_without_creating_an_event() -> None:
+    record = SimpleNamespace(
+        data=b"\0", data_start_offset=32, state=SimpleNamespace(name="Written"), crc_passed=False
+    )
+    parsed = parse_segb_records(_raw(), b"ignored", [record])[0]
+    assert parsed.record_kind == "crc_failure"
+    assert parsed.event_key is None and parsed.original_payload == b"\0"
+    record.crc_passed = True
+    with pytest.raises(PayloadDecodeError):
+        parse_segb_records(_raw(), b"ignored", [record])
+
+
+@pytest.mark.parametrize("reason", [1, 2, 99])
+def test_tombstones_are_typed_records_not_foreground_events(reason) -> None:
+    payload = b"".join(
+        (
+            _field_bytes(1, b"12345"),
+            _field_varint(2, 512),
+            _field_varint(3, 100),
+            _field_varint(4, reason),
+            _field_bytes(5, b"synthetic"),
+            _field_double(6, 10.5),
+        )
+    )
+    record = SimpleNamespace(
+        data=payload, data_start_offset=32, state=SimpleNamespace(name="Written"), crc_passed=True
+    )
+    parsed = parse_segb_records(_raw(), b"ignored", [record], segment_kind="tombstones")[0]
+    assert parsed.record_kind == "tombstone" and parsed.event_key is None
+    assert (
+        parsed.target_segment_name,
+        parsed.target_offset,
+        parsed.target_length,
+        parsed.target_event_timestamp,
+        parsed.deletion_reason,
+    ) == ("12345", 512, 100, 10.5, reason)
+    with pytest.raises(PayloadDecodeError, match="events segment"):
+        parse_segb_records(_raw(), b"ignored", [record], segment_kind="events")
+
+
+def test_unknown_valid_crc_tombstone_format_is_not_silently_skipped() -> None:
+    record = SimpleNamespace(
+        data=_payload(),
+        data_start_offset=32,
+        state=SimpleNamespace(name="Written"),
+        crc_passed=True,
+    )
+    with pytest.raises(PayloadDecodeError, match="unrecognized tombstone"):
+        parse_segb_records(_raw(), b"ignored", [record], segment_kind="tombstones")
