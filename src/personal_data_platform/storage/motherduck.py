@@ -77,8 +77,11 @@ class Warehouse:
 
     def __init__(self, connection: Any):
         self.connection = connection
+        self.screen_time_ingestion = None
 
     def close(self) -> None:
+        if self.screen_time_ingestion is not None:
+            self.screen_time_ingestion.close()
         self.connection.close()
 
     def migrate(self, migrations: Path = DEFAULT_MIGRATIONS) -> None:
@@ -256,7 +259,35 @@ class Warehouse:
             raise RuntimeError(f"immutable object identity changed: {raw.key}")
         return current
 
+    def open_screen_time_ingestion(self, store=None) -> None:
+        from personal_data_platform.sources.screen_time.ingestion import (
+            ScreenTimeIngestion,
+            local_checkpoint_store,
+        )
+
+        if self.screen_time_ingestion is None:
+            self.screen_time_ingestion = ScreenTimeIngestion(
+                self, store if store is not None else local_checkpoint_store(self)
+            )
+        else:
+            self.screen_time_ingestion.resume()
+
     def load_object(
+        self,
+        raw: RawObject,
+        *,
+        byte_size: int,
+        batch: DecodedBatch,
+        legacy_scope: tuple[str, str] | None = None,
+    ) -> int:
+        from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
+
+        if isinstance(batch, ScreenTimeBatch):
+            self.open_screen_time_ingestion()
+            return self.screen_time_ingestion.load(raw, byte_size=byte_size, batch=batch)
+        return self._load_object(raw, byte_size=byte_size, batch=batch, legacy_scope=legacy_scope)
+
+    def _load_object(
         self,
         raw: RawObject,
         *,

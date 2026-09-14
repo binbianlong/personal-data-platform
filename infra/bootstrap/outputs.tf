@@ -11,11 +11,12 @@ output "artifact_repository" {
 output "storage_custom_roles" {
   description = "Custom storage role names consumed by runtime Terraform."
   value = {
-    collector_raw_creator     = google_project_iam_custom_role.collector_raw_creator.name
-    collector_receipt_writer  = google_project_iam_custom_role.collector_receipt_writer.name
-    preflight_object_operator = google_project_iam_custom_role.preflight_object_operator.name
-    runtime_bucket_manager    = google_project_iam_custom_role.runtime_bucket_manager.name
-    runtime_bucket_reader     = google_project_iam_custom_role.runtime_bucket_reader.name
+    ingestion_checkpoint_writer = google_project_iam_custom_role.ingestion_checkpoint_writer.name
+    collector_raw_creator       = google_project_iam_custom_role.collector_raw_creator.name
+    collector_receipt_writer    = google_project_iam_custom_role.collector_receipt_writer.name
+    preflight_object_operator   = google_project_iam_custom_role.preflight_object_operator.name
+    runtime_bucket_manager      = google_project_iam_custom_role.runtime_bucket_manager.name
+    runtime_bucket_reader       = google_project_iam_custom_role.runtime_bucket_reader.name
   }
 }
 

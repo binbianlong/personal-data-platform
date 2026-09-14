@@ -6,9 +6,10 @@ locals {
   device_manifest_key   = "raw/screen_time/v1/_control/collector/active.json"
 
   storage_roles = {
-    collector_raw_creator     = "projects/${var.project_id}/roles/pdpCollectorRawCreator"
-    collector_receipt_writer  = "projects/${var.project_id}/roles/pdpCollectorReceiptWriter"
-    preflight_object_operator = "projects/${var.project_id}/roles/pdpPreflightObjectOperator"
+    ingestion_checkpoint_writer = "projects/${var.project_id}/roles/pdpIngestionCheckpointWriter"
+    collector_raw_creator       = "projects/${var.project_id}/roles/pdpCollectorRawCreator"
+    collector_receipt_writer    = "projects/${var.project_id}/roles/pdpCollectorReceiptWriter"
+    preflight_object_operator   = "projects/${var.project_id}/roles/pdpPreflightObjectOperator"
   }
 }
 
@@ -105,6 +106,19 @@ data "google_iam_policy" "raw_bucket" {
       title       = "collector_control_state_only"
       description = "Allow replacement of latest receipts and the expected-device manifest only."
       expression  = "(resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${local.receipt_object_prefix}') && resource.name.endsWith('.json')) || resource.name == 'projects/_/buckets/${local.raw_bucket_name}/objects/${local.device_manifest_key}'"
+    }
+  }
+
+  binding {
+    role = local.storage_roles.ingestion_checkpoint_writer
+    members = [
+      "serviceAccount:${google_service_account.runtime["loader"].email}",
+      "serviceAccount:${google_service_account.runtime["reconciliation"].email}",
+    ]
+    condition {
+      title       = "screen_time_ingestion_checkpoint_only"
+      description = "Allow checkpoint replacement without Raw write or delete access."
+      expression  = "resource.name == 'projects/_/buckets/${local.raw_bucket_name}/objects/control/screen_time/app-in-focus/${sha256(var.motherduck_database)}/state.sqlite'"
     }
   }
 

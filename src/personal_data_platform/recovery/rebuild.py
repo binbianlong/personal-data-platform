@@ -34,6 +34,11 @@ class _SnapshotRawRepository:
     repository: RawRepository
     observations: tuple[RawObject, ...]
 
+    def checkpoint_store(self, warehouse):
+        from personal_data_platform.sources.screen_time.checkpoint import MemoryCheckpointStore
+
+        return MemoryCheckpointStore()
+
     def list_raw(self, prefix: str) -> Iterable[RawObject]:
         return (value for value in self.observations if value.key.startswith(prefix))
 
