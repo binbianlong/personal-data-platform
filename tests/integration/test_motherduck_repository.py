@@ -8,13 +8,13 @@ import pytest
 
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.screen_time.models import ParsedScreenTimeRecord
-from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
     DEFAULT_MIGRATIONS,
     Warehouse,
     WarehouseConfig,
     connect,
 )
+from tests.legacy_screen_time import LegacyScreenTimeBatch as ScreenTimeBatch
 
 
 def _raw(
