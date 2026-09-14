@@ -450,3 +450,77 @@ run "reject_noncanonical_namespace" {
 
   expect_failures = [var.additional_ingestion_pipelines]
 }
+
+run "screen_time_checkpoint_permissions" {
+  command = plan
+
+  override_resource {
+    target          = google_service_account.runtime["loader"]
+    override_during = plan
+    values = {
+      email = "loader@example-project.iam.gserviceaccount.com"
+      name  = "projects/example-project/serviceAccounts/loader@example-project.iam.gserviceaccount.com"
+    }
+  }
+
+  override_resource {
+    target          = google_service_account.runtime["reconciliation"]
+    override_during = plan
+    values = {
+      email = "reconciliation@example-project.iam.gserviceaccount.com"
+      name  = "projects/example-project/serviceAccounts/reconciliation@example-project.iam.gserviceaccount.com"
+    }
+  }
+
+  override_resource {
+    target          = google_service_account.runtime["dbt"]
+    override_during = plan
+    values = {
+      email = "pdp-dbt@example-project.iam.gserviceaccount.com"
+      name  = "projects/example-project/serviceAccounts/pdp-dbt@example-project.iam.gserviceaccount.com"
+    }
+  }
+
+  override_resource {
+    target          = google_service_account.runtime["preflight"]
+    override_during = plan
+    values = {
+      email = "preflight@example-project.iam.gserviceaccount.com"
+      name  = "projects/example-project/serviceAccounts/preflight@example-project.iam.gserviceaccount.com"
+    }
+  }
+
+  override_resource {
+    target          = google_service_account.collector
+    override_during = plan
+    values = {
+      email = "collector@example-project.iam.gserviceaccount.com"
+      name  = "projects/example-project/serviceAccounts/collector@example-project.iam.gserviceaccount.com"
+    }
+  }
+
+  override_resource {
+    target          = google_service_account.rebuild_operator
+    override_during = plan
+    values = {
+      email = "rebuild@example-project.iam.gserviceaccount.com"
+      name  = "projects/example-project/serviceAccounts/rebuild@example-project.iam.gserviceaccount.com"
+    }
+  }
+
+  assert {
+    condition = alltrue([
+      for binding in data.google_iam_policy.raw_bucket.binding :
+      binding.role != local.storage_roles.ingestion_checkpoint_writer || (
+        toset(binding.members) == toset([
+          "serviceAccount:${google_service_account.runtime["loader"].email}",
+          "serviceAccount:${google_service_account.runtime["reconciliation"].email}",
+        ]) && one(binding.condition).expression == "resource.name == 'projects/_/buckets/${local.raw_bucket_name}/objects/control/screen_time/app-in-focus/${sha256(var.motherduck_database)}/state.sqlite'"
+      )
+      ]) && length([
+      for binding in data.google_iam_policy.raw_bucket.binding : binding
+      if binding.role == local.storage_roles.ingestion_checkpoint_writer
+    ]) == 1
+    error_message = "Only Screen Time Loader and Reconciliation may replace the exact production checkpoint."
+  }
+}

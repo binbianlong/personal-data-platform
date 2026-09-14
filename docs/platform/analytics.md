@@ -22,8 +22,15 @@ commitする。batchはparser version、record数、型付きtableへの書込�
 Warehouseだけが行う。decodeまたは書込に失敗したobjectの分析行は確定せず、`failed`とerror種別を別transactionで
 保存する。
 
-iPhone Screen Timeではadapter内でccl-segbとApp.InFocus protobufをdecodeし、segment observationとrecord occurrenceを
-同じtransactionで書き込む。他sourceのrecordをこのtableへ格納する汎用JSON化は行わない。
+iPhone Screen Timeではccl-segbとApp.InFocus protobufをdecodeした後、取り込み側のSQLite状態で重複と削除を
+判定する。MotherDuckには`base.screen_time_event`を`event_key`ごとに1件保存し、分析項目・有効状態が変わる場合
+だけ更新する。新しいsegment observation・record occurrenceやprotobuf原文はMotherDuckへ保存しない。
+既存のoccurrenceは移行互換のため維持する。他sourceのDecodedBatch契約は変更しない。
+
+Screen Timeは更新予定をGCS checkpointへ先に保存し、イベント・取込成功・checkpoint revisionを1 transactionで
+確定してから更新予定を解除する。checkpoint関連の失敗では後続objectを処理せずJobを失敗にする。commit済みの
+取込成功を`failed`へ上書きせず、次回は未完了更新を回復してから通常のskip判定へ進む。
+保存場所と復旧は[`Screen Time運用`](../sources/screen-time/operations.md#イベント単位の保存への切り替え)に従う。
 
 Loaderはsource横断JOIN、interval生成、日次集計を行わない。これらはdbt Viewで行う。
 
@@ -61,6 +68,11 @@ Raw objectごとの最新取込状態を保持する。
 `COALESCE(logical_key, segment_key)`で互換性を保つ。Screen Time adapterの`legacy_scope`は新writerからも旧scope列を
 埋める。旧列と旧writer向けdefaultは残し、新sourceを有効にする前のruntime更新順序は
 [`operations.md`](operations.md#更新時の互換性)に従う。
+
+### `ops.screen_time_checkpoint`
+
+Screen Timeの外部checkpointに対応する`state_id`と単調増加する`revision`だけを1行保持する。
+イベント本文やrecord照合情報は含めない。checkpointの紛失、別databaseとの取り違え、古い状態からの再開を検出する。
 
 ### `ops.schema_migration`
 

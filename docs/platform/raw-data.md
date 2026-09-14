@@ -89,3 +89,12 @@ source / streamまたはkey由来のidentityとmetadataの不一致は処理前�
 
 Rawの存在と分析への取込成功は別の状態として扱う。GCS objectが存在しても、MotherDuckの
 `ops.ingestion_metadata`が同じRaw identityとGCS generationで`succeeded`になるまでは取込完了とみなさない。
+
+## Screen Time取り込みcheckpoint
+
+`control/screen_time/app-in-focus/<SHA-256(database名)>/state.sqlite`はLoaderが管理する処理状態で、Rawではない。
+同じrecordの観測ごとのコピーは作らず、recordの変更差分、削除照合情報、未完了のMotherDuck更新を保存する。
+この固定objectをgeneration条件付きで置換する。観測ごとのcheckpoint objectは増やさず、原文はRawだけに保持する。
+
+Raw用90日Lifecycleのprefix・suffixに一致しないため、自動削除の対象外である。checkpointに独自の期限削除は
+設定しない。Raw期限切れ後も削除照合を維持するために必要で、Rawだけから全状態を復元できるとは限らない。

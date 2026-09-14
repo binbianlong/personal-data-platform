@@ -71,3 +71,14 @@ resource "google_project_iam_custom_role" "runtime_bucket_reader" {
 
   depends_on = [google_project_service.bootstrap]
 }
+
+resource "google_project_iam_custom_role" "ingestion_checkpoint_writer" {
+  project     = var.project_id
+  role_id     = "pdpIngestionCheckpointWriter"
+  title       = "PDP ingestion checkpoint writer"
+  description = "Replaces ingestion checkpoints selected by bucket IAM conditions."
+  permissions = ["storage.objects.create", "storage.objects.delete"]
+  stage       = "GA"
+
+  depends_on = [google_project_service.bootstrap]
+}

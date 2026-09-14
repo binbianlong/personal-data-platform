@@ -47,6 +47,15 @@ class ScreenTimeGCSRepository(GCSRawRepository):
     def from_env(cls, *, source: RawCodec | None = None) -> ScreenTimeGCSRepository:
         return cls.from_config(GCSConfig.from_env(), source=source)
 
+    def checkpoint_store(self, warehouse):
+        import hashlib
+
+        from .checkpoint import CHECKPOINT_PREFIX, GCSCheckpointStore
+
+        database = warehouse.query_value("SELECT current_database()")
+        namespace = hashlib.sha256(database.encode()).hexdigest()
+        return GCSCheckpointStore(self._bucket, f"{CHECKPOINT_PREFIX}{namespace}/state.sqlite")
+
     def store_raw(self, identity: ScreenTimeRawIdentity, raw_bytes: bytes) -> str:
         """Validate, compress, and upload a Screen Time observation."""
         actual_sha256 = sha256_hex(raw_bytes)

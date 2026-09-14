@@ -30,6 +30,7 @@ class ScreenTimeSource:
     raw_prefixes = (f"{RAW_PREFIX}/", f"{RAW_V2_PREFIX}/")
     raw_suffixes = (".segb.gz",)
     required_relations = (
+        "base.screen_time_event",
         "base.screen_time_segment_observation",
         "base.screen_time_record_occurrence",
         "base.screen_time_transition",

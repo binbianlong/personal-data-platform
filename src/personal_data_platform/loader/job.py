@@ -56,10 +56,6 @@ def run_loader(
     refs = sorted(
         list_source_raw(repository, source, prefix), key=lambda raw: (raw.observed_at, raw.key)
     )
-    already_loaded = warehouse.succeeded_keys_for(
-        refs, parser_version=getattr(source, "parser_version", None)
-    )
-    pending = [raw for raw in refs if raw.key not in already_loaded]
     run_id = str(uuid.uuid4())
     # All source streams share one warehouse write lease. Source selection does not
     # change the database's concurrency contract.
@@ -73,6 +69,14 @@ def run_loader(
     try:
         warehouse.begin_job(f"loader:{source.source_id}:{source.stream}", run_id)
         job_started = True
+        if source.source_id == "screen_time" and source.stream == "app-in-focus":
+            factory = getattr(repository, "checkpoint_store", None)
+            store = factory(warehouse) if factory is not None else None
+            warehouse.open_screen_time_ingestion(store)
+        already_loaded = warehouse.succeeded_keys_for(
+            refs, parser_version=getattr(source, "parser_version", None)
+        )
+        pending = [raw for raw in refs if raw.key not in already_loaded]
         for raw in pending:
             byte_size = 0
             legacy_scope = source.legacy_scope(raw)
@@ -86,6 +90,10 @@ def run_loader(
                 )
                 succeeded += 1
             except Exception as error:
+                from personal_data_platform.sources.screen_time.ingestion import CheckpointError
+
+                if isinstance(error, CheckpointError):
+                    raise
                 failed += 1
                 LOGGER.exception("failed to load raw object %s", raw.key)
                 warehouse.mark_failed(

@@ -18,7 +18,7 @@ source / stream別Cloud Run Reconciliation Job
 
 実データの取得まで実装しているのは、Macへ同期されたiPhoneの
 [`Screen Time App.InFocus`](../sources/screen-time/)だけである。実行単位は
-`source_id=screen_time`、`stream=app-in-focus`で、Raw schema v1を扱う。
+`source_id=screen_time`、`stream=app-in-focus`で、Raw schema v1/v2を扱う。
 Mac自身のScreen TimeとFitbitの取得処理・decoder・分析modelは未実装である。
 複数source、同じsource内の別stream、複数schema versionを扱う共通処理はsynthetic fixtureで検証する。
 
@@ -55,6 +55,8 @@ source固有の稼働監査は`SourceHealth`として成功可否と詳細を共
 - GCS Rawを保持期間内の再生可能な正本、MotherDuck baseを長期分析履歴とする。
 - 取得処理はRawの保存までを担当し、分析のinterval生成や日次集計を行わない。
 - Source adapterはRawを型付きbatchへdecodeし、Warehouseがobject単位のtransactionを管理する。
+- Screen Timeは取り込み側で重複・削除を判定し、MotherDuckにはイベントを1件ずつ保存する。
+  判定状態は原文を含まないSQLite差分状態としてGCSの専用control領域に保持する。
 - dbtはinterval、日境界、集計、source横断JOINをViewとして提供する。
 - ChatGPTは分析用Viewだけをread-onlyで参照する。
 

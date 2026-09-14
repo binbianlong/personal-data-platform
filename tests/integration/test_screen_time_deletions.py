@@ -170,20 +170,19 @@ def test_user_deletions_ttl_history_and_reused_positions(tmp_path, monkeypatch):
         )
         assert (
             warehouse.query_value(
-                "SELECT cf_absolute_time FROM base.screen_time_record_occurrence "
-                "WHERE event_key=(SELECT event_key FROM base.screen_time_transition "
-                "WHERE bundle_id='app.slot') LIMIT 1"
+                "SELECT epoch(event_at) - 978307200 FROM base.screen_time_transition "
+                "WHERE bundle_id='app.slot'"
             )
             == 20.0
         )
-        assert warehouse.query_rows(
-            "SELECT status, count(*) FROM base.screen_time_tombstone_status GROUP BY status ORDER BY status"
-        ) == [
-            ("ttl_history_retained", 1),
-            ("unmatched", 3),
-            ("unsupported_reason", 1),
-            ("user_deletion_applied", 2),
-        ]
+        warehouse.open_screen_time_ingestion()
+        assert warehouse.screen_time_ingestion.state.get("diagnostics") == {
+            "ttl_history_retained": 1,
+            "unmatched": 3,
+            "unsupported_reason": 1,
+            "user_deletion_applied": 2,
+        }
+
     finally:
         warehouse.close()
 
@@ -211,8 +210,8 @@ def test_parser_upgrade_reprocesses_available_raw_without_touching_other_history
 
 
 def test_migration_preserves_existing_occurrences_and_can_be_repeated(tmp_path):
-    from personal_data_platform.sources.screen_time.writer import _record_row
     from personal_data_platform.storage.motherduck import DEFAULT_MIGRATIONS
+    from tests.legacy_screen_time import _record_row
 
     repository = Repository()
     raw = repository.add("100", segb(event("app.legacy"))[0])

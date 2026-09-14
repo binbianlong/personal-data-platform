@@ -17,8 +17,8 @@
 | 実行主体 | capability |
 |---|---|
 | Local Collector | 固定Raw prefixへのcreateとscan receipt prefix・固定manifest keyへのcreate / deleteだけ |
-| Loader | production bucketへのlist / readだけ |
-| Reconciliation | production bucketのRawとcontrol JSONへのlist / readだけ |
+| Loader | production bucketへのlist / readと、Screen Time checkpoint 1 objectのcreate / delete |
+| Reconciliation | production bucketへのlist / readと、Screen Time checkpoint 1 objectのcreate / delete |
 | Preflight | preflight bucketへのwrite / read / listと作成generationのdeleteだけ |
 | Rebuild operator | 専用read-only Service Accountでproduction bucketへのlist / read |
 
@@ -26,6 +26,10 @@ CollectorへRawのread、list、deleteを許可しない。control JSONの同名
 `raw/screen_time/v1/_control/collector/active.json`の完全一致だけへIAM conditionで限定する。bucket IAM policyは
 Terraformでauthoritativeに管理し、projectの
 Viewer / Editor / Owner convenience valueによるobject accessを残さない。
+
+checkpointの書き換え権限は`pdpIngestionCheckpointWriter`とIAM conditionで
+`control/screen_time/app-in-focus/<SHA-256(database名)>/state.sqlite`の完全一致だけに限定する。
+Loaderを内部で呼ぶReconciliationにも同じ権限が必要。Collector、dbt、Rebuildにはこの書き換え権限を与えない。
 
 ローカルrebuildはCollector ADCを再利用せず、別のRebuild Service Accountをimpersonateする専用ADCを使う。
 このService AccountはRaw bucketのobject Viewerだけを持ち、write / delete権限を持たない。

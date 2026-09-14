@@ -85,6 +85,25 @@ raw/screen_time/v1/_control/collector/active.json
 Reconciliationはこのmanifestを最新のactive-device集合の正本として扱う。allowlistから外したdeviceのRawは
 90日Lifecycleまで残り得るが、そのdeviceのreceipt更新は要求しない。
 
+## `base.screen_time_event`
+
+新規取り込みの分析用table。`event_key`をprimary keyとし、同じイベントは1行だけ保持する。
+列は後述の`base.screen_time_transition`に`is_active`と`loaded_at`を加えたもの。
+`original_payload`や観測版ごとのrecord本文は保存しない。無効化も行を増やさず`is_active=false`へ更新する。
+
+同じイベントの再観測だけでは更新しない。分析項目、parser version、物理コピー数、有効状態が変わる場合だけ
+更新し、provenance列はその更新で採用した代表recordを指す。`observed_at`は全再観測の最新日時ではない。
+Rawごとの取込時刻・件数は`ops.ingestion_metadata`で確認する。
+
+取り込み側はsegmentの観測順とrecord変更差分から最新状態と削除照合を計算する。順序逆転と再解析では対象観測と
+直後の差分を修正し、それ以降の観測内容を維持する。変更されていないrecordの参照行を観測のたびに増やさない。
+TTLで必要な過去状態はGCS checkpointに残し、同じevent_keyへのユーザー削除は別segmentのコピーにも適用する。
+
+## 既存データとの互換性
+
+以下のsegment observationとrecord occurrenceは切り替え前の保存形式で、新方式では書き込まない。
+既存行の削除・圧縮・新tableへの一括コピーは行わない。初回に既存行を読み、取り込み側の判定状態を初期化する。
+
 ## `base.screen_time_segment_observation`
 
 GCS objectごとに1行を保持する。
@@ -152,9 +171,10 @@ private frameworkは形式検証だけに使い、本番パーサーはPythonで
 `base.screen_time_tombstone_match`で端末・stream・元segment名・metadata offset・payload長・元record時刻を照合する。
 時刻の許容差は旧datetime列のmicrosecond丸め分の1 microsecondだけ。元ファイル名の対応が曖昧なsegmentは適用しない。
 
-`base.screen_time_tombstone_status`は`user_deletion_applied`、`ttl_history_retained`、`unmatched`、
+既存データ用の`base.screen_time_tombstone_status`は`user_deletion_applied`、`ttl_history_retained`、`unmatched`、
 `unsupported_reason`と一致イベント数を公開する。`unmatched`には未到着・保存期間外・v1の元ファイル名不明も
-含まれ、削除適用済みとは扱わない。後から対応する観測が届けばView上で再評価する。
+含まれ、削除適用済みとは扱わない。新規取り込みの照合はLoaderで再評価し、同じstatus名の件数を
+`deletion_status`としてログ出力する。旧Viewは切り替え前の証跡だけを表示する。
 
 ## `event_key`
 
@@ -175,7 +195,11 @@ eventが別segmentに現れるため`event_key`へ含めない。
 
 ## `base.screen_time_transition`
 
-現在の各segmentとlogical eventを選ぶdbt Viewである。
+新旧データを統合するdbt Viewである。既存データの解決結果を`base.screen_time_legacy_transition`から読み、
+`base.screen_time_event`に同じkeyがあれば新tableを優先する。新tableの行が無効なら旧イベントも表示しない。
+これにより同じkeyの二重計上や、削除した旧イベントの復活を防ぐ。
+
+取り込み側と既存データ用Viewは、次のイベント選択規則を共有する。
 
 1. 通常の候補はlogical segmentの最新観測から選び、同じrecord offsetの最後のmetadataを現在stateとする。
 2. `event`かつ`WRITTEN`かつCRC不一致でないrecordだけを候補にする。
@@ -183,7 +207,7 @@ eventが別segmentに現れるため`event_key`へ含めない。
 4. UserInitiated tombstoneに完全照合できた`event_key`は、別segmentの重複コピーも含めて候補から除外する。
 5. 同一物理イベントの過去観測を重複計上せず、最後に同じ`event_key`を1件にまとめる。
 
-これは集計からの除外であり、GCS Rawやbaseの証跡を物理削除する処理ではない。取得前に消えたpayloadは復元できない。
+これは集計からの除外であり、GCS Rawや既存baseの証跡を物理削除する処理ではない。取得前に消えたpayloadは復元できない。
 
 ```text
 event_key / device_key / platform / source_stream
