@@ -5,7 +5,7 @@ import pytest
 
 from personal_data_platform.sources.screen_time.event_state import EventState, observation_for
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
-from tests.integration.test_motherduck_repository import _raw, _record
+from tests.screen_time_helpers import _raw, _record
 
 
 @pytest.mark.parametrize("order", [(0, 1, 2), (2, 0, 1), (1, 2, 0)])

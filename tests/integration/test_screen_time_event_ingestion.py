@@ -17,8 +17,8 @@ from personal_data_platform.sources.screen_time.event_state import EventState, o
 from personal_data_platform.sources.screen_time.ingestion import CheckpointError
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-from tests.integration.test_screen_time_deletions import Repository, event, segb, tombstone
 from tests.legacy_screen_time import LegacyScreenTimeBatch
+from tests.screen_time_helpers import Repository, event, segb, tombstone
 
 
 def decode(repository, raw):
