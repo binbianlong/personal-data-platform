@@ -57,11 +57,6 @@ def write_state(connection, raw, batch, *, loaded_at):
                NULL::UINTEGER AS deletion_reason
         FROM ops.screen_time_record WHERE false;
     """)
-    connection.execute(
-        "INSERT INTO screen_time_affected_event SELECT DISTINCT event_key "
-        "FROM ops.screen_time_record WHERE device_key = ? AND source_stream = ? AND segment_key = ?",
-        scope,
-    )
     # Capture old name matches as well, before learning a new/ambiguous v2 name.
     _affected_tombstones(connection, scope)
     connection.execute(
@@ -146,15 +141,40 @@ def write_state(connection, raw, batch, *, loaded_at):
             device_key, source_stream, segment_key, record_offset, record_metadata_offset,
             record_timestamp_cocoa, physical_id
         );
-        INSERT OR IGNORE INTO screen_time_affected_event
-        SELECT DISTINCT event_key FROM screen_time_input WHERE record_kind = 'event';
     """)
+    # Keep old keys before corrections overwrite them. Older evidence rejected by
+    # the UPSERT cannot change ranking and must not expand the resolve set.
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO screen_time_affected_event
+        SELECT r.event_key FROM ops.screen_time_record r
+        JOIN ops.screen_time_segment s USING (device_key, source_stream, segment_key)
+        WHERE r.device_key = ? AND r.source_stream = ? AND r.segment_key = ?
+          AND ((r.is_valid AND r.object_key = ?) OR (r.is_current AND s.object_key = ?));
+        """,
+        [*scope, raw.key, raw.key],
+    )
+    connection.execute("""
+        CREATE OR REPLACE TEMP TABLE screen_time_updated_event AS
+        SELECT i.event_key, r.event_key AS old_event_key
+        FROM screen_time_input i LEFT JOIN ops.screen_time_record r USING (physical_id)
+        WHERE i.record_kind = 'event' AND (r.physical_id IS NULL OR
+              (i.observed_at, i.object_key) >= (r.observed_at, r.object_key));
+        INSERT OR IGNORE INTO screen_time_affected_event
+        SELECT event_key FROM screen_time_updated_event
+        UNION SELECT old_event_key FROM screen_time_updated_event WHERE old_event_key IS NOT NULL;
+    """)
+    # Include both old and newly learned target names, then preserve effects before
+    # either record keys or tombstone reasons can be corrected in place.
+    _affected_tombstones(connection, scope)
+    _capture_deletion_effects(connection, "screen_time_previous_effect")
     # Reparse corrections invalidate only versions whose latest evidence is this Raw.
     # Later observations of the same bytes remain valid.
     for table in ("record", "tombstone"):
         connection.execute(
             f"UPDATE ops.screen_time_{table} SET is_valid = false WHERE "
-            "device_key = ? AND source_stream = ? AND segment_key = ? AND object_key = ?",
+            "device_key = ? AND source_stream = ? AND segment_key = ? AND object_key = ? "
+            "AND is_valid",
             [*scope, raw.key],
         )
     connection.execute(
@@ -163,7 +183,7 @@ def write_state(connection, raw, batch, *, loaded_at):
         FROM ops.screen_time_segment s
         WHERE r.device_key = s.device_key AND r.source_stream = s.source_stream
           AND r.segment_key = s.segment_key AND s.device_key = ? AND s.source_stream = ?
-          AND s.segment_key = ? AND s.object_key = ?
+          AND s.segment_key = ? AND s.object_key = ? AND r.is_current
         """,
         [*scope, raw.key],
     )
@@ -198,7 +218,6 @@ def write_state(connection, raw, batch, *, loaded_at):
               (ops.screen_time_tombstone.observed_at, ops.screen_time_tombstone.object_key)
     """)
     _affected_tombstones(connection, scope)
-    _affected_matches(connection)
     connection.execute("""
         DELETE FROM ops.screen_time_deletion_match
         WHERE tombstone_id IN (SELECT physical_id FROM screen_time_affected_tombstone);
@@ -215,7 +234,15 @@ def write_state(connection, raw, batch, *, loaded_at):
             ELSE 'user_deletion_applied' END
         WHERE t.physical_id IN (SELECT physical_id FROM screen_time_affected_tombstone);
     """)
-    _affected_matches(connection)
+    _capture_deletion_effects(connection, "screen_time_next_effect")
+    connection.execute("""
+        INSERT OR IGNORE INTO screen_time_affected_event
+        SELECT event_key FROM (
+            (SELECT * FROM screen_time_previous_effect EXCEPT SELECT * FROM screen_time_next_effect)
+            UNION
+            (SELECT * FROM screen_time_next_effect EXCEPT SELECT * FROM screen_time_previous_effect)
+        );
+    """)
     columns = (*EVENT_COLUMNS, "is_active", "loaded_at")
     connection.execute(
         f"INSERT INTO base.screen_time_event ({', '.join(columns)}) "
@@ -260,10 +287,12 @@ def _affected_tombstones(connection, scope):
     )
 
 
-def _affected_matches(connection):
-    connection.execute("""
-        INSERT OR IGNORE INTO screen_time_affected_event
-        SELECT DISTINCT r.event_key FROM ops.screen_time_record r
-        JOIN ops.screen_time_deletion_match m ON m.physical_id = r.physical_id
+def _capture_deletion_effects(connection, table):
+    connection.execute(f"""
+        CREATE OR REPLACE TEMP TABLE {table} AS
+        SELECT m.tombstone_id, m.physical_id, t.deletion_reason, r.event_key
+        FROM ops.screen_time_deletion_match m
+        JOIN ops.screen_time_tombstone t ON t.physical_id = m.tombstone_id
+        JOIN ops.screen_time_record r ON r.physical_id = m.physical_id
         WHERE m.tombstone_id IN (SELECT physical_id FROM screen_time_affected_tombstone)
     """)
