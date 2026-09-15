@@ -93,8 +93,11 @@ def test_user_deletions_ttl_history_and_reused_positions(tmp_path, monkeypatch):
             )
             == 20.0
         )
-        warehouse.open_screen_time_ingestion()
-        assert warehouse.screen_time_ingestion.state.get("diagnostics") == {
+        assert dict(
+            warehouse.query_rows(
+                "SELECT resolution, count(*) FROM ops.screen_time_tombstone GROUP BY resolution"
+            )
+        ) == {
             "ttl_history_retained": 1,
             "unmatched": 3,
             "unsupported_reason": 1,

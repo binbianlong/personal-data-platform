@@ -5,18 +5,20 @@ import shutil
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.loader.job import run_loader
 from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
-from personal_data_platform.sources.screen_time.checkpoint import MemoryCheckpointStore
-from personal_data_platform.sources.screen_time.event_state import EventState, observation_for
-from personal_data_platform.sources.screen_time.ingestion import CheckpointError
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.motherduck import (
+    DEFAULT_MIGRATIONS,
+    Warehouse,
+    WarehouseConfig,
+    WarehouseConnectionError,
+    connect,
+)
 from tests.legacy_screen_time import LegacyScreenTimeBatch
 from tests.screen_time_helpers import Repository, event, segb, tombstone
 
@@ -38,8 +40,7 @@ def test_reobservations_store_one_event_and_only_state_changes(tmp_path):
     initial_batch = decode(repository, initial)
     warehouse.load_object(initial, byte_size=1, batch=initial_batch)
     original = warehouse.query_rows("SELECT * FROM base.screen_time_event")
-    state = warehouse.screen_time_ingestion.state
-    changes = state.db.execute("SELECT count(*) FROM changes").fetchone()[0]
+    initial_counts = state_counts(warehouse)
     for index in range(1, 20):
         raw = replace(
             initial,
@@ -58,15 +59,14 @@ def test_reobservations_store_one_event_and_only_state_changes(tmp_path):
     assert warehouse.query_rows("SELECT * FROM base.screen_time_event") == original
     assert warehouse.query_value("SELECT count(*) FROM base.screen_time_record_occurrence") == 0
     assert warehouse.query_value("SELECT count(*) FROM base.screen_time_segment_observation") == 0
-    assert state.db.execute("SELECT count(*) FROM changes").fetchone()[0] == changes
-    assert state.db.execute("SELECT count(*) FROM record_values").fetchone()[0] == 1
-    assert (
-        "original_payload"
-        not in state.db.execute("SELECT document FROM record_values").fetchone()[0]
+    assert state_counts(warehouse) == initial_counts
+    assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 20
+    assert not warehouse.query_rows(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'ops' "
+        "AND table_name LIKE 'screen_time_%' AND column_name IN ('original_payload', 'document')"
     )
     warehouse.close()
     warehouse = warehouse_at(tmp_path / "events.duckdb")
-    warehouse.open_screen_time_ingestion()
     assert warehouse.query_rows("SELECT * FROM base.screen_time_event") == original
     warehouse.close()
 
@@ -96,83 +96,14 @@ def test_out_of_order_and_reparse_keep_later_snapshot(tmp_path, order):
     warehouse.close()
 
 
-class FailingStore(MemoryCheckpointStore):
-    def __init__(self):
-        super().__init__()
-        self.writes = 0
-        self.fail_at = None
-        self.persist_before_failure = False
-
-    def write(self, payload):
-        self.writes += 1
-        if self.writes == self.fail_at:
-            if self.persist_before_failure:
-                super().write(payload)
-            raise OSError("checkpoint response lost")
-        super().write(payload)
-
-
-@pytest.mark.parametrize(
-    "stage", ["prepare", "prepare_response", "warehouse", "ack", "ack_response"]
-)
-def test_interrupted_update_recovers_before_later_input(tmp_path, stage):
-    database = tmp_path / "events.duckdb"
-    warehouse = warehouse_at(database)
-    store = FailingStore()
-    warehouse.open_screen_time_ingestion(store)
-    repository = Repository()
-    raw = repository.add("100", segb(event("app.once"))[0])
-    if stage.startswith("prepare"):
-        store.fail_at = store.writes + 1
-    elif stage.startswith("ack"):
-        store.fail_at = store.writes + 2
-    store.persist_before_failure = stage.endswith("response")
-    if stage == "warehouse":
-        warehouse._load_object = lambda *args, **kwargs: (_ for _ in ()).throw(
-            OSError("database lost")
-        )
-    with pytest.raises(CheckpointError):
-        warehouse.load_object(raw, byte_size=1, batch=decode(repository, raw))
-    with pytest.raises(CheckpointError):
-        warehouse.load_object(raw, byte_size=1, batch=decode(repository, raw))
-    warehouse.close()
-    warehouse = warehouse_at(database)
-    warehouse.open_screen_time_ingestion(store)
-    warehouse.load_object(raw, byte_size=1, batch=decode(repository, raw))
-    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
-    assert (
-        warehouse.query_value(
-            "SELECT count(*) FROM ops.ingestion_metadata WHERE status='succeeded'"
-        )
-        == 1
-    )
-    assert EventState(store.read()).get("pending") is None
-    assert warehouse.query_value("SELECT revision FROM ops.screen_time_checkpoint") == 1
-    warehouse.close()
-
-
-def test_missing_or_stale_checkpoint_cannot_silently_reset(tmp_path):
-    database = tmp_path / "events.duckdb"
-    warehouse = warehouse_at(database)
-    store = MemoryCheckpointStore()
-    warehouse.open_screen_time_ingestion(store)
-    stale = store.read()
-    repository = Repository()
-    raw = repository.add("100", segb(event("app.once"))[0])
-    warehouse.load_object(raw, byte_size=1, batch=decode(repository, raw))
-    warehouse.close()
-    for checkpoint in (None, stale, b"broken"):
-        store.payload = checkpoint
-        warehouse = warehouse_at(database)
-        with pytest.raises(CheckpointError):
-            warehouse.open_screen_time_ingestion(store)
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
-        warehouse.close()
-
-
 def test_cutover_keeps_old_rows_and_user_deletion_overrides_legacy(tmp_path, monkeypatch):
     database = tmp_path / "events.duckdb"
-    warehouse = warehouse_at(database)
+    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
+    migrations = tmp_path / "legacy_migrations"
+    migrations.mkdir()
+    for path in DEFAULT_MIGRATIONS.glob("00[1-5]*.sql"):
+        shutil.copyfile(path, migrations / path.name)
+    warehouse.migrate(migrations)
     repository = Repository()
     payload = event("app.legacy")
     segment, offset = segb(payload)
@@ -184,8 +115,9 @@ def test_cutover_keeps_old_rows_and_user_deletion_overrides_legacy(tmp_path, mon
         batch=LegacyScreenTimeBatch(batch.records, batch.source_segment_name, batch.segment_kind),
     )
     legacy_rows = warehouse.query_rows("SELECT * FROM base.screen_time_record_occurrence")
-    warehouse.open_screen_time_ingestion()
-    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 0
+    warehouse.migrate()
+    warehouse.migrate()
+    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
     # A different segment contains the same event. No extra event row is created on retry.
     copy = repository.add("200", segment)
     warehouse.load_object(copy, byte_size=1, batch=decode(repository, copy))
@@ -212,73 +144,348 @@ def test_cutover_keeps_old_rows_and_user_deletion_overrides_legacy(tmp_path, mon
     warehouse.close()
 
 
-def test_loader_stops_on_checkpoint_failure_without_marking_committed_object_failed(tmp_path):
-    store = FailingStore()
-    repository = Repository()
-    repository.checkpoint_store = lambda warehouse: store
-    repository.add("100", segb(event("app.first"))[0])
-    repository.add("200", segb(event("app.second"))[0])
+STATE_TABLES = ("segment", "record", "tombstone", "deletion_match")
+
+
+def state_counts(warehouse):
+    return {
+        t: warehouse.query_value(f"SELECT count(*) FROM ops.screen_time_{t}") for t in STATE_TABLES
+    }
+
+
+def load(warehouse, repository, raw):
+    return warehouse.load_object(raw, byte_size=1, batch=decode(repository, raw))
+
+
+@pytest.mark.parametrize("unrelated", [0, 25])
+def test_unrelated_segments_do_not_expand_working_sets(tmp_path, unrelated):
     warehouse = warehouse_at(tmp_path / "events.duckdb")
-    store.fail_at = 3  # Initial checkpoint, prepared update, acknowledgement.
-    with pytest.raises(CheckpointError):
-        run_loader(repository, warehouse)
-    assert warehouse.query_rows("SELECT status FROM ops.ingestion_metadata") == [("succeeded",)]
-    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
+    repository = Repository()
+    for i in range(unrelated):
+        load(warehouse, repository, repository.add(str(200 + i), segb(event(f"other.{i}"))[0]))
+    first = repository.add("100", segb(event("app.first"))[0])
+    load(warehouse, repository, first)
+    counts = state_counts(warehouse)
+    load(warehouse, repository, repository.add("100", segb(event("app.first"))[0]))
+    assert state_counts(warehouse) == counts
+    assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_event") == 1
+    assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_tombstone") == 0
     warehouse.close()
 
 
-def test_delta_state_reparse_removes_event_and_preserves_successor():
+@pytest.mark.parametrize("reason", [1, 2])
+@pytest.mark.parametrize("order", [(0, 1, 2), (2, 1, 0), (1, 0, 2)])
+def test_deletion_target_late_and_empty_snapshot(tmp_path, reason, order):
+    warehouse = warehouse_at(tmp_path / "events.duckdb")
+    repository = Repository()
+    payload = event("app.deleted")
+    segment, offset = segb(payload)
+    raws = [
+        repository.add("100", segment),
+        repository.add("100", b""),
+        repository.add(
+            "100", segb(tombstone("100", offset, len(payload), reason=reason))[0], kind="tombstones"
+        ),
+    ]
+    for i in order:
+        if i == 1:
+            warehouse.load_object(raws[i], byte_size=0, batch=ScreenTimeBatch([], "100", "events"))
+        else:
+            load(warehouse, repository, raws[i])
+    assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(reason == 1,)]
+    counts = state_counts(warehouse)
+    baseline = warehouse.query_rows("SELECT * FROM base.screen_time_event")
+    for i in range(5):
+        repeated = repository.add(
+            "100", segb(tombstone("100", offset, len(payload), reason=reason))[0], kind="tombstones"
+        )
+        load(warehouse, repository, repeated)
+    assert state_counts(warehouse) == counts
+    assert warehouse.query_rows("SELECT * FROM base.screen_time_event") == baseline
+    warehouse.close()
+
+
+def test_reparse_empty_latest_and_older_snapshot(tmp_path):
+    warehouse = warehouse_at(tmp_path / "events.duckdb")
     repository = Repository()
     raws = [repository.add("100", segb(event(f"app.{i}"))[0]) for i in range(3)]
-    state = EventState()
     for raw in raws:
-        batch = decode(repository, raw)
-        state.observe(observation_for(raw, batch), list(batch.records))
-    state.observe(observation_for(raws[1], ScreenTimeBatch([])), [])
-    assert [value["bundle_id"] for value in state.resolve().values()] == ["app.2"]
-    state.observe(observation_for(raws[2], ScreenTimeBatch([])), [])
-    assert state.resolve() == {}
+        load(warehouse, repository, raw)
+    warehouse.load_object(raws[1], byte_size=0, batch=ScreenTimeBatch([], "100", "events"))
+    assert warehouse.query_rows("SELECT bundle_id FROM base.screen_time_event WHERE is_active") == [
+        ("app.2",)
+    ]
+    warehouse.load_object(raws[2], byte_size=0, batch=ScreenTimeBatch([], "100", "events"))
+    # Empty batches use the source parser version, so force a reparse using the receipt.
+    warehouse.connection.execute("UPDATE ops.ingestion_metadata SET parser_version = 'old'")
+    warehouse.load_object(raws[2], byte_size=0, batch=ScreenTimeBatch([], "100", "events"))
+    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event WHERE is_active") == 0
+    warehouse.close()
 
 
-def test_scratch_repository_never_uses_production_checkpoint():
-    from personal_data_platform.recovery.rebuild import _SnapshotRawRepository
-
-    def unexpected(*args):
-        raise AssertionError("production checkpoint accessed")
-
-    repository = _SnapshotRawRepository(
-        repository=SimpleNamespace(checkpoint_store=unexpected), observations=()
+def test_reparse_tombstone_and_event_corrects_existing_physical_rows(tmp_path):
+    warehouse = warehouse_at(tmp_path / "events.duckdb")
+    repository = Repository()
+    payload = event("app.original")
+    segment, offset = segb(payload)
+    raw = repository.add("100", segment)
+    load(warehouse, repository, raw)
+    deletion = repository.add(
+        "100", segb(tombstone("100", offset, len(payload)))[0], kind="tombstones"
     )
-    first, second = repository.checkpoint_store(None), repository.checkpoint_store(None)
-    first.write(b"scratch")
-    assert second.read() is None
+    load(warehouse, repository, deletion)
+    assert warehouse.query_value("SELECT is_active FROM base.screen_time_event") is False
+    batch = decode(repository, deletion)
+    warehouse.load_object(
+        deletion,
+        byte_size=1,
+        batch=replace(
+            batch,
+            records=[replace(r, deletion_reason=99, parser_version="next") for r in batch.records],
+        ),
+    )
+    assert warehouse.query_value("SELECT is_active FROM base.screen_time_event") is True
+    batch = decode(repository, raw)
+    warehouse.load_object(
+        raw,
+        byte_size=1,
+        batch=replace(
+            batch,
+            records=[
+                replace(r, bundle_id="app.corrected", event_key="corrected", parser_version="next")
+                for r in batch.records
+            ],
+        ),
+    )
+    assert warehouse.query_rows("SELECT bundle_id FROM base.screen_time_event WHERE is_active") == [
+        ("app.corrected",)
+    ]
+    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_record") == 1
+    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_tombstone") == 1
+    warehouse.close()
 
 
-def test_event_and_success_transaction_roll_back_together(tmp_path, monkeypatch):
-    from personal_data_platform.sources.screen_time.ingestion import EventBatch
+class InterruptedConnection:
+    def __init__(self, connection, stage):
+        self.connection = connection
+        self.stage = stage
+        self.failed = False
+        self.calls_after_failure = []
 
-    database = tmp_path / "events.duckdb"
-    warehouse = warehouse_at(database)
-    store = MemoryCheckpointStore()
-    warehouse.open_screen_time_ingestion(store)
+    def execute(self, sql, *args):
+        if self.failed:
+            self.calls_after_failure.append(sql)
+        match = (
+            (self.stage in ("commit_before", "commit_after") and sql == "COMMIT")
+            or (self.stage == "success" and "SET status = 'succeeded'" in sql)
+            or (self.stage == "events" and "INSERT INTO base.screen_time_event" in sql)
+            or (self.stage == "state" and "INSERT INTO ops.screen_time_tombstone" in sql)
+        )
+        if match and not self.failed:
+            self.failed = True
+            if self.stage == "commit_after":
+                self.connection.execute(sql, *args)
+            raise OSError("database response lost")
+        return self.connection.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+
+@pytest.mark.parametrize("stage", ["state", "events", "success", "commit_before", "commit_after"])
+def test_transaction_failure_and_reconnect_retry(tmp_path, stage):
+    path = tmp_path / "events.duckdb"
+    warehouse = warehouse_at(path)
     repository = Repository()
     raw = repository.add("100", segb(event("app.once"))[0])
-    original_write = EventBatch.write
-
-    def fail_after_write(self, *args, **kwargs):
-        original_write(self, *args, **kwargs)
-        raise RuntimeError("interrupted transaction")
-
-    monkeypatch.setattr(EventBatch, "write", fail_after_write)
-    with pytest.raises(CheckpointError):
-        warehouse.load_object(raw, byte_size=1, batch=decode(repository, raw))
-    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 0
-    assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 0
-    assert warehouse.query_value("SELECT revision FROM ops.screen_time_checkpoint") == 0
+    wrapper = InterruptedConnection(warehouse.connection, stage)
+    warehouse.connection = wrapper
+    exception = WarehouseConnectionError if stage.startswith("commit") else OSError
+    with pytest.raises(exception):
+        load(warehouse, repository, raw)
+    if stage.startswith("commit"):
+        with pytest.raises(WarehouseConnectionError):
+            load(warehouse, repository, raw)
+        with pytest.raises(WarehouseConnectionError):
+            warehouse.mark_failed(raw, byte_size=1, error=ValueError("bad"))
+        assert wrapper.calls_after_failure == []
+    else:
+        assert state_counts(warehouse) == dict.fromkeys(STATE_TABLES, 0)
+        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 0
+        assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 0
     warehouse.close()
-    monkeypatch.setattr(EventBatch, "write", original_write)
-    warehouse = warehouse_at(database)
-    warehouse.open_screen_time_ingestion(store)
+    warehouse = warehouse_at(path)
+    expected = 1 if stage == "commit_after" else 0
+    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == expected
+    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_record") == expected
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM ops.ingestion_metadata WHERE status='succeeded'"
+        )
+        == expected
+    )
+    assert load(warehouse, repository, raw) == 1 - expected
+    assert load(warehouse, repository, raw) == 0
     assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
-    assert warehouse.query_value("SELECT status FROM ops.ingestion_metadata") == "succeeded"
+    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_record") == 1
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM ops.ingestion_metadata WHERE status='succeeded'"
+        )
+        == 1
+    )
+    warehouse.close()
+
+
+def test_loader_stops_after_unknown_commit_without_failed_receipt(tmp_path):
+    warehouse = warehouse_at(tmp_path / "events.duckdb")
+    repository = Repository()
+    repository.add("100", segb(event("app.first"))[0])
+    repository.add("200", segb(event("app.second"))[0])
+    # Inject only after the lease transaction has completed.
+    original_load = warehouse.load_object
+
+    def interrupted_load(*args, **kwargs):
+        warehouse.connection = InterruptedConnection(warehouse.connection, "commit_after")
+        return original_load(*args, **kwargs)
+
+    warehouse.load_object = interrupted_load
+    with pytest.raises(WarehouseConnectionError):
+        run_loader(repository, warehouse)
+    wrapper = warehouse.connection
+    assert wrapper.calls_after_failure == []
+    assert wrapper.connection.execute("SELECT status FROM ops.ingestion_metadata").fetchall() == [
+        ("succeeded",)
+    ]
+    assert wrapper.connection.execute("SELECT count(*) FROM base.screen_time_event").fetchone() == (
+        1,
+    )
+    warehouse.close()
+
+
+def test_same_content_v1_to_v2_and_representative_fallback(tmp_path):
+    warehouse = warehouse_at(tmp_path / "events.duckdb")
+    repository = Repository()
+    segment = segb(event("app.copy"))[0]
+    first = repository.add("100", segment, version=1)
+    load(warehouse, repository, first)
+    original = warehouse.query_rows("SELECT * FROM base.screen_time_event")
+    load(warehouse, repository, repository.add("100", segment))
+    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_record") == 1
+    assert warehouse.query_rows("SELECT * FROM base.screen_time_event") == original
+    second = repository.add("200", segment)
+    load(warehouse, repository, second)
+    assert (
+        warehouse.query_value("SELECT duplicate_occurrence_count FROM base.screen_time_event") == 1
+    )
+    empty = repository.add("200", b"")
+    warehouse.load_object(empty, byte_size=0, batch=ScreenTimeBatch([], "200", "events"))
+    assert warehouse.query_rows(
+        "SELECT segment_key, duplicate_occurrence_count, is_active FROM base.screen_time_event"
+    ) == [(first.logical_key, 0, True)]
+    warehouse.close()
+
+
+def test_rollback_restores_existing_events_matches_and_success(tmp_path):
+    warehouse = warehouse_at(tmp_path / "events.duckdb")
+    repository = Repository()
+    payload = event("app.history")
+    segment, offset = segb(payload)
+    load(warehouse, repository, repository.add("100", segment))
+    load(warehouse, repository, repository.add("200", segment))
+    tables = [f"ops.screen_time_{t}" for t in STATE_TABLES] + [
+        "base.screen_time_event",
+        "ops.ingestion_metadata",
+    ]
+    before = {t: warehouse.query_rows(f"SELECT * FROM {t} ORDER BY ALL") for t in tables}
+    deletion = repository.add(
+        "100", segb(tombstone("100", offset, len(payload)))[0], kind="tombstones"
+    )
+    connection = warehouse.connection
+    warehouse.connection = InterruptedConnection(connection, "events")
+    with pytest.raises(OSError):
+        load(warehouse, repository, deletion)
+    assert {t: warehouse.query_rows(f"SELECT * FROM {t} ORDER BY ALL") for t in tables} == before
+    warehouse.connection = connection
+    load(warehouse, repository, deletion)
+    assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(False,)]
+    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 1
+    warehouse.close()
+
+
+def test_migration_compacts_repeated_history_and_late_deletion(tmp_path):
+    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "events.duckdb"))))
+    migrations = tmp_path / "legacy_migrations"
+    migrations.mkdir()
+    for path in DEFAULT_MIGRATIONS.glob("00[1-5]*.sql"):
+        shutil.copyfile(path, migrations / path.name)
+    warehouse.migrate(migrations)
+    repository = Repository()
+    payload = event("app.legacy")
+    segment, offset = segb(payload)
+    for i in range(10):
+        raw = repository.add("100", segment, version=1 if i == 0 else 2)
+        b = decode(repository, raw)
+        warehouse.load_object(
+            raw,
+            byte_size=1,
+            batch=LegacyScreenTimeBatch(b.records, b.source_segment_name, b.segment_kind),
+        )
+    legacy_rows = warehouse.query_rows(
+        "SELECT * FROM base.screen_time_record_occurrence ORDER BY ALL"
+    )
+    warehouse.migrate()
+    counts = state_counts(warehouse)
+    assert counts == {"segment": 1, "record": 1, "tombstone": 0, "deletion_match": 0}
+    warehouse.migrate()
+    assert state_counts(warehouse) == counts
+    assert (
+        warehouse.query_rows("SELECT * FROM base.screen_time_record_occurrence ORDER BY ALL")
+        == legacy_rows
+    )
+    load(warehouse, repository, repository.add("100", segment))
+    assert state_counts(warehouse) == counts
+    # Matching uses exactly the same identity after initialization and live decode.
+    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_record") == 1
+    deletion = repository.add(
+        "100", segb(tombstone("100", offset, len(payload)))[0], kind="tombstones"
+    )
+    load(warehouse, repository, deletion)
+    assert warehouse.query_value("SELECT is_active FROM base.screen_time_event") is False
+    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 1
+    assert (
+        warehouse.query_rows("SELECT * FROM base.screen_time_record_occurrence ORDER BY ALL")
+        == legacy_rows
+    )
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema='ops' AND table_name='screen_time_checkpoint'"
+        )
+        == 0
+    )
+    warehouse.close()
+
+
+@pytest.mark.parametrize("failure", ["begin", "rollback"])
+def test_broken_connection_stops_every_followup_write(tmp_path, failure):
+    warehouse = warehouse_at(tmp_path / "events.duckdb")
+    repository = Repository()
+    raw = repository.add("100", segb(event("app.failure"))[0])
+
+    class BrokenConnection(InterruptedConnection):
+        def execute(self, sql, *args):
+            if sql == ("BEGIN TRANSACTION" if failure == "begin" else "ROLLBACK"):
+                raise OSError("connection closed")
+            return super().execute(sql, *args)
+
+    wrapper = BrokenConnection(warehouse.connection, "events")
+    warehouse.connection = wrapper
+    with pytest.raises(WarehouseConnectionError):
+        load(warehouse, repository, raw)
+    assert warehouse.connection_usable is False
+    wrapper.calls_after_failure.clear()
+    with pytest.raises(WarehouseConnectionError):
+        load(warehouse, repository, raw)
+    warehouse.release_job_lock("loader", "owner")
+    assert wrapper.calls_after_failure == []
     warehouse.close()

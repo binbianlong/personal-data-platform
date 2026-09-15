@@ -9,6 +9,7 @@ from typing import Any
 
 from personal_data_platform.raw.models import RawObject
 
+from .event_state import write_state
 from .models import ParsedScreenTimeRecord
 from .parser import PARSER_VERSION
 
@@ -30,4 +31,4 @@ class ScreenTimeBatch:
     def write(
         self, connection: Any, raw: RawObject, *, byte_size: int, loaded_at: datetime
     ) -> None:
-        raise RuntimeError("Screen Time batches require the ingestion checkpoint coordinator")
+        write_state(connection, raw, self, loaded_at=loaded_at)
