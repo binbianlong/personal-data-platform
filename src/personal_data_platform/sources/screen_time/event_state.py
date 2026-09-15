@@ -57,11 +57,6 @@ def write_state(connection, raw, batch, *, loaded_at):
                NULL::UINTEGER AS deletion_reason
         FROM ops.screen_time_record WHERE false;
     """)
-    connection.execute(
-        "INSERT INTO screen_time_affected_event SELECT DISTINCT event_key "
-        "FROM ops.screen_time_record WHERE device_key = ? AND source_stream = ? AND segment_key = ?",
-        scope,
-    )
     # Capture old name matches as well, before learning a new/ambiguous v2 name.
     _affected_tombstones(connection, scope)
     connection.execute(
@@ -146,8 +141,28 @@ def write_state(connection, raw, batch, *, loaded_at):
             device_key, source_stream, segment_key, record_offset, record_metadata_offset,
             record_timestamp_cocoa, physical_id
         );
+    """)
+    # Keep old keys before corrections overwrite them. Older evidence rejected by
+    # the UPSERT cannot change ranking and must not expand the resolve set.
+    connection.execute(
+        """
         INSERT OR IGNORE INTO screen_time_affected_event
-        SELECT DISTINCT event_key FROM screen_time_input WHERE record_kind = 'event';
+        SELECT r.event_key FROM ops.screen_time_record r
+        JOIN ops.screen_time_segment s USING (device_key, source_stream, segment_key)
+        WHERE r.device_key = ? AND r.source_stream = ? AND r.segment_key = ?
+          AND ((r.is_valid AND r.object_key = ?) OR (r.is_current AND s.object_key = ?));
+        """,
+        [*scope, raw.key, raw.key],
+    )
+    connection.execute("""
+        CREATE OR REPLACE TEMP TABLE screen_time_updated_event AS
+        SELECT i.event_key, r.event_key AS old_event_key
+        FROM screen_time_input i LEFT JOIN ops.screen_time_record r USING (physical_id)
+        WHERE i.record_kind = 'event' AND (r.physical_id IS NULL OR
+              (i.observed_at, i.object_key) >= (r.observed_at, r.object_key));
+        INSERT OR IGNORE INTO screen_time_affected_event
+        SELECT event_key FROM screen_time_updated_event
+        UNION SELECT old_event_key FROM screen_time_updated_event WHERE old_event_key IS NOT NULL;
     """)
     # Reparse corrections invalidate only versions whose latest evidence is this Raw.
     # Later observations of the same bytes remain valid.
