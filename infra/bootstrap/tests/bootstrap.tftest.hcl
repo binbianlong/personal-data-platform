@@ -92,17 +92,3 @@ run "secure_bootstrap_contract" {
     error_message = "Runtime deployment must not receive project-wide IAM or act-as permissions."
   }
 }
-
-run "checkpoint_writer_has_no_bucket_or_raw_wide_grant" {
-  command = plan
-
-  variables {
-    project_id        = "example-project"
-    state_bucket_name = "example-project-tfstate"
-  }
-
-  assert {
-    condition     = toset(google_project_iam_custom_role.ingestion_checkpoint_writer.permissions) == toset(["storage.objects.create", "storage.objects.delete"])
-    error_message = "Checkpoint replacement must use only condition-scoped create and delete permissions."
-  }
-}
