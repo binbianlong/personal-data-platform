@@ -1,17 +1,11 @@
-"""Change-only observation state and Screen Time event resolution in local SQLite."""
+"""Update only the affected Screen Time state inside the caller's transaction."""
 
 from __future__ import annotations
 
 import hashlib
-import json
-import sqlite3
-from collections import defaultdict
-from dataclasses import asdict
-from datetime import UTC
+import logging
 
-from .models import ParsedScreenTimeRecord
-
-PROVENANCE = {"object_key", "segment_sha256", "observed_at", "segment_filename", "original_payload"}
+LOGGER = logging.getLogger(__name__)
 EVENT_COLUMNS = (
     "event_key",
     "device_key",
@@ -50,301 +44,226 @@ ANALYTICAL_COLUMNS = tuple(
 )
 
 
-def encode(value) -> str:
-    return json.dumps(value, default=lambda v: v.isoformat(), sort_keys=True, separators=(",", ":"))
-
-
-class EventState:
-    def __init__(self, payload: bytes | None = None) -> None:
-        self.db = sqlite3.connect(":memory:")
-        if payload is not None:
-            self.db.deserialize(payload)
-            if (
-                self.get("format") != 1
-                or self.db.execute("PRAGMA integrity_check").fetchone()[0] != "ok"
-            ):
-                raise RuntimeError("unsupported or corrupt Screen Time checkpoint")
-        else:
-            self.db.executescript("""
-                CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                CREATE TABLE observations (
-                    object_key TEXT PRIMARY KEY, scope TEXT NOT NULL, ordering TEXT NOT NULL,
-                    document TEXT NOT NULL
-                );
-                CREATE INDEX observation_order ON observations(scope, ordering);
-                CREATE TABLE record_values (id TEXT PRIMARY KEY, document TEXT NOT NULL);
-                CREATE TABLE changes (
-                    object_key TEXT NOT NULL, offset INTEGER NOT NULL, record_id TEXT,
-                    PRIMARY KEY(object_key, offset)
-                );
-                CREATE TABLE events (event_key TEXT PRIMARY KEY, document TEXT NOT NULL);
-            """)
-            self.set("format", 1)
-
-    def get(self, key, default=None):
-        row = self.db.execute("SELECT value FROM metadata WHERE key = ?", [key]).fetchone()
-        return json.loads(row[0]) if row else default
-
-    def set(self, key, value) -> None:
-        self.db.execute("INSERT OR REPLACE INTO metadata VALUES (?, ?)", [key, encode(value)])
-
-    def serialize(self) -> bytes:
-        self.db.commit()
-        return self.db.serialize()
-
-    def _snapshots(self, scope=None, *, changes_only=False):
-        rows = self.db.execute(
-            "SELECT object_key, scope, document FROM observations "
-            + ("WHERE scope = ? " if scope is not None else "")
-            + "ORDER BY scope, ordering",
-            [scope] if scope is not None else [],
-        ).fetchall()
-        changes = defaultdict(list)
-        for key, offset, value in self.db.execute(
-            "SELECT changes.object_key, offset, record_id FROM changes "
-            "JOIN observations USING (object_key) "
-            + ("WHERE scope = ?" if scope is not None else ""),
-            [scope] if scope is not None else [],
-        ):
-            changes[key].append((offset, value))
-        state = {}
-        previous_scope = None
-        for index, (key, current_scope, document) in enumerate(rows):
-            if previous_scope != current_scope:
-                state = {}
-                previous_scope = current_scope
-            for offset, value in changes[key]:
-                if value is None:
-                    state.pop(offset, None)
-                else:
-                    state[offset] = value
-            if changes_only and index + 1 < len(rows):
-                next_key, next_scope, _ = rows[index + 1]
-                if next_scope == current_scope and not changes[next_key]:
-                    continue
-            yield json.loads(document), state.copy()
-
-    def observe(self, observation: dict, records: list[ParsedScreenTimeRecord]) -> None:
-        scope = encode([observation[k] for k in ("device_key", "source_stream", "segment_key")])
-        ordering = observation["observed_at"] + "\x1f" + observation["object_key"]
-        before = {}
-        successor = None
-        successor_records = None
-        for existing, values in self._snapshots(scope):
-            other_order = existing["observed_at"] + "\x1f" + existing["object_key"]
-            if other_order < ordering:
-                before = values
-            elif other_order > ordering:
-                successor, successor_records = existing["object_key"], values
-                break
-        desired = {}
-        for record in records:
-            document = asdict(record)
-            document["payload_length"] = record.payload_length or len(record.original_payload)
-            for field in PROVENANCE:
-                document.pop(field)
-            content = encode(document)
-            identity = hashlib.sha256(content.encode()).hexdigest()
-            self.db.execute(
-                "INSERT OR IGNORE INTO record_values VALUES (?, ?)", [identity, content]
-            )
-            if record.record_metadata_offset in desired:
-                raise ValueError("duplicate metadata position in Screen Time observation")
-            desired[record.record_metadata_offset] = identity
-        key = observation["object_key"]
-        self.db.execute(
-            "INSERT OR REPLACE INTO observations VALUES (?, ?, ?, ?)",
-            [key, scope, ordering, encode(observation)],
-        )
-        self._diff(key, before, desired)
-        if successor is not None:
-            self._diff(successor, desired, successor_records)
-        self.db.execute(
-            "DELETE FROM record_values WHERE id NOT IN "
-            "(SELECT record_id FROM changes WHERE record_id IS NOT NULL)"
-        )
-
-    def _diff(self, key, before, after):
-        self.db.execute("DELETE FROM changes WHERE object_key = ?", [key])
-        self.db.executemany(
-            "INSERT INTO changes VALUES (?, ?, ?)",
+def write_state(connection, raw, batch, *, loaded_at):
+    scope = [raw.subject_key, raw.stream, raw.logical_key]
+    # Temporary working sets contain only this segment and its related deletions/events.
+    connection.execute("""
+        CREATE OR REPLACE TEMP TABLE screen_time_affected_event (event_key VARCHAR PRIMARY KEY);
+        CREATE OR REPLACE TEMP TABLE screen_time_affected_tombstone (physical_id VARCHAR PRIMARY KEY);
+        CREATE OR REPLACE TEMP TABLE screen_time_input AS
+        SELECT * EXCLUDE (is_current, is_valid), NULL::VARCHAR AS record_kind,
+               NULL::VARCHAR AS target_segment_name, NULL::UBIGINT AS target_offset,
+               NULL::UINTEGER AS target_length, NULL::DOUBLE AS target_event_timestamp,
+               NULL::UINTEGER AS deletion_reason
+        FROM ops.screen_time_record WHERE false;
+    """)
+    connection.execute(
+        "INSERT INTO screen_time_affected_event SELECT DISTINCT event_key "
+        "FROM ops.screen_time_record WHERE device_key = ? AND source_stream = ? AND segment_key = ?",
+        scope,
+    )
+    # Capture old name matches as well, before learning a new/ambiguous v2 name.
+    _affected_tombstones(connection, scope)
+    connection.execute(
+        """
+        INSERT INTO ops.screen_time_segment
+        VALUES (?, ?, ?, ?, ?, ?, false)
+        ON CONFLICT (device_key, source_stream, segment_key) DO UPDATE SET
+            source_segment_name = coalesce(ops.screen_time_segment.source_segment_name,
+                                           excluded.source_segment_name),
+            name_ambiguous = ops.screen_time_segment.name_ambiguous OR (
+                ops.screen_time_segment.source_segment_name IS NOT NULL
+                AND excluded.source_segment_name IS NOT NULL
+                AND ops.screen_time_segment.source_segment_name <> excluded.source_segment_name
+            ),
+            observed_at = greatest(ops.screen_time_segment.observed_at, excluded.observed_at),
+            object_key = CASE
+                WHEN (excluded.observed_at, excluded.object_key) >=
+                     (ops.screen_time_segment.observed_at, ops.screen_time_segment.object_key)
+                THEN excluded.object_key ELSE ops.screen_time_segment.object_key END
+        """,
+        [
+            *scope,
+            raw.observed_at,
+            raw.key,
+            batch.source_segment_name if batch.segment_kind == "events" else None,
+        ],
+    )
+    # The highest metadata entry defines a physical slot, including erased/bad CRC entries.
+    positions = set()
+    latest = {}
+    for record in batch.records:
+        if record.record_metadata_offset in positions:
+            raise ValueError("duplicate metadata position in Screen Time observation")
+        positions.add(record.record_metadata_offset)
+        previous = latest.get(record.record_offset)
+        if previous is None or record.record_metadata_offset > previous.record_metadata_offset:
+            latest[record.record_offset] = record
+    rows = []
+    for r in latest.values():
+        if r.record_state.upper() != "WRITTEN" or r.crc_passed is False:
+            continue
+        if r.record_kind not in ("event", "tombstone"):
+            continue
+        if r.record_kind == "event" and r.event_key is None:
+            continue
+        rows.append(
             [
-                (key, offset, after.get(offset))
-                for offset in before.keys() | after.keys()
-                if before.get(offset) != after.get(offset)
-            ],
-        )
-
-    def resolve(self) -> dict[str, dict]:
-        values = {
-            key: json.loads(document)
-            for key, document in self.db.execute("SELECT id, document FROM record_values")
-        }
-        names = defaultdict(set)
-        current = {}
-        history = {}
-        tombstones = {}
-        for (document,) in self.db.execute("SELECT document FROM observations"):
-            observation = json.loads(document)
-            scope = tuple(observation[k] for k in ("device_key", "source_stream", "segment_key"))
-            if observation.get("segment_kind") == "events" and observation.get(
-                "source_segment_name"
-            ):
-                names[scope].add(observation["source_segment_name"])
-        for observation, snapshot in self._snapshots(changes_only=True):
-            scope = tuple(observation[k] for k in ("device_key", "source_stream", "segment_key"))
-            if observation.get("segment_kind") == "events" and observation.get(
-                "source_segment_name"
-            ):
-                names[scope].add(observation["source_segment_name"])
-            latest = {}
-            for metadata_offset, identity in snapshot.items():
-                record = values[identity]
-                offset = record["record_offset"]
-                if offset not in latest or metadata_offset > latest[offset][0]:
-                    latest[offset] = metadata_offset, identity
-            candidates = []
-            for _, identity in latest.values():
-                record = {
-                    **values[identity],
-                    **{
-                        k: observation[k] for k in ("object_key", "observed_at", "segment_filename")
-                    },
-                }
-                if record["record_state"].upper() != "WRITTEN" or record["crc_passed"] is False:
-                    continue
-                if record["record_kind"] == "event" and record["event_key"] is not None:
-                    candidates.append(record)
-                    # One representative per distinct physical record version, not per observation.
-                    history[identity] = record
-                elif record["record_kind"] == "tombstone":
-                    tombstones[identity] = record
-            current[scope] = candidates
-        name_scopes = defaultdict(list)
-        for scope, found in names.items():
-            if len(found) == 1:
-                name_scopes[(*scope[:2], next(iter(found)))].append(scope)
-        event_locations = defaultdict(list)
-        for event in history.values():
-            event_locations[
-                (
-                    event["device_key"],
-                    event["source_stream"],
-                    event["segment_key"],
-                    event["record_metadata_offset"],
-                    event["payload_length"],
-                )
-            ].append(event)
-        ttl, deleted = [], set()
-        diagnostics = defaultdict(int)
-        for tombstone in tombstones.values():
-            reason = tombstone["deletion_reason"]
-            scopes = name_scopes[
-                (
-                    tombstone["device_key"],
-                    tombstone["source_stream"],
-                    tombstone["target_segment_name"],
-                )
+                hashlib.sha256(r.original_payload).hexdigest(),
+                *scope,
+                r.record_offset,
+                r.record_metadata_offset,
+                r.payload_length or len(r.original_payload),
+                r.record_timestamp_cocoa,
+                r.event_key,
+                r.bundle_id,
+                r.event_at,
+                "start" if r.in_foreground else "end",
+                r.transition_reason,
+                r.kind,
+                r.app_version,
+                r.app_build,
+                r.platform_flag,
+                r.parser_version,
+                r.unknown_field_count,
+                batch.source_segment_name or r.segment_filename,
+                raw.observed_at,
+                raw.key,
+                r.record_kind,
+                r.target_segment_name,
+                r.target_offset,
+                r.target_length,
+                r.target_event_timestamp,
+                r.deletion_reason,
             ]
-            matched = []
-            if len(scopes) == 1:
-                for event in event_locations[
-                    (*scopes[0], tombstone["target_offset"], tombstone["target_length"])
-                ]:
-                    timestamp = event["record_timestamp_cocoa"]
-                    target = tombstone["target_event_timestamp"]
-                    if (
-                        timestamp is not None
-                        and target is not None
-                        and abs(timestamp - target) <= 0.000001
-                    ):
-                        matched.append(event)
-            status = (
-                "unsupported_reason"
-                if reason not in (1, 2)
-                else "unmatched"
-                if not matched
-                else "ttl_history_retained"
-                if reason == 1
-                else "user_deletion_applied"
+        )
+    if rows:
+        connection.executemany(
+            "INSERT INTO screen_time_input VALUES (" + ",".join("?" for _ in rows[0]) + ")", rows
+        )
+    connection.execute("""
+        UPDATE screen_time_input SET physical_id = ops.screen_time_physical_id(
+            device_key, source_stream, segment_key, record_offset, record_metadata_offset,
+            record_timestamp_cocoa, physical_id
+        );
+        INSERT OR IGNORE INTO screen_time_affected_event
+        SELECT DISTINCT event_key FROM screen_time_input WHERE record_kind = 'event';
+    """)
+    # Reparse corrections invalidate only versions whose latest evidence is this Raw.
+    # Later observations of the same bytes remain valid.
+    for table in ("record", "tombstone"):
+        connection.execute(
+            f"UPDATE ops.screen_time_{table} SET is_valid = false WHERE "
+            "device_key = ? AND source_stream = ? AND segment_key = ? AND object_key = ?",
+            [*scope, raw.key],
+        )
+    connection.execute(
+        """
+        UPDATE ops.screen_time_record r SET is_current = false
+        FROM ops.screen_time_segment s
+        WHERE r.device_key = s.device_key AND r.source_stream = s.source_stream
+          AND r.segment_key = s.segment_key AND s.device_key = ? AND s.source_stream = ?
+          AND s.segment_key = ? AND s.object_key = ?
+        """,
+        [*scope, raw.key],
+    )
+    columns = [
+        row[0]
+        for row in connection.execute("SELECT * FROM ops.screen_time_record LIMIT 0").description
+    ]
+    connection.execute(
+        "INSERT INTO ops.screen_time_record SELECT i.* EXCLUDE "
+        "(record_kind, target_segment_name, target_offset, target_length, "
+        "target_event_timestamp, deletion_reason), i.object_key = s.object_key, true "
+        "FROM screen_time_input i JOIN ops.screen_time_segment s "
+        "USING (device_key, source_stream, segment_key) WHERE i.record_kind = 'event' "
+        "ON CONFLICT (physical_id) DO UPDATE SET "
+        + ", ".join(f"{c} = excluded.{c}" for c in columns if c != "physical_id")
+        + " WHERE (excluded.observed_at, excluded.object_key) >= "
+        "(ops.screen_time_record.observed_at, ops.screen_time_record.object_key)"
+    )
+    connection.execute("""
+        INSERT INTO ops.screen_time_tombstone
+        SELECT physical_id, device_key, source_stream, segment_key, target_segment_name,
+               target_offset, target_length, target_event_timestamp, deletion_reason,
+               observed_at, object_key, true, 'unmatched'
+        FROM screen_time_input WHERE record_kind = 'tombstone'
+        ON CONFLICT (physical_id) DO UPDATE SET
+            target_segment_name = excluded.target_segment_name,
+            target_offset = excluded.target_offset, target_length = excluded.target_length,
+            target_event_timestamp = excluded.target_event_timestamp,
+            deletion_reason = excluded.deletion_reason, observed_at = excluded.observed_at,
+            object_key = excluded.object_key, is_valid = true
+        WHERE (excluded.observed_at, excluded.object_key) >=
+              (ops.screen_time_tombstone.observed_at, ops.screen_time_tombstone.object_key)
+    """)
+    _affected_tombstones(connection, scope)
+    _affected_matches(connection)
+    connection.execute("""
+        DELETE FROM ops.screen_time_deletion_match
+        WHERE tombstone_id IN (SELECT physical_id FROM screen_time_affected_tombstone);
+        INSERT INTO ops.screen_time_deletion_match
+        SELECT * FROM ops.screen_time_matching_record(
+            (SELECT list(physical_id) FROM screen_time_affected_tombstone)
+        );
+        UPDATE ops.screen_time_tombstone t SET resolution = CASE
+            WHEN NOT is_valid THEN 'invalidated'
+            WHEN deletion_reason NOT IN (1, 2) OR deletion_reason IS NULL THEN 'unsupported_reason'
+            WHEN NOT EXISTS (SELECT 1 FROM ops.screen_time_deletion_match m
+                             WHERE m.tombstone_id = t.physical_id) THEN 'unmatched'
+            WHEN deletion_reason = 1 THEN 'ttl_history_retained'
+            ELSE 'user_deletion_applied' END
+        WHERE t.physical_id IN (SELECT physical_id FROM screen_time_affected_tombstone);
+    """)
+    _affected_matches(connection)
+    columns = (*EVENT_COLUMNS, "is_active", "loaded_at")
+    connection.execute(
+        f"INSERT INTO base.screen_time_event ({', '.join(columns)}) "
+        "SELECT *, ? FROM ops.screen_time_resolve("
+        "(SELECT list(event_key) FROM screen_time_affected_event)) "
+        "ON CONFLICT (event_key) DO UPDATE SET "
+        + ", ".join(f"{c} = excluded.{c}" for c in columns if c != "event_key")
+        + " WHERE "
+        + " OR ".join(
+            f"base.screen_time_event.{c} IS DISTINCT FROM excluded.{c}"
+            for c in (*ANALYTICAL_COLUMNS, "is_active")
+        ),
+        [loaded_at],
+    )
+    # A parser correction can change an event key at an unchanged physical location.
+    connection.execute(
+        "UPDATE base.screen_time_event e SET is_active = false, loaded_at = ? "
+        "WHERE e.is_active AND e.event_key IN (SELECT event_key FROM screen_time_affected_event) "
+        "AND NOT EXISTS (SELECT 1 FROM ops.screen_time_record r WHERE r.event_key = e.event_key)",
+        [loaded_at],
+    )
+    counts = connection.execute("""
+        SELECT (SELECT count(*) FROM screen_time_affected_event),
+               (SELECT count(*) FROM screen_time_affected_tombstone)
+    """).fetchone()
+    LOGGER.info("Screen Time affected events=%d tombstones=%d", *counts)
+
+
+def _affected_tombstones(connection, scope):
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO screen_time_affected_tombstone
+        SELECT t.physical_id FROM ops.screen_time_tombstone t
+        WHERE t.device_key = ? AND t.source_stream = ? AND (
+            t.segment_key = ? OR t.target_segment_name IN (
+                SELECT source_segment_name FROM ops.screen_time_segment
+                WHERE device_key = ? AND source_stream = ? AND segment_key = ?
             )
-            diagnostics[status] += 1
-            if reason == 1:
-                ttl.extend(matched)
-            elif reason == 2:
-                deleted.update(event["event_key"] for event in matched)
-        retained = {}
-        for event in [r for records in current.values() for r in records] + ttl:
-            if event["event_key"] in deleted:
-                continue
-            identity = tuple(
-                event[k]
-                for k in (
-                    "device_key",
-                    "source_stream",
-                    "segment_key",
-                    "record_offset",
-                    "event_key",
-                )
-            )
-            if identity not in retained or self._rank(event) > self._rank(retained[identity]):
-                retained[identity] = event
-        grouped = defaultdict(list)
-        for event in retained.values():
-            grouped[event["event_key"]].append(event)
-        result = {}
-        for key, copies in grouped.items():
-            winner = max(copies, key=self._rank)
-            result[key] = {
-                **{
-                    column: winner[column]
-                    for column in EVENT_COLUMNS
-                    if column not in {"platform", "state", "duplicate_occurrence_count"}
-                },
-                "platform": "ios",
-                "state": "start" if winner["in_foreground"] else "end",
-                "duplicate_occurrence_count": len(copies) - 1,
-                "is_active": True,
-            }
-        self.set("diagnostics", dict(diagnostics))
-        return result
-
-    @staticmethod
-    def _rank(record):
-        return record["observed_at"], record["object_key"], record["record_metadata_offset"]
-
-    def updates(self, resolved: dict[str, dict]) -> list[dict]:
-        previous = {
-            key: json.loads(document)
-            for key, document in self.db.execute("SELECT event_key, document FROM events")
-        }
-        updates = []
-        for key in previous.keys() | resolved.keys():
-            old = previous.get(key)
-            new = resolved.get(key) or {**old, "is_active": False}
-            if old is None or any(old[k] != new[k] for k in (*ANALYTICAL_COLUMNS, "is_active")):
-                updates.append(new)
-                self.db.execute("INSERT OR REPLACE INTO events VALUES (?, ?)", [key, encode(new)])
-        return updates
-
-    def seed_events(self):
-        self.updates(self.resolve())
+        )
+        """,
+        [*scope, *scope],
+    )
 
 
-def observation_for(raw, batch) -> dict:
-    return {
-        "object_key": raw.key,
-        "device_key": raw.subject_key,
-        "source_stream": raw.stream,
-        "segment_key": raw.logical_key,
-        "observed_at": raw.observed_at.astimezone(UTC).isoformat(),
-        "source_segment_name": batch.source_segment_name,
-        "segment_kind": batch.segment_kind,
-        "segment_filename": batch.source_segment_name
-        or (batch.records[0].segment_filename if batch.records else raw.logical_key),
-    }
-
-
-def record_from_legacy(row: dict) -> ParsedScreenTimeRecord:
-    row = {k: v for k, v in row.items() if k in ParsedScreenTimeRecord.__dataclass_fields__}
-    return ParsedScreenTimeRecord(**row)
+def _affected_matches(connection):
+    connection.execute("""
+        INSERT OR IGNORE INTO screen_time_affected_event
+        SELECT DISTINCT r.event_key FROM ops.screen_time_record r
+        JOIN ops.screen_time_deletion_match m ON m.physical_id = r.physical_id
+        WHERE m.tombstone_id IN (SELECT physical_id FROM screen_time_affected_tombstone)
+    """)

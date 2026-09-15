@@ -95,14 +95,24 @@ Reconciliationはこのmanifestを最新のactive-device集合の正本として
 更新し、provenance列はその更新で採用した代表recordを指す。`observed_at`は全再観測の最新日時ではない。
 Rawごとの取込時刻・件数は`ops.ingestion_metadata`で確認する。
 
-取り込み側はsegmentの観測順とrecord変更差分から最新状態と削除照合を計算する。順序逆転と再解析では対象観測と
-直後の差分を修正し、それ以降の観測内容を維持する。変更されていないrecordの参照行を観測のたびに増やさない。
-TTLで必要な過去状態はGCS checkpointに残し、同じevent_keyへのユーザー削除は別segmentのコピーにも適用する。
+`ops.screen_time_segment`は`(observed_at, object_key)`順の最新snapshotだけを保持する。
+古いRawの遅着や再解析は最新snapshotを巻き戻さず、物理recordとtombstoneの照合情報を補完・修正する。
+`ops.screen_time_record`は内容digestと物理位置で重複排除し、順位情報を同じ行で更新する。
+代表選択に必要な正規化項目を持つが、元payloadは保存しない。同じ内容の再観測では補助行数が増えない。
+
+TTLで必要な過去recordの照合情報と正規化項目はMotherDuckに残し、ユーザー削除は同じevent_keyを持つ
+別segmentのコピーにも適用する。削除照合はdevice・stream・一意なsegment名・metadata位置・payload長・
+record時刻で行い、物理位置が再利用されても異なる時刻のイベントを削除しない。
+v1で不明だったsegment名は同じlogical segmentのv2から補完する。名前が矛盾するsegmentは照合しない。
 
 ## 既存データとの互換性
 
 以下のsegment observationとrecord occurrenceは切り替え前の保存形式で、新方式では書き込まない。
-既存行の削除・圧縮・新tableへの一括コピーは行わない。初回に既存行を読み、取り込み側の判定状態を初期化する。
+`006_screen_time_ingestion.sql`が旧履歴をSQLで集約し、最新segment・物理record・tombstoneと代表イベントを
+初期化する。旧行と元payloadは変更せず保持する。migration ledgerにより再実行で重複しない。
+
+dbtは新イベント行を旧履歴より優先してから`is_active`で絞り込む。削除済みの新イベントが存在すれば、
+旧履歴の同じevent_keyが分析結果に復活することはない。
 
 ## `base.screen_time_segment_observation`
 

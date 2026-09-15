@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 import pytest
 
 from personal_data_platform.raw.models import RawObject
-from personal_data_platform.sources.screen_time.models import ParsedScreenTimeRecord
 from personal_data_platform.storage.motherduck import (
     DEFAULT_MIGRATIONS,
     Warehouse,
@@ -15,55 +14,7 @@ from personal_data_platform.storage.motherduck import (
     connect,
 )
 from tests.legacy_screen_time import LegacyScreenTimeBatch as ScreenTimeBatch
-
-
-def _raw(
-    *,
-    storage_created_at: datetime = datetime(2026, 8, 27, 1, tzinfo=UTC),
-    storage_generation: int = 1,
-) -> RawObject:
-    return RawObject(
-        key="raw/screen_time/v1/device/App.InFocus/segment/2026-08-27T00:00:00Z/hash.segb.gz",
-        source_id="screen_time",
-        schema_version=1,
-        subject_key="device",
-        stream="App.InFocus",
-        logical_key="segment",
-        observed_at=datetime(2026, 8, 27, tzinfo=UTC),
-        sha256="a" * 64,
-        storage_created_at=storage_created_at,
-        storage_generation=storage_generation,
-    )
-
-
-def _record(raw: RawObject) -> ParsedScreenTimeRecord:
-    return ParsedScreenTimeRecord(
-        event_key="event",
-        object_key=raw.key,
-        device_key=raw.subject_key,
-        source_stream=raw.stream,
-        segment_key=raw.logical_key,
-        segment_sha256=raw.sha256,
-        observed_at=raw.observed_at,
-        segment_filename="segment.segb",
-        record_offset=12,
-        record_metadata_offset=120,
-        record_state="WRITTEN",
-        segment_record_timestamp=raw.observed_at,
-        crc_passed=True,
-        transition_reason="foreground",
-        kind=1,
-        in_foreground=True,
-        cf_absolute_time=1.0,
-        event_at=datetime(2001, 1, 1, 0, 0, 1, tzinfo=UTC),
-        bundle_id="com.example.app",
-        app_version="1",
-        app_build="1",
-        platform_flag=2,
-        unknown_field_count=0,
-        original_payload=b"payload",
-        parser_version="app-in-focus-v1",
-    )
+from tests.screen_time_helpers import _raw, _record
 
 
 def test_migration_and_object_load_are_idempotent(tmp_path) -> None:

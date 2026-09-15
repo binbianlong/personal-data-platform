@@ -22,14 +22,15 @@ commitする。batchはparser version、record数、型付きtableへの書込�
 Warehouseだけが行う。decodeまたは書込に失敗したobjectの分析行は確定せず、`failed`とerror種別を別transactionで
 保存する。
 
-iPhone Screen Timeではccl-segbとApp.InFocus protobufをdecodeした後、取り込み側のSQLite状態で重複と削除を
-判定する。MotherDuckには`base.screen_time_event`を`event_key`ごとに1件保存し、分析項目・有効状態が変わる場合
-だけ更新する。新しいsegment observation・record occurrenceやprotobuf原文はMotherDuckへ保存しない。
-既存のoccurrenceは移行互換のため維持する。他sourceのDecodedBatch契約は変更しない。
+iPhone Screen Timeではccl-segbとApp.InFocus protobufをdecodeした後、`ScreenTimeBatch.write()`が
+MotherDuck内で対象segmentの補助状態、関連する削除照合と代表イベントを更新する。
+`base.screen_time_event`は`event_key`ごとに1行で、分析項目・有効状態が変わる場合だけ更新する。
+補助状態には原文payloadを含めない。既存のoccurrenceは移行互換のため保持する。
+`SourceAdapter`と`DecodedBatch`の契約、共有Loader leaseはsource間で共通である。
 
-Screen Timeは更新予定をGCS checkpointへ先に保存し、イベント・取込成功・checkpoint revisionを1 transactionで
-確定してから更新予定を解除する。checkpoint関連の失敗では後続objectを処理せずJobを失敗にする。commit済みの
-取込成功を`failed`へ上書きせず、次回は未完了更新を回復してから通常のskip判定へ進む。
+補助状態・イベント・Rawの取込成功はWarehouseの1 transactionで確定する。commit前の失敗はrollbackし、
+commit後の再実行は既存の成功判定でskipする。commitの応答が失われた場合やrollbackが失敗した場合は、
+その接続での後続処理と失敗記録の書込を止める。再接続後、永続化済みの成功記録から再処理の要否を判断する。
 保存場所と復旧は[`Screen Time運用`](../sources/screen-time/operations.md#イベント単位の保存への切り替え)に従う。
 
 Loaderはsource横断JOIN、interval生成、日次集計を行わない。これらはdbt Viewで行う。
@@ -69,10 +70,18 @@ Raw objectごとの最新取込状態を保持する。
 埋める。旧列と旧writer向けdefaultは残し、新sourceを有効にする前のruntime更新順序は
 [`operations.md`](operations.md#更新時の互換性)に従う。
 
-### `ops.screen_time_checkpoint`
+### Screen Timeの補助状態
 
-Screen Timeの外部checkpointに対応する`state_id`と単調増加する`revision`だけを1行保持する。
-イベント本文やrecord照合情報は含めない。checkpointの紛失、別databaseとの取り違え、古い状態からの再開を検出する。
+| table | 保存する状態 |
+|---|---|
+| `ops.screen_time_segment` | device・stream・segmentごとの最新観測順位とv2の名前照合情報 |
+| `ops.screen_time_record` | 内容と物理位置で一意なrecord、削除照合座標、代表選択に必要な正規化項目、最新順位・有効状態 |
+| `ops.screen_time_tombstone` | 内容と物理位置で一意なtombstone、削除対象・理由、最新順位・解決状態 |
+| `ops.screen_time_deletion_match` | tombstoneと一致する物理recordの組 |
+
+同じ内容の再観測では既存行の順位情報を更新する。新しい物理recordや削除先が増えればindexは増えるが、
+再観測回数に比例して補助行を追加しない。Raw単位の`ops.ingestion_metadata`は引き続き増加する。
+元payloadや観測の全履歴を補助tableへ複製せず、通常取り込みの計算対象も関連するsegment・削除照合・イベントに限定する。
 
 ### `ops.schema_migration`
 

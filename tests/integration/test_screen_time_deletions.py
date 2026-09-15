@@ -2,96 +2,14 @@ from __future__ import annotations
 
 import gzip
 import shutil
-import struct
-import zlib
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.loader.job import run_loader
 from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
-from personal_data_platform.sources.screen_time.raw import (
-    ScreenTimeRawIdentity,
-    encode_segment_envelope,
-    parse_raw_object_key,
-    sha256_hex,
-)
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-
-NOW = datetime(2026, 9, 13, tzinfo=UTC)
-
-
-def varint(n):
-    result = bytearray()
-    while n > 127:
-        result.append((n & 127) | 128)
-        n >>= 7
-    return bytes(result) + bytes([n])
-
-
-def text_field(tag, value):
-    value = value.encode()
-    return varint(tag * 8 + 2) + varint(len(value)) + value
-
-
-def event(bundle, timestamp=10.0):
-    return b"\x10\x01\x18\x01\x21" + struct.pack("<d", timestamp) + text_field(6, bundle)
-
-
-def segb(payload, *, state=1, timestamp=10.0, crc=None):
-    entry = struct.pack("<Ii", zlib.crc32(payload) if crc is None else crc, 0) + payload
-    metadata_offset = 32 + len(entry) + (-len(entry) % 4)
-    result = (
-        struct.pack("<4sid16s", b"SEGB", 1, 0.0, b"\0" * 16)
-        + entry
-        + b"\0" * (-len(entry) % 4)
-        + struct.pack("<2id", len(entry), state, timestamp)
-    )
-    return result, metadata_offset
-
-
-def tombstone(name, offset, length, *, reason=2, timestamp=10.0):
-    return (
-        text_field(1, name)
-        + b"\x10"
-        + varint(offset)
-        + b"\x18"
-        + varint(length)
-        + b"\x20"
-        + varint(reason)
-        + text_field(5, "synthetic")
-        + b"\x31"
-        + struct.pack("<d", timestamp)
-    )
-
-
-class Repository:
-    def __init__(self):
-        self.objects = {}
-
-    def add(self, name, segment, *, kind="events", device="a" * 64, version=2, logical=None):
-        value = encode_segment_envelope(segment, name=name, kind=kind) if version == 2 else segment
-        identity = ScreenTimeRawIdentity(
-            device_key=device,
-            stream="app-in-focus",
-            segment_key=logical or sha256_hex((kind + name).encode()),
-            observed_at=NOW + timedelta(seconds=len(self.objects)),
-            sha256=sha256_hex(value),
-            schema_version=version,
-        )
-        raw = parse_raw_object_key(
-            identity.object_key, storage_created_at=NOW, storage_generation=1
-        )
-        self.objects[raw.key] = raw, gzip.compress(value, mtime=0)
-        return raw
-
-    def list_raw(self, prefix):
-        return [raw for raw, _ in self.objects.values() if raw.key.startswith(prefix)]
-
-    def get_raw(self, key, *, generation):
-        assert generation == 1
-        return self.objects[key][1]
+from tests.screen_time_helpers import NOW, Repository, event, segb, tombstone
 
 
 def test_user_deletions_ttl_history_and_reused_positions(tmp_path, monkeypatch):
@@ -175,8 +93,11 @@ def test_user_deletions_ttl_history_and_reused_positions(tmp_path, monkeypatch):
             )
             == 20.0
         )
-        warehouse.open_screen_time_ingestion()
-        assert warehouse.screen_time_ingestion.state.get("diagnostics") == {
+        assert dict(
+            warehouse.query_rows(
+                "SELECT resolution, count(*) FROM ops.screen_time_tombstone GROUP BY resolution"
+            )
+        ) == {
             "ttl_history_retained": 1,
             "unmatched": 3,
             "unsupported_reason": 1,

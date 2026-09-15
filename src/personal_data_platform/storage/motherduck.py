@@ -72,16 +72,18 @@ def _raw_identity(raw: RawObject) -> tuple[Any, ...]:
     )
 
 
+class WarehouseConnectionError(RuntimeError):
+    """The connection must be reopened before deciding whether a write committed."""
+
+
 class Warehouse:
     """Small repository that makes a raw object's load status atomic."""
 
     def __init__(self, connection: Any):
         self.connection = connection
-        self.screen_time_ingestion = None
+        self.connection_usable = True
 
     def close(self) -> None:
-        if self.screen_time_ingestion is not None:
-            self.screen_time_ingestion.close()
         self.connection.close()
 
     def migrate(self, migrations: Path = DEFAULT_MIGRATIONS) -> None:
@@ -259,35 +261,7 @@ class Warehouse:
             raise RuntimeError(f"immutable object identity changed: {raw.key}")
         return current
 
-    def open_screen_time_ingestion(self, store=None) -> None:
-        from personal_data_platform.sources.screen_time.ingestion import (
-            ScreenTimeIngestion,
-            local_checkpoint_store,
-        )
-
-        if self.screen_time_ingestion is None:
-            self.screen_time_ingestion = ScreenTimeIngestion(
-                self, store if store is not None else local_checkpoint_store(self)
-            )
-        else:
-            self.screen_time_ingestion.resume()
-
     def load_object(
-        self,
-        raw: RawObject,
-        *,
-        byte_size: int,
-        batch: DecodedBatch,
-        legacy_scope: tuple[str, str] | None = None,
-    ) -> int:
-        from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
-
-        if isinstance(batch, ScreenTimeBatch):
-            self.open_screen_time_ingestion()
-            return self.screen_time_ingestion.load(raw, byte_size=byte_size, batch=batch)
-        return self._load_object(raw, byte_size=byte_size, batch=batch, legacy_scope=legacy_scope)
-
-    def _load_object(
         self,
         raw: RawObject,
         *,
@@ -297,8 +271,14 @@ class Warehouse:
     ) -> int:
         """Commit source records and their success state in one transaction."""
 
+        if not self.connection_usable:
+            raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
         now = datetime.now(UTC)
-        self.connection.execute("BEGIN TRANSACTION")
+        try:
+            self.connection.execute("BEGIN TRANSACTION")
+        except Exception as error:
+            self.connection_usable = False
+            raise WarehouseConnectionError("cannot begin transaction; reopen warehouse") from error
         try:
             current = self._existing_object(raw)
             if (
@@ -359,11 +339,23 @@ class Warehouse:
                 """,
                 [batch.record_count, now, raw.key],
             )
-            self.connection.execute("COMMIT")
-            return batch.record_count
         except Exception:
-            self.connection.execute("ROLLBACK")
+            try:
+                self.connection.execute("ROLLBACK")
+            except Exception as rollback_error:
+                self.connection_usable = False
+                raise WarehouseConnectionError(
+                    "rollback failed; reopen warehouse"
+                ) from rollback_error
             raise
+        try:
+            self.connection.execute("COMMIT")
+        except Exception as error:
+            # Never write a failed receipt or process another Raw on an uncertain connection.
+            # A new connection decides from the persisted success receipt.
+            self.connection_usable = False
+            raise WarehouseConnectionError("commit outcome unknown; reopen warehouse") from error
+        return batch.record_count
 
     def mark_failed(
         self,
@@ -373,6 +365,8 @@ class Warehouse:
         error: Exception,
         legacy_scope: tuple[str, str] | None = None,
     ) -> None:
+        if not self.connection_usable:
+            raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
         now = datetime.now(UTC)
         self.connection.execute("BEGIN TRANSACTION")
         try:
@@ -456,6 +450,8 @@ class Warehouse:
             raise
 
     def release_job_lock(self, job_name: str, owner_id: str) -> None:
+        if not self.connection_usable:
+            return
         self.connection.execute(
             "DELETE FROM ops.job_lock WHERE job_name = ? AND owner_id = ?", [job_name, owner_id]
         )

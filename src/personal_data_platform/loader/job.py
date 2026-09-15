@@ -17,7 +17,12 @@ from personal_data_platform.sources.contracts import (
     validate_runtime_policy,
 )
 from personal_data_platform.sources.registry import get_source
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.motherduck import (
+    Warehouse,
+    WarehouseConfig,
+    WarehouseConnectionError,
+    connect,
+)
 
 from .models import LoadSummary, RawDecodeError
 
@@ -69,10 +74,6 @@ def run_loader(
     try:
         warehouse.begin_job(f"loader:{source.source_id}:{source.stream}", run_id)
         job_started = True
-        if source.source_id == "screen_time" and source.stream == "app-in-focus":
-            factory = getattr(repository, "checkpoint_store", None)
-            store = factory(warehouse) if factory is not None else None
-            warehouse.open_screen_time_ingestion(store)
         already_loaded = warehouse.succeeded_keys_for(
             refs, parser_version=getattr(source, "parser_version", None)
         )
@@ -89,11 +90,9 @@ def run_loader(
                     raw, byte_size=byte_size, batch=batch, legacy_scope=legacy_scope
                 )
                 succeeded += 1
+            except WarehouseConnectionError:
+                raise
             except Exception as error:
-                from personal_data_platform.sources.screen_time.ingestion import CheckpointError
-
-                if isinstance(error, CheckpointError):
-                    raise
                 failed += 1
                 LOGGER.exception("failed to load raw object %s", raw.key)
                 warehouse.mark_failed(
@@ -111,13 +110,14 @@ def run_loader(
         )
         return summary
     except Exception as error:
-        if job_started:
+        if job_started and warehouse.connection_usable:
             warehouse.finish_job(
                 run_id, succeeded=False, details={**scope_details, "error": str(error)}
             )
         raise
     finally:
-        warehouse.release_job_lock("loader", run_id)
+        if warehouse.connection_usable:
+            warehouse.release_job_lock("loader", run_id)
 
 
 def run_loader_from_env(*, source_id: str | None = None, stream: str | None = None) -> int:

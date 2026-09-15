@@ -180,7 +180,7 @@ Collectorの5分確認・後続ファイル待ち条件は継続する。v1か�
 Terraform apply、クラウド再解析、Mac Collector起動はローカルのテストとは別に実施する。
 
 v1は元segment名を持たないため、同じlogical segmentのv2が未取得ならファイル間の削除照合ができない。
-新方式ではLoaderログの`deletion_status`にある`unmatched`と`unsupported_reason`を確認する。
+新方式では`ops.screen_time_tombstone.resolution`の`unmatched`と`unsupported_reason`を確認する。
 `base.screen_time_tombstone_status`は切り替え前のデータだけを表示する。古いRawが期限切れの場合、
 新parserで再解析できる範囲は現在残っているRawに限られる。既に失われた利用内容は作らない。
 期限切れの履歴保持は、取得済みの正常イベントと照合可能なTTL tombstoneがある場合に限る。
@@ -188,41 +188,31 @@ v1は元segment名を持たないため、同じlogical segmentのv2が未取得
 ## イベント単位の保存への切り替え
 
 1. Loader/ReconciliationのSchedulerを止め、実行中Jobの終了を確認する。以降は旧writerと新writerを混在させない。
-2. bootstrapの`pdpIngestionCheckpointWriter`を作成し、runtime Terraformで本番checkpointだけへのIAM条件を適用する。
-3. 新runtimeのmigration `005_screen_time_events.sql`を適用する。新イベントtableとcheckpoint照合用の1行tableを追加し、
-   既存のoccurrence・segment observation行は変更しない。
-4. `pdp dbt --source screen_time --stream app-in-focus`で新旧統合Viewを作成する。新tableが空でも旧集計を参照できる。
-5. 新Loaderを1回実行する。共有lease取得後、既存baseからSQLite判定状態を初期化し、GCSへ保存する。
-   既存成功Rawはparserが同じなら再取得せず、これから処理するRawだけをイベント単位で保存する。
-6. 日別利用時間、イベント一意性、Loaderログの`event updates`と`deletion_status`を確認してSchedulerを再開する。
+2. MotherDuckをバックアップし、新runtimeのmigrationを`006_screen_time_ingestion.sql`まで適用する。
+   旧履歴から最小の補助状態と代表イベントを初期化する。旧occurrence・segment observation行は保持する。
+   初期化とmigration ledgerは同じtransactionで確定し、migrationは再実行できる。
+3. `pdp dbt --source screen_time --stream app-in-focus`で新旧統合Viewを作成する。
+   新tableの行を先に優先し、その後`is_active`で絞るため、削除済みイベントは旧履歴から復活しない。
+4. 新Loaderを1回実行する。既存成功Rawはparserが同じならskipし、旧parserの保持中Rawは再解析する。
+5. 日別利用時間、イベント一意性、`ops.screen_time_tombstone.resolution`、Loaderログの
+   `affected events`と`tombstones`件数を確認してSchedulerを再開する。
 
-分析tableには`event_key`ごとに1行を保持する。切り替え前に取得したイベントの分析項目・有効状態が変わった場合は
-新tableへそのkeyの上書き結果を保存する。旧行は残るが、統合Viewでは新tableを優先する。
-旧occurrenceの容量は減らさない。将来の保存増加を抑える変更であり、既存容量の整理とは分けて扱う。
+分析tableは`event_key`ごとに1行、補助状態はsegment・物理record・tombstone・削除照合の組ごとに保持する。
+同じ内容を繰り返し観測しても補助行数は増えない。新イベント・物理位置・Raw単位の取込記録は増える。
+旧occurrenceの容量は減らさない。
 
-### チェックポイントと停止後の再実行
+### 停止後の再実行
 
-本番の保存先はGCSの`control/screen_time/app-in-focus/<SHA-256(database名)>/state.sqlite`。
-Rawの90日Lifecycleの対象外であり、Loader/Reconciliationが同じobjectを使う。
-ローカルDuckDBではdatabaseファイルに`.screen-time.sqlite`を付けた隣接ファイルへmode 0600で保存する。
-SQLiteの作業状態はメモリ上で扱い、checkpointへは確定したbytesを保存する。
+`ScreenTimeBatch.write()`が補助状態とイベントを更新し、WarehouseがRawの取込成功記録とまとめてcommitする。
 
-各Rawについて、更新済みの判定状態と未適用イベントを先にcheckpointへ保存する。その後MotherDuckのtransactionで
-イベント・取込成功・revisionを確定し、最後にcheckpointの未適用記録を解除する。
-GCSはgeneration条件、MotherDuckはstate IDとrevisionで古いwriterを拒否する。
+- commit前の失敗：補助状態・イベント・成功記録を全てrollbackする。同じRawを再実行できる。
+- commit後の再実行：Raw identity・generation・parser versionに一致する成功記録があればskipする。
+- commit結果が不明な接続障害：後続Raw、失敗記録、Job終了記録、lease解放の書込を止めて接続を閉じる。
+  lease期限切れ後に新接続で起動し、永続化済みの成功記録から再処理の要否を判断する。
 
-- GCS保存前の停止：以前のcheckpointから同じRawを再処理する。
-- GCS保存後・MotherDuck確定前の停止：次回起動時に未適用更新を再実行する。
-- MotherDuck確定後・応答喪失や解除前の停止：revisionを確認し、commit済みの更新を重ねず解除する。
-- checkpointが欠落・破損・別databaseの状態・古いrevisionの場合：自動初期化せず停止する。
+復元はMotherDuckのイベント・補助状態・取込記録を同じ時点のバックアップから行う。
+Rawの保持は90日のため、Rawだけから期限切れの履歴を完全に復元することは保証できない。
+新方式で書き込み後は旧runtimeに戻さず、修正版runtimeで再開する。
 
-checkpoint関連のエラー後はそのJobで後続Rawを処理しない。再起動時はcheckpointを再読込し、未完了更新を
-処理してから新しいRawへ進む。原文やBundle IDはログへ出さず、更新件数と削除状態別件数だけを出力する。
-
-checkpointを削除したり、warehouseの照合行だけを消して再開してはならない。復元する場合は停止中に取得した
-整合するcheckpointとwarehouseの組を使用する。最新checkpointを失い、対応するRawも期限切れなら完全復元は
-保証できない。固定objectの過去世代の自動保存は行わない。
-
-scratch rebuildは独立したメモリ上のcheckpointを使い、本番checkpointを読まず書かない。中断したscratchは
-本番へ切り替えず、別の空databaseへ再構築する。再構築範囲は従来どおりGCSに残るRawの範囲だけである。
-新方式で書き込み後は旧runtimeに戻さず、修正版runtimeで同じcheckpointから再開する。
+scratch rebuildは別の空MotherDuck databaseへ、GCSに残るRawだけを同じ取り込み経路で処理する。
+本番の状態は参照しない。中断したscratchを本番へ切り替えず、再構築後にdbtと監査を確認する。
