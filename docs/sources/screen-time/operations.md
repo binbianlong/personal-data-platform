@@ -190,10 +190,14 @@ v1は元segment名を持たないため、同じlogical segmentのv2が未取得
 
 1. Loader/ReconciliationのSchedulerを止め、実行中のLoader・Reconciliation・dbt Jobの終了を確認する。
    以降は旧writerと新writerを混在させない。
-2. MotherDuckをバックアップし、Loader・Reconciliation・dbtを新runtimeへ揃える。
-   `006_screen_time_ingestion.sql`が未適用なら、旧履歴から最小の補助状態と代表イベントを初期化する。
+2. MotherDuckと、旧runtime停止時点のSQLite checkpointをバックアップする。
+   checkpointの`pending`が残っている場合は旧runtimeで復旧を完了してから再度停止・取得する。
+   Loader・Reconciliation・dbtを新runtimeへ揃える。
+   `ops.screen_time_checkpoint`にmarkerがある場合は、通常Jobを動かす前に下記commandで移行する。
+   `006_screen_time_ingestion.sql`が未適用なら、旧履歴とcheckpointから補助状態と代表イベントを初期化する。
    既存イベントがある場合は、旧履歴から再計算した分析項目・有効状態との一致を検査する。
-   一致する既存行はprovenance・loaded_atも含めて保持し、未保存のevent keyだけを追加する。
+   一致する既存行はprovenance・loaded_atも含めて保持し、未保存のevent keyを追加する。
+   checkpoint経由の移行では、無効イベントに残った削除前の重複数だけを下記のとおり補正する。
    旧occurrence・segment observation行は保持する。各migrationとledgerは同じtransactionで確定する。
 3. `pdp dbt --source screen_time --stream app-in-focus`を実行する。
    dbt実行前に`007_screen_time_analysis_entry.sql`まで適用され、下記の移行検査に成功した場合だけ
@@ -213,11 +217,33 @@ v1は元segment名を持たないため、同じlogical segmentのv2が未取得
 reconstructed from legacy history`で停止する。既存イベント、旧履歴、checkpointの照合marker、
 取込記録を保持し、`006`の補助状態とledger更新はrollbackする。
 
-旧runtimeが外部SQLite checkpointだけに保存した観測・削除・訂正は、このSQLでは復元できない。
-旧runtime停止時点のcheckpointとMotherDuckのバックアップを保持し、checkpointに対応する履歴の復元が
-必要な環境として扱う。外部checkpointからの自動移行は未対応であり、既存イベントの削除、`is_active`の
-書換え、ledgerの手修正で検査を通さない。復元後は同じmigrationを再実行できる。
-この検査は既存イベントとの不一致を検出するもので、外部checkpoint全体の移行完全性を保証しない。
+旧runtimeが外部SQLite checkpointだけに保存した観測・削除・TTL履歴は、次の手順で移行する。
+移行先は`MOTHERDUCK_DATABASE`と`MOTHERDUCK_TOKEN`で指定する。ローカルDuckDBではtokenは不要。
+
+```sh
+pdp screen-time migrate-checkpoint --checkpoint /absolute/path/screen-time.sqlite
+```
+
+GCSのcheckpointは旧runtimeが使用した`control/screen_time/app-in-focus/`配下の対象objectを、
+停止後のgenerationを固定してローカルへ取得する。ローカル旧runtimeではDBファイルに
+`.screen-time.sqlite`を付けたpathが保存先になる。入力ファイルは読み取り専用で扱い、変更しない。
+checkpointのformat・SQLite整合性・state_id・revision・pendingなし・既存成功観測の網羅性・
+既存イベントとの一致を検査する。markerがあるのにcheckpointを指定しない通常Jobは移行を停止する。
+
+観測差分を展開し、最新segment・物理record・tombstoneを`006`の初期化transaction内で補完してから、
+通常取り込みと同じSQL macroで削除照合と代表イベントを検証する。
+未照合のtombstoneも移すため、移行後に対象recordが初めて到着した場合も照合できる。
+旧writerが無効イベントに残していた削除前の重複数は、有効コピー数に合わせて0へ補正する。
+旧occurrence・segment observation・Raw成功記録は変更せず、保持中Rawの再処理には依存しない。
+90日より古い履歴もcheckpointに含まれていれば移行できる。
+
+`006`内で失敗した場合は補助状態・既存イベントの補正・checkpoint markerの削除・ledgerをrollbackする。
+原因を解消して同じcommandを再実行する。既存イベントの削除、`is_active`の書換え、ledgerの手修正で
+検査を通さない。`006`が成功して`007`の検査だけが失敗した場合、importは確定済みなので、
+下記の分析入口検査の原因を解消して通常の`pdp dbt`から再開する。
+`006`適用済みDBへのcheckpoint importは拒否するため、以前の移行でcheckpointを
+取りこぼしたDBは停止・バックアップのうえ、移行前バックアップに戻したDBへcheckpointを移行して検証する。
+バックアップがない場合、元のmarkerが失われているため、このcommandで移行済みDBを直接修復できない。
 
 主キー衝突は`006`より後のmigrationでは修復できないため、未適用DBには修正版`006`を適用する。
 元の`006`を適用済みのDBは、固定した元版・修正版checksumの組だけを互換として認め、再初期化しない。
