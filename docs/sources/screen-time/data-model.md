@@ -87,7 +87,8 @@ Reconciliationはこのmanifestを最新のactive-device集合の正本として
 
 ## `base.screen_time_event`
 
-新規取り込みの分析用table。`event_key`をprimary keyとし、同じイベントは1行だけ保持する。
+移行済みの旧履歴と新規取り込みを含む、分析の唯一の入口となるtable。
+`event_key`をprimary keyとし、同じイベントは1行だけ保持する。
 列は後述の`base.screen_time_transition`に`is_active`と`loaded_at`を加えたもの。
 `original_payload`や観測版ごとのrecord本文は保存しない。無効化も行を増やさず`is_active=false`へ更新する。
 
@@ -118,8 +119,10 @@ DBの物理走査量が履歴量によらず一定になることを保証する
 `006_screen_time_ingestion.sql`が旧履歴をSQLで集約し、最新segment・物理record・tombstoneと代表イベントを
 初期化する。旧行と元payloadは変更せず保持する。migration ledgerにより再実行で重複しない。
 
-dbtは新イベント行を旧履歴より優先してから`is_active`で絞り込む。削除済みの新イベントが存在すれば、
-旧履歴の同じevent_keyが分析結果に復活することはない。
+`007_screen_time_analysis_entry.sql`は旧観測・物理recordの移行漏れ、削除照合、代表イベントの分析項目と
+有効状態を検査する。削除照合と代表選択の検証には取り込みと同じSQL macroを使い、不整合があれば停止する。
+検査成功後、分析Viewを`base.screen_time_event`だけの参照に切り替え、旧判定Viewを削除する。
+旧tableは証跡として保存するが、dbt・通常クエリ・必須relation監視からは参照しない。
 
 ## `base.screen_time_segment_observation`
 
@@ -185,13 +188,14 @@ macOSの`BMTombstoneEvent`による合成データのdecode結果と実機の構
 | 7 | string、省略可 | policyID |
 
 private frameworkは形式検証だけに使い、本番パーサーはPythonで実装する。未知の削除理由は保持するが自動適用しない。
-`base.screen_time_tombstone_match`で端末・stream・元segment名・metadata offset・payload長・元record時刻を照合する。
+取り込み時に端末・stream・元segment名・metadata offset・payload長・元record時刻を照合し、
+`ops.screen_time_deletion_match`へ保存する。
 時刻の許容差は旧datetime列のmicrosecond丸め分の1 microsecondだけ。元ファイル名の対応が曖昧なsegmentは適用しない。
 
-既存データ用の`base.screen_time_tombstone_status`は`user_deletion_applied`、`ttl_history_retained`、`unmatched`、
-`unsupported_reason`と一致イベント数を公開する。`unmatched`には未到着・保存期間外・v1の元ファイル名不明も
-含まれ、削除適用済みとは扱わない。新規取り込みの照合はLoaderで再評価し、同じstatus名の件数を
-`deletion_status`としてログ出力する。旧Viewは切り替え前の証跡だけを表示する。
+`ops.screen_time_tombstone.resolution`で`user_deletion_applied`、`ttl_history_retained`、`unmatched`、
+`unsupported_reason`、再解析で無効になった`invalidated`を確認する。`unmatched`には未到着・保存期間外・
+v1の元ファイル名不明も含まれ、削除適用済みとは扱わない。照合はLoaderで再評価する。
+旧`base.screen_time_tombstone_match`・`base.screen_time_tombstone_status` Viewは廃止する。
 
 ## `event_key`
 
@@ -212,11 +216,11 @@ eventが別segmentに現れるため`event_key`へ含めない。
 
 ## `base.screen_time_transition`
 
-新旧データを統合するdbt Viewである。既存データの解決結果を`base.screen_time_legacy_transition`から読み、
-`base.screen_time_event`に同じkeyがあれば新tableを優先する。新tableの行が無効なら旧イベントも表示しない。
-これにより同じkeyの二重計上や、削除した旧イベントの復活を防ぐ。
+`base.screen_time_event`の`is_active=true`だけを公開するdbt Viewである。
+旧履歴へのfallbackや最新観測の選択、削除照合、重複排除は行わない。
+`base.screen_time_legacy_transition`は廃止し、interval生成・日別集計は引き続きこのViewを参照する。
 
-取り込み側と既存データ用Viewは、次のイベント選択規則を共有する。
+取り込み側が次のイベント選択規則を適用し、結果を`base.screen_time_event`に保存する。
 
 1. 通常の候補はlogical segmentの最新観測から選び、同じrecord offsetの最後のmetadataを現在stateとする。
 2. `event`かつ`WRITTEN`かつCRC不一致でないrecordだけを候補にする。

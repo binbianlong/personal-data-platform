@@ -172,7 +172,8 @@ Loader・監査・再構築は`--source screen_time --stream app-in-focus`でこ
 1. GCSのv1/v2両prefixの90日Lifecycle、Collector create権限、Loader/Reconciliationのprefix設定をTerraformで揃える。
 2. 新runtimeへ更新し、migration `004_screen_time_tombstones.sql`を適用する。既存行を保持し、nullable列・削除情報を追加する。
 3. Loaderは利用可能なRawのparser versionが古い場合も再解析する。同一objectの置換と取込成功更新は1 transactionで行う。
-4. dbtを実行し、削除照合・診断Viewと集計Viewを更新する。Reconciliationで新Viewの存在も確認する。
+4. 現行runtimeでは後述のイベント単位の保存への切り替えも完了し、dbtで集計Viewを更新する。
+   Reconciliationで分析用relationの存在を確認する。
 5. Mac Collectorを新コードで起動する。既存pendingは元のv1/v2 keyとbytesで先に再送し、新規観測はv2で保存する。
 
 Collectorの5分確認・後続ファイル待ち条件は継続する。v1からv2への切替時は、完成扱いの既存segmentも照合情報を
@@ -181,18 +182,20 @@ Terraform apply、クラウド再解析、Mac Collector起動はローカルの�
 
 v1は元segment名を持たないため、同じlogical segmentのv2が未取得ならファイル間の削除照合ができない。
 新方式では`ops.screen_time_tombstone.resolution`の`unmatched`と`unsupported_reason`を確認する。
-`base.screen_time_tombstone_status`は切り替え前のデータだけを表示する。古いRawが期限切れの場合、
+旧`base.screen_time_tombstone_status` Viewは廃止済み。古いRawが期限切れの場合、
 新parserで再解析できる範囲は現在残っているRawに限られる。既に失われた利用内容は作らない。
 期限切れの履歴保持は、取得済みの正常イベントと照合可能なTTL tombstoneがある場合に限る。
 
 ## イベント単位の保存への切り替え
 
-1. Loader/ReconciliationのSchedulerを止め、実行中Jobの終了を確認する。以降は旧writerと新writerを混在させない。
-2. MotherDuckをバックアップし、新runtimeのmigrationを`006_screen_time_ingestion.sql`まで適用する。
-   旧履歴から最小の補助状態と代表イベントを初期化する。旧occurrence・segment observation行は保持する。
-   初期化とmigration ledgerは同じtransactionで確定し、migrationは再実行できる。
-3. `pdp dbt --source screen_time --stream app-in-focus`で新旧統合Viewを作成する。
-   新tableの行を先に優先し、その後`is_active`で絞るため、削除済みイベントは旧履歴から復活しない。
+1. Loader/ReconciliationのSchedulerを止め、実行中のLoader・Reconciliation・dbt Jobの終了を確認する。
+   以降は旧writerと新writerを混在させない。
+2. MotherDuckをバックアップし、Loader・Reconciliation・dbtを新runtimeへ揃える。
+   `006_screen_time_ingestion.sql`が未適用なら、旧履歴から最小の補助状態と代表イベントを初期化する。
+   旧occurrence・segment observation行は保持する。各migrationとledgerは同じtransactionで確定する。
+3. `pdp dbt --source screen_time --stream app-in-focus`を実行する。
+   dbt実行前に`007_screen_time_analysis_entry.sql`まで適用され、下記の移行検査に成功した場合だけ
+   分析の入口が`base.screen_time_event`の有効行に切り替わる。旧判定Viewは削除され、dbtでも再作成しない。
 4. 新Loaderを1回実行する。既存成功Rawはparserが同じならskipし、旧parserの保持中Rawは再解析する。
 5. 日別利用時間、イベント一意性、`ops.screen_time_tombstone.resolution`、Loaderログの
    `affected events`と`tombstones`件数を確認してSchedulerを再開する。
@@ -200,6 +203,26 @@ v1は元segment名を持たないため、同じlogical segmentのv2が未取得
 分析tableは`event_key`ごとに1行、補助状態はsegment・物理record・tombstone・削除照合の組ごとに保持する。
 同じ内容を繰り返し観測しても補助行数は増えない。新イベント・物理位置・Raw単位の取込記録は増える。
 旧occurrenceの容量は減らさない。
+
+### 分析入口の一本化に伴う移行検査
+
+`006`適用済みの環境も同じ停止・バックアップ手順で`007`を適用する。
+検査はmigration適用時に一度だけ旧履歴と補助状態を全体走査する。通常の分析クエリには含めない。
+
+- 旧segment観測以上に新しい観測が補助状態に存在すること。
+- 旧観測の各物理位置の最終metadataから移行対象となるevent・tombstoneが補助状態に存在すること。
+- 取り込みSQLで再計算した削除照合が保存済みの照合と一致すること。
+- 取り込みSQLで再計算した代表イベントと、保存済みの分析項目・有効状態が一致すること。
+  同内容の再観測で更新しないprovenanceは比較せず、parser訂正で元recordを失った無効イベントは許容する。
+
+失敗時は`Screen Time cutover blocked:`で停止し、`007`のView変更とledgerをrollbackする。
+停止理由に対応する旧履歴・補助状態・イベントを調べ、バックアップとの比較や保持中Rawの再解析で修復してから
+同じcommandを再実行する。ledgerを手で適用済みにしたり、旧tableを削除して検査を回避しない。
+Rawは90日保持のため、期限切れの履歴はバックアップまたは保存済みの旧行からの修復が必要になる。
+
+検査成功時は入口Viewを置換してから旧Viewを削除するため、既存の下流Viewも引き続き参照できる。
+旧tableの保存と分析結果への採用は独立しており、以後の削除診断は
+`ops.screen_time_tombstone.resolution`と`ops.screen_time_deletion_match`で行う。
 
 ### 停止後の再実行
 

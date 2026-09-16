@@ -25,7 +25,8 @@ Warehouseだけが行う。decodeまたは書込に失敗したobjectの分析�
 iPhone Screen Timeではccl-segbとApp.InFocus protobufをdecodeした後、`ScreenTimeBatch.write()`が
 MotherDuck内で対象segmentの補助状態、関連する削除照合と代表イベントを更新する。
 `base.screen_time_event`は`event_key`ごとに1行で、分析項目・有効状態が変わる場合だけ更新する。
-補助状態には原文payloadを含めない。既存のoccurrenceは移行互換のため保持する。
+補助状態には原文payloadを含めない。既存のoccurrenceは証跡として保持する。
+移行検査後、dbtは`base.screen_time_event`の有効行だけを読み、旧occurrenceの判定を再実行しない。
 `SourceAdapter`と`DecodedBatch`の契約、共有Loader leaseはsource間で共通である。
 
 補助状態・イベント・Rawの取込成功はWarehouseの1 transactionで確定する。commit前の失敗はrollbackし、
