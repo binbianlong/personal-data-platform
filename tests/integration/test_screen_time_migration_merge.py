@@ -31,9 +31,6 @@ def legacy(tmp_path):
         shutil.copyfile(path, migrations / path.name)
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate(migrations)
-    warehouse.connection.execute(
-        "INSERT INTO ops.screen_time_checkpoint VALUES (true, 'existing-state', 1)"
-    )
     try:
         yield warehouse, Repository(), migrations
     finally:
