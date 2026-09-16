@@ -118,6 +118,14 @@ DBの物理走査量が履歴量によらず一定になることを保証する
 以下のsegment observationとrecord occurrenceは切り替え前の保存形式で、新方式では書き込まない。
 `006_screen_time_ingestion.sql`が旧履歴をSQLで集約し、最新segment・物理record・tombstoneと代表イベントを
 初期化する。旧行と元payloadは変更せず保持する。migration ledgerにより再実行で重複しない。
+旧checkpoint writerを利用したDBでは、`pdp screen-time migrate-checkpoint --checkpoint PATH`で
+format-1 SQLite checkpointの観測差分を同じtransaction内で補助状態へ移す。
+checkpointはpayloadを持たないため、旧履歴と正規化内容が一致するrecordは既存の物理IDを再利用し、
+それ以外には`checkpoint:`で始まる正規化内容のIDを付ける。元payloadを捏造・復元することはない。
+このIDには物理位置も保持する。同じ位置・時刻・長さ・解析内容を持つ新しいRawを取得した場合は、
+checkpoint由来の版を無効化し、通常の物理IDへ引き継ぐ。以後のparser訂正で旧削除情報だけが残ることを防ぐ。
+後続Rawの物理コピーとの重複は、通常と同じsegment・offset・event key単位で除外する。
+削除前の重複数が残る無効イベントは0へ補正し、削除状態自体は通常取り込みと同じresolverで検証する。
 
 `007_screen_time_analysis_entry.sql`は旧観測・物理recordの移行漏れ、削除照合、代表イベントの分析項目と
 有効状態を検査する。削除照合と代表選択の検証には取り込みと同じSQL macroを使い、不整合があれば停止する。
