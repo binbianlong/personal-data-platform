@@ -207,7 +207,26 @@ CREATE MACRO ops.screen_time_resolve(keys) AS TABLE (
            active AS is_active
     FROM ranked
 );
-INSERT INTO base.screen_time_event
-SELECT *, current_timestamp FROM ops.screen_time_resolve(
+-- Merge only reproducible existing events. The event writer can contain newer
+-- deletions/corrections than the archived observations; observation time alone
+-- cannot order those changes. Never replace such results with stale history.
+CREATE TEMP TABLE screen_time_merge_expected AS
+SELECT * FROM ops.screen_time_resolve(
     (SELECT list(DISTINCT event_key) FROM ops.screen_time_record)
 );
+SELECT CASE WHEN EXISTS (
+    SELECT * EXCLUDE (object_key, segment_key, segment_filename, record_offset,
+                      record_metadata_offset, observed_at, loaded_at)
+    FROM base.screen_time_event
+    EXCEPT
+    SELECT * EXCLUDE (object_key, segment_key, segment_filename, record_offset,
+                      record_metadata_offset, observed_at)
+    FROM screen_time_merge_expected
+) THEN error('Screen Time migration blocked: existing events cannot be reconstructed from legacy history; restore checkpoint-backed history before retrying') END;
+
+-- Existing rows win when analytical fields and active state agree, preserving
+-- their provenance and loaded_at. Only missing event keys are bootstrapped.
+INSERT INTO base.screen_time_event
+SELECT *, current_timestamp FROM screen_time_merge_expected
+ON CONFLICT (event_key) DO NOTHING;
+DROP TABLE screen_time_merge_expected;

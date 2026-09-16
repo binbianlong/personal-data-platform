@@ -192,6 +192,8 @@ v1は元segment名を持たないため、同じlogical segmentのv2が未取得
    以降は旧writerと新writerを混在させない。
 2. MotherDuckをバックアップし、Loader・Reconciliation・dbtを新runtimeへ揃える。
    `006_screen_time_ingestion.sql`が未適用なら、旧履歴から最小の補助状態と代表イベントを初期化する。
+   既存イベントがある場合は、旧履歴から再計算した分析項目・有効状態との一致を検査する。
+   一致する既存行はprovenance・loaded_atも含めて保持し、未保存のevent keyだけを追加する。
    旧occurrence・segment observation行は保持する。各migrationとledgerは同じtransactionで確定する。
 3. `pdp dbt --source screen_time --stream app-in-focus`を実行する。
    dbt実行前に`007_screen_time_analysis_entry.sql`まで適用され、下記の移行検査に成功した場合だけ
@@ -203,6 +205,23 @@ v1は元segment名を持たないため、同じlogical segmentのv2が未取得
 分析tableは`event_key`ごとに1行、補助状態はsegment・物理record・tombstone・削除照合の組ごとに保持する。
 同じ内容を繰り返し観測しても補助行数は増えない。新イベント・物理位置・Raw単位の取込記録は増える。
 旧occurrenceの容量は減らさない。
+
+### 既存イベントと旧履歴が一致しない場合
+
+`006`は観測時刻だけで削除・parser訂正の新旧を判定しない。既存イベントの分析項目・有効状態・
+重複数を旧履歴から再現できない場合、`Screen Time migration blocked: existing events cannot be
+reconstructed from legacy history`で停止する。既存イベント、旧履歴、checkpointの照合marker、
+取込記録を保持し、`006`の補助状態とledger更新はrollbackする。
+
+旧runtimeが外部SQLite checkpointだけに保存した観測・削除・訂正は、このSQLでは復元できない。
+旧runtime停止時点のcheckpointとMotherDuckのバックアップを保持し、checkpointに対応する履歴の復元が
+必要な環境として扱う。外部checkpointからの自動移行は未対応であり、既存イベントの削除、`is_active`の
+書換え、ledgerの手修正で検査を通さない。復元後は同じmigrationを再実行できる。
+この検査は既存イベントとの不一致を検出するもので、外部checkpoint全体の移行完全性を保証しない。
+
+主キー衝突は`006`より後のmigrationでは修復できないため、未適用DBには修正版`006`を適用する。
+元の`006`を適用済みのDBは、固定した元版・修正版checksumの組だけを互換として認め、再初期化しない。
+適用済みledgerは保持し、この組以外のSQL変更は従来どおりエラーにする。
 
 ### 分析入口の一本化に伴う移行検査
 

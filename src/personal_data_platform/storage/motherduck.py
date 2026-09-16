@@ -16,6 +16,17 @@ from personal_data_platform.sources.contracts import DecodedBatch
 
 DEFAULT_MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
+# 006 must be repaired in place: a later migration cannot fix its failing INSERT.
+# Accept exactly the original -> repaired checksum pair on already migrated DBs.
+# Preserve the original ledger entry and do not rerun the bootstrap there.
+MIGRATION_CHECKSUM_REPAIRS = {
+    (
+        "006_screen_time_ingestion.sql",
+        "abe9144642b57f906eaac49bd3ecef597ef4e43d4388fdc5bc1478c934bce7a1",
+        "5fa1829adc0277eaac9e0f7348d9765cbfcae3050b4ea76cbd272a71a03f5042",
+    ),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class WarehouseConfig:
@@ -104,7 +115,10 @@ class Warehouse:
                 "SELECT checksum FROM ops.schema_migration WHERE migration_id = ?", [path.name]
             ).fetchone()
             if existing:
-                if existing[0] != checksum:
+                if (
+                    existing[0] != checksum
+                    and (path.name, existing[0], checksum) not in MIGRATION_CHECKSUM_REPAIRS
+                ):
                     raise RuntimeError(f"applied migration changed: {path.name}")
                 continue
             self.connection.execute("BEGIN TRANSACTION")
