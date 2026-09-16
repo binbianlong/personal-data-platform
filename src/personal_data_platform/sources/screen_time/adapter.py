@@ -31,11 +31,7 @@ class ScreenTimeSource:
     raw_suffixes = (".segb.gz",)
     required_relations = (
         "base.screen_time_event",
-        "base.screen_time_segment_observation",
-        "base.screen_time_record_occurrence",
         "base.screen_time_transition",
-        "base.screen_time_tombstone_match",
-        "base.screen_time_tombstone_status",
         "base.screen_time_interval",
         "marts.daily_screen_time",
     )

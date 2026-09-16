@@ -96,7 +96,7 @@ def test_out_of_order_and_reparse_keep_later_snapshot(tmp_path, order):
     warehouse.close()
 
 
-def test_cutover_keeps_old_rows_and_user_deletion_overrides_legacy(tmp_path, monkeypatch):
+def test_cutover_keeps_old_rows_without_resurrecting_user_deleted_events(tmp_path, monkeypatch):
     database = tmp_path / "events.duckdb"
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     migrations = tmp_path / "legacy_migrations"
@@ -138,8 +138,19 @@ def test_cutover_keeps_old_rows_and_user_deletion_overrides_legacy(tmp_path, mon
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
     run_dbt(target="local", project_dir=project)
     warehouse = warehouse_at(database)
-    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_legacy_transition") == 1
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM information_schema.views WHERE table_schema = 'base' "
+            "AND table_name IN ('screen_time_legacy_transition', 'screen_time_tombstone_match', "
+            "'screen_time_tombstone_status')"
+        )
+        == 0
+    )
     assert warehouse.query_value("SELECT count(*) FROM base.screen_time_transition") == 0
+    assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time") == 0
+    # Archived tables are not dependencies of any normal analytical query.
+    warehouse.connection.execute("DROP TABLE base.screen_time_record_occurrence")
+    warehouse.connection.execute("DROP TABLE base.screen_time_segment_observation")
     assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time") == 0
     warehouse.close()
 

@@ -43,12 +43,10 @@ def _warehouse() -> Warehouse:
     warehouse.migrate()
     for relation in (
         "base.screen_time_transition",
-        "base.screen_time_tombstone_match",
-        "base.screen_time_tombstone_status",
         "base.screen_time_interval",
         "marts.daily_screen_time",
     ):
-        warehouse.connection.execute(f"CREATE VIEW {relation} AS SELECT 1 AS value")
+        warehouse.connection.execute(f"CREATE OR REPLACE VIEW {relation} AS SELECT 1 AS value")
     return warehouse
 
 

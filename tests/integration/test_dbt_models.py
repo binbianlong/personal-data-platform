@@ -11,7 +11,13 @@ from personal_data_platform.dbt_runner import DBT_PROJECT_DIR, run_dbt
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.screen_time.models import ParsedScreenTimeRecord
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.motherduck import (
+    DEFAULT_MIGRATIONS,
+    Warehouse,
+    WarehouseConfig,
+    connect,
+)
+from tests.legacy_screen_time import LegacyScreenTimeBatch
 
 
 @pytest.fixture
@@ -79,8 +85,9 @@ def _record(
     )
 
 
+@pytest.mark.parametrize("legacy", [False, True], ids=["new-ingestion", "migrated-history"])
 def test_dbt_pairs_events_and_splits_tokyo_midnight(
-    tmp_path, monkeypatch, dbt_project, raw
+    tmp_path, monkeypatch, dbt_project, raw, legacy
 ) -> None:
     database = tmp_path / "dbt-test.duckdb"
     records = [
@@ -141,8 +148,17 @@ def test_dbt_pairs_events_and_splits_tokyo_midnight(
     )
 
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
-    warehouse.migrate()
-    warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch(records))
+    if legacy:
+        migrations = tmp_path / "legacy_migrations"
+        migrations.mkdir()
+        for path in DEFAULT_MIGRATIONS.glob("00[1-5]*.sql"):
+            shutil.copyfile(path, migrations / path.name)
+        warehouse.migrate(migrations)
+        warehouse.load_object(raw, byte_size=100, batch=LegacyScreenTimeBatch(records))
+        warehouse.migrate()
+    else:
+        warehouse.migrate()
+        warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch(records))
     warehouse.close()
 
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
