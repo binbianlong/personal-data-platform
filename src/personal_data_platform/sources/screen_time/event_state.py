@@ -168,7 +168,6 @@ def write_state(connection, raw, batch, *, loaded_at):
     # either record keys or tombstone reasons can be corrected in place.
     _affected_tombstones(connection, scope)
     _capture_deletion_effects(connection, "screen_time_previous_effect")
-    _replace_checkpoint_versions(connection)
     # Reparse corrections invalidate only versions whose latest evidence is this Raw.
     # Later observations of the same bytes remain valid.
     for table in ("record", "tombstone"):
@@ -286,61 +285,6 @@ def _affected_tombstones(connection, scope):
         """,
         [*scope, *scope],
     )
-
-
-def _replace_checkpoint_versions(connection):
-    # Checkpoints lacked payload digests. Once equivalent decoded evidence arrives
-    # from Raw, retire its imported version in favor of the ordinary physical ID.
-    # Otherwise a later parser correction would leave the imported deletion alive.
-    common = ("device_key", "source_stream", "segment_key")
-    fields = {
-        "record": (
-            "record_offset",
-            "record_metadata_offset",
-            "payload_length",
-            "record_timestamp_cocoa",
-            "event_key",
-            "bundle_id",
-            "event_at",
-            "state",
-            "transition_reason",
-            "kind",
-            "app_version",
-            "app_build",
-            "platform_flag",
-        ),
-        "tombstone": (
-            "target_segment_name",
-            "target_offset",
-            "target_length",
-            "target_event_timestamp",
-            "deletion_reason",
-        ),
-    }
-    for table, columns in fields.items():
-        equality = " AND ".join(
-            f"r.{column} IS NOT DISTINCT FROM i.{column}" for column in (*common, *columns)
-        )
-        if table == "tombstone":
-            for index, (column, kind) in enumerate(
-                (
-                    ("record_offset", "UBIGINT"),
-                    ("record_metadata_offset", "UBIGINT"),
-                    ("payload_length", "UINTEGER"),
-                    ("record_timestamp_cocoa", "DOUBLE"),
-                )
-            ):
-                equality += (
-                    f" AND try_cast(json_extract(try_cast(split_part(r.physical_id, ':', 2) "
-                    f"AS JSON), '$[{index}]') AS {kind}) IS NOT DISTINCT FROM i.{column}"
-                )
-        connection.execute(
-            f"UPDATE ops.screen_time_{table} r SET is_valid = false "
-            "FROM screen_time_input i WHERE starts_with(r.physical_id, 'checkpoint:') "
-            "AND r.is_valid AND i.record_kind = ? "
-            "AND (i.observed_at, i.object_key) >= (r.observed_at, r.object_key) AND " + equality,
-            ["event" if table == "record" else table],
-        )
 
 
 def _capture_deletion_effects(connection, table):

@@ -33,10 +33,6 @@ def build_parser() -> argparse.ArgumentParser:
     screen_time_commands = screen_time.add_subparsers(dest="screen_time_command", required=True)
     screen_time_commands.add_parser("devices", help="list pseudonymized iPhone devices")
     screen_time_commands.add_parser("doctor", help="diagnose collector configuration and access")
-    checkpoint = screen_time_commands.add_parser(
-        "migrate-checkpoint", help="migrate a stopped pre-006 warehouse using its SQLite checkpoint"
-    )
-    checkpoint.add_argument("--checkpoint", type=Path, required=True)
     collect = screen_time_commands.add_parser("collect", help="collect App.InFocus segments")
     collection_mode = collect.add_mutually_exclusive_group(required=True)
     collection_mode.add_argument(
@@ -93,19 +89,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "screen-time":
-        if args.screen_time_command == "migrate-checkpoint":
-            from personal_data_platform.storage.motherduck import (
-                Warehouse,
-                WarehouseConfig,
-                connect,
-            )
-
-            warehouse = Warehouse(connect(WarehouseConfig.from_env()))
-            try:
-                warehouse.migrate(screen_time_checkpoint=args.checkpoint)
-            finally:
-                warehouse.close()
-            return 0
         if args.screen_time_command == "devices":
             return _run_devices()
         if args.screen_time_command == "doctor":
