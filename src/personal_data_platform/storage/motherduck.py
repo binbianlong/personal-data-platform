@@ -97,9 +97,7 @@ class Warehouse:
     def close(self) -> None:
         self.connection.close()
 
-    def migrate(
-        self, migrations: Path = DEFAULT_MIGRATIONS, *, screen_time_checkpoint: Path | None = None
-    ) -> None:
+    def migrate(self, migrations: Path = DEFAULT_MIGRATIONS) -> None:
         self.connection.execute("CREATE SCHEMA IF NOT EXISTS ops")
         self.connection.execute(
             """
@@ -117,8 +115,6 @@ class Warehouse:
                 "SELECT checksum FROM ops.schema_migration WHERE migration_id = ?", [path.name]
             ).fetchone()
             if existing:
-                if path.name == "006_screen_time_ingestion.sql" and screen_time_checkpoint:
-                    raise RuntimeError("Screen Time checkpoint import requires a pre-006 warehouse")
                 if (
                     existing[0] != checksum
                     and (path.name, existing[0], checksum) not in MIGRATION_CHECKSUM_REPAIRS
@@ -127,14 +123,7 @@ class Warehouse:
                 continue
             self.connection.execute("BEGIN TRANSACTION")
             try:
-                if path.name == "006_screen_time_ingestion.sql":
-                    from personal_data_platform.sources.screen_time.checkpoint_migration import (
-                        migrate_checkpoint,
-                    )
-
-                    migrate_checkpoint(self.connection, sql, screen_time_checkpoint)
-                else:
-                    self.connection.execute(sql)
+                self.connection.execute(sql)
                 self.connection.execute(
                     "INSERT INTO ops.schema_migration VALUES (?, ?, ?)",
                     [path.name, checksum, datetime.now(UTC)],
