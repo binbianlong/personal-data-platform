@@ -4,12 +4,16 @@ import struct
 import zlib
 from datetime import UTC, datetime
 
+import pytest
+
+from personal_data_platform.sources.screen_time.models import SegmentDecodeError
 from personal_data_platform.sources.screen_time.parser import parse_segb_bytes
 from personal_data_platform.sources.screen_time.raw import (
     ScreenTimeRawIdentity,
     parse_raw_object_key,
     sha256_hex,
 )
+from tests.screen_time_helpers import Repository, event, segb
 
 
 def _varint(value: int) -> bytes:
@@ -79,3 +83,60 @@ def test_pinned_ccl_segb_decodes_shared_offset_trailer_entries() -> None:
     assert records[0].record_metadata_offset != records[1].record_metadata_offset
     assert [record.record_state for record in records] == ["WRITTEN", "DELETED"]
     assert all(record.bundle_id == "com.example.app" for record in records)
+
+
+@pytest.mark.parametrize("state", [99, -1, 2, 0])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_unknown_trailer_state_rejects_entire_segment(state, mixed):
+    segment, offset = segb(event("app.valid"), state=state)
+    if mixed:
+        segment = bytearray(segment)
+        struct.pack_into("<i", segment, 4, 2)
+        segment += struct.pack("<2id", offset - 32, 1, 10.0)
+        segment = bytes(segment)
+    raw = Repository().add("100", segment)
+
+    with pytest.raises(SegmentDecodeError, match="unsupported SEGB record state"):
+        parse_segb_bytes(raw, segment)
+
+
+@pytest.mark.parametrize("state", [99, -1, 2])
+def test_unknown_state_is_rejected_even_without_a_data_offset(state):
+    segment = struct.pack("<4sid16s2id", b"SEGB", 1, 0.0, b"\0" * 16, 0, state, 0.0)
+    raw = Repository().add("100", segment)
+
+    with pytest.raises(SegmentDecodeError, match="unsupported SEGB record state"):
+        parse_segb_bytes(raw, segment)
+
+
+@pytest.mark.parametrize("state", [0, 4])
+@pytest.mark.parametrize("with_event", [False, True])
+def test_known_empty_trailer_slots_remain_supported(state, with_event):
+    if with_event:
+        segment = bytearray(segb(event("app.valid"))[0])
+        struct.pack_into("<i", segment, 4, 2)
+    else:
+        segment = bytearray(struct.pack("<4sid16s", b"SEGB", 1, 0.0, b"\0" * 16))
+    segment += struct.pack("<2id", 0, state, 0.0)
+    segment = bytes(segment)
+    raw = Repository().add("100", segment)
+
+    records = parse_segb_bytes(raw, segment)
+
+    assert [record.bundle_id for record in records] == (["app.valid"] if with_event else [])
+
+
+@pytest.mark.parametrize("count", [-1, 1, 3])
+def test_invalid_trailer_extent_is_rejected(count):
+    segment = struct.pack("<4sid16s", b"SEGB", count, 0.0, b"\0" * 16)
+    raw = Repository().add("100", segment)
+
+    with pytest.raises(SegmentDecodeError):
+        parse_segb_bytes(raw, segment)
+
+
+def test_empty_segment_without_trailer_entries_remains_supported():
+    segment = struct.pack("<4sid16s", b"SEGB", 0, 0.0, b"\0" * 16)
+    raw = Repository().add("100", segment)
+
+    assert parse_segb_bytes(raw, segment) == []
