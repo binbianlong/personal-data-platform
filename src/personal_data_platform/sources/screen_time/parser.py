@@ -311,6 +311,27 @@ def parse_segb_records(
     return parsed
 
 
+def _validate_segb2_record_states(segment: bytes) -> None:
+    """Reject unknown states before ccl-segb can silently discard their trailers."""
+    if not segment.startswith(b"SEGB"):
+        return  # SEGB v1 rejects unknown states in the dependency itself.
+    if len(segment) < 32:
+        raise SegmentDecodeError("truncated SEGB header")
+    entry_count = struct.unpack_from("<i", segment, 4)[0]
+    trailer_start = len(segment) - 16 * entry_count
+    if entry_count < 0 or trailer_start < 32:
+        raise SegmentDecodeError("SEGB trailer is outside the source bytes")
+    for offset in range(trailer_start, len(segment), 16):
+        end_offset, state = struct.unpack_from("<2i", segment, offset)
+        # Zeroed unused slots reference no data; state 4 is a known empty record.
+        if state == 0 and end_offset == 0:
+            continue
+        if state not in {1, 3, 4}:
+            raise SegmentDecodeError(
+                f"unsupported SEGB record state {state} at metadata offset {offset}"
+            )
+
+
 def parse_segb_bytes(
     raw: RawObject, segment: bytes, *, segment_kind: str | None = None
 ) -> list[ParsedScreenTimeRecord]:
@@ -328,6 +349,7 @@ def parse_segb_bytes(
         ) from error
 
     try:
+        _validate_segb2_record_states(segment)
         with tempfile.NamedTemporaryFile(suffix=".segb") as temporary:
             temporary.write(segment)
             temporary.flush()

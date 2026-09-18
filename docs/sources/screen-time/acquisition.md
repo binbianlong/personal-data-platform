@@ -91,3 +91,7 @@ platform flag
 未知protobuf fieldはRaw bytesに保持する。削除済み・CRC不一致はイベント本文を要求せず、元bytesとメタデータを
 保持する。CRC正常の通常イベントやtombstoneの既知field、またはSEGB構造をdecodeできない場合は、
 そのsegment observationをAnalyticsへ成功取込した扱いにしない。
+
+SEGB v2のtrailerはdecoderへ渡す前にrecord stateを検査する。未知のstateが1件でもあれば
+観測全体を失敗させ、直前の正常観測と既存イベントの有効状態を維持する。`state=0`かつ
+`end_offset=0`の未使用slotと、既知の空レコード`state=4`は引き続き許容する。

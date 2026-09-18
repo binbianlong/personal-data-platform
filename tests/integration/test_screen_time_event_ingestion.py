@@ -33,6 +33,36 @@ def warehouse_at(path):
     return warehouse
 
 
+@pytest.mark.parametrize("version", [1, 2])
+def test_unknown_segb_state_fails_without_replacing_last_good_observation(tmp_path, version):
+    warehouse = warehouse_at(tmp_path / "events.duckdb")
+    repository = Repository()
+    payload = event("app.retained")
+    initial = repository.add("100", segb(payload)[0], version=version)
+    assert run_loader(repository, warehouse).succeeded == 1
+    assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(True,)]
+    tables = [f"ops.screen_time_{t}" for t in STATE_TABLES] + ["base.screen_time_event"]
+    before = {t: warehouse.query_rows(f"SELECT * FROM {t} ORDER BY ALL") for t in tables}
+    invalid = repository.add("100", segb(payload, state=99)[0], version=version)
+
+    # Repeated attempts must remain failures and leave the last good snapshot intact.
+    for _ in range(2):
+        summary = run_loader(repository, warehouse)
+
+        assert (summary.succeeded, summary.failed, summary.skipped, summary.records) == (0, 1, 1, 0)
+        assert {
+            t: warehouse.query_rows(f"SELECT * FROM {t} ORDER BY ALL") for t in tables
+        } == before
+        assert warehouse.query_rows(
+            "SELECT status, error_type FROM ops.ingestion_metadata WHERE object_key = ?",
+            [invalid.key],
+        ) == [("failed", "SegmentDecodeError")]
+        assert warehouse.query_rows(
+            "SELECT status FROM ops.ingestion_metadata WHERE object_key = ?", [initial.key]
+        ) == [("succeeded",)]
+    warehouse.close()
+
+
 def test_reobservations_store_one_event_and_only_state_changes(tmp_path):
     warehouse = warehouse_at(tmp_path / "events.duckdb")
     repository = Repository()
