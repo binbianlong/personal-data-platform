@@ -106,6 +106,17 @@ TTLで必要な過去recordの照合情報と正規化項目はMotherDuckに残�
 record時刻で行い、物理位置が再利用されても異なる時刻のイベントを削除しない。
 v1で不明だったsegment名は同じlogical segmentのv2から補完する。名前が矛盾するsegmentは照合しない。
 
+`source_segment_names`は観測された名前の重複を除いたsort済みの集合を保持する。矛盾するsegmentの
+候補名も名前の一意性判定に含めるため、同じ名前を持つ別segmentへの誤った削除適用を防ぐ。
+名前を追加したときは全候補名に関係するtombstoneを再照合する。`source_segment_name`は候補名の
+辞書順最小値であり、照合には単独で使わない。
+
+`008_screen_time_segment_names.sql`は既存の削除照合と、その変更で分析結果が変わるイベントを再計算する。
+旧形式ですでに`name_ambiguous=true`の場合、失われた候補名の全体を復元できないため
+`source_segment_names=NULL`で表す。この場合は同じdevice・streamの削除照合を`unmatched`とし、
+ユーザー削除・TTL保持を推測で適用しない。他device・streamには影響しない。
+新たな観測だけで不完全な候補集合を完全と扱うことはない。
+
 通常取り込みの代表イベント再計算は、追加・更新・無効化・最新状態の交代に関係するrecordの
 変更前後のevent_keyと、削除照合の変更前後で効果が変わるevent_keyに限定する。
 観測日時・object_keyの更新も代表順位に影響するため対象に含める。更新が不成立になる古い観測や、

@@ -4,6 +4,7 @@ import gzip
 import shutil
 from dataclasses import replace
 from datetime import timedelta
+from itertools import permutations
 from pathlib import Path
 
 import pytest
@@ -670,3 +671,99 @@ def test_name_ambiguity_removes_old_deletion_effect(tmp_path, conflict):
     )
     assert_full_resolution(warehouse)
     warehouse.close()
+
+
+@pytest.mark.parametrize("order", list(permutations(range(4))))
+@pytest.mark.parametrize("reason", [1, 2])
+def test_conflicting_names_block_every_alias_in_any_arrival_order(tmp_path, order, reason):
+    repository = Repository()
+    payload = event("app.target")
+    segment, offset = segb(payload)
+    raws = [
+        repository.add("100", segb(event("app.conflict"))[0], logical="b" * 64),
+        repository.add("200", segb(event("app.conflict"))[0], logical="b" * 64),
+        repository.add("200", segment, logical="c" * 64),
+        repository.add(
+            "300",
+            segb(tombstone("200", offset, len(payload), reason=reason))[0],
+            kind="tombstones",
+        ),
+    ]
+    warehouse = warehouse_at(tmp_path / "events.duckdb")
+    try:
+        for index in order:
+            load(warehouse, repository, raws[index])
+        assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 0
+        assert warehouse.query_rows(
+            "SELECT bundle_id, is_active FROM base.screen_time_event ORDER BY bundle_id"
+        ) == [("app.conflict", True), ("app.target", True)]
+        # TTL must not retain the target after its current copy is erased either.
+        erased = repository.add(
+            "200", segb(b"\0" * len(payload), state=3, crc=123)[0], logical="c" * 64
+        )
+        load(warehouse, repository, erased)
+        assert (
+            warehouse.query_value(
+                "SELECT is_active FROM base.screen_time_event WHERE bundle_id='app.target'"
+            )
+            is False
+        )
+    finally:
+        warehouse.close()
+
+
+def test_new_alias_invalidates_only_colliding_deletions_after_ambiguity(tmp_path):
+    warehouse = warehouse_at(tmp_path / "events.duckdb")
+    repository = Repository()
+    try:
+        for name in ("100", "200"):
+            load(
+                warehouse,
+                repository,
+                repository.add(
+                    name,
+                    segb(event("app.conflict"))[0],
+                    logical="b" * 64,
+                ),
+            )
+        for name, bundle in (("300", "app.collision"), ("400", "app.unrelated")):
+            payload = event(bundle)
+            segment, offset = segb(payload)
+            load(warehouse, repository, repository.add(name, segment))
+            load(
+                warehouse,
+                repository,
+                repository.add(
+                    name,
+                    segb(tombstone(name, offset, len(payload)))[0],
+                    kind="tombstones",
+                ),
+            )
+        assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 2
+        raw = repository.add("300", segb(event("app.conflict"))[0], logical="b" * 64)
+        load(warehouse, repository, raw)
+        assert warehouse.query_rows(
+            "SELECT bundle_id,is_active FROM base.screen_time_event ORDER BY bundle_id"
+        ) == [("app.collision", True), ("app.conflict", True), ("app.unrelated", False)]
+        assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 1
+        before = warehouse.query_rows("SELECT * FROM base.screen_time_event ORDER BY event_key")
+        # Repeating a known alias neither changes the name set nor analytical results.
+        load(
+            warehouse,
+            repository,
+            repository.add(
+                "300",
+                segb(event("app.conflict"))[0],
+                logical="b" * 64,
+            ),
+        )
+        assert (
+            warehouse.query_rows("SELECT * FROM base.screen_time_event ORDER BY event_key")
+            == before
+        )
+        assert warehouse.query_rows(
+            "SELECT source_segment_names FROM ops.screen_time_segment WHERE segment_key=?",
+            ["b" * 64],
+        ) == [(["100", "200", "300"],)]
+    finally:
+        warehouse.close()

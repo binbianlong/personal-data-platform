@@ -157,8 +157,14 @@ def test_incomplete_cutover_rolls_back_without_retiring_views(before_cutover, da
         )
 
 
-def test_cutover_accepts_live_reobservations_and_parser_key_corrections(before_cutover):
+def test_cutover_accepts_live_reobservations_and_parser_key_corrections(before_cutover, tmp_path):
     warehouse, repository, source = before_cutover
+    # Exercise the deferred 007 check with the current writer's name-set schema.
+    writer_migrations = tmp_path / "writer_migrations"
+    writer_migrations.mkdir()
+    names_migration = DEFAULT_MIGRATIONS / "008_screen_time_segment_names.sql"
+    shutil.copyfile(names_migration, writer_migrations / names_migration.name)
+    warehouse.migrate(writer_migrations)
     # Provenance is intentionally stale when analytical fields stay the same.
     raw = repository.add("500", segb(event("app.current"))[0])
     batch = source.decode(raw, gzip.decompress(repository.objects[raw.key][1]))
