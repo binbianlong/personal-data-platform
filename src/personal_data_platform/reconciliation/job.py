@@ -100,7 +100,8 @@ def run_reconciliation(
     raw_by_key = _list_raw_by_key(repository, source, prefix)
     raw_objects = list(raw_by_key.values())
     raw_keys = set(raw_by_key)
-    loaded_keys = warehouse.succeeded_keys_for(raw_objects)
+    parser_version = getattr(source, "parser_version", None)
+    loaded_keys = warehouse.succeeded_keys_for(raw_objects, parser_version=parser_version)
     missing_before_repair = raw_keys - loaded_keys
     repair_summary: dict[str, Any] | None = None
     if missing_before_repair and repair_missing:
@@ -125,7 +126,7 @@ def run_reconciliation(
         states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
 
     checked_at = started_at if now is not None else datetime.now(UTC)
-    succeeded_keys = warehouse.succeeded_keys_for(raw_objects)
+    succeeded_keys = warehouse.succeeded_keys_for(raw_objects, parser_version=parser_version)
     failed_keys = _active_status_keys(states, "failed")
     loading_keys = _active_status_keys(states, "loading")
     live_loaded_keys = raw_keys & succeeded_keys

@@ -127,7 +127,11 @@ class _Warehouse:
             self.reconciliations = self._saved_reconciliations
             self.states = self._saved_states
 
-    def succeeded_keys_for(self, raw_objects: list[SimpleNamespace]) -> set[str]:
+    def succeeded_keys_for(
+        self, raw_objects: list[SimpleNamespace], *, parser_version: str | None = None
+    ) -> set[str]:
+        # These retention fixtures contain only current-parser successes.
+        assert parser_version in (None, get_source().parser_version)
         generations = {value.key: value.storage_generation for value in raw_objects}
         return {
             key

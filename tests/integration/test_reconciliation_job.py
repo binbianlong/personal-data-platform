@@ -278,3 +278,81 @@ def test_reconciliation_isolates_source_and_stream_and_repairs_all_supported_sch
         ) == [("failed", None), ("succeeded", None)]
     finally:
         warehouse.close()
+
+
+@pytest.mark.parametrize("repair_mode", ["success", "disabled", "failure", "stale"])
+def test_reconciliation_requires_current_parser_before_success(repair_mode):
+    import gzip
+    from dataclasses import replace
+
+    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+    from personal_data_platform.sources.screen_time.raw import (
+        CollectorDeviceManifest,
+        CollectorScanReceipt,
+    )
+    from tests.screen_time_helpers import NOW, Repository, event, segb
+
+    class LiveRepository(Repository):
+        def list_scan_receipts(self):
+            return [CollectorScanReceipt("a" * 64, NOW, 1)]
+
+        def get_device_manifest(self):
+            return CollectorDeviceManifest(("a" * 64,), NOW)
+
+    class CorrectedSource(ScreenTimeSource):
+        parser_version = "corrected-parser"
+
+        def decode(self, raw, payload):
+            if repair_mode == "failure":
+                raise ValueError("cannot decode with corrected parser")
+            batch = super().decode(raw, payload)
+            if repair_mode == "stale":
+                return batch
+            return replace(
+                batch,
+                records=[
+                    replace(record, parser_version=self.parser_version, app_version="corrected")
+                    for record in batch.records
+                ],
+            )
+
+    repository = LiveRepository()
+    raw = repository.add("100", segb(event("app.versioned"))[0])
+    warehouse = _warehouse()
+    published = []
+    try:
+        old_batch = ScreenTimeSource().decode(raw, gzip.decompress(repository.objects[raw.key][1]))
+        warehouse.load_object(raw, byte_size=1, batch=old_batch)
+        result = run_reconciliation(
+            repository,
+            warehouse,
+            source=CorrectedSource(),
+            heartbeat=published.append,
+            repair_missing=repair_mode != "disabled",
+            now=NOW,
+        )
+        assert result.details["missing_before_repair"] == 1
+        if repair_mode == "success":
+            assert result.ok
+            assert result.missing_object_count == 0
+            assert len(published) == 1
+            assert warehouse.query_rows(
+                "SELECT parser_version, app_version FROM base.screen_time_event"
+            ) == [("corrected-parser", "corrected")]
+            assert (
+                warehouse.query_value("SELECT parser_version FROM ops.ingestion_metadata")
+                == "corrected-parser"
+            )
+        else:
+            assert not result.ok
+            assert result.missing_object_count == 1
+            assert published == []
+            assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == 0
+        if repair_mode == "disabled":
+            assert result.details["repair_summary"] is None
+        elif repair_mode == "failure":
+            assert result.failed_object_count == 1
+        elif repair_mode == "stale":
+            assert result.details["repair_summary"]["succeeded"] == 1
+    finally:
+        warehouse.close()
