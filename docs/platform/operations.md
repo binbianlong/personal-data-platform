@@ -60,6 +60,7 @@ objectを再試行できるようにする。
 `reconciliation` leaseは同じroleの全sourceで共有し、Loaderとは別leaseである。
 
 1. 選択source / streamのGCS objectとactiveな取込状態だけを照合し、未取込objectを同じadapterで再処理する。
+   sourceがparser versionを指定する場合は旧parserの成功記録も未取込扱いにし、修復後も現在のversionを確認する。
 2. 修復や並行Loaderが追加した取込済みkeyはGCSを再確認してから、Raw欠損と判定する。
 3. 取込成功済みobjectの欠損をGCS作成時刻とsourceの保持期限で分類する。期限前は失敗、期限以降は予定された期限切れとする。
 4. 対象scopeの`failed` / `loading` / 作成時刻不明の欠損と、保持期限にgrace日数を加えた時点で残るRawを失敗にする。

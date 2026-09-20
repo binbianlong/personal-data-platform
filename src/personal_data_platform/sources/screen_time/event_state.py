@@ -61,11 +61,19 @@ def write_state(connection, raw, batch, *, loaded_at):
     _affected_tombstones(connection, scope)
     connection.execute(
         """
-        INSERT INTO ops.screen_time_segment
-        VALUES (?, ?, ?, ?, ?, ?, false)
+        INSERT INTO ops.screen_time_segment (
+            device_key, source_stream, segment_key, observed_at, object_key,
+            source_segment_name, name_ambiguous, source_segment_names
+        )
+        VALUES (?, ?, ?, ?, ?, ?, false, ?)
         ON CONFLICT (device_key, source_stream, segment_key) DO UPDATE SET
-            source_segment_name = coalesce(ops.screen_time_segment.source_segment_name,
-                                           excluded.source_segment_name),
+            source_segment_name = least(ops.screen_time_segment.source_segment_name,
+                                        excluded.source_segment_name),
+            source_segment_names = CASE
+                WHEN ops.screen_time_segment.source_segment_names IS NULL THEN NULL
+                ELSE list_sort(list_distinct(list_concat(
+                    ops.screen_time_segment.source_segment_names, excluded.source_segment_names
+                ))) END,
             name_ambiguous = ops.screen_time_segment.name_ambiguous OR (
                 ops.screen_time_segment.source_segment_name IS NOT NULL
                 AND excluded.source_segment_name IS NOT NULL
@@ -82,6 +90,9 @@ def write_state(connection, raw, batch, *, loaded_at):
             raw.observed_at,
             raw.key,
             batch.source_segment_name if batch.segment_kind == "events" else None,
+            [batch.source_segment_name]
+            if batch.segment_kind == "events" and batch.source_segment_name is not None
+            else [],
         ],
     )
     # The highest metadata entry defines a physical slot, including erased/bad CRC entries.
@@ -277,9 +288,11 @@ def _affected_tombstones(connection, scope):
         INSERT OR IGNORE INTO screen_time_affected_tombstone
         SELECT t.physical_id FROM ops.screen_time_tombstone t
         WHERE t.device_key = ? AND t.source_stream = ? AND (
-            t.segment_key = ? OR t.target_segment_name IN (
-                SELECT source_segment_name FROM ops.screen_time_segment
-                WHERE device_key = ? AND source_stream = ? AND segment_key = ?
+            t.segment_key = ? OR EXISTS (
+                SELECT 1 FROM ops.screen_time_segment s
+                WHERE s.device_key = ? AND s.source_stream = ? AND s.segment_key = ?
+                  AND (s.source_segment_names IS NULL
+                       OR list_contains(s.source_segment_names, t.target_segment_name))
             )
         )
         """,
