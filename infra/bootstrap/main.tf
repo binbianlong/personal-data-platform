@@ -61,6 +61,34 @@ resource "google_artifact_registry_repository" "runtime_us" {
   description   = "Immutable runtime images for personal-data-platform"
   format        = "DOCKER"
 
+  cleanup_policy_dry_run = false
+
+  cleanup_policies {
+    id     = "delete-older-than-30-days"
+    action = "DELETE"
+    condition {
+      tag_state  = "ANY"
+      older_than = "2592000s"
+    }
+  }
+
+  cleanup_policies {
+    id     = "keep-latest-five"
+    action = "KEEP"
+    most_recent_versions {
+      keep_count = 5
+    }
+  }
+
+  cleanup_policies {
+    id     = "keep-deployed"
+    action = "KEEP"
+    condition {
+      tag_state    = "TAGGED"
+      tag_prefixes = ["deployed-"]
+    }
+  }
+
   depends_on = [google_project_service.bootstrap]
 }
 

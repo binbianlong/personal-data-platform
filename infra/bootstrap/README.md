@@ -4,7 +4,8 @@ runtime Terraformより先に適用し、state bucket、`us-central1`のArtifact
 
 ## 適用
 
-Project IAMを設定できる管理者identityで実行する。
+Project IAMを設定できる管理者identityで実行する。既存repositoryへcleanup policyを初適用する前に、
+後述の「Imageの保持と旧repositoryの廃止」に従って現行imageの保持タグを確認する。
 
 ```bash
 cp terraform.tfvars.example terraform.tfvars
@@ -46,3 +47,28 @@ apply後、outputを次のGitHub Actions Repository Variablesへ登録する。
 併せて`GCP_PROJECT_ID`、`GCP_IMAGE_NAME`、初回planのfallbackとなるdigest URIを表す`GCP_RUNTIME_IMAGE_URI`、通知先の`GCP_ALERT_EMAIL`、Mac operatorを表す`GCP_COLLECTOR_IMPERSONATOR_MEMBER`をRepository Variablesへ登録する。最後の値は`user:operator@example.com`または`group:operators@example.com`形式にし、write-only Collectorとread-only Rebuildの2つの専用Service Accountをimpersonateできるprincipalになる。workflowとTerraformのregionは`us-central1`へ固定しているため、`GCP_REGION`は使わない。いずれもcredentialではなく、secret payloadは登録しない。runtime構築後のplanは、現在`screen-time-loader`へ適用済みのdigest URIをGoogle Cloudから読み取って使用する。
 
 対応するWIF providerのRepository Variableが未設定の間、Terraform Plan / Deployのjobはskipされる。今回の移行では、先にbootstrapを再適用してUS repositoryとcustom roleを作成し、その後runtime planへ進む。Deployは登録後、対象pathを変更するmainへのpushでも起動する。
+
+## Imageの保持と旧repositoryの廃止
+
+`us-central1`のrepositoryは、作成から30日を超えたimageをSHAタグの有無にかかわらず削除する。
+各image packageの最新5世代と、`deployed-`接頭辞のタグが付いたimageは保持する。
+KEEPはDELETEより優先され、実際の削除はArtifact Registryの非同期処理で行われる。
+[cleanup policyの仕様](https://cloud.google.com/artifact-registry/docs/repositories/cleanup-policy)を参照する。
+
+既存repositoryへ初めて適用する場合は、先に保持タグを付けるdeploy workflowを反映し、
+現在の全Jobのimageに`deployed-job-<Job名>`が付いていることを確認する。手動で付ける場合も、
+Jobごとの実際のdigestを読み取り、`gcloud artifacts docker tags add`で同じタグを付ける。
+その後bootstrapをplanし、repositoryのcleanup policy以外に意図しない変更がないことを確認してapplyする。
+runtimeのdeploy workflowはbootstrapの変更をapplyしない。
+
+旧Asia repositoryの削除は手動で行う。対象project・location・repository IDを明示し、
+Cloud Run Jobs、Servicesの有効なrevision、実行中Job、その他の利用元やbuild/deploy設定、
+GitHub Variablesのfallback imageが旧repositoryを参照していないことを確認する。
+旧imageを使ったrollbackが不要で、us-central1の代替imageを利用できることを確認できた場合だけ削除する。
+
+```bash
+gcloud artifacts repositories delete "<old-repository-id>" \
+  --project="<project-id>" --location="<old-asia-location>"
+```
+
+削除後は対象locationのrepository一覧で不在を確認する。`removed`ブロックは以前のstateからの移行用に残す。

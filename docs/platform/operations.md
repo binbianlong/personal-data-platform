@@ -13,6 +13,17 @@ Secret Managerのsecret resourceを先に作成し、secret versionを登録し�
 Terraform DeployのJobをskipする。これらを設定した後の実行成功を、コードのCI成功とは別に確認する。
 
 runtimeはcommit SHAに対応するimmutable image digestを参照する。mutable tagだけをdeploy入力にしない。
+push差分が`Dockerfile`、`.dockerignore`、`pyproject.toml`、`src/`、`dbt/`を含まない場合は、
+`screen-time-loader`へ現在deploy済みのdigestを再利用し、build/pushを省略する。初回構築、比較元のないpush、
+手動実行ではbuildする。Job一覧の取得失敗、無効な比較元、再利用対象のdigest不正はdeployを停止する。
+アプリ変更のdeployが失敗した後にinfraだけを更新しても、そのアプリ変更は再buildされない。
+失敗したアプリ変更を反映するときはTerraform Deployを手動実行する。
+
+apply前に、各Jobの現行digestへ`deployed-job-<Job名>`、次のdigestへ`deployed-candidate`タグを付ける。
+cleanupの保持対象となるタグであり、Terraformには引き続きdigestを渡す。現行Jobの保持タグを先に更新し、
+途中失敗で複数digestが稼働していても保護してからcandidateタグを移す。タグ付け失敗時はapplyしない。
+手動でJobのimageを変更するときも、変更先へ`deployed-`接頭辞の保持タグを先に付ける。
+Jobを廃止した後の`deployed-job-<Job名>`タグは、参照がないことを確認して手動で除去する。
 
 初回およびIAM変更後は`pdp preflight`を専用GCS preflight bucketとMotherDuck test databaseへ接続して実行し、
 次を確認する。

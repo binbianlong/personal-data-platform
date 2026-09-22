@@ -34,6 +34,36 @@ run "secure_bootstrap_contract" {
   }
 
   assert {
+    condition = anytrue([
+      for policy in google_artifact_registry_repository.runtime_us.cleanup_policies :
+      policy.action == "KEEP" && try(
+        policy.condition[0].tag_state == "TAGGED" &&
+        contains(policy.condition[0].tag_prefixes, "deployed-"), false
+      )
+    ])
+    error_message = "Cleanup must retain deployed and candidate images regardless of age."
+  }
+
+  assert {
+    condition = anytrue([
+      for policy in google_artifact_registry_repository.runtime_us.cleanup_policies :
+      policy.action == "KEEP" && try(policy.most_recent_versions[0].keep_count >= 5, false)
+    ])
+    error_message = "Cleanup must retain recent image versions for rollback."
+  }
+
+  assert {
+    condition = !google_artifact_registry_repository.runtime_us.cleanup_policy_dry_run && anytrue([
+      for policy in google_artifact_registry_repository.runtime_us.cleanup_policies :
+      policy.action == "DELETE" && try(
+        policy.condition[0].tag_state == "ANY" &&
+        policy.condition[0].older_than == "2592000s", false
+      )
+    ])
+    error_message = "Cleanup must expire old SHA-tagged images as well as untagged images after 30 days."
+  }
+
+  assert {
     condition = alltrue([
       toset(google_project_iam_custom_role.collector_raw_creator.permissions) == toset(["storage.objects.create"]),
       toset(google_project_iam_custom_role.collector_receipt_writer.permissions) == toset(["storage.objects.create", "storage.objects.delete"]),
