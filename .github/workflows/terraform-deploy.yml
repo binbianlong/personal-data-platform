@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "Dockerfile"
+      - ".dockerignore"
       - "dbt/**"
       - "infra/terraform/**"
       - "pyproject.toml"
@@ -70,10 +71,42 @@ jobs:
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
+      - name: Select runtime image
+        id: select_image
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          build=true
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
+            # A missing base or a failed diff must not be treated as no changes.
+            changed="$(git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" -- Dockerfile .dockerignore pyproject.toml src/ dbt/)"
+            if [[ -z "${changed}" ]]; then
+              jobs="$(gcloud run jobs list --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" \
+                --filter='metadata.labels.application=personal-data-platform' --format=json)"
+              current_image="$(jq -r '.[] | select(.metadata.name == "screen-time-loader") |
+                .spec.template.spec.template.spec.containers[0].image' <<< "${jobs}")"
+              if [[ -n "${current_image}" ]]; then
+                image_path="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
+                if [[ "${current_image}" != "${image_path}@"* || ! "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+                  echo "The deployed runtime image must be a digest in the configured repository." >&2
+                  exit 1
+                fi
+                build=false
+                echo "TF_VAR_image_uri=${current_image}" >> "${GITHUB_ENV}"
+                echo "Reusing runtime image: \`${current_image}\`" >> "${GITHUB_STEP_SUMMARY}"
+              fi
+            fi
+          fi
+          echo "build=${build}" >> "${GITHUB_OUTPUT}"
+
       - name: Configure Artifact Registry authentication
+        if: ${{ steps.select_image.outputs.build == 'true' }}
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
       - name: Build and publish runtime image
+        if: ${{ steps.select_image.outputs.build == 'true' }}
         id: image
         shell: bash
         run: |
@@ -83,11 +116,31 @@ jobs:
           docker build --tag "${image_tag}" .
           docker push "${image_tag}"
           digest="$(gcloud artifacts docker images describe "${image_tag}" --format='value(image_summary.digest)')"
-          test "${digest#sha256:}" != "${digest}"
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           image_uri="${image_path}@${digest}"
           echo "image_uri=${image_uri}" >> "${GITHUB_OUTPUT}"
           echo "TF_VAR_image_uri=${image_uri}" >> "${GITHUB_ENV}"
           echo "Runtime image: \`${image_uri}\`" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Protect deployed and candidate images
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_path="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
+          jobs="$(gcloud run jobs list --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" \
+            --filter='metadata.labels.application=personal-data-platform' --format=json)"
+          current_images="$(jq -r '.[] | [.metadata.name,
+            .spec.template.spec.template.spec.containers[0].image] | @tsv' <<< "${jobs}")"
+          # Keep each live Job's image before moving the candidate tag. This also
+          # preserves mixed digests left by a partially failed Terraform apply.
+          while IFS=$'\t' read -r job image; do
+            [[ -n "${job}" ]] || continue
+            [[ "${image}" == "${image_path}@"* || "${image}" == "${image_path}:"* ]] || continue
+            [[ "${image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
+            gcloud artifacts docker tags add "${image}" "${image_path}:deployed-job-${job}" --quiet
+          done <<< "${current_images}"
+          [[ "${TF_VAR_image_uri}" == "${image_path}@"* && "${TF_VAR_image_uri}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
+          gcloud artifacts docker tags add "${TF_VAR_image_uri}" "${image_path}:deployed-candidate" --quiet
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1

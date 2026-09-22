@@ -442,3 +442,164 @@ def test_deploy_initializes_models_only_after_apply_and_preflight() -> None:
     )
     assert "FIRST_DEPLOYMENT: ${{ steps.plan.outputs.first_deployment }}" in workflow
     assert "if: ${{ steps.dbt.outputs.run == 'true' }}" in workflow
+
+
+IMAGE_PATH = "us-central1-docker.pkg.dev/example-project/runtime/runtime"
+CURRENT_DIGEST = f"{IMAGE_PATH}@sha256:" + "a" * 64
+
+
+def _runtime_job(name: str, image: str) -> dict:
+    return {
+        "metadata": {"name": name},
+        "spec": {"template": {"spec": {"template": {"spec": {"containers": [{"image": image}]}}}}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("changed_path", "event", "current_image", "before_kind", "expected_build"),
+    [
+        ("infra/terraform/jobs.tf", "push", CURRENT_DIGEST, "valid", "false"),
+        (".github/workflows/terraform-deploy.yml", "push", CURRENT_DIGEST, "valid", "false"),
+        ("src/personal_data_platform/cli.py", "push", CURRENT_DIGEST, "valid", "true"),
+        ("dbt/models/test.sql", "push", CURRENT_DIGEST, "valid", "true"),
+        ("Dockerfile", "push", CURRENT_DIGEST, "valid", "true"),
+        (".dockerignore", "push", CURRENT_DIGEST, "valid", "true"),
+        ("pyproject.toml", "push", CURRENT_DIGEST, "valid", "true"),
+        ("infra/terraform/jobs.tf", "workflow_dispatch", CURRENT_DIGEST, "empty", "true"),
+        ("infra/terraform/jobs.tf", "push", "", "valid", "true"),
+        ("infra/terraform/jobs.tf", "push", CURRENT_DIGEST, "zero", "true"),
+        ("infra/terraform/jobs.tf", "push", CURRENT_DIGEST, "missing", None),
+        ("infra/terraform/jobs.tf", "push", "runtime:latest", "valid", None),
+    ],
+)
+def test_deploy_selects_existing_digest_only_for_unchanged_image_inputs(
+    tmp_path: Path,
+    changed_path: str,
+    event: str,
+    current_image: str,
+    before_kind: str,
+    expected_build: str | None,
+) -> None:
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
+
+    git("init", "--quiet")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    git("commit", "--quiet", "--allow-empty", "-m", "base")
+    before = git("rev-parse", "HEAD")
+    changed = tmp_path / changed_path
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("changed\n")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "change")
+    after = git("rev-parse", "HEAD")
+    before = {"zero": "0" * 40, "empty": "", "missing": "f" * 40}.get(before_kind, before)
+    gcloud = tmp_path / "gcloud"
+    gcloud.write_text(
+        '#!/bin/bash\n[[ "$1 $2 $3" == "run jobs list" ]] || exit 90\nprintf "%s\\n" "$JOBS_JSON"\n'
+    )
+    gcloud.chmod(0o755)
+    output = tmp_path / "output"
+    github_env = tmp_path / "env"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(".github/workflows/terraform-deploy.yml", "Select runtime image"),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "JOBS_JSON": json.dumps(
+                [_runtime_job("screen-time-loader", current_image)] if current_image else []
+            ),
+            "GITHUB_EVENT_NAME": event,
+            "BEFORE_SHA": before,
+            "GITHUB_SHA": after,
+            "GCP_PROJECT_ID": "example-project",
+            "GCP_REGION": "us-central1",
+            "ARTIFACT_REPOSITORY": "runtime",
+            "IMAGE_NAME": "runtime",
+            "GITHUB_OUTPUT": str(output),
+            "GITHUB_ENV": str(github_env),
+            "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if expected_build is None:
+        assert result.returncode != 0
+        assert not github_env.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert output.read_text() == f"build={expected_build}\n"
+        if expected_build == "false":
+            assert github_env.read_text() == f"TF_VAR_image_uri={CURRENT_DIGEST}\n"
+        else:
+            assert not github_env.exists()
+
+
+@pytest.mark.parametrize("failure", ["", "list", "tag", "invalid-digest"])
+def test_cleanup_protects_all_current_jobs_before_replacing_the_candidate_tag(
+    tmp_path: Path, failure: str
+) -> None:
+    previous_digest = f"{IMAGE_PATH}@sha256:" + "b" * 64
+    candidate_digest = f"{IMAGE_PATH}@sha256:" + "c" * 64
+    jobs = [
+        _runtime_job("screen-time-loader", CURRENT_DIGEST),
+        _runtime_job("dbt-runner", previous_digest),
+        _runtime_job("other-repository", "us-central1-docker.pkg.dev/other/image:latest"),
+    ]
+    if failure == "invalid-digest":
+        jobs[0] = _runtime_job("screen-time-loader", f"{IMAGE_PATH}:latest")
+    gcloud = tmp_path / "gcloud"
+    gcloud.write_text(
+        "#!/bin/bash\n"
+        'if [[ "$1 $2 $3" == "run jobs list" ]]; then\n'
+        '  [[ "$FAILURE" == "list" ]] && exit 1\n'
+        '  printf "%s\\n" "$JOBS_JSON"; exit 0\n'
+        "fi\n"
+        'if [[ "$1 $2 $3 $4" == "artifacts docker tags add" ]]; then\n'
+        '  [[ "$FAILURE" == "tag" ]] && exit 1\n'
+        '  printf "%s %s\\n" "$5" "$6" >> "$TAG_LOG"; exit 0\n'
+        "fi\nexit 90\n"
+    )
+    gcloud.chmod(0o755)
+    tag_log = tmp_path / "tags"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                ".github/workflows/terraform-deploy.yml", "Protect deployed and candidate images"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "FAILURE": failure,
+            "JOBS_JSON": json.dumps(jobs),
+            "TAG_LOG": str(tag_log),
+            "GCP_PROJECT_ID": "example-project",
+            "GCP_REGION": "us-central1",
+            "ARTIFACT_REPOSITORY": "runtime",
+            "IMAGE_NAME": "runtime",
+            "TF_VAR_image_uri": candidate_digest,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if failure:
+        assert result.returncode != 0
+        assert not tag_log.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert tag_log.read_text().splitlines() == [
+            f"{CURRENT_DIGEST} {IMAGE_PATH}:deployed-job-screen-time-loader",
+            f"{previous_digest} {IMAGE_PATH}:deployed-job-dbt-runner",
+            f"{candidate_digest} {IMAGE_PATH}:deployed-candidate",
+        ]
