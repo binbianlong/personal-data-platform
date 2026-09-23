@@ -22,6 +22,7 @@ pdp = "personal_data_platform.cli:main"
 
 [project.optional-dependencies]
 dev = [
+  "mypy==2.3.1",
   "pytest>=8.4,<10",
   "ruff>=0.12,<1",
 ]
@@ -43,3 +44,14 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src"]
+strict = true
+
+# These dependencies do not publish a py.typed marker. Their values are
+# constrained by the transport and parser protocols at the application boundary.
+[[tool.mypy.overrides]]
+module = ["google.cloud", "google.cloud.storage.*", "ccl_segb", "ccl_segb.*"]
+ignore_missing_imports = true
