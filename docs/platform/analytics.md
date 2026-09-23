@@ -117,7 +117,8 @@ Reconciliationは監査に成功したら
 adapterのselectorを両commandへ渡す。iPhoneは`tag:screen_time_app_in_focus`を使い、source固有のmodelと
 そのtestを選択する。Rebuildも選択scopeのselectorを使い、未再生sourceのbaseを前提とするmodelは選択しない。
 
-`base.screen_time_transition`、`base.screen_time_interval`、`marts.daily_screen_time`はdbt Viewである。
+`base.screen_time_transition`、`base.screen_time_interval`、`marts.daily_screen_time`、
+`marts.daily_screen_time_total`はdbt Viewである。
 base dataの更新時には再materializeせず、query時点の最新baseを参照する。初回構築、model / schema定義の
 変更、明示した再実行時に`dbt run`に続けて`dbt test`を実行する。deploy時の実行条件は
 [`operations.md`](operations.md)に従う。

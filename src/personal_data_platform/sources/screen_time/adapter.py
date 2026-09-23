@@ -34,6 +34,7 @@ class ScreenTimeSource:
         "base.screen_time_transition",
         "base.screen_time_interval",
         "marts.daily_screen_time",
+        "marts.daily_screen_time_total",
     )
     retention_days = 90
     lifecycle_grace_days = 3

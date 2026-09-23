@@ -169,6 +169,7 @@ def test_dbt_excludes_user_deleted_events_across_repeated_initialization(tmp_pat
     )
     assert warehouse.query_value("SELECT count(*) FROM base.screen_time_transition") == 0
     assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time") == 0
+    assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time_total") == 0
     warehouse.close()
 
 

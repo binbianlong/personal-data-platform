@@ -217,7 +217,8 @@ start_event_key / end_event_key
 
 ## `marts.daily_screen_time`
 
-有効なintervalをAsia/Tokyoの日境界で分割し、日・device・Bundle ID単位に集計するdbt Viewである。
+有効なintervalをAsia/Tokyoの日境界で分割し、`activity_date / device_key / platform / bundle_id`ごとに
+1行を返すdbt Viewである。
 
 ```text
 activity_date / device_key / platform / bundle_id
@@ -227,3 +228,39 @@ complete_interval_parts / inferred_interval_parts
 
 `complete_seconds`と`inferred_seconds`は分離し、欠損qualityは加算しない。表示用アプリ名は初期coreでは
 解決せず、Bundle IDを公開値とする。
+
+## `marts.daily_screen_time_total`
+
+`marts.daily_screen_time`のアプリ別利用を合計し、`activity_date / device_key / platform`ごとに
+1行を返すdbt Viewである。異なる端末の利用時間は合算しない。
+
+```text
+activity_date / device_key / platform
+complete_seconds / inferred_seconds / total_seconds
+complete_interval_parts / inferred_interval_parts
+```
+
+両日次Viewの指標は次の意味を持つ。
+
+| column | 意味 |
+|---|---|
+| `activity_date` | Asia/Tokyoの暦日。午前0時を日境界とする |
+| `device_key` / `platform` | 利用した端末の疑似化keyとplatform |
+| `complete_seconds` | 対応するstartとendがある区間の利用秒数 |
+| `inferred_seconds` | 次のapp startを終了時刻とした区間の利用秒数 |
+| `total_seconds` | 確定分と推定分を含む合計秒数 |
+| `complete_interval_parts` | 当日に属する確定区間の分割片数 |
+| `inferred_interval_parts` | 当日に属する推定区間の分割片数 |
+
+秒数は小数秒を保持する。日付をまたぐ区間は各日の秒数に分配され、分割片数も各日に1件ずつ加算される。
+分割片数はアプリ起動回数ではない。終了が午前0時ちょうどなら、翌日のゼロ秒の分割片は生成しない。
+
+`missing_start`・`missing_end`とゼロ秒区間は日次集計に含めない。集計対象がない日・端末・アプリには
+行を生成しないため、行の不在だけでは「利用ゼロ」と「記録不足」を区別できない。当日の値は取り込み済みの
+データに基づく途中経過である。
+
+両Viewは有効なイベントから導出されるため、遅れて到着した訂正やイベントの無効化はdbtを再実行せず反映される。
+初回作成と定義変更時にはScreen Time用selectorでdbtを実行する。日次集計専用の定期ジョブは持たない。
+Reconciliationは両Viewの存在と参照可否を確認する。
+
+クエリ例は[`日次Screen Timeの参照`](../../analytics/README.md#日次screen-timeの参照)を参照する。

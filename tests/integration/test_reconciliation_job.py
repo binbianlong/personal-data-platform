@@ -45,6 +45,7 @@ def _warehouse() -> Warehouse:
         "base.screen_time_transition",
         "base.screen_time_interval",
         "marts.daily_screen_time",
+        "marts.daily_screen_time_total",
     ):
         warehouse.connection.execute(f"CREATE OR REPLACE VIEW {relation} AS SELECT 1 AS value")
     return warehouse
@@ -79,6 +80,21 @@ def test_success_finalizes_the_pending_audit_and_warehouse_heartbeat() -> None:
         ]
         assert warehouse.query_value("SELECT run_id FROM ops.heartbeat") == result.run_id
         assert len(published) == 1
+    finally:
+        warehouse.close()
+
+
+def test_missing_daily_total_view_fails_reconciliation() -> None:
+    warehouse = _warehouse()
+    try:
+        warehouse.connection.execute("DROP VIEW marts.daily_screen_time_total")
+        published = []
+
+        result = run_reconciliation(_Repository(), warehouse, heartbeat=published.append)
+
+        assert not result.ok
+        assert result.missing_relations == ("marts.daily_screen_time_total",)
+        assert published == []
     finally:
         warehouse.close()
 

@@ -32,9 +32,43 @@ models:
                 values: [complete, inferred_end_from_next_start, missing_end, missing_start]
 
   - name: daily_screen_time
-    description: Screen Time seconds split at Asia/Tokyo calendar-day boundaries.
+    description: Screen Time per Asia/Tokyo date, device, platform and application.
     columns:
       - name: activity_date
         data_tests: [not_null]
+      - name: device_key
+        data_tests: [not_null]
+      - name: platform
+        data_tests: [not_null]
+      - name: bundle_id
+        data_tests: [not_null]
+      - name: complete_seconds
+        data_tests: [not_null]
+      - name: inferred_seconds
+        data_tests: [not_null]
       - name: total_seconds
+        data_tests: [not_null]
+      - name: complete_interval_parts
+        data_tests: [not_null]
+      - name: inferred_interval_parts
+        data_tests: [not_null]
+
+  - name: daily_screen_time_total
+    description: Sum of application usage per Asia/Tokyo date, device and platform, including inferred time.
+    columns:
+      - name: activity_date
+        data_tests: [not_null]
+      - name: device_key
+        data_tests: [not_null]
+      - name: platform
+        data_tests: [not_null]
+      - name: complete_seconds
+        data_tests: [not_null]
+      - name: inferred_seconds
+        data_tests: [not_null]
+      - name: total_seconds
+        data_tests: [not_null]
+      - name: complete_interval_parts
+        data_tests: [not_null]
+      - name: inferred_interval_parts
         data_tests: [not_null]
