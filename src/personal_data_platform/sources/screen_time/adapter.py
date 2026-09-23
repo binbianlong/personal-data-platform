@@ -95,9 +95,6 @@ class ScreenTimeSource:
 
         return audit_source(repository, observations, now)
 
-    def legacy_scope(self, raw: RawObject) -> tuple[str, str]:
-        return raw.subject_key, raw.logical_key
-
     def inventory(self, observations: Sequence[RawObject]) -> dict[str, object]:
         return {
             "device_count": len({raw.subject_key for raw in observations}),

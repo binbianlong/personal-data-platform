@@ -302,9 +302,6 @@ def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(mon
             assert value == payload
             return Batch()
 
-        def legacy_scope(self, raw):
-            return None
-
         def audit(self, repository, values, now):
             return SourceHealth(ok=True, details={})
 

@@ -201,9 +201,6 @@ class _SyntheticSource:
         assert payload == b"payload"
         return _EmptyBatch()
 
-    def legacy_scope(self, raw):
-        return None
-
     def audit(self, repository, observations, now):
         self.audited = list(observations)
         return SourceHealth(ok=True, details={"synthetic_health": "fresh"})

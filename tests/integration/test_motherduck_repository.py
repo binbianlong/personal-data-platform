@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 import pytest
 
-from personal_data_platform.raw.models import RawObject
+from personal_data_platform.sources.screen_time.parser import PARSER_VERSION
+from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
-    DEFAULT_MIGRATIONS,
     Warehouse,
     WarehouseConfig,
     connect,
 )
-from tests.legacy_screen_time import LegacyScreenTimeBatch as ScreenTimeBatch
 from tests.screen_time_helpers import _raw, _record
 
 
@@ -26,7 +24,7 @@ def test_migration_and_object_load_are_idempotent(tmp_path) -> None:
         assert warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch([_record(raw)])) == 1
         assert warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch([_record(raw)])) == 0
         assert warehouse.succeeded_keys(source_id="screen_time", stream="App.InFocus") == {raw.key}
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_record_occurrence") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
         assert (
             warehouse.query_value("SELECT storage_created_at FROM ops.ingestion_metadata")
             == raw.storage_created_at
@@ -98,7 +96,7 @@ def test_expired_key_can_be_reloaded_with_a_new_storage_creation_time(tmp_path) 
             """,
             [original.key],
         ) == [(recreated.storage_created_at, None)]
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_record_occurrence") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
     finally:
         warehouse.close()
 
@@ -132,7 +130,7 @@ def test_new_generation_is_not_trusted_until_it_is_reloaded(tmp_path) -> None:
             FROM ops.ingestion_metadata
             """
         ) == [(recreated_at, 2, None)]
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_record_occurrence") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
     finally:
         warehouse.close()
 
@@ -286,7 +284,7 @@ def test_object_identity_cannot_cross_sources_streams_or_versions(field, value) 
         warehouse.close()
 
 
-def test_a_non_screen_time_batch_writes_typed_rows_without_legacy_device_fields() -> None:
+def test_a_non_screen_time_batch_writes_typed_rows_with_source_identity() -> None:
     warehouse = _metric_warehouse()
     try:
         raw = replace(
@@ -296,11 +294,11 @@ def test_a_non_screen_time_batch_writes_typed_rows_without_legacy_device_fields(
         assert warehouse.query_value("SELECT amount FROM base.fixture_metric") == 42
         assert warehouse.query_rows(
             """
-            SELECT source_id, subject_key, device_key, segment_key, parser_version
+            SELECT source_id, subject_key, logical_key, parser_version
             FROM ops.ingestion_metadata
             """
-        ) == [("fixture_health", "account", None, None, "fixture-metric-v1")]
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_record_occurrence") == 0
+        ) == [("fixture_health", "account", raw.logical_key, "fixture-metric-v1")]
+        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 0
     finally:
         warehouse.close()
 
@@ -334,7 +332,7 @@ def test_source_writer_failure_rolls_back_records_and_object_state(previously_lo
         warehouse.close()
 
 
-def test_empty_screen_time_batch_keeps_its_decoder_version_and_legacy_scope() -> None:
+def test_empty_screen_time_batch_keeps_its_decoder_version_and_source_identity() -> None:
     warehouse = _metric_warehouse()
     try:
         raw = _raw()
@@ -343,122 +341,27 @@ def test_empty_screen_time_batch_keeps_its_decoder_version_and_legacy_scope() ->
                 raw,
                 byte_size=10,
                 batch=ScreenTimeBatch([]),
-                legacy_scope=(raw.subject_key, raw.logical_key),
             )
             == 0
         )
         assert warehouse.query_rows(
             """
-            SELECT parser_version, record_count, device_key, segment_key
+            SELECT parser_version, record_count, subject_key, logical_key
             FROM ops.ingestion_metadata
             """
-        ) == [("app-in-focus-v2", 0, raw.subject_key, raw.logical_key)]
+        ) == [(PARSER_VERSION, 0, raw.subject_key, raw.logical_key)]
         assert warehouse.query_rows(
-            "SELECT parser_version, record_count FROM base.screen_time_segment_observation"
-        ) == [("app-in-focus-v2", 0)]
+            "SELECT device_key, segment_key, source_segment_names FROM ops.screen_time_segment"
+        ) == [(raw.subject_key, raw.logical_key, [])]
         failed_raw = replace(raw, key="raw/failed")
         warehouse.mark_failed(
             failed_raw,
             byte_size=0,
             error=ValueError("decode failed"),
-            legacy_scope=(failed_raw.subject_key, failed_raw.logical_key),
         )
-        assert warehouse.query_rows(
-            "SELECT device_key, segment_key FROM ops.ingestion_metadata WHERE object_key = ?",
-            [failed_raw.key],
-        ) == [(raw.subject_key, raw.logical_key)]
-    finally:
-        warehouse.close()
-
-
-def _legacy_insert(warehouse: Warehouse, raw: RawObject) -> None:
-    warehouse.connection.execute(
-        """
-        INSERT INTO ops.ingestion_metadata (
-            object_key, device_key, source_stream, segment_key, observed_at,
-            content_sha256, byte_size, status, parser_version, record_count,
-            started_at, completed_at, retry_count, storage_created_at, storage_generation,
-            retention_expired_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 10, 'succeeded', 'app-in-focus-v1', 0, ?, ?, 3, ?, ?, NULL)
-        """,
-        [
-            raw.key,
-            raw.subject_key,
-            raw.stream,
-            raw.logical_key,
-            raw.observed_at,
-            raw.sha256,
-            raw.observed_at,
-            raw.observed_at,
-            raw.storage_created_at,
-            raw.storage_generation,
-        ],
-    )
-
-
-def test_source_migration_preserves_rows_and_accepts_previous_writer_sql(tmp_path) -> None:
-    legacy_migrations = tmp_path / "legacy-migrations"
-    legacy_migrations.mkdir()
-    for name in ("001_initial.sql", "002_raw_retention.sql"):
-        shutil.copyfile(DEFAULT_MIGRATIONS / name, legacy_migrations / name)
-    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
-    try:
-        warehouse.migrate(legacy_migrations)
-        original = _raw()
-        _legacy_insert(warehouse, original)
-        old_row = warehouse.query_rows("SELECT * FROM ops.ingestion_metadata")[0]
-        old_checksums = warehouse.query_rows(
-            "SELECT migration_id, checksum FROM ops.schema_migration ORDER BY migration_id"
-        )
-
-        warehouse.migrate()
-        warehouse.migrate()
-        assert (
-            warehouse.query_rows("SELECT * FROM ops.ingestion_metadata")[0][: len(old_row)]
-            == old_row
-        )
-        assert warehouse.query_rows(
-            "SELECT source_id, schema_version, subject_key, logical_key FROM ops.ingestion_metadata"
-        ) == [(original.source_id, 1, original.subject_key, original.logical_key)]
-        assert (
-            warehouse.query_rows(
-                "SELECT migration_id, checksum FROM ops.schema_migration ORDER BY migration_id LIMIT 2"
-            )
-            == old_checksums
-        )
-
-        legacy_added = replace(original, key="raw/legacy-added-after-migration")
-        _legacy_insert(warehouse, legacy_added)
         assert warehouse.query_rows(
             "SELECT subject_key, logical_key FROM ops.ingestion_metadata WHERE object_key = ?",
-            [legacy_added.key],
-        ) == [(None, None)]
-        assert warehouse.succeeded_keys_for([original, legacy_added]) == {
-            original.key,
-            legacy_added.key,
-        }
-        assert warehouse.load_object(legacy_added, byte_size=10, batch=ScreenTimeBatch([])) == 0
-        recreated = replace(legacy_added, storage_generation=2)
-        warehouse.load_object(
-            recreated,
-            byte_size=10,
-            batch=ScreenTimeBatch([]),
-            legacy_scope=(recreated.subject_key, recreated.logical_key),
-        )
-        assert warehouse.query_rows(
-            """
-            SELECT subject_key, logical_key, device_key, segment_key, storage_generation
-            FROM ops.ingestion_metadata WHERE object_key = ?
-            """,
-            [recreated.key],
-        ) == [
-            (
-                recreated.subject_key,
-                recreated.logical_key,
-                recreated.subject_key,
-                recreated.logical_key,
-                2,
-            )
-        ]
+            [failed_raw.key],
+        ) == [(raw.subject_key, raw.logical_key)]
     finally:
         warehouse.close()

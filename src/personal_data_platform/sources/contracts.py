@@ -69,10 +69,6 @@ class SourceAdapter(RawCodec, Protocol):
 
     def inventory(self, observations: Sequence[RawObject]) -> dict[str, object]: ...
 
-    def legacy_scope(self, raw: RawObject) -> tuple[str, str] | None:
-        """Supply old ingestion columns during the additive schema transition."""
-        ...
-
 
 def selected_prefixes(source: RawCodec, prefix: str | None = None) -> tuple[str, ...]:
     """Resolve a complete source inventory or an explicitly narrowed prefix."""
