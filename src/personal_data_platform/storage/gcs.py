@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-from typing import Any
 
 import google_crc32c
 from google.api_core.exceptions import PreconditionFailed
@@ -14,11 +13,13 @@ from personal_data_platform.config import GCSConfig
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import RawCodec, selected_prefixes
 
+from .gcs_types import GCSClient
+
 
 class GCSRawRepository:
     """Read/write transport whose object contract is supplied by a source codec."""
 
-    def __init__(self, *, client: Any, bucket: str, source: RawCodec) -> None:
+    def __init__(self, *, client: GCSClient, bucket: str, source: RawCodec) -> None:
         self._client = client
         self._bucket = client.bucket(bucket)
         self._source = source
@@ -40,9 +41,10 @@ class GCSRawRepository:
         self._source.validate_raw_key(key)
         blob = self._bucket.blob(key)
         blob.content_encoding = "gzip"
-        crc32c_checksum_value = base64.b64encode(
-            google_crc32c.Checksum(compressed_bytes).digest()
-        ).decode("ascii")
+        # google-crc32c ships an unannotated extension API.
+        checksum = google_crc32c.Checksum(compressed_bytes)  # type: ignore[no-untyped-call]
+        digest: bytes = checksum.digest()  # type: ignore[no-untyped-call]
+        crc32c_checksum_value = base64.b64encode(digest).decode("ascii")
         try:
             blob.upload_from_string(
                 compressed_bytes,

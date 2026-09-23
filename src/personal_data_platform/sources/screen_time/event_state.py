@@ -4,6 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+from personal_data_platform.raw.models import RawObject
+
+from .models import ParsedScreenTimeRecord
+
+if TYPE_CHECKING:
+    from duckdb import DuckDBPyConnection
+
+    from .writer import ScreenTimeBatch
 
 LOGGER = logging.getLogger(__name__)
 EVENT_COLUMNS = (
@@ -44,7 +55,13 @@ ANALYTICAL_COLUMNS = tuple(
 )
 
 
-def write_state(connection, raw, batch, *, loaded_at):
+def write_state(
+    connection: DuckDBPyConnection,
+    raw: RawObject,
+    batch: ScreenTimeBatch,
+    *,
+    loaded_at: datetime,
+) -> None:
     scope = [raw.subject_key, raw.stream, raw.logical_key]
     # Temporary working sets contain only this segment and its related deletions/events.
     connection.execute("""
@@ -95,7 +112,7 @@ def write_state(connection, raw, batch, *, loaded_at):
     )
     # The highest metadata entry defines a physical slot, including erased/bad CRC entries.
     positions = set()
-    latest = {}
+    latest: dict[int, ParsedScreenTimeRecord] = {}
     for record in batch.records:
         if record.record_metadata_offset in positions:
             raise ValueError("duplicate metadata position in Screen Time observation")
@@ -252,13 +269,13 @@ def write_state(connection, raw, batch, *, loaded_at):
             (SELECT * FROM screen_time_next_effect EXCEPT SELECT * FROM screen_time_previous_effect)
         );
     """)
-    columns = (*EVENT_COLUMNS, "is_active", "loaded_at")
+    event_columns = (*EVENT_COLUMNS, "is_active", "loaded_at")
     connection.execute(
-        f"INSERT INTO base.screen_time_event ({', '.join(columns)}) "
+        f"INSERT INTO base.screen_time_event ({', '.join(event_columns)}) "
         "SELECT *, ? FROM ops.screen_time_resolve("
         "(SELECT list(event_key) FROM screen_time_affected_event)) "
         "ON CONFLICT (event_key) DO UPDATE SET "
-        + ", ".join(f"{c} = excluded.{c}" for c in columns if c != "event_key")
+        + ", ".join(f"{c} = excluded.{c}" for c in event_columns if c != "event_key")
         + " WHERE "
         + " OR ".join(
             f"base.screen_time_event.{c} IS DISTINCT FROM excluded.{c}"
@@ -277,10 +294,12 @@ def write_state(connection, raw, batch, *, loaded_at):
         SELECT (SELECT count(*) FROM screen_time_affected_event),
                (SELECT count(*) FROM screen_time_affected_tombstone)
     """).fetchone()
+    # Both scalar count subqueries return a value even for an empty working set.
+    assert counts is not None
     LOGGER.info("Screen Time affected events=%d tombstones=%d", *counts)
 
 
-def _affected_tombstones(connection, scope):
+def _affected_tombstones(connection: DuckDBPyConnection, scope: list[str]) -> None:
     connection.execute(
         """
         INSERT OR IGNORE INTO screen_time_affected_tombstone
@@ -297,7 +316,7 @@ def _affected_tombstones(connection, scope):
     )
 
 
-def _capture_deletion_effects(connection, table):
+def _capture_deletion_effects(connection: DuckDBPyConnection, table: str) -> None:
     connection.execute(f"""
         CREATE OR REPLACE TEMP TABLE {table} AS
         SELECT m.tombstone_id, m.physical_id, t.deletion_reason, r.event_key

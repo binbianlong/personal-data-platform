@@ -69,5 +69,8 @@ def run_dbt_from_env(*, source_id: str | None = None, stream: str | None = None)
         warehouse.migrate()
     finally:
         warehouse.close()
-    run_dbt(target=target, **({"selector": source.dbt_selector} if source is not None else {}))
+    if source is None:
+        run_dbt(target=target)
+    else:
+        run_dbt(target=target, selector=source.dbt_selector)
     return 0

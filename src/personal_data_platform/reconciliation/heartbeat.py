@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any
 from urllib.request import Request, urlopen
 
 
-def publish_http_heartbeat(url: str, payload: dict[str, Any], *, timeout: float = 10.0) -> None:
+def publish_http_heartbeat(url: str, payload: dict[str, object], *, timeout: float = 10.0) -> None:
     body = json.dumps(payload, sort_keys=True).encode()
     request = Request(
         url,
@@ -21,4 +20,4 @@ def publish_http_heartbeat(url: str, payload: dict[str, Any], *, timeout: float 
             raise RuntimeError(f"heartbeat endpoint returned HTTP {response.status}")
 
 
-HeartbeatPublisher = Callable[[dict[str, Any]], None]
+HeartbeatPublisher = Callable[[dict[str, object]], None]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -182,7 +182,7 @@ def run_rebuild_from_env(
 
 
 @contextmanager
-def _temporary_environment(name: str, value: str):
+def _temporary_environment(name: str, value: str) -> Iterator[None]:
     previous = os.environ.get(name)
     os.environ[name] = value
     try:

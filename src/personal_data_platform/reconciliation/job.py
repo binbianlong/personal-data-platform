@@ -7,7 +7,6 @@ import os
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from personal_data_platform.loader.job import run_loader
 from personal_data_platform.raw.models import RawObject
@@ -103,7 +102,7 @@ def run_reconciliation(
     parser_version = getattr(source, "parser_version", None)
     loaded_keys = warehouse.succeeded_keys_for(raw_objects, parser_version=parser_version)
     missing_before_repair = raw_keys - loaded_keys
-    repair_summary: dict[str, Any] | None = None
+    repair_summary: dict[str, int] | None = None
     if missing_before_repair and repair_missing:
         summary = run_loader(repository, warehouse, source=source, prefix=prefix)
         repair_summary = {

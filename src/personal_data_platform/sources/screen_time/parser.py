@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Protocol, TypedDict
 
 from personal_data_platform.raw.models import RawObject
 
@@ -19,6 +19,37 @@ from .models import ParsedScreenTimeRecord, PayloadDecodeError, SegmentDecodeErr
 PARSER_VERSION = "app-in-focus-v2"
 CF_ABSOLUTE_TIME_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
 EVENT_KEY_DOMAIN = b"screen-time/event/v1\0"
+
+
+class DecodedAppInFocus(TypedDict):
+    transition_reason: str | None
+    kind: int | None
+    in_foreground: bool
+    cf_absolute_time: float
+    event_at: datetime
+    bundle_id: str
+    app_version: str | None
+    app_build: str | None
+    platform_flag: int | None
+    unknown_field_count: int
+
+
+class DecodedTombstone(TypedDict):
+    target_segment_name: str
+    target_offset: int | None
+    target_length: int | None
+    deletion_reason: int | None
+    target_event_timestamp: float
+
+
+class SegbRecord(Protocol):
+    """Fields shared by ccl-segb v1 and v2 records; metadata is version-specific."""
+
+    @property
+    def data(self) -> bytes: ...
+
+    @property
+    def data_start_offset(self) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +75,7 @@ def _read_varint(payload: bytes, offset: int) -> tuple[int, int]:
 def _decode_wire(payload: bytes) -> list[_WireValue]:
     values: list[_WireValue] = []
     offset = 0
+    value: int | bytes
     while offset < len(payload):
         tag, offset = _read_varint(payload, offset)
         field_number, wire_type = tag >> 3, tag & 0x07
@@ -108,7 +140,7 @@ def _uint(value: int | bytes | None, field: int) -> int | None:
     return value
 
 
-def decode_app_in_focus_payload(payload: bytes) -> dict[str, Any]:
+def decode_app_in_focus_payload(payload: bytes) -> DecodedAppInFocus:
     """Decode the observed fields of an iPhone ``App.InFocus`` payload.
 
     Unknown fields are counted and retained in the original payload instead of
@@ -179,7 +211,7 @@ def event_key(
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _record_timestamp(record: Any) -> datetime | None:
+def _record_timestamp(record: SegbRecord) -> datetime | None:
     timestamp = getattr(record, "timestamp1", None)
     if timestamp is None:
         metadata = getattr(record, "metadata", None)
@@ -193,7 +225,7 @@ def _record_timestamp(record: Any) -> datetime | None:
     return None
 
 
-def decode_tombstone_payload(payload: bytes) -> dict[str, Any] | None:
+def decode_tombstone_payload(payload: bytes) -> DecodedTombstone | None:
     """Recognize BMTombstoneEvent, not an incompatible App.InFocus event.
 
     Tags verified with macOS BMTombstoneEvent.initWithProtoData/jsonDictionary:
@@ -207,7 +239,10 @@ def decode_tombstone_payload(payload: bytes) -> dict[str, Any] | None:
     name = _utf8(_one(values, 1, 2), 1)
     if not name or not name.isascii() or not name.isdecimal():
         raise PayloadDecodeError("invalid tombstone segment name")
-    timestamp = struct.unpack("<d", _one(values, 6, 1))[0]
+    time_raw = _one(values, 6, 1)
+    # The signature and _one wire-type validation above guarantee fixed64 bytes.
+    assert isinstance(time_raw, bytes)
+    timestamp = struct.unpack("<d", time_raw)[0]
     if not math.isfinite(timestamp):
         raise PayloadDecodeError("invalid tombstone event timestamp")
     _utf8(_one(values, 5, 2), 5)
@@ -222,7 +257,11 @@ def decode_tombstone_payload(payload: bytes) -> dict[str, Any] | None:
 
 
 def parse_segb_records(
-    raw: RawObject, segment: bytes, records: Iterable[Any], *, segment_kind: str | None = None
+    raw: RawObject,
+    segment: bytes,
+    records: Iterable[SegbRecord],
+    *,
+    segment_kind: str | None = None,
 ) -> list[ParsedScreenTimeRecord]:
     """Keep deletion/CRC metadata without requiring a surviving event payload."""
     parsed: list[ParsedScreenTimeRecord] = []
@@ -230,7 +269,7 @@ def parse_segb_records(
         payload = bytes(record.data)
         state = getattr(record, "state", "UNKNOWN")
         state_name = getattr(state, "name", str(state)).upper()
-        record_offset = int(getattr(record, "data_start_offset"))
+        record_offset = int(record.data_start_offset)
         metadata = getattr(record, "metadata", None)
         metadata_offset = int(getattr(metadata, "metadata_offset", record_offset))
         timestamp = _record_timestamp(record)
@@ -242,8 +281,8 @@ def parse_segb_records(
                 raise SegmentDecodeError("SEGB metadata offset is outside the source bytes")
             timestamp_cocoa = struct.unpack_from("<d", segment, metadata_offset + 8)[0]
         crc = getattr(record, "crc_passed", None)
-        decoded: dict[str, Any] = {}
-        tombstone: dict[str, Any] = {}
+        decoded: DecodedAppInFocus | None = None
+        tombstone: DecodedTombstone | None = None
         identity = None
         if state_name == "DELETED":
             kind = "deleted"
@@ -257,7 +296,7 @@ def parse_segb_records(
         elif crc is False:
             kind = "crc_failure"
         else:
-            tombstone = decode_tombstone_payload(payload) or {}
+            tombstone = decode_tombstone_payload(payload)
             if tombstone:
                 if segment_kind == "events":
                     raise PayloadDecodeError("tombstone payload in an events segment")
@@ -290,22 +329,26 @@ def parse_segb_records(
                 record_state=state_name,
                 segment_record_timestamp=timestamp,
                 crc_passed=crc,
-                transition_reason=decoded.get("transition_reason"),
-                kind=decoded.get("kind"),
-                in_foreground=decoded.get("in_foreground"),
-                cf_absolute_time=decoded.get("cf_absolute_time"),
-                event_at=decoded.get("event_at"),
-                bundle_id=decoded.get("bundle_id"),
-                app_version=decoded.get("app_version"),
-                app_build=decoded.get("app_build"),
-                platform_flag=decoded.get("platform_flag"),
-                unknown_field_count=decoded.get("unknown_field_count", 0),
+                transition_reason=decoded["transition_reason"] if decoded is not None else None,
+                kind=decoded["kind"] if decoded is not None else None,
+                in_foreground=decoded["in_foreground"] if decoded is not None else None,
+                cf_absolute_time=decoded["cf_absolute_time"] if decoded is not None else None,
+                event_at=decoded["event_at"] if decoded is not None else None,
+                bundle_id=decoded["bundle_id"] if decoded is not None else None,
+                app_version=decoded["app_version"] if decoded is not None else None,
+                app_build=decoded["app_build"] if decoded is not None else None,
+                platform_flag=decoded["platform_flag"] if decoded is not None else None,
+                unknown_field_count=decoded["unknown_field_count"] if decoded is not None else 0,
                 original_payload=payload,
                 parser_version=PARSER_VERSION,
                 record_kind=kind,
                 payload_length=len(payload),
                 record_timestamp_cocoa=timestamp_cocoa,
-                **tombstone,
+                target_segment_name=tombstone["target_segment_name"] if tombstone else None,
+                target_offset=tombstone["target_offset"] if tombstone else None,
+                target_length=tombstone["target_length"] if tombstone else None,
+                target_event_timestamp=tombstone["target_event_timestamp"] if tombstone else None,
+                deletion_reason=tombstone["deletion_reason"] if tombstone else None,
             )
         )
     return parsed
@@ -353,7 +396,7 @@ def parse_segb_bytes(
         with tempfile.NamedTemporaryFile(suffix=".segb") as temporary:
             temporary.write(segment)
             temporary.flush()
-            records = list(read_segb_file(temporary.name))
+            records: list[SegbRecord] = list(read_segb_file(temporary.name))
         return parse_segb_records(raw, segment, records, segment_kind=segment_kind)
     except PayloadDecodeError:
         raise
