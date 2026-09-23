@@ -147,23 +147,25 @@ target databaseがproductionと同一、既存tableを持つ、環境識別が�
 `--allow-partial-history`がない場合は開始前に停止する。MotherDuckの90日より古い履歴を失った場合、GCSからは
 復元できない。
 
-## 更新時の互換性
+## DBの初期化と更新
 
-`003_source_ingestion.sql`は既存のiPhone履歴を残す追加migrationである。旧列を読めることと、旧runtimeが
-新sourceを監査できることは別の条件である。旧Reconciliationは全sourceの取込状態をiPhoneのRawと照合するため、
-新sourceを先に有効化してはならない。
+初回は空のMotherDuck databaseを指定する。`pdp loader`、`pdp reconciliation`、`pdp dbt`は処理開始時に
+package内のSQLを順番に適用する。`001_initial.sql`で運用table、Screen Timeのイベント・補助状態・
+分析入口Viewを作成し、`ops.schema_migration`へchecksumと適用日時を記録する。
+再実行では適用済みSQLをskipし、checksumが変わっていれば停止する。
 
-1. iPhoneのRawキー、疑似化キー、Collectorのstate DB、LaunchAgent labelとCLIを維持したまま、対応runtimeを用意する。
-2. 更新時は既存Loader・Reconciliationの定期実行を一時停止し、実行中Jobが終了したことを確認する。
-   CollectorのRaw保存は継続できる。migrationは競合するJobがない状態で一度適用する。
-3. 新runtimeを既存の全Jobへ反映し、隔離preflightとdbtを実行する。iPhoneの手動Loader・監査が成功したら
-   定期実行を再開する。旧Jobの再試行が残っていないことも確認する。
-4. 新sourceの取得処理、必要なsecret version、control権限と外部monitorを用意する。
-   新sourceを登録したruntimeが動作している状態で、追加pipelineと取得処理を有効にする。
-5. 新scopeの初回Raw、型付きbase、監査と停止検出を確認する。新sourceを有効にした後は、全件監査を行う
-   旧runtimeへのrollbackは行わず、新scopeの取得・定期実行を止めて対応runtimeで修復する。
+1. Schedulerを停止した状態で接続先とsecretを設定し、隔離preflightを成功させる。
+2. `pdp dbt --source screen_time --stream app-in-focus`で初期スキーマと分析Viewを作成・検証する。
+3. CollectorによるRaw保存を確認してLoaderを手動実行し、Reconciliationで取込と分析relationを確認する。
+4. 初回の取込・監査が成功した後に定期実行を有効にする。
 
-旧scope列と旧writer向けdefaultの削除は、別migrationとして扱う。
+既存DBの自動変換や削除は行わない。異なる初期SQLを適用した開発用DBは引き継がず、別の空DBを用意する。
+適用履歴を手で変更してchecksum検証を回避しない。
+
+今後のスキーマ変更は`002`以降のforward migrationで追加し、適用済みSQLは書き換えない。
+更新時はLoader・Reconciliationの定期実行を止め、実行中のLoader・Reconciliation・dbt Jobが終了してから
+対応runtimeを全Jobへ反映する。migration、dbt、手動Loader・監査の成功を確認して定期実行を再開する。
+新sourceは対応runtime、取得権限・secret・monitorを揃えてから有効にする。
 
 ## CLI
 

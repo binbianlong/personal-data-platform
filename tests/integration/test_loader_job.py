@@ -217,9 +217,6 @@ class _JsonSource:
         field = "value" if raw.schema_version == 1 else "measurement"
         return _JsonBatch(int(decoded[field]))
 
-    def legacy_scope(self, raw: RawObject) -> None:
-        return None
-
 
 def _json_raw(source, payload: bytes, version: int, now: datetime) -> RawObject:
     digest = hashlib.sha256(payload).hexdigest()

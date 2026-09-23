@@ -89,7 +89,7 @@ source間の処理分離はアプリケーションの契約である。同じRa
    検証する。実providerの認証、取得、更新、停止検出はfixture検証とは別に受け入れる。
 6. [`Terraform runtime`](../../infra/terraform/)へ追加pipelineを設定し、取得identity、Raw create権限、保持期限、
    cron、専用heartbeatを用意する。source独自のcontrol更新権限やprovider認証は取得方式に合わせて追加する。
-7. [`更新時の互換性`](operations.md#更新時の互換性)に従い、既存runtimeをすべて更新して旧実行の終了を確認した後に、
+7. [`DBの初期化と更新`](operations.md#dbの初期化と更新)に従い、既存runtimeをすべて更新して旧実行の終了を確認した後に、
    新sourceの取得と定期実行を有効にする。
 
 ## 対象外

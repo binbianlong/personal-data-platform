@@ -14,13 +14,11 @@ from personal_data_platform.loader.job import run_loader
 from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
-    DEFAULT_MIGRATIONS,
     Warehouse,
     WarehouseConfig,
     WarehouseConnectionError,
     connect,
 )
-from tests.legacy_screen_time import LegacyScreenTimeBatch
 from tests.screen_time_helpers import Repository, event, segb, tombstone
 
 
@@ -88,8 +86,6 @@ def test_reobservations_store_one_event_and_only_state_changes(tmp_path):
         assert warehouse.load_object(raw, byte_size=1, batch=batch) == 1
         assert warehouse.load_object(raw, byte_size=1, batch=batch) == 0
     assert warehouse.query_rows("SELECT * FROM base.screen_time_event") == original
-    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_record_occurrence") == 0
-    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_segment_observation") == 0
     assert state_counts(warehouse) == initial_counts
     assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 20
     assert not warehouse.query_rows(
@@ -127,25 +123,20 @@ def test_out_of_order_and_reparse_keep_later_snapshot(tmp_path, order):
     warehouse.close()
 
 
-def test_cutover_keeps_old_rows_without_resurrecting_user_deleted_events(tmp_path, monkeypatch):
+def test_dbt_excludes_user_deleted_events_across_repeated_initialization(tmp_path, monkeypatch):
     database = tmp_path / "events.duckdb"
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
-    migrations = tmp_path / "legacy_migrations"
-    migrations.mkdir()
-    for path in DEFAULT_MIGRATIONS.glob("00[1-5]*.sql"):
-        shutil.copyfile(path, migrations / path.name)
-    warehouse.migrate(migrations)
+    warehouse.migrate()
     repository = Repository()
-    payload = event("app.legacy")
+    payload = event("app.deleted")
     segment, offset = segb(payload)
     raw = repository.add("100", segment)
     batch = decode(repository, raw)
     warehouse.load_object(
         raw,
         byte_size=1,
-        batch=LegacyScreenTimeBatch(batch.records, batch.source_segment_name, batch.segment_kind),
+        batch=batch,
     )
-    legacy_rows = warehouse.query_rows("SELECT * FROM base.screen_time_record_occurrence")
     warehouse.migrate()
     warehouse.migrate()
     assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
@@ -158,7 +149,6 @@ def test_cutover_keeps_old_rows_without_resurrecting_user_deleted_events(tmp_pat
     )
     warehouse.load_object(deletion, byte_size=1, batch=decode(repository, deletion))
     assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(False,)]
-    assert warehouse.query_rows("SELECT * FROM base.screen_time_record_occurrence") == legacy_rows
     warehouse.close()
     project = tmp_path / "dbt"
     shutil.copytree(
@@ -178,10 +168,6 @@ def test_cutover_keeps_old_rows_without_resurrecting_user_deleted_events(tmp_pat
         == 0
     )
     assert warehouse.query_value("SELECT count(*) FROM base.screen_time_transition") == 0
-    assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time") == 0
-    # Archived tables are not dependencies of any normal analytical query.
-    warehouse.connection.execute("DROP TABLE base.screen_time_record_occurrence")
-    warehouse.connection.execute("DROP TABLE base.screen_time_segment_observation")
     assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time") == 0
     warehouse.close()
 
@@ -454,59 +440,6 @@ def test_rollback_restores_existing_events_matches_and_success(tmp_path):
     load(warehouse, repository, deletion)
     assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(False,)]
     assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 1
-    warehouse.close()
-
-
-def test_migration_compacts_repeated_history_and_late_deletion(tmp_path):
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "events.duckdb"))))
-    migrations = tmp_path / "legacy_migrations"
-    migrations.mkdir()
-    for path in DEFAULT_MIGRATIONS.glob("00[1-5]*.sql"):
-        shutil.copyfile(path, migrations / path.name)
-    warehouse.migrate(migrations)
-    repository = Repository()
-    payload = event("app.legacy")
-    segment, offset = segb(payload)
-    for i in range(10):
-        raw = repository.add("100", segment, version=1 if i == 0 else 2)
-        b = decode(repository, raw)
-        warehouse.load_object(
-            raw,
-            byte_size=1,
-            batch=LegacyScreenTimeBatch(b.records, b.source_segment_name, b.segment_kind),
-        )
-    legacy_rows = warehouse.query_rows(
-        "SELECT * FROM base.screen_time_record_occurrence ORDER BY ALL"
-    )
-    warehouse.migrate()
-    counts = state_counts(warehouse)
-    assert counts == {"segment": 1, "record": 1, "tombstone": 0, "deletion_match": 0}
-    warehouse.migrate()
-    assert state_counts(warehouse) == counts
-    assert (
-        warehouse.query_rows("SELECT * FROM base.screen_time_record_occurrence ORDER BY ALL")
-        == legacy_rows
-    )
-    load(warehouse, repository, repository.add("100", segment))
-    assert state_counts(warehouse) == counts
-    # Matching uses exactly the same identity after initialization and live decode.
-    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_record") == 1
-    deletion = repository.add(
-        "100", segb(tombstone("100", offset, len(payload)))[0], kind="tombstones"
-    )
-    load(warehouse, repository, deletion)
-    assert warehouse.query_value("SELECT is_active FROM base.screen_time_event") is False
-    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 1
-    assert (
-        warehouse.query_rows("SELECT * FROM base.screen_time_record_occurrence ORDER BY ALL")
-        == legacy_rows
-    )
-    assert (
-        warehouse.query_value(
-            "SELECT count(*) FROM information_schema.tables WHERE table_schema='ops' AND table_name='screen_time_checkpoint'"
-        )
-        == 0
-    )
     warehouse.close()
 
 

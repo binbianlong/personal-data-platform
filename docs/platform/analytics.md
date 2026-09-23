@@ -25,14 +25,14 @@ Warehouseだけが行う。decodeまたは書込に失敗したobjectの分析�
 iPhone Screen Timeではccl-segbとApp.InFocus protobufをdecodeした後、`ScreenTimeBatch.write()`が
 MotherDuck内で対象segmentの補助状態、関連する削除照合と代表イベントを更新する。
 `base.screen_time_event`は`event_key`ごとに1行で、分析項目・有効状態が変わる場合だけ更新する。
-補助状態には原文payloadを含めない。既存のoccurrenceは証跡として保持する。
-移行検査後、dbtは`base.screen_time_event`の有効行だけを読み、旧occurrenceの判定を再実行しない。
+補助状態には原文payloadを含めない。元bytesはGCS Rawに保存する。
+dbtは`base.screen_time_event`の有効行だけを読む。
 `SourceAdapter`と`DecodedBatch`の契約、共有Loader leaseはsource間で共通である。
 
 補助状態・イベント・Rawの取込成功はWarehouseの1 transactionで確定する。commit前の失敗はrollbackし、
 commit後の再実行は既存の成功判定でskipする。commitの応答が失われた場合やrollbackが失敗した場合は、
 その接続での後続処理と失敗記録の書込を止める。再接続後、永続化済みの成功記録から再処理の要否を判断する。
-保存場所と復旧は[`Screen Time運用`](../sources/screen-time/operations.md#イベント単位の保存への切り替え)に従う。
+保存場所と復旧は[`Screen Time運用`](../sources/screen-time/operations.md#イベントと補助状態の保存)に従う。
 
 Loaderはsource横断JOIN、interval生成、日次集計を行わない。これらはdbt Viewで行う。
 
@@ -48,7 +48,6 @@ Raw objectごとの最新取込状態を保持する。
 | `source_id` / `source_stream` | 取込・監査・再構築の実行scope |
 | `schema_version` | Rawの形式version。parser versionとは区別する |
 | `subject_key` / `logical_key` | sourceが定義する対象と観測単位 |
-| `device_key` / `segment_key` | 既存Screen Time writerとの移行互換用。新sourceではnull |
 | `observed_at` | UTC観測時刻 |
 | `storage_created_at` | GCS upload完了時刻。Lifecycle期限判定の正本 |
 | `storage_generation` | listingとdownloadを結び付けるGCS object generation |
@@ -65,11 +64,8 @@ Raw objectごとの最新取込状態を保持する。
 監査証跡として残すが、日次のlive Raw照合対象から外す。状態と件数の読取には`source_id`と`source_stream`を
 必ず指定し、他scopeの`failed`や古い成功行を混ぜない。
 
-`003_source_ingestion.sql`は既存tableへ列を追加し、過去行を`screen_time`、schema v1として扱う。
-旧writerが移行後に追加した行は共通scope列がnullになり得るため、読取は`COALESCE(subject_key, device_key)`と
-`COALESCE(logical_key, segment_key)`で互換性を保つ。Screen Time adapterの`legacy_scope`は新writerからも旧scope列を
-埋める。旧列と旧writer向けdefaultは残し、新sourceを有効にする前のruntime更新順序は
-[`operations.md`](operations.md#更新時の互換性)に従う。
+`source_id`、`schema_version`、`subject_key`、`logical_key`は必須で、source固有のdefault値を持たない。
+LoaderはRaw identityの値をそのまま保存し、成功判定と再試行でも同じ列を参照する。
 
 ### Screen Timeの補助状態
 
@@ -88,6 +84,8 @@ Raw objectごとの最新取込状態を保持する。
 
 forward-only migrationの`migration_id`、ファイルSHA-256、`applied_at`を保持する。一度適用した
 migrationのchecksumが変わっていた場合は停止し、既存migrationを書き換えない。
+`001_initial.sql`で現行の初期スキーマを作成する。以降の変更は`002`から始まる追加SQLで適用する。
+各SQLと適用履歴は同じtransactionで確定し、失敗時はそのSQLの変更と履歴をrollbackする。
 SQLの正本はPython package内の`src/personal_data_platform/migrations/`に置き、wheelにも同梱する。
 
 ### `ops.job_lock`
@@ -96,9 +94,8 @@ LoaderとReconciliationの多重実行を防ぐ期限付きleaseである。`job
 `expires_at`を保持する。未期限切れleaseを持つ別ownerがいる場合は処理を開始しない。正常終了・失敗時は
 自分のleaseだけを解放し、異常終了時は期限切れ後に次の実行が引き継ぐ。
 
-lease名はsourceごとに分けず、既存の`loader`と`reconciliation`を継続する。異なるsourceの同じroleも同時には
-走らない。旧runtimeとの互換期間に別名leaseで同じdatabaseへの並行writerを増やさないためで、source数を増やす
-場合はJobの所要時間とscheduleの重なりを確認する。
+lease名はsourceごとに分けず、`loader`と`reconciliation`を共有する。異なるsourceの同じroleも同時には
+走らない。source数を増やす場合はJobの所要時間とscheduleの重なりを確認する。
 
 ### 実行記録
 

@@ -80,24 +80,19 @@ def run_loader(
         pending = [raw for raw in refs if raw.key not in already_loaded]
         for raw in pending:
             byte_size = 0
-            legacy_scope = source.legacy_scope(raw)
             try:
                 stored = repository.get_raw(raw.key, generation=raw.storage_generation)
                 payload = _decompress_and_verify(raw, stored)
                 byte_size = len(payload)
                 batch = source.decode(raw, payload)
-                record_count += warehouse.load_object(
-                    raw, byte_size=byte_size, batch=batch, legacy_scope=legacy_scope
-                )
+                record_count += warehouse.load_object(raw, byte_size=byte_size, batch=batch)
                 succeeded += 1
             except WarehouseConnectionError:
                 raise
             except Exception as error:
                 failed += 1
                 LOGGER.exception("failed to load raw object %s", raw.key)
-                warehouse.mark_failed(
-                    raw, byte_size=byte_size, error=error, legacy_scope=legacy_scope
-                )
+                warehouse.mark_failed(raw, byte_size=byte_size, error=error)
         summary = LoadSummary(
             discovered=len(refs),
             skipped=len(refs) - len(pending),

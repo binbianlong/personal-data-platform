@@ -16,17 +16,6 @@ from personal_data_platform.sources.contracts import DecodedBatch
 
 DEFAULT_MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
-# 006 must be repaired in place: a later migration cannot fix its failing INSERT.
-# Accept exactly the original -> repaired checksum pair on already migrated DBs.
-# Preserve the original ledger entry and do not rerun the bootstrap there.
-MIGRATION_CHECKSUM_REPAIRS = {
-    (
-        "006_screen_time_ingestion.sql",
-        "abe9144642b57f906eaac49bd3ecef597ef4e43d4388fdc5bc1478c934bce7a1",
-        "5fa1829adc0277eaac9e0f7348d9765cbfcae3050b4ea76cbd272a71a03f5042",
-    ),
-}
-
 
 @dataclass(frozen=True, slots=True)
 class WarehouseConfig:
@@ -115,10 +104,7 @@ class Warehouse:
                 "SELECT checksum FROM ops.schema_migration WHERE migration_id = ?", [path.name]
             ).fetchone()
             if existing:
-                if (
-                    existing[0] != checksum
-                    and (path.name, existing[0], checksum) not in MIGRATION_CHECKSUM_REPAIRS
-                ):
+                if existing[0] != checksum:
                     raise RuntimeError(f"applied migration changed: {path.name}")
                 continue
             self.connection.execute("BEGIN TRANSACTION")
@@ -163,8 +149,8 @@ class Warehouse:
             rows.extend(
                 self.connection.execute(
                     """
-                    SELECT object_key, source_id, schema_version, COALESCE(subject_key, device_key),
-                           source_stream, COALESCE(logical_key, segment_key), observed_at,
+                    SELECT object_key, source_id, schema_version, subject_key,
+                           source_stream, logical_key, observed_at,
                            content_sha256, storage_generation
                     FROM ops.ingestion_metadata
                     WHERE source_id = ? AND source_stream = ?
@@ -264,8 +250,8 @@ class Warehouse:
         current = self.connection.execute(
             """
             SELECT status, content_sha256, retention_expired_at, storage_generation,
-                   source_id, schema_version, COALESCE(subject_key, device_key), source_stream,
-                   COALESCE(logical_key, segment_key), observed_at, parser_version
+                   source_id, schema_version, subject_key, source_stream,
+                   logical_key, observed_at, parser_version
             FROM ops.ingestion_metadata
             WHERE object_key = ?
             """,
@@ -281,7 +267,6 @@ class Warehouse:
         *,
         byte_size: int,
         batch: DecodedBatch,
-        legacy_scope: tuple[str, str] | None = None,
     ) -> int:
         """Commit source records and their success state in one transaction."""
 
@@ -312,14 +297,12 @@ class Warehouse:
                     logical_key, observed_at, content_sha256, byte_size, status,
                     parser_version, record_count, started_at, completed_at, error_type,
                     error_message, retry_count, storage_created_at, storage_generation,
-                    retention_expired_at, device_key, segment_key
+                    retention_expired_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'loading', ?, NULL, ?, NULL,
-                          NULL, NULL, 0, ?, ?, NULL, ?, ?)
+                          NULL, NULL, 0, ?, ?, NULL)
                 ON CONFLICT (object_key) DO UPDATE SET
                     status = 'loading', parser_version = excluded.parser_version,
                     subject_key = excluded.subject_key, logical_key = excluded.logical_key,
-                    device_key = COALESCE(excluded.device_key, ops.ingestion_metadata.device_key),
-                    segment_key = COALESCE(excluded.segment_key, ops.ingestion_metadata.segment_key),
                     started_at = excluded.started_at, completed_at = NULL,
                     error_type = NULL, error_message = NULL,
                     storage_created_at = excluded.storage_created_at,
@@ -341,7 +324,6 @@ class Warehouse:
                     now,
                     raw.storage_created_at,
                     raw.storage_generation,
-                    *(legacy_scope or (None, None)),
                 ],
             )
             batch.write(self.connection, raw, byte_size=byte_size, loaded_at=now)
@@ -377,7 +359,6 @@ class Warehouse:
         *,
         byte_size: int,
         error: Exception,
-        legacy_scope: tuple[str, str] | None = None,
     ) -> None:
         if not self.connection_usable:
             raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
@@ -391,15 +372,12 @@ class Warehouse:
                     object_key, source_id, schema_version, subject_key, source_stream, logical_key,
                     observed_at, content_sha256, byte_size, status, parser_version, record_count,
                     started_at, completed_at, error_type, error_message, retry_count,
-                    storage_created_at, storage_generation, retention_expired_at,
-                    device_key, segment_key
+                    storage_created_at, storage_generation, retention_expired_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'failed', NULL, NULL, ?, ?, ?, ?,
-                          0, ?, ?, NULL, ?, ?)
+                          0, ?, ?, NULL)
                 ON CONFLICT (object_key) DO UPDATE SET
                     status = 'failed', completed_at = excluded.completed_at,
                     subject_key = excluded.subject_key, logical_key = excluded.logical_key,
-                    device_key = COALESCE(excluded.device_key, ops.ingestion_metadata.device_key),
-                    segment_key = COALESCE(excluded.segment_key, ops.ingestion_metadata.segment_key),
                     error_type = excluded.error_type, error_message = excluded.error_message,
                     storage_created_at = excluded.storage_created_at,
                     storage_generation = excluded.storage_generation,
@@ -422,7 +400,6 @@ class Warehouse:
                     str(error)[:4000],
                     raw.storage_created_at,
                     raw.storage_generation,
-                    *(legacy_scope or (None, None)),
                 ],
             )
             self.connection.execute("COMMIT")

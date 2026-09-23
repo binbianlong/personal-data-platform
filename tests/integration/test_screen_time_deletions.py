@@ -9,7 +9,7 @@ from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.loader.job import run_loader
 from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-from tests.screen_time_helpers import NOW, Repository, event, segb, tombstone
+from tests.screen_time_helpers import Repository, event, segb, tombstone
 
 
 def test_user_deletions_ttl_history_and_reused_positions(tmp_path, monkeypatch):
@@ -125,44 +125,6 @@ def test_parser_upgrade_reprocesses_available_raw_without_touching_other_history
         assert (
             warehouse.query_value("SELECT parser_version FROM ops.ingestion_metadata")
             == source.parser_version
-        )
-    finally:
-        warehouse.close()
-
-
-def test_migration_preserves_existing_occurrences_and_can_be_repeated(tmp_path):
-    from personal_data_platform.storage.motherduck import DEFAULT_MIGRATIONS
-    from tests.legacy_screen_time import _record_row
-
-    repository = Repository()
-    raw = repository.add("100", segb(event("app.legacy"))[0])
-    batch = ScreenTimeSource().decode(raw, gzip.decompress(repository.objects[raw.key][1]))
-    legacy = tmp_path / "migrations"
-    legacy.mkdir()
-    for filename in ("001_initial.sql", "002_raw_retention.sql", "003_source_ingestion.sql"):
-        shutil.copyfile(DEFAULT_MIGRATIONS / filename, legacy / filename)
-    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
-    try:
-        warehouse.migrate(legacy)
-        row = _record_row(batch.records[0], NOW)[:26]
-        warehouse.connection.execute(
-            "INSERT INTO base.screen_time_record_occurrence VALUES (" + ",".join("?" * 26) + ")",
-            row,
-        )
-        warehouse.connection.execute(
-            "CREATE VIEW base.legacy_view AS SELECT event_key FROM base.screen_time_record_occurrence"
-        )
-        warehouse.migrate()
-        warehouse.migrate()
-        assert warehouse.query_rows("SELECT * FROM base.screen_time_record_occurrence")[0][
-            :26
-        ] == tuple(row)
-        assert warehouse.query_value(
-            "SELECT payload_length FROM base.screen_time_record_occurrence"
-        ) == len(batch.records[0].original_payload)
-        assert (
-            warehouse.query_value("SELECT event_key FROM base.legacy_view")
-            == batch.records[0].event_key
         )
     finally:
         warehouse.close()

@@ -69,11 +69,9 @@ def write_state(connection, raw, batch, *, loaded_at):
         ON CONFLICT (device_key, source_stream, segment_key) DO UPDATE SET
             source_segment_name = least(ops.screen_time_segment.source_segment_name,
                                         excluded.source_segment_name),
-            source_segment_names = CASE
-                WHEN ops.screen_time_segment.source_segment_names IS NULL THEN NULL
-                ELSE list_sort(list_distinct(list_concat(
-                    ops.screen_time_segment.source_segment_names, excluded.source_segment_names
-                ))) END,
+            source_segment_names = list_sort(list_distinct(list_concat(
+                ops.screen_time_segment.source_segment_names, excluded.source_segment_names
+            ))),
             name_ambiguous = ops.screen_time_segment.name_ambiguous OR (
                 ops.screen_time_segment.source_segment_name IS NOT NULL
                 AND excluded.source_segment_name IS NOT NULL
@@ -291,8 +289,7 @@ def _affected_tombstones(connection, scope):
             t.segment_key = ? OR EXISTS (
                 SELECT 1 FROM ops.screen_time_segment s
                 WHERE s.device_key = ? AND s.source_stream = ? AND s.segment_key = ?
-                  AND (s.source_segment_names IS NULL
-                       OR list_contains(s.source_segment_names, t.target_segment_name))
+                  AND list_contains(s.source_segment_names, t.target_segment_name)
             )
         )
         """,

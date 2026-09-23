@@ -87,7 +87,7 @@ Reconciliationはこのmanifestを最新のactive-device集合の正本として
 
 ## `base.screen_time_event`
 
-移行済みの旧履歴と新規取り込みを含む、分析の唯一の入口となるtable。
+取り込んだイベントを保存する、分析の唯一の入口となるtable。
 `event_key`をprimary keyとし、同じイベントは1行だけ保持する。
 列は後述の`base.screen_time_transition`に`is_active`と`loaded_at`を加えたもの。
 `original_payload`や観測版ごとのrecord本文は保存しない。無効化も行を増やさず`is_active=false`へ更新する。
@@ -111,11 +111,8 @@ v1で不明だったsegment名は同じlogical segmentのv2から補完する。
 名前を追加したときは全候補名に関係するtombstoneを再照合する。`source_segment_name`は候補名の
 辞書順最小値であり、照合には単独で使わない。
 
-`008_screen_time_segment_names.sql`は既存の削除照合と、その変更で分析結果が変わるイベントを再計算する。
-旧形式ですでに`name_ambiguous=true`の場合、失われた候補名の全体を復元できないため
-`source_segment_names=NULL`で表す。この場合は同じdevice・streamの削除照合を`unmatched`とし、
-ユーザー削除・TTL保持を推測で適用しない。他device・streamには影響しない。
-新たな観測だけで不完全な候補集合を完全と扱うことはない。
+`source_segment_names`は非NULLの配列で、名前未観測は空配列とする。v2の観測で得た名前を追加し、
+複数の異なる名前を持つsegmentは`name_ambiguous=true`として照合対象から外す。
 
 通常取り込みの代表イベント再計算は、追加・更新・無効化・最新状態の交代に関係するrecordの
 変更前後のevent_keyと、削除照合の変更前後で効果が変わるevent_keyに限定する。
@@ -124,65 +121,14 @@ v1で不明だったsegment名は同じlogical segmentのv2から補完する。
 対象event_keyの別segmentのコピーは引き続き比較する。これは再計算対象の制限であり、
 DBの物理走査量が履歴量によらず一定になることを保証するものではない。
 
-## 既存データとの互換性
+## Recordの取り込み
 
-以下のsegment observationとrecord occurrenceは切り替え前の保存形式で、新方式では書き込まない。
-`006_screen_time_ingestion.sql`が旧履歴をSQLで集約し、最新segment・物理record・tombstoneと代表イベントを
-初期化する。旧行と元payloadは変更せず保持する。migration ledgerにより再実行で重複しない。
+parser versionとdecodeした全record数は`ops.ingestion_metadata`に保存する。record数は正常イベントだけでなく、
+削除済みrecord、CRC不一致、tombstoneを含む。parser versionは`app-in-focus-v2`とする。
 
-`007_screen_time_analysis_entry.sql`は旧観測・物理recordの移行漏れ、削除照合、代表イベントの分析項目と
-有効状態を検査する。削除照合と代表選択の検証には取り込みと同じSQL macroを使い、不整合があれば停止する。
-検査成功後、分析Viewを`base.screen_time_event`だけの参照に切り替え、旧判定Viewを削除する。
-旧tableは証跡として保存するが、dbt・通常クエリ・必須relation監視からは参照しない。
-
-## `base.screen_time_segment_observation`
-
-GCS objectごとに1行を保持する。
-
-```text
-object_key                 primary key
-device_key
-source_stream              "app-in-focus"
-segment_key
-observed_at                UTC
-content_sha256
-byte_size                  gzip展開後
-record_count
-parser_version
-loaded_at                  UTC
-source_segment_name       v2で既知。v1はnull
-segment_kind              events / tombstones。v1はnull
-```
-
-## `base.screen_time_record_occurrence`
-
-成功decodeしたsegment observation内の各SEGB recordを、観測版ごとのoccurrenceとして保持する。
-
-```text
-object_key + record_metadata_offset primary key
-event_key
-device_key
-source_stream
-segment_key / segment_sha256 / observed_at
-segment_filename / record_offset / record_metadata_offset
-record_state / segment_record_timestamp / crc_passed
-transition_reason / kind / in_foreground
-cf_absolute_time / event_at / bundle_id
-app_version / app_build / platform_flag
-unknown_field_count
-original_payload           protobuf bytes
-parser_version / loaded_at
-record_kind               event / deleted / crc_failure / tombstone
-payload_length / record_timestamp_cocoa
-target_segment_name / target_offset / target_length / target_event_timestamp / deletion_reason
-```
-
-`event_key`、前面状態、event時刻、Bundle IDは非イベント行ではnullを許容する。`record_count`はイベントだけ
-でなく保存した全occurrence数。parser versionは`app-in-focus-v2`とする。
-
-削除済みレコードは本文がゼロ埋めでもstate・offset・元bytesを保存する。CRC不一致は`crc_failure`として
-元bytesを保存し、イベントを生成しない。CRC正常の未知payload形式や壊れたSEGB構造はobject全体を失敗させ、
-部分的な成功として扱わない。元Rawが残る90日間は再解析できる。
+削除済みrecordやCRC不一致はイベントを生成せず、同じ物理位置の既存recordを無効化する。
+CRC正常の未知payload形式や壊れたSEGB構造はobject全体を失敗させ、部分的な成功として扱わない。
+元bytesはRawに保存し、Rawが残る90日間は再解析できる。
 
 ### Tombstone
 
@@ -201,12 +147,11 @@ macOSの`BMTombstoneEvent`による合成データのdecode結果と実機の構
 private frameworkは形式検証だけに使い、本番パーサーはPythonで実装する。未知の削除理由は保持するが自動適用しない。
 取り込み時に端末・stream・元segment名・metadata offset・payload長・元record時刻を照合し、
 `ops.screen_time_deletion_match`へ保存する。
-時刻の許容差は旧datetime列のmicrosecond丸め分の1 microsecondだけ。元ファイル名の対応が曖昧なsegmentは適用しない。
+時刻の照合は1 microsecondの許容差で行う。元ファイル名の対応が曖昧なsegmentは適用しない。
 
 `ops.screen_time_tombstone.resolution`で`user_deletion_applied`、`ttl_history_retained`、`unmatched`、
 `unsupported_reason`、再解析で無効になった`invalidated`を確認する。`unmatched`には未到着・保存期間外・
 v1の元ファイル名不明も含まれ、削除適用済みとは扱わない。照合はLoaderで再評価する。
-旧`base.screen_time_tombstone_match`・`base.screen_time_tombstone_status` Viewは廃止する。
 
 ## `event_key`
 
@@ -228,8 +173,8 @@ eventが別segmentに現れるため`event_key`へ含めない。
 ## `base.screen_time_transition`
 
 `base.screen_time_event`の`is_active=true`だけを公開するdbt Viewである。
-旧履歴へのfallbackや最新観測の選択、削除照合、重複排除は行わない。
-`base.screen_time_legacy_transition`は廃止し、interval生成・日別集計は引き続きこのViewを参照する。
+interval生成・日別集計はこのViewを参照する。初期SQLでも同じ定義のViewを作成し、
+dbt実行時にmodel定義で更新する。
 
 取り込み側が次のイベント選択規則を適用し、結果を`base.screen_time_event`に保存する。
 
@@ -239,7 +184,7 @@ eventが別segmentに現れるため`event_key`へ含めない。
 4. UserInitiated tombstoneに完全照合できた`event_key`は、別segmentの重複コピーも含めて候補から除外する。
 5. 同一物理イベントの過去観測を重複計上せず、最後に同じ`event_key`を1件にまとめる。
 
-これは集計からの除外であり、GCS Rawや既存baseの証跡を物理削除する処理ではない。取得前に消えたpayloadは復元できない。
+これは集計からの除外であり、GCS Rawや保存済みのイベント・補助状態を物理削除する処理ではない。取得前に消えたpayloadは復元できない。
 
 ```text
 event_key / device_key / platform / source_stream
