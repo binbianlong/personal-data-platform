@@ -23,7 +23,7 @@ locals {
         role        = role
         args        = [role, "--source", pipeline.source_id, "--stream", pipeline.stream]
         timeout     = role == "loader" ? "7200s" : "3600s"
-        max_retries = role == "loader" ? 2 : 1
+        max_retries = role == "loader" ? 0 : 1
         resources = {
           cpu    = "1"
           memory = "1Gi"

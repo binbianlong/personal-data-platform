@@ -54,6 +54,7 @@ printf '%s' "$SECRET_VALUE" | gcloud secrets versions add SECRET_ID --data-file=
 - `platform-preflight`は隔離したGCS bucketとMotherDuck test databaseを使い、deployごとにworkflowから実行する。
 - `screen-time-loader`は毎時15分、`reconciliation`は毎日04:30に、どちらも`Asia/Tokyo`で起動する。
 - LoaderのTask timeoutは120分、MotherDuck上の排他期限は125分とする。前回実行が続いている間の定期起動は成功扱いでスキップし、次の定期起動で未処理Rawを再確認する。
+- LoaderのTask自動リトライは無効（`max_retries = 0`）とし、失敗は失敗として記録する。未処理Rawは次の毎時起動で再処理する。異常終了で排他が残った場合は、排他期限が切れた後の定期起動で再開する。
 - `dbt-runner`はSchedulerから起動せず、初回構築、dbt定義・SQL migration変更時、または`run_dbt=true`を指定したdeploy時に実行する。初回はapply前のTerraform planでdbt Jobの新規作成を検出し、applyと隔離preflightが成功した後にmodelを作成する。Job再作成も同じ扱いとする。
 - 各Jobは専用Service Accountを持ち、必要なSecretだけを参照する。
 - deploy identityの`actAs`は、Terraformが作成するJob用Service AccountとScheduler用Service Accountだけへ付与する。

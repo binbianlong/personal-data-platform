@@ -50,6 +50,10 @@ source / streamごとにLoader Jobを持つ。既存のiPhoneは`screen-time-loa
 4. [`analytics.md`](analytics.md)のtransaction契約でbaseと取込状態を更新する。
 5. 1件でも未処理の失敗が残ればJobをnon-zeroで終了する。
 
+LoaderのCloud Run Task自動リトライは無効（`max_retries = 0`）とし、失敗した実行を成功扱いにせず、
+未処理Rawの再処理は次の毎時起動に任せる。異常終了でleaseが残った場合は、取得から125分の期限が
+切れた後の定期起動で再開する。期限内の定期起動は処理せず成功扱いでスキップする。
+
 poison objectは失敗として記録するが、自動削除や上書きを行わない。修正したdecoderをdeployした後に同じ
 objectを再試行できるようにする。
 
