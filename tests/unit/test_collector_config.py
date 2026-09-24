@@ -1,4 +1,6 @@
+import ctypes
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -48,3 +50,36 @@ def test_devices_command_configuration_can_load_before_allowlist_is_chosen(tmp_p
 
     assert config.device_allowlist == frozenset()
     assert config.gcs is None
+
+
+def test_collector_reads_existing_keychain_secret_in_python_process(tmp_path, monkeypatch) -> None:
+    key_hex = b"42" * 32
+    native_password = ctypes.create_string_buffer(key_hex)
+
+    def find_password(
+        _keychain,
+        _service_length,
+        _service,
+        _account_length,
+        _account,
+        password_length,
+        password_data,
+        _item,
+    ) -> int:
+        ctypes.cast(password_length, ctypes.POINTER(ctypes.c_uint32)).contents.value = len(key_hex)
+        ctypes.cast(password_data, ctypes.POINTER(ctypes.c_void_p)).contents.value = ctypes.cast(
+            native_password, ctypes.c_void_p
+        ).value
+        return 0
+
+    native_library = Mock()
+    native_library.SecKeychainFindGenericPassword.side_effect = find_password
+    native_library.SecKeychainItemFreeContent.return_value = 0
+    monkeypatch.setattr(ctypes, "CDLL", lambda _: native_library)
+    environment = _environment(tmp_path)
+    environment.pop("PDP_PSEUDONYM_KEY_HEX")
+
+    config = CollectorConfig.from_env(environment)
+
+    assert config.pseudonym_key == bytes.fromhex("42" * 32)
+    native_library.SecKeychainItemFreeContent.assert_called_once()

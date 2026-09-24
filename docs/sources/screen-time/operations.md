@@ -97,7 +97,7 @@ export PDP_COLLECTOR_POLL_SECONDS="300"
 
 `CLOUDSDK_CONFIG`はADC作成時だけ使う。plistにはGCS project、bucket、target Service Account、ADC pathを保存し、
 ADC本文や疑似化secretは保存しない。疑似化secretはmacOS Keychain service
-`personal-data-platform`から実行時に読む。`pdp screen-time doctor`と`collect --once`を成功させてからplistを生成する。
+`personal-data-platform`から実行中のPython processがSecurity.framework経由で読む。`pdp screen-time doctor`と`collect --once`を成功させてからplistを生成する。
 read-only rebuildにはこのCollector ADCを使わず、[`Platform運用`](../../platform/operations.md#rebuild)の
 別Service Accountと別ADC directoryを使う。
 
