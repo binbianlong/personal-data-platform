@@ -25,7 +25,7 @@ terraform apply -target=google_secret_manager_secret.runtime
 printf '%s' "$SECRET_VALUE" | gcloud secrets versions add SECRET_ID --data-file=-
 ```
 
-対象は`terraform output -json secret_ids`で確認する。既定のJobが使うのは本番MotherDuck tokenとpreflight MotherDuck tokenである。旧`healthchecks-ping-url` containerはversionを登録せず、iPhoneのJobでは参照しない。追加pipelineには専用heartbeat URLのcontainerも作る。Jobが参照するsecretにversionを登録してから通常のapplyまたは`Terraform Deploy` workflowを実行する。Email notification channelは適用後に届く確認メールで有効化する。
+対象は`terraform output -json secret_ids`で確認する。既定のJobが使うのは本番MotherDuck tokenとpreflight MotherDuck tokenである。旧`healthchecks-ping-url` containerはversionを登録せず、iPhoneのJobでは参照しない。追加pipelineには専用heartbeat URLのcontainerも作る。Jobが参照するsecretにversionを登録してから通常のapplyまたは`Terraform Deploy` workflowを実行する。Email notification channelは適用後に有効状態とalert policyへの紐付けを確認し、通知の到達は実際の発報で確認する。
 
 ## B2からのstate移行
 
