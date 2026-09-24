@@ -22,7 +22,7 @@ locals {
         name        = key == "screen_time_app_in_focus" ? (role == "loader" ? "screen-time-loader" : "reconciliation") : "pdp-${replace(key, "_", "-")}-${role == "loader" ? "load" : "audit"}"
         role        = role
         args        = [role, "--source", pipeline.source_id, "--stream", pipeline.stream]
-        timeout     = role == "loader" ? "7200s" : "3600s"
+        timeout     = role == "loader" ? "7200s" : "9000s"
         max_retries = role == "loader" ? 0 : 1
         resources = {
           cpu    = "1"
@@ -30,7 +30,7 @@ locals {
         }
         scheduler_name = key == "screen_time_app_in_focus" ? (role == "loader" ? "screen-time-loader-hourly" : "reconciliation-daily") : "pdp-${replace(key, "_", "-")}-${role}"
         schedule       = role == "loader" ? pipeline.loader_schedule : pipeline.reconciliation_schedule
-        environment = {
+        environment = merge({
           APP_ENV                  = "production"
           GCS_BUCKET               = local.raw_bucket_name
           GOOGLE_CLOUD_PROJECT     = var.project_id
@@ -39,9 +39,11 @@ locals {
           PDP_LIFECYCLE_GRACE_DAYS = tostring(pipeline.lifecycle_grace_days)
           PDP_RAW_PREFIXES_JSON    = jsonencode(pipeline.raw_prefixes)
           PDP_RAW_SUFFIXES_JSON    = jsonencode(pipeline.raw_suffixes)
-        }
-        secrets = merge({ MOTHERDUCK_TOKEN = "motherduck_token" }, role == "reconciliation" ? {
-          RECONCILIATION_HEARTBEAT_URL = key == "screen_time_app_in_focus" ? "healthchecks_ping_url" : "${key}_heartbeat"
+          }, role == "reconciliation" && key == "screen_time_app_in_focus" ? {
+          PDP_RECONCILIATION_MONITORING_MODE = "cloud_monitoring"
+        } : {})
+        secrets = merge({ MOTHERDUCK_TOKEN = "motherduck_token" }, role == "reconciliation" && key != "screen_time_app_in_focus" ? {
+          RECONCILIATION_HEARTBEAT_URL = "${key}_heartbeat"
         } : {})
       }
     }

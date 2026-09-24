@@ -34,11 +34,12 @@ def test_runtime_uses_only_approved_jobs_and_schedules() -> None:
     assert "webhook" not in (jobs + sources + scheduler).lower()
     assert "fetch" not in (jobs + sources + scheduler).lower()
     assert 'default     = "15 * * * *"' in _read("infra/terraform/variables.tf")
-    assert 'default     = "30 4 * * *"' in _read("infra/terraform/variables.tf")
+    assert 'default     = "30 4,16 * * *"' in _read("infra/terraform/variables.tf")
     assert 'default     = "Asia/Tokyo"' in _read("infra/terraform/variables.tf")
     assert "PREFLIGHT_MOTHERDUCK_DATABASE = var.preflight_motherduck_database" in jobs
-    assert 'RECONCILIATION_HEARTBEAT_URL = key == "screen_time_app_in_focus"' in sources
-    assert '? "healthchecks_ping_url" : "${key}_heartbeat"' in sources
+    assert 'PDP_RECONCILIATION_MONITORING_MODE = "cloud_monitoring"' in sources
+    assert 'RECONCILIATION_HEARTBEAT_URL = "${key}_heartbeat"' in sources
+    assert 'duration = "84600s"' in _read("infra/terraform/monitoring.tf")
 
 
 def test_preflight_uses_an_isolated_gcs_bucket_and_token() -> None:

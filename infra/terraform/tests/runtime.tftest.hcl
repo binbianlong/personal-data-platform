@@ -63,8 +63,8 @@ run "runtime_contract" {
   }
 
   assert {
-    condition     = local.scheduled_jobs.reconciliation.schedule == "30 4 * * *"
-    error_message = "Reconciliation must run daily at 04:30."
+    condition     = local.scheduled_jobs.reconciliation.schedule == "30 4,16 * * *"
+    error_message = "Reconciliation must run at 04:30 and 16:30."
   }
 
   assert {
@@ -328,6 +328,9 @@ run "additional_source_and_stream_contract" {
       google_secret_manager_secret.runtime["fixture_sleep_heartbeat"].secret_id == "pdp-fixture-sleep-heartbeat",
       local.runtime_jobs.fixture_steps_reconciliation.secrets.RECONCILIATION_HEARTBEAT_URL == "fixture_steps_heartbeat",
       local.runtime_jobs.fixture_sleep_reconciliation.secrets.RECONCILIATION_HEARTBEAT_URL == "fixture_sleep_heartbeat",
+      local.runtime_jobs.reconciliation.environment.PDP_RECONCILIATION_MONITORING_MODE == "cloud_monitoring",
+      !contains(keys(local.runtime_jobs.reconciliation.secrets), "RECONCILIATION_HEARTBEAT_URL"),
+      google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_absent[0].duration == "84600s",
       contains(keys(google_secret_manager_secret_iam_member.runtime), "fixture_steps_reconciliation:fixture_steps_heartbeat"),
       !contains(keys(google_secret_manager_secret_iam_member.runtime), "fixture_sleep_reconciliation:fixture_steps_heartbeat"),
       !contains(keys(google_secret_manager_secret_iam_member.runtime), "fixture_steps_loader:fixture_steps_heartbeat"),

@@ -1,6 +1,6 @@
 # GCP runtime
 
-GCS Raw/preflight bucket、Cloud Run Jobs、Secret Manager、Scheduler、Cloud Logging/Monitoringを管理する。既定のiPhone構成は4つのJobと3つのsecret resourceを持つ。追加source / streamは独立したLoader・Reconciliation・Scheduler・heartbeatを持つ。HTTP Service、Cloud Tasks、空のwebhook/fetch runtimeは作成しない。Cloud Run、GCS、Artifact Registryは`us-central1`に固定し、Schedulerの時刻解釈だけは`Asia/Tokyo`を使う。
+GCS Raw/preflight bucket、Cloud Run Jobs、Secret Manager、Scheduler、Cloud Logging/Monitoringを管理する。既定のiPhone構成は4つのJobを持つ。追加source / streamは独立したLoader・Reconciliation・Scheduler・heartbeatを持つ。HTTP Service、Cloud Tasks、空のwebhook/fetch runtimeは作成しない。Cloud Run、GCS、Artifact Registryは`us-central1`に固定し、Schedulerの時刻解釈だけは`Asia/Tokyo`を使う。
 
 ## 初回構築
 
@@ -25,7 +25,7 @@ terraform apply -target=google_secret_manager_secret.runtime
 printf '%s' "$SECRET_VALUE" | gcloud secrets versions add SECRET_ID --data-file=-
 ```
 
-対象は`terraform output -json secret_ids`で確認する。既定の対象は本番MotherDuck token、preflight MotherDuck token、iPhoneのHealthchecks URLの3つで、追加pipelineには専用heartbeat URLのcontainerも作る。すべてにversionを登録してから通常のapplyまたは`Terraform Deploy` workflowを実行する。Email notification channelは適用後に届く確認メールで有効化する。
+対象は`terraform output -json secret_ids`で確認する。既定のJobが使うのは本番MotherDuck tokenとpreflight MotherDuck tokenである。旧`healthchecks-ping-url` containerはversionを登録せず、iPhoneのJobでは参照しない。追加pipelineには専用heartbeat URLのcontainerも作る。Jobが参照するsecretにversionを登録してから通常のapplyまたは`Terraform Deploy` workflowを実行する。Email notification channelは適用後に届く確認メールで有効化する。
 
 ## B2からのstate移行
 
@@ -52,7 +52,8 @@ printf '%s' "$SECRET_VALUE" | gcloud secrets versions add SECRET_ID --data-file=
 
 - imageはtagではなく`@sha256:`付きdigestだけを受け付ける。
 - `platform-preflight`は隔離したGCS bucketとMotherDuck test databaseを使い、deployごとにworkflowから実行する。
-- `screen-time-loader`は毎時15分、`reconciliation`は毎日04:30に、どちらも`Asia/Tokyo`で起動する。
+- `screen-time-loader`は毎時15分、`reconciliation`は毎日04:30と16:30に、どちらも`Asia/Tokyo`で起動する。
+- `reconciliation`の完了metricが23.5時間届かない場合と、Jobが失敗した場合はCloud Monitoringから通知する。欠落監視を作成・更新した後は23.5時間以内にJobを1回成功または失敗まで完了させ、監視対象の時系列を初期化する。
 - LoaderのTask timeoutは120分、MotherDuck上の排他期限は125分とする。前回実行が続いている間の定期起動は成功扱いでスキップし、次の定期起動で未処理Rawを再確認する。
 - LoaderのTask自動リトライは無効（`max_retries = 0`）とし、失敗は失敗として記録する。未処理Rawは次の毎時起動で再処理する。異常終了で排他が残った場合は、排他期限が切れた後の定期起動で再開する。
 - `dbt-runner`はSchedulerから起動せず、初回構築、dbt定義・SQL migration変更時、または`run_dbt=true`を指定したdeploy時に実行する。初回はapply前のTerraform planでdbt Jobの新規作成を検出し、applyと隔離preflightが成功した後にmodelを作成する。Job再作成も同じ扱いとする。

@@ -651,7 +651,8 @@ def test_reconciliation_rejects_partial_inventory_before_auditing_warehouse():
 def test_reconciliation_rejects_deployment_retention_drift_before_cloud_access(
     monkeypatch, name, value
 ):
-    monkeypatch.setenv("RECONCILIATION_HEARTBEAT_URL", "https://heartbeat.invalid/ping")
+    monkeypatch.setenv("PDP_RECONCILIATION_MONITORING_MODE", "cloud_monitoring")
+    monkeypatch.delenv("RECONCILIATION_HEARTBEAT_URL", raising=False)
     monkeypatch.setenv(name, value)
     monkeypatch.setattr(
         "personal_data_platform.sources.screen_time.adapter.ScreenTimeSource.repository_from_env",
@@ -659,4 +660,12 @@ def test_reconciliation_rejects_deployment_retention_drift_before_cloud_access(
     )
 
     with pytest.raises(ValueError, match=name):
+        run_reconciliation_from_env()
+
+
+def test_reconciliation_rejects_heartbeat_url_with_cloud_monitoring(monkeypatch) -> None:
+    monkeypatch.setenv("PDP_RECONCILIATION_MONITORING_MODE", "cloud_monitoring")
+    monkeypatch.setenv("RECONCILIATION_HEARTBEAT_URL", "https://heartbeat.invalid/ping")
+
+    with pytest.raises(ValueError, match="not used with Cloud Monitoring"):
         run_reconciliation_from_env()
