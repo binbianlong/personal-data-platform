@@ -117,6 +117,8 @@ plutil -extract ProgramArguments.0 raw -o - "$collector_plist"
 
 最後のcommandが表示したPython executableへ、macOSの「システム設定 > プライバシーとセキュリティ >
 フルディスクアクセス」でFull Disk Accessを付与する。Terminalへの付与だけではLaunchAgentの権限にならない。
+`.venv/bin/python`はsymlinkで、設定画面では実体の`python3.14`として表示される場合がある。
+Pythonの更新や仮想環境の再作成後は、LaunchAgentからBiomeを読めることを再確認する。
 付与後に登録し、service状態とlogを確認する。
 
 ```bash
