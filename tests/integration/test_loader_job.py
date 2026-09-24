@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from personal_data_platform.loader.job import run_loader
+from personal_data_platform.loader.job import JobAlreadyRunning, run_loader, run_loader_from_env
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.screen_time.raw import (
     ScreenTimeRawIdentity,
@@ -30,6 +30,29 @@ class _Repository:
     def get_raw(self, key: str, *, generation: int) -> bytes:
         self.get_calls.append((key, generation))
         return self.objects[key]
+
+
+def test_scheduled_loader_skips_when_another_run_holds_the_lease(tmp_path, monkeypatch) -> None:
+    database = str(tmp_path / "busy.duckdb")
+    monkeypatch.setattr(
+        "personal_data_platform.loader.job.get_source",
+        lambda source_id, stream: SimpleNamespace(
+            source_id="screen_time",
+            stream="app-in-focus",
+            repository_from_env=lambda: _Repository([], {}),
+        ),
+    )
+    monkeypatch.setattr("personal_data_platform.loader.job.validate_runtime_policy", lambda _: None)
+    monkeypatch.setattr(
+        "personal_data_platform.loader.job.WarehouseConfig.from_env",
+        lambda: WarehouseConfig(database),
+    )
+    monkeypatch.setattr(
+        "personal_data_platform.loader.job.run_loader",
+        lambda *args, **kwargs: (_ for _ in ()).throw(JobAlreadyRunning("busy")),
+    )
+
+    assert run_loader_from_env(source_id="screen_time", stream="app-in-focus") == 0
 
 
 def _raw(
