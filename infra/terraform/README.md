@@ -43,7 +43,7 @@ printf '%s' "$SECRET_VALUE" | gcloud secrets versions add SECRET_ID --data-file=
 - Raw Lifecycleは`raw/screen_time/v1/`または`raw/screen_time/v2/`配下の`.segb.gz`だけを作成から90日でDeleteする。90日間はStandardのまま保持し、Coldline / Archiveへ遷移しない。Soft Deleteは0秒、Object VersioningとAutoclassは無効で、削除後は復元できない。Lifecycle実行は非同期で、90日ちょうどの削除を保証するprovider SLAはない。
 - device別receipt JSONと`_control/collector/active.json` manifestはsuffix条件に合わないため90日削除の対象外で、最新objectを上書きする。
 - `${project_id}-pdp-preflight`: 本番と別の`STANDARD` bucket。Soft Deleteは0秒で、`test/preflight/`の孤立objectを1日で削除する。
-- Raw bucket IAM policyとpreflight bucket IAM policyはauthoritative管理する。手動で追加したbucket bindingは次回applyで削除される。
+- Raw bucket IAM policyとpreflight bucket IAM policyはauthoritative管理する。運用者にはbucket単位のStorage Adminを明示的に付与し、手動で追加したその他のbucket bindingは次回applyで削除される。
 - Mac CollectorはRaw segmentのcreateとlatest receipt・active-device manifestのcreate/deleteだけを持ち、read/listは持たない。`collector_impersonator_member`は専用Collector Service Accountとread-only Rebuild Service AccountだけをToken Creatorとしてimpersonateできる。
 - Loader、Reconciliation、Rebuild Service AccountはRaw bucketのobject Viewerを持つ。preflight Jobはpreflight bucketだけのcreate/get/list/deleteを持ち、dbt JobはGCS権限を持たない。
 - ローカルrebuildは`rebuild_operator_service_account` outputをtargetにした別ADCを使い、Collector ADCを上書きしない。
@@ -53,6 +53,7 @@ printf '%s' "$SECRET_VALUE" | gcloud secrets versions add SECRET_ID --data-file=
 - imageはtagではなく`@sha256:`付きdigestだけを受け付ける。
 - `platform-preflight`は隔離したGCS bucketとMotherDuck test databaseを使い、deployごとにworkflowから実行する。
 - `screen-time-loader`は毎時15分、`reconciliation`は毎日04:30に、どちらも`Asia/Tokyo`で起動する。
+- LoaderのTask timeoutは120分、MotherDuck上の排他期限は125分とする。前回実行が続いている間の定期起動は成功扱いでスキップし、次の定期起動で未処理Rawを再確認する。
 - `dbt-runner`はSchedulerから起動せず、初回構築、dbt定義・SQL migration変更時、または`run_dbt=true`を指定したdeploy時に実行する。初回はapply前のTerraform planでdbt Jobの新規作成を検出し、applyと隔離preflightが成功した後にmodelを作成する。Job再作成も同じ扱いとする。
 - 各Jobは専用Service Accountを持ち、必要なSecretだけを参照する。
 - deploy identityの`actAs`は、Terraformが作成するJob用Service AccountとScheduler用Service Accountだけへ付与する。
