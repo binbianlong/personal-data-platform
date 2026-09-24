@@ -9,10 +9,14 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from personal_data_platform.raw.models import RawObject
+from personal_data_platform.reconciliation.models import ReconciliationResult
 from personal_data_platform.sources.contracts import DecodedBatch
+
+if TYPE_CHECKING:
+    from duckdb import DuckDBPyConnection
 
 DEFAULT_MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
@@ -43,7 +47,7 @@ class IngestionState:
     retention_expired_at: datetime | None
 
 
-def connect(config: WarehouseConfig) -> Any:
+def connect(config: WarehouseConfig) -> DuckDBPyConnection:
     """Connect to MotherDuck, or to a local DuckDB file for tests."""
 
     try:
@@ -60,7 +64,7 @@ def connect(config: WarehouseConfig) -> Any:
     return duckdb.connect(f"md:{config.database}", config={"motherduck_token": config.token})
 
 
-def _raw_identity(raw: RawObject) -> tuple[Any, ...]:
+def _raw_identity(raw: RawObject) -> tuple[str, int, str, str, str, datetime, str]:
     return (
         raw.source_id,
         raw.schema_version,
@@ -79,7 +83,7 @@ class WarehouseConnectionError(RuntimeError):
 class Warehouse:
     """Small repository that makes a raw object's load status atomic."""
 
-    def __init__(self, connection: Any):
+    def __init__(self, connection: DuckDBPyConnection) -> None:
         self.connection = connection
         self.connection_usable = True
 
@@ -212,6 +216,8 @@ class Warehouse:
             """,
             [source_id, stream],
         ).fetchone()
+        # Aggregate queries without GROUP BY always return one row.
+        assert row is not None
         return {
             "total_object_count": int(row[0]),
             "expired_object_count": int(row[1]),
@@ -447,7 +453,7 @@ class Warehouse:
             "DELETE FROM ops.job_lock WHERE job_name = ? AND owner_id = ?", [job_name, owner_id]
         )
 
-    def finish_job(self, run_id: str, *, succeeded: bool, details: dict[str, Any]) -> None:
+    def finish_job(self, run_id: str, *, succeeded: bool, details: dict[str, object]) -> None:
         self.connection.execute(
             """
             UPDATE ops.job_run SET status = ?, completed_at = ?, details = ?
@@ -468,8 +474,8 @@ class Warehouse:
     def query_rows(self, sql: str, parameters: list[Any] | None = None) -> list[tuple[Any, ...]]:
         return self.connection.execute(sql, parameters or []).fetchall()
 
-    def record_reconciliation(self, values: dict[str, Any]) -> None:
-        row = asdict(values) if hasattr(values, "__dataclass_fields__") else values
+    def record_reconciliation(self, values: ReconciliationResult | dict[str, object]) -> None:
+        row = asdict(values) if isinstance(values, ReconciliationResult) else values
         self.connection.execute(
             """
             INSERT INTO ops.reconciliation_run VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -495,7 +501,7 @@ class Warehouse:
             ],
         )
 
-    def publish_heartbeat(self, monitor_name: str, run_id: str, details: dict[str, Any]) -> None:
+    def publish_heartbeat(self, monitor_name: str, run_id: str, details: dict[str, object]) -> None:
         self.connection.execute(
             """
             INSERT INTO ops.heartbeat VALUES (?, ?, ?, ?)

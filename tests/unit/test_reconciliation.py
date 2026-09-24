@@ -12,6 +12,7 @@ from personal_data_platform.reconciliation.job import (
     run_reconciliation,
     run_reconciliation_from_env,
 )
+from personal_data_platform.reconciliation.models import ReconciliationResult
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.storage.motherduck import IngestionState
@@ -20,6 +21,30 @@ DEVICE_KEY = "a" * 64
 NOW = datetime(2026, 8, 27, tzinfo=UTC)
 
 REQUIRED_RELATIONS = get_source().required_relations
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["collector_receipt_count", "stale_collector_count", "missing_collector_receipt_count"],
+)
+def test_source_detail_counts_preserve_defaults_conversion_and_errors(key) -> None:
+    result = ReconciliationResult(
+        run_id="count-contract",
+        status="succeeded",
+        started_at=NOW,
+        completed_at=NOW,
+        raw_object_count=0,
+        loaded_object_count=0,
+        missing_object_count=0,
+        failed_object_count=0,
+        orphaned_loaded_object_count=0,
+    )
+    assert getattr(result, key) == 0
+    result.details[key] = "3"
+    assert getattr(result, key) == 3
+    result.details[key] = None
+    with pytest.raises(TypeError):
+        getattr(result, key)
 
 
 def _key(name: str) -> str:

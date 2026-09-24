@@ -8,19 +8,25 @@ import logging
 import os
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING
 
 from google.cloud import storage
 
 from personal_data_platform.config import GCSConfig
 from personal_data_platform.recovery.rebuild import validate_rebuild_target
+from personal_data_platform.storage.gcs_types import GCSClient
 from personal_data_platform.storage.motherduck import WarehouseConfig, connect
+
+if TYPE_CHECKING:
+    from duckdb import DuckDBPyConnection
 
 PREFLIGHT_PREFIX = "test/preflight/"
 LOGGER = logging.getLogger(__name__)
 
 
-def probe_gcs(client: Any, *, bucket: str, prefix: str = PREFLIGHT_PREFIX) -> dict[str, object]:
+def probe_gcs(
+    client: GCSClient, *, bucket: str, prefix: str = PREFLIGHT_PREFIX
+) -> dict[str, object]:
     """Write, read, list, and generation-delete one object in the test bucket."""
 
     payload = uuid.uuid4().bytes
@@ -68,7 +74,7 @@ def probe_gcs(client: Any, *, bucket: str, prefix: str = PREFLIGHT_PREFIX) -> di
                 LOGGER.exception("GCS preflight cleanup failed after the probe failed")
 
 
-def probe_warehouse(connection: Any) -> dict[str, object]:
+def probe_warehouse(connection: DuckDBPyConnection) -> dict[str, object]:
     """Exercise DDL and DML in a disposable schema within the test database."""
 
     table = f"probe_{uuid.uuid4().hex}"
@@ -76,8 +82,8 @@ def probe_warehouse(connection: Any) -> dict[str, object]:
     try:
         connection.execute(f"CREATE TABLE preflight.{table} (value INTEGER NOT NULL)")
         connection.execute(f"INSERT INTO preflight.{table} VALUES (42)")
-        value = connection.execute(f"SELECT value FROM preflight.{table}").fetchone()[0]
-        if value != 42:
+        row = connection.execute(f"SELECT value FROM preflight.{table}").fetchone()
+        if row is None or row[0] != 42:
             raise RuntimeError("MotherDuck preflight round trip returned the wrong value")
         return {"ok": True, "tested_at": datetime.now(UTC).isoformat()}
     finally:

@@ -25,11 +25,11 @@ class ScreenTimeSource:
 
     source_id = "screen_time"
     stream = APP_IN_FOCUS_STREAM
-    schema_versions = (1, 2)
+    schema_versions: tuple[int, ...] = (1, 2)
     parser_version = PARSER_VERSION
-    raw_prefixes = (f"{RAW_PREFIX}/", f"{RAW_V2_PREFIX}/")
-    raw_suffixes = (".segb.gz",)
-    required_relations = (
+    raw_prefixes: tuple[str, ...] = (f"{RAW_PREFIX}/", f"{RAW_V2_PREFIX}/")
+    raw_suffixes: tuple[str, ...] = (".segb.gz",)
+    required_relations: tuple[str, ...] = (
         "base.screen_time_event",
         "base.screen_time_transition",
         "base.screen_time_interval",

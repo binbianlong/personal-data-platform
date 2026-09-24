@@ -113,8 +113,14 @@ workflowの回帰テストには、Pythonに加えてBashとjqが必要になる
 ```bash
 ruff check src tests
 ruff format --check src tests
+mypy src
 pytest
 ```
+
+Python本体（`src`）はPython 3.13を対象にmypyのstrictモードで型チェックする。
+テストコードは型チェック対象に含めず、pytestで動作を検証する。
+GCS・SEGBの型情報がない依存は、利用する操作に絞ったProtocolで境界を定義する。
+汎用SQLの結果とソース固有の詳細値の変換では、実行時に型が決まるため限定的にAnyを使用する。
 
 ## コンテナ実行
 

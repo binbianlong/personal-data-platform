@@ -9,7 +9,6 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
 
 from personal_data_platform.config import (
     ConfigurationError,
@@ -17,6 +16,7 @@ from personal_data_platform.config import (
 )
 from personal_data_platform.sources.screen_time.collector import (
     BiomeScreenTimeSource,
+    CollectionStats,
     ScreenTimeCollector,
 )
 from personal_data_platform.sources.screen_time.config import CollectorADCConfig, CollectorConfig
@@ -286,7 +286,7 @@ def _write_launch_agent(
     return 0
 
 
-def _print_collection_stats(stats: Any) -> None:
+def _print_collection_stats(stats: CollectionStats) -> None:
     print(
         json.dumps(
             {
@@ -320,8 +320,8 @@ def _source(config: CollectorConfig) -> BiomeScreenTimeSource:
     )
 
 
-def _run_job(function: Callable[..., Any], **kwargs: Any) -> int:
-    result = function(**kwargs)
+def _run_job[**P](function: Callable[P, int | None], *args: P.args, **kwargs: P.kwargs) -> int:
+    result = function(*args, **kwargs)
     if result is None:
         return 0
     if isinstance(result, bool) or not isinstance(result, int):

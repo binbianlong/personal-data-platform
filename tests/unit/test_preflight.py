@@ -127,3 +127,24 @@ def test_warehouse_probe_cleans_up_its_table() -> None:
         ).fetchone()[0]
         == 0
     )
+
+
+def test_warehouse_probe_rejects_missing_row_and_cleans_up() -> None:
+    import duckdb
+
+    connection = duckdb.connect(":memory:")
+
+    class EmptyProbeResult:
+        def execute(self, sql):
+            if sql.startswith("SELECT value FROM preflight."):
+                sql += " WHERE false"
+            return connection.execute(sql)
+
+    try:
+        with pytest.raises(RuntimeError, match="round trip"):
+            probe_warehouse(EmptyProbeResult())
+        assert connection.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'preflight'"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()

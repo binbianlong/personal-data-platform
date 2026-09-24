@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from google.api_core.exceptions import NotFound
 from google.cloud import storage
 
 from personal_data_platform.config import GCSConfig
 from personal_data_platform.sources.contracts import RawCodec
 from personal_data_platform.storage.gcs import GCSRawRepository
+from personal_data_platform.storage.gcs_types import GCSClient
 
 from .raw import (
     SCAN_MANIFEST_KEY,
@@ -26,7 +25,7 @@ from .raw import (
 class ScreenTimeGCSRepository(GCSRawRepository):
     """Extend the shared transport with the Screen Time collector protocol."""
 
-    def __init__(self, *, client: Any, bucket: str, source: RawCodec | None = None) -> None:
+    def __init__(self, *, client: GCSClient, bucket: str, source: RawCodec | None = None) -> None:
         from personal_data_platform.sources.registry import get_source
 
         super().__init__(

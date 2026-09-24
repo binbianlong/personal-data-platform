@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import json
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 
 import pytest
 
+from personal_data_platform.reconciliation.models import ReconciliationResult
 from personal_data_platform.sources.screen_time.parser import PARSER_VERSION
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
@@ -13,6 +15,35 @@ from personal_data_platform.storage.motherduck import (
     connect,
 )
 from tests.screen_time_helpers import _raw, _record
+
+
+@pytest.mark.parametrize("as_mapping", [False, True])
+def test_reconciliation_accepts_result_and_dictionary(as_mapping) -> None:
+    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    now = datetime(2026, 9, 23, tzinfo=UTC)
+    result = ReconciliationResult(
+        run_id="typed-audit",
+        status="succeeded",
+        started_at=now,
+        completed_at=now,
+        raw_object_count=3,
+        loaded_object_count=3,
+        missing_object_count=0,
+        failed_object_count=0,
+        orphaned_loaded_object_count=0,
+        details={"collector_receipt_count": 2},
+    )
+    try:
+        warehouse.migrate()
+        warehouse.record_reconciliation(asdict(result) if as_mapping else result)
+        row = warehouse.query_rows(
+            "SELECT run_id, status, raw_object_count, loaded_object_count, details "
+            "FROM ops.reconciliation_run"
+        )[0]
+        assert row[:4] == ("typed-audit", "succeeded", 3, 3)
+        assert json.loads(row[4]) == {"collector_receipt_count": 2}
+    finally:
+        warehouse.close()
 
 
 def test_migration_and_object_load_are_idempotent(tmp_path) -> None:

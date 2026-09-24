@@ -7,9 +7,12 @@ import os
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from personal_data_platform.raw.models import RawObject
+
+if TYPE_CHECKING:
+    from duckdb import DuckDBPyConnection
 
 
 class RawRepository(Protocol):
@@ -42,14 +45,14 @@ class DecodedBatch(Protocol):
     def record_count(self) -> int: ...
 
     def write(
-        self, connection: Any, raw: RawObject, *, byte_size: int, loaded_at: datetime
+        self, connection: DuckDBPyConnection, raw: RawObject, *, byte_size: int, loaded_at: datetime
     ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
 class SourceHealth:
     ok: bool
-    details: dict[str, Any]
+    details: dict[str, object]
 
 
 class SourceAdapter(RawCodec, Protocol):
@@ -135,7 +138,7 @@ def validate_runtime_policy(source: SourceAdapter) -> None:
             raise ValueError(
                 f"{name} does not match {source.source_id}/{source.stream}: {expected}"
             )
-    for name, expected in (
+    for name, expected_values in (
         ("PDP_RAW_PREFIXES_JSON", source.raw_prefixes),
         ("PDP_RAW_SUFFIXES_JSON", source.raw_suffixes),
     ):
@@ -149,6 +152,6 @@ def validate_runtime_policy(source: SourceAdapter) -> None:
         if (
             not isinstance(configured, list)
             or not all(isinstance(item, str) for item in configured)
-            or sorted(configured) != sorted(expected)
+            or sorted(configured) != sorted(expected_values)
         ):
             raise ValueError(f"{name} does not match {source.source_id}/{source.stream}")

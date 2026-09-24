@@ -183,9 +183,9 @@ class ScreenTimeCollector:
             raise CollectorSourceError("Screen Time device allowlist is empty")
         retried = 0
         uploaded = 0
-        for observation in self._state.pending():
+        for pending_observation in self._state.pending():
             # The observation was allowlisted when this durable upload intent was created.
-            self._upload(observation)
+            self._upload(pending_observation)
             retried += 1
             uploaded += 1
 
