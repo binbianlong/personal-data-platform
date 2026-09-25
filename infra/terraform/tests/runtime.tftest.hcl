@@ -331,6 +331,7 @@ run "additional_source_and_stream_contract" {
       local.runtime_jobs.reconciliation.environment.PDP_RECONCILIATION_MONITORING_MODE == "cloud_monitoring",
       !contains(keys(local.runtime_jobs.reconciliation.secrets), "RECONCILIATION_HEARTBEAT_URL"),
       google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_absent[0].duration == "84600s",
+      google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_absent[0].aggregations[0].cross_series_reducer == "REDUCE_SUM",
       contains(keys(google_secret_manager_secret_iam_member.runtime), "fixture_steps_reconciliation:fixture_steps_heartbeat"),
       !contains(keys(google_secret_manager_secret_iam_member.runtime), "fixture_sleep_reconciliation:fixture_steps_heartbeat"),
       !contains(keys(google_secret_manager_secret_iam_member.runtime), "fixture_steps_loader:fixture_steps_heartbeat"),

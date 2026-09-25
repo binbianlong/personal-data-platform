@@ -149,8 +149,9 @@ resource "google_monitoring_alert_policy" "reconciliation_absent" {
       duration = "84600s"
 
       aggregations {
-        alignment_period   = "60s"
-        per_series_aligner = "ALIGN_DELTA"
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_DELTA"
+        cross_series_reducer = "REDUCE_SUM"
       }
 
       trigger {
