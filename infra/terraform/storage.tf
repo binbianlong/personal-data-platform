@@ -84,6 +84,11 @@ resource "google_storage_bucket" "preflight" {
 }
 
 data "google_iam_policy" "raw_bucket" {
+  binding {
+    role    = "roles/storage.admin"
+    members = [var.collector_impersonator_member]
+  }
+
   dynamic "binding" {
     for_each = { for key, pipeline in local.ingestion_pipelines : key => pipeline if length(pipeline.raw_creator_members) > 0 }
     content {
@@ -123,6 +128,11 @@ resource "google_storage_bucket_iam_policy" "raw" {
 }
 
 data "google_iam_policy" "preflight_bucket" {
+  binding {
+    role    = "roles/storage.admin"
+    members = [var.collector_impersonator_member]
+  }
+
   binding {
     role    = local.storage_roles.preflight_object_operator
     members = ["serviceAccount:${google_service_account.runtime["preflight"].email}"]

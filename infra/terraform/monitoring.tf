@@ -130,3 +130,47 @@ resource "google_monitoring_alert_policy" "job_error_log" {
 
   depends_on = [google_project_service.runtime]
 }
+
+resource "google_monitoring_alert_policy" "reconciliation_absent" {
+  project      = var.project_id
+  display_name = "reconciliation: scheduled execution absent"
+  combiner     = "OR"
+  enabled      = true
+
+  conditions {
+    display_name = "No reconciliation completion for 23.5 hours"
+
+    condition_absent {
+      filter = join(" AND ", [
+        "resource.type = \"cloud_run_job\"",
+        "resource.labels.job_name = \"reconciliation\"",
+        "metric.type = \"run.googleapis.com/job/completed_execution_count\"",
+      ])
+      duration = "84600s"
+
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_DELTA"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.email.name]
+
+  documentation {
+    mime_type = "text/markdown"
+    content   = "The `reconciliation` Cloud Run Job has no completion metric for 23.5 hours. Check Cloud Scheduler, Job executions, and the Collector manifest and receipts. A failed execution is also covered by the failure policy."
+  }
+
+  user_labels = {
+    application = "personal-data-platform"
+    role        = "reconciliation"
+  }
+
+  depends_on = [google_project_service.runtime]
+}

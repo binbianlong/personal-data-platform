@@ -96,9 +96,9 @@ resource "google_service_account" "runtime" {
 }
 
 resource "google_service_account_iam_member" "deployer_act_as_runtime" {
-  for_each = google_service_account.runtime
+  for_each = local.runtime_jobs
 
-  service_account_id = each.value.name
+  service_account_id = google_service_account.runtime[each.key].name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${var.deployer_service_account_email}"
 }

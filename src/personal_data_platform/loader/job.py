@@ -27,7 +27,7 @@ from personal_data_platform.storage.motherduck import (
 from .models import LoadSummary, RawDecodeError
 
 LOGGER = logging.getLogger(__name__)
-LOADER_LEASE_SECONDS = 65 * 60
+LOADER_LEASE_SECONDS = 125 * 60
 
 
 class JobAlreadyRunning(RuntimeError):
@@ -124,7 +124,15 @@ def run_loader_from_env(*, source_id: str | None = None, stream: str | None = No
     warehouse = Warehouse(connect(WarehouseConfig.from_env()))
     try:
         warehouse.migrate()
-        summary = run_loader(repository, warehouse, source=source)
+        try:
+            summary = run_loader(repository, warehouse, source=source)
+        except JobAlreadyRunning:
+            LOGGER.info(
+                "loader skipped source=%s stream=%s: another run is active",
+                source.source_id,
+                source.stream,
+            )
+            return 0
         LOGGER.info(
             "loader complete source=%s stream=%s discovered=%d skipped=%d "
             "succeeded=%d failed=%d records=%d",

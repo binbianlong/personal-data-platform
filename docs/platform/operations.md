@@ -50,6 +50,10 @@ source / streamごとにLoader Jobを持つ。既存のiPhoneは`screen-time-loa
 4. [`analytics.md`](analytics.md)のtransaction契約でbaseと取込状態を更新する。
 5. 1件でも未処理の失敗が残ればJobをnon-zeroで終了する。
 
+LoaderのCloud Run Task自動リトライは無効（`max_retries = 0`）とし、失敗した実行を成功扱いにせず、
+未処理Rawの再処理は次の毎時起動に任せる。異常終了でleaseが残った場合は、取得から125分の期限が
+切れた後の定期起動で再開する。期限内の定期起動は処理せず成功扱いでスキップする。
+
 poison objectは失敗として記録するが、自動削除や上書きを行わない。修正したdecoderをdeployした後に同じ
 objectを再試行できるようにする。
 
@@ -67,7 +71,7 @@ objectを再試行できるようにする。
 
 ## Reconciliation
 
-監査もsource / streamごとのJobとして実行する。既存iPhoneの`reconciliation`は毎日04:30 Asia/Tokyoに起動する。
+監査もsource / streamごとのJobとして実行する。既存iPhoneの`reconciliation`は毎日04:30と16:30 Asia/Tokyoに起動する。
 `reconciliation` leaseは同じroleの全sourceで共有し、Loaderとは別leaseである。
 
 1. 選択source / streamのGCS objectとactiveな取込状態だけを照合し、未取込objectを同じadapterで再処理する。
@@ -79,11 +83,11 @@ objectを再試行できるようにする。
    manifestから外れたdeviceの残存Rawや古いreceiptはactive Collectorの異常に数えない。他sourceへ同じcontrol形式を要求しない。
 6. 未取込・`failed` ingestionがないことを確認する。
 7. 必須base / Viewの存在と各relationの代表`count(*)` queryを確認する。
-8. 対象scopeの全監査項目と再処理が成功した後、監査記録を保存し、そのscope専用URLへ成功heartbeatを送る。
+8. 対象scopeの全監査項目と再処理が成功した後、監査記録とMotherDuck内の成功heartbeatを保存する。追加sourceがHTTP監視を使う場合だけ、そのscope専用URLへ成功heartbeatを送る。
 
-Jobの開始、retry開始、Loaderへの引き渡しだけでは成功heartbeatを送らない。監査結果を構築できた失敗では、
+Jobの開始、retry開始、Loaderへの引き渡しだけでは成功heartbeatを記録しない。監査結果を構築できた失敗では、
 失敗object、欠損relation、stale receiptなどの構造化した結果を記録し、Jobをnon-zeroで終了する。
-GCS listingやDB接続など結果構築前の失敗では監査行が残らない場合がある。この場合も成功heartbeatは送らず、
+GCS listingやDB接続など結果構築前の失敗では監査行が残らない場合がある。この場合も成功heartbeatは記録せず、
 Jobの失敗とlogで原因を確認する。
 DB更新と外部通知の順序、および配送後のcommit失敗に関する制約は[`analytics.md`](analytics.md)に従う。
 
@@ -98,9 +102,10 @@ Cloud Logging / MonitoringとEmailで次を通知する。
 
 93日判定はLifecycleの遅延を検知するこのprojectの運用SLOであり、GCSが90日ちょうどの削除時刻を保証するものではない。
 
-Collector停止はReconciliationのreceipt検査で検出する。Job自体が起動しない場合の検出には、Healthchecks.io側で
-毎日04:30 Asia/Tokyoのschedule、許容するgrace period、通知先を別途設定する。この未着監視はTerraformでは
-作成しないため、通知が届くことを運用開始前に確認する。
+Collector停止はReconciliationのreceipt検査で検出する。Job自体が起動しない場合は、Cloud Runの
+`completed_execution_count`が23.5時間届かないことをCloud Monitoringで検出する。通常の12時間間隔に対して
+1回の遅延を許容する。欠落監視は実行が1回完了するまで監視対象の時系列を持たないため、作成・更新直後に
+Reconciliationを手動実行し、完了metricと通知先の状態を確認する。Job失敗は別の失敗alertで検出する。
 
 新しいsource eventがないことだけを障害とみなさない。scan完了、GCS listing、取込状態、query成功を
 組み合わせて判定する。

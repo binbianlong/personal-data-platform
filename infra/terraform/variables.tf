@@ -67,9 +67,9 @@ variable "loader_schedule" {
 }
 
 variable "reconciliation_schedule" {
-  description = "Cron schedule for daily reconciliation."
+  description = "Cron schedule for twice-daily reconciliation, within the Cloud Monitoring absence window."
   type        = string
-  default     = "30 4 * * *"
+  default     = "30 4,16 * * *"
 }
 
 variable "scheduler_time_zone" {

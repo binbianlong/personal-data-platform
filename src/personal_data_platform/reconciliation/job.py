@@ -7,6 +7,7 @@ import os
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 from personal_data_platform.loader.job import run_loader
 from personal_data_platform.raw.models import RawObject
@@ -29,7 +30,11 @@ from .heartbeat import HeartbeatPublisher, publish_http_heartbeat
 from .models import ReconciliationResult
 
 LOGGER = logging.getLogger(__name__)
-RECONCILIATION_LEASE_SECONDS = 65 * 60
+RECONCILIATION_LEASE_SECONDS = 155 * 60
+
+
+def _no_external_heartbeat(_payload: dict[str, object]) -> None:
+    """Cloud Monitoring observes the Job completion instead of an HTTP ping."""
 
 
 def _relation_names(warehouse: Warehouse) -> set[str]:
@@ -278,9 +283,18 @@ def run_reconciliation(
 def run_reconciliation_from_env(*, source_id: str | None = None, stream: str | None = None) -> int:
 
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+    monitoring_mode = os.environ.get("PDP_RECONCILIATION_MONITORING_MODE", "http")
     heartbeat_url = os.environ.get("RECONCILIATION_HEARTBEAT_URL")
-    if not heartbeat_url:
+    if monitoring_mode == "cloud_monitoring":
+        if heartbeat_url:
+            raise ValueError("RECONCILIATION_HEARTBEAT_URL is not used with Cloud Monitoring")
+        heartbeat: HeartbeatPublisher = _no_external_heartbeat
+    elif monitoring_mode == "http" and heartbeat_url:
+        heartbeat = partial(publish_http_heartbeat, heartbeat_url)
+    elif monitoring_mode == "http":
         raise ValueError("RECONCILIATION_HEARTBEAT_URL is required")
+    else:
+        raise ValueError("PDP_RECONCILIATION_MONITORING_MODE must be http or cloud_monitoring")
     source = get_source(source_id=source_id, stream=stream)
     validate_runtime_policy(source)
     repository = source.repository_from_env()
@@ -296,7 +310,7 @@ def run_reconciliation_from_env(*, source_id: str | None = None, stream: str | N
             result = run_reconciliation(
                 repository,
                 warehouse,
-                heartbeat=lambda payload: publish_http_heartbeat(heartbeat_url, payload),
+                heartbeat=heartbeat,
                 source=source,
             )
         finally:

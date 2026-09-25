@@ -97,7 +97,7 @@ export PDP_COLLECTOR_POLL_SECONDS="300"
 
 `CLOUDSDK_CONFIG`はADC作成時だけ使う。plistにはGCS project、bucket、target Service Account、ADC pathを保存し、
 ADC本文や疑似化secretは保存しない。疑似化secretはmacOS Keychain service
-`personal-data-platform`から実行時に読む。`pdp screen-time doctor`と`collect --once`を成功させてからplistを生成する。
+`personal-data-platform`から実行中のPython processがSecurity.framework経由で読む。`pdp screen-time doctor`と`collect --once`を成功させてからplistを生成する。
 read-only rebuildにはこのCollector ADCを使わず、[`Platform運用`](../../platform/operations.md#rebuild)の
 別Service Accountと別ADC directoryを使う。
 
@@ -117,6 +117,8 @@ plutil -extract ProgramArguments.0 raw -o - "$collector_plist"
 
 最後のcommandが表示したPython executableへ、macOSの「システム設定 > プライバシーとセキュリティ >
 フルディスクアクセス」でFull Disk Accessを付与する。Terminalへの付与だけではLaunchAgentの権限にならない。
+`.venv/bin/python`はsymlinkで、設定画面では実体の`python3.14`として表示される場合がある。
+Pythonの更新や仮想環境の再作成後は、LaunchAgentからBiomeを読めることを再確認する。
 付与後に登録し、service状態とlogを確認する。
 
 ```bash
