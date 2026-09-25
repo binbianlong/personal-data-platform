@@ -2,8 +2,10 @@
 
 Macへ同期されたiPhoneのBiome `App.InFocus`から、アプリのforeground遷移を取得する。
 
-初期対象は`sync.db`で`platform = 2`として識別できるiPhoneだけである。Mac自身の
-`ScreenTime.AppUsage/local`、Web利用、通知、表示用アプリ名の補完は対象に含めない。
+継続収集・Raw保存・分析の対象は`sync.db`で`platform = 2`として識別できるiPhoneだけである。
+Mac自身の`App.InFocus/local`は`pdp screen-time inspect-mac`でローカルの形式を検証できるが、
+Raw保存や日次Viewには追加しない。`ScreenTime.AppUsage/local`、Web利用、通知、表示用アプリ名の補完は
+対象に含めない。
 
 共通処理へは`source_id=screen_time`、`stream=app-in-focus`、Raw schema v1として登録する。
 `loader`、`reconciliation`、`rebuild`の既定対象であり、明示時は

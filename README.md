@@ -28,6 +28,7 @@ python -m personal_data_platform.entrypoint --help
 ```text
 pdp screen-time devices
 pdp screen-time doctor
+pdp screen-time inspect-mac
 pdp screen-time collect --once
 pdp screen-time collect --watch
 pdp screen-time launch-agent --output <plist-path>
@@ -44,6 +45,11 @@ pdp preflight
 未登録の組合せは拒否する。`pdp dbt`は指定なしでは全model、source / stream指定時は対応するmodelとtestを実行する。
 
 未実装の`webhook`と`fetch`はcommandとして受理しない。
+
+`pdp screen-time inspect-mac`はMac自身の`App.InFocus/local`にある完成済みsegmentを読み取り専用で
+解析する。`--directory PATH`で検証対象を変更できる。JSONにはBundle ID別の開始・終了レコード件数、
+全体のrecord種別件数とevent時刻の範囲を表示する。これは利用時間の集計ではなく、RawやDBへの保存、
+GCS認証、Keychainの設定は行わない。詳細は[`Screen Time取得仕様`](docs/sources/screen-time/acquisition.md#macのローカル形式検証)を参照する。
 
 ## iPhone Screen Time Collector
 

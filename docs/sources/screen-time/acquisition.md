@@ -95,3 +95,24 @@ platform flag
 SEGB v2のtrailerはdecoderへ渡す前にrecord stateを検査する。未知のstateが1件でもあれば
 観測全体を失敗させ、直前の正常観測と既存イベントの有効状態を維持する。`state=0`かつ
 `end_offset=0`の未使用slotと、既知の空レコード`state=4`は引き続き許容する。
+
+## Macのローカル形式検証
+
+```bash
+pdp screen-time inspect-mac
+pdp screen-time inspect-mac --directory <App.InFocus/localのpath>
+```
+
+既定の対象は`~/Library/Biome/streams/restricted/App.InFocus/local`。iPhone Collectorと同じく、親directory
+ごとに数値名の後続ファイルがあるsegmentだけを安定読込して解析する。最新segmentは`deferred_segment_count`
+へ数え、内容は解析しない。読取りや解析が失敗した場合はsegmentの相対pathを示してnon-zeroで終了する。
+
+結果はJSONで、`segment_count`、`checked_segment_count`、`deferred_segment_count`、event・start・end・
+deleted・CRC不一致・tombstoneのrecord件数、最初と最後のevent時刻を出す。`apps`には有効なevent recordの
+Bundle IDとstart・end・合計のrecord件数をBundle ID順で出す。時刻はUTC ISO 8601形式で、eventがなければ
+`null`になる。record件数は一意なイベント数や利用秒数を表さない。表示用アプリ名はpayloadにないため補完
+しない。元payloadや端末identifierは出力せず、取得データの継続保存も行わない。既存parserが使う一時ファイルは
+解析後に削除する。
+
+Biome directoryを読む実行バイナリにはFull Disk Accessが必要。iPhoneの`devices`と`doctor`はevent payloadを
+解析しないため、アプリ別の出力は持たない。

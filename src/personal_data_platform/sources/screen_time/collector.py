@@ -108,20 +108,25 @@ class BiomeScreenTimeSource:
 
     def list_segments(self, device: IPhoneDevice) -> list[tuple[Path, str]]:
         directory = self.device_directory(device)
-        segments: list[tuple[Path, str]] = []
-        directories = [directory]
-        try:
-            while directories:
-                with os.scandir(directories.pop()) as entries:
-                    for entry in entries:
-                        if entry.is_dir(follow_symlinks=False):
-                            directories.append(Path(entry.path))
-                        elif entry.is_file(follow_symlinks=False):
-                            path = Path(entry.path)
-                            segments.append((path, path.relative_to(directory).as_posix()))
-        except OSError as error:
-            raise CollectorSourceError("failed to enumerate Screen Time segments") from error
-        return sorted(segments, key=lambda item: item[1])
+        return list_segment_files(directory)
+
+
+def list_segment_files(directory: Path) -> list[tuple[Path, str]]:
+    """List regular SEGB paths under one Biome stream without following symlinks."""
+    segments: list[tuple[Path, str]] = []
+    directories = [directory]
+    try:
+        while directories:
+            with os.scandir(directories.pop()) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        directories.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        path = Path(entry.path)
+                        segments.append((path, path.relative_to(directory).as_posix()))
+    except OSError as error:
+        raise CollectorSourceError("failed to enumerate Screen Time segments") from error
+    return sorted(segments, key=lambda item: item[1])
 
 
 def select_completed_segments(segments: list[tuple[Path, str]]) -> list[tuple[Path, str]]:
@@ -130,7 +135,9 @@ def select_completed_segments(segments: list[tuple[Path, str]]) -> list[tuple[Pa
     numbered: list[tuple[Path, str, int]] = []
     for path, relative_path in segments:
         if not path.name.isascii() or not path.name.isdecimal():
-            raise CollectorSourceError("cannot determine completion of a non-numeric segment name")
+            raise CollectorSourceError(
+                f"cannot determine completion of a non-numeric segment name: {relative_path}"
+            )
         number = int(path.name)
         numbered.append((path, relative_path, number))
         newest[path.parent] = max(newest.get(path.parent, number), number)

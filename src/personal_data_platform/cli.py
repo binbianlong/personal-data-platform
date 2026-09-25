@@ -33,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     screen_time_commands = screen_time.add_subparsers(dest="screen_time_command", required=True)
     screen_time_commands.add_parser("devices", help="list pseudonymized iPhone devices")
     screen_time_commands.add_parser("doctor", help="diagnose collector configuration and access")
+    inspect_mac = screen_time_commands.add_parser(
+        "inspect-mac", help="inspect completed local Mac App.InFocus segments without saving them"
+    )
+    inspect_mac.add_argument(
+        "--directory", type=Path, help="App.InFocus/local directory (defaults to this Mac's Biome)"
+    )
     collect = screen_time_commands.add_parser("collect", help="collect App.InFocus segments")
     collection_mode = collect.add_mutually_exclusive_group(required=True)
     collection_mode.add_argument(
@@ -93,6 +99,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _run_devices()
         if args.screen_time_command == "doctor":
             return _run_doctor()
+        if args.screen_time_command == "inspect-mac":
+            return _run_inspect_mac(directory=args.directory)
         if args.screen_time_command == "collect":
             return _run_collect(watch=args.watch)
         if args.screen_time_command == "launch-agent":
@@ -151,6 +159,22 @@ def _run_devices() -> int:
                 sort_keys=True,
             )
         )
+    return 0
+
+
+def _run_inspect_mac(*, directory: Path | None) -> int:
+    from personal_data_platform.sources.screen_time.mac_inspection import (
+        DEFAULT_MAC_DIRECTORY,
+        inspect_mac_directory,
+    )
+
+    print(
+        json.dumps(
+            inspect_mac_directory(directory or DEFAULT_MAC_DIRECTORY),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
     return 0
 
 
