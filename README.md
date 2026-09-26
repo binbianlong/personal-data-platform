@@ -97,7 +97,7 @@ raw/screen_time/v2/<device_key>/<app-in-focus または app-usage>/<segment_key>
 
 local SQLite stateはupload前に同じobject keyと決定的gzip bytesを`pending`として保存し、GCS upload成功後だけ`uploaded`へ更新する。再起動時は現在のallowlistから削除済みのdeviceも含め、GCSのread/list権限を使わずに同じkeyとbytesでpending uploadを再試行する。連続する同一segmentはskipするが、`A → B → A`の観測は3件とも保持する。
 
-`--watch`はdefaultで300秒ごとにcomplete scanを行う。間隔は`PDP_COLLECTOR_POLL_SECONDS`で変更できる。成功時は
+`--watch`はdefaultで1800秒（30分）ごとにcomplete scanを行う。間隔は`PDP_COLLECTOR_POLL_SECONDS`で変更できる。成功時は
 iPhoneの`raw/screen_time/v1/_control/collector/latest/`と`_control/collector/active.json`、Macの
 `_control/collector/app-usage/latest/`と`_control/collector/app-usage/active.json`を別々に更新する。
 端末の正式なdecommissionはallowlistまたはMac keyから削除した後、次のcomplete scanがmanifest更新まで

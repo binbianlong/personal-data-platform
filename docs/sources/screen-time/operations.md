@@ -25,8 +25,8 @@ pdp screen-time collect --once   1回走査して終了
 pdp screen-time collect --watch  完全走査を一定間隔で反復
 ```
 
-`--watch`の確認間隔は`PDP_COLLECTOR_POLL_SECONDS`で指定し、defaultは300秒、最小は10秒である。
-5分ごとの確認でRawを必ず保存するわけではない。端末・親directoryごとに数値のファイル名を数値順で比較し、
+`--watch`の確認間隔は`PDP_COLLECTOR_POLL_SECONDS`で指定し、defaultは1800秒（30分）、最小は10秒である。
+30分ごとの確認でRawを必ず保存するわけではない。端末・親directoryごとに数値のファイル名を数値順で比較し、
 より大きい名前の後続ファイルが存在するsegmentだけを転送対象とする。通常directoryと`tombstone`を含む
 各子directoryは独立して判定する。同じ数値の名前が複数ある場合、それだけでは後続とみなさない。
 
@@ -104,7 +104,7 @@ export GOOGLE_APPLICATION_CREDENTIALS="$CLOUDSDK_CONFIG/application_default_cred
 chmod 600 "$GOOGLE_APPLICATION_CREDENTIALS"
 export PDP_SCREEN_TIME_DEVICE_ALLOWLIST="<device_key>[,<device_key>...]"
 export PDP_SCREEN_TIME_MAC_DEVICE_KEY="<mac_device_key>"  # Macも収集する場合
-export PDP_COLLECTOR_POLL_SECONDS="300"
+export PDP_COLLECTOR_POLL_SECONDS="1800"
 ```
 
 `CLOUDSDK_CONFIG`はADC作成時だけ使う。plistにはGCS project、bucket、target Service Account、ADC pathを保存し、
@@ -196,7 +196,7 @@ GCSのv1/v2両prefixの90日Lifecycle、Collector create権限、Loader/Reconcil
 Collectorは新規観測をv2で保存し、既存pendingは元のv1/v2 keyとbytesで再送する。
 LoaderはRaw v1/v2を読み込む。利用可能なRawのparser versionが古い場合も再解析し、
 同一objectの置換と取込成功更新を1 transactionで行う。
-Collectorの5分確認・後続ファイル待ち条件を満たしたsegmentだけを転送する。
+Collectorの30分確認・後続ファイル待ち条件を満たしたsegmentだけを転送する。
 v1で保存済みの完成segmentも、照合情報を伴うv2として一度保存し直し、その後の同内容はskipする。
 
 v1は元segment名を持たないため、同じlogical segmentのv2が未取得ならファイル間の削除照合ができない。

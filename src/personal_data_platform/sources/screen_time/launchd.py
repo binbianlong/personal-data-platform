@@ -95,7 +95,7 @@ class LaunchAgentSettings:
                 "PDP_SCREEN_TIME_DEVICE_ALLOWLIST or PDP_SCREEN_TIME_MAC_DEVICE_KEY is required"
             )
 
-        poll_seconds = values.get("PDP_COLLECTOR_POLL_SECONDS", "300").strip()
+        poll_seconds = values.get("PDP_COLLECTOR_POLL_SECONDS", "1800").strip()
         try:
             parsed_poll_seconds = float(poll_seconds)
         except ValueError as error:

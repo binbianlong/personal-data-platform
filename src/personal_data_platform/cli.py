@@ -368,7 +368,7 @@ def _run_collect(*, watch: bool) -> int:
         )
         return 0
 
-    interval = _positive_seconds(os.environ.get("PDP_COLLECTOR_POLL_SECONDS", "300"))
+    interval = _positive_seconds(os.environ.get("PDP_COLLECTOR_POLL_SECONDS", "1800"))
     try:
         while True:
             _print_collection_stats(
