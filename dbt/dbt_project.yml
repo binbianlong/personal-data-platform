@@ -13,24 +13,24 @@ models:
     screen_time:
       +schema: base
       +materialized: view
-      +tags: [screen_time_app_in_focus]
+      +tags: [screen_time]
     marts:
       +schema: marts
       +materialized: view
       daily_screen_time:
-        +tags: [screen_time_app_in_focus]
+        +tags: [screen_time]
       daily_screen_time_total:
-        +tags: [screen_time_app_in_focus]
+        +tags: [screen_time]
 
 data_tests:
   personal_data_platform:
     daily_screen_time_totals_match:
-      +tags: [screen_time_app_in_focus]
+      +tags: [screen_time]
     no_invalid_screen_time_duration:
-      +tags: [screen_time_app_in_focus]
+      +tags: [screen_time]
     daily_screen_time_keys_unique:
-      +tags: [screen_time_app_in_focus]
+      +tags: [screen_time]
     no_invalid_daily_screen_time_metrics:
-      +tags: [screen_time_app_in_focus]
+      +tags: [screen_time]
     daily_screen_time_total_matches_apps:
-      +tags: [screen_time_app_in_focus]
+      +tags: [screen_time]

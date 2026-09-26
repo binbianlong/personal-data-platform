@@ -8,11 +8,22 @@ from personal_data_platform.sources import registry
 def test_registry_defaults_and_explicit_scope_keep_screen_time() -> None:
     for source in (
         registry.get_source(),
-        registry.get_source("screen_time"),
         registry.get_source("screen_time", "app-in-focus"),
     ):
         assert (source.source_id, source.stream) == ("screen_time", "app-in-focus")
     assert registry.source_ids() == ("screen_time",)
+    assert registry.get_source("screen_time", "app-usage").stream == "app-usage"
+    with pytest.raises(ValueError, match="multiple streams"):
+        registry.get_source("screen_time")
+
+
+def test_all_streams_requires_explicit_source_and_excludes_other_sources() -> None:
+    sources = registry.get_sources("screen_time", all_streams=True)
+    assert [source.stream for source in sources] == ["app-in-focus", "app-usage"]
+    with pytest.raises(ValueError, match="requires source"):
+        registry.get_sources(all_streams=True)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        registry.get_sources("screen_time", "app-in-focus", all_streams=True)
 
 
 @pytest.mark.parametrize(

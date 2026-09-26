@@ -14,12 +14,75 @@ from personal_data_platform.recovery.rebuild import (
     rebuild_inventory,
     require_empty_rebuild_target,
     run_rebuild,
+    run_rebuild_all,
     run_rebuild_from_env,
     validate_rebuild_target,
 )
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from tests.screen_time_helpers import Repository, event, mac_usage_event, segb
+
+
+def test_all_streams_rebuilds_one_scratch_database_and_shared_daily_views(
+    tmp_path, monkeypatch
+) -> None:
+    from personal_data_platform.dbt_runner import run_dbt as real_run_dbt
+
+    database = tmp_path / "combined.duckdb"
+    monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
+    monkeypatch.setattr(
+        "personal_data_platform.recovery.rebuild.connect",
+        lambda _config: connect(WarehouseConfig(str(database))),
+    )
+    calls = []
+
+    def build_views(*, target, selector):
+        calls.append((target, selector))
+        real_run_dbt(target="local", selector=selector)
+
+    monkeypatch.setattr("personal_data_platform.recovery.rebuild.run_dbt", build_views)
+    when = datetime(2026, 9, 13, 0, 0, tzinfo=UTC)
+    phone_repository = Repository()
+    mac_repository = Repository()
+    for name, payload in (
+        ("100", event("phone.app", 100.0)),
+        ("200", event("phone.app", 160.0, foreground=False)),
+    ):
+        phone_repository.add(name, segb(payload)[0])
+    for name, payload in (
+        ("100", mac_usage_event("mac.app", when.timestamp(), start=True)),
+        ("200", mac_usage_event("mac.app", when.timestamp() + 60, start=False)),
+    ):
+        mac_repository.add(name, segb(payload)[0], device="b" * 64, stream="app-usage")
+    phone = get_source("screen_time", "app-in-focus")
+    mac = get_source("screen_time", "app-usage")
+    inventories = (
+        (phone, phone_repository, tuple(value[0] for value in phone_repository.objects.values())),
+        (mac, mac_repository, tuple(value[0] for value in mac_repository.objects.values())),
+    )
+
+    assert (
+        run_rebuild_all(
+            inventories,
+            target_db="scratch",
+            token="local",
+            production_db="production",
+            allow_partial_history=True,
+        )
+        == 0
+    )
+    assert calls == [("prod", "tag:screen_time")]
+    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
+    try:
+        assert warehouse.query_rows(
+            "SELECT platform, count(*) FROM base.screen_time_event GROUP BY platform ORDER BY platform"
+        ) == [("ios", 2), ("macos", 2)]
+        assert warehouse.query_rows(
+            "SELECT platform, total_seconds FROM marts.daily_screen_time_total ORDER BY platform"
+        ) == [("ios", 60.0), ("macos", 60.0)]
+    finally:
+        warehouse.close()
 
 
 def _raw(

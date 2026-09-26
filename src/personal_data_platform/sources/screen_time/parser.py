@@ -1,4 +1,4 @@
-"""Decode Biome SEGB records and iPhone ``App.InFocus`` protobuf payloads."""
+"""Decode Biome SEGB records and Screen Time event payloads."""
 
 from __future__ import annotations
 
@@ -17,7 +17,9 @@ from personal_data_platform.raw.models import RawObject
 from .models import ParsedScreenTimeRecord, PayloadDecodeError, SegmentDecodeError
 
 PARSER_VERSION = "app-in-focus-v2"
+MAC_APP_USAGE_PARSER_VERSION = "app-usage-v1"
 CF_ABSOLUTE_TIME_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
+UNIX_TO_CF_SECONDS = 978_307_200
 EVENT_KEY_DOMAIN = b"screen-time/event/v1\0"
 
 
@@ -187,6 +189,39 @@ def decode_app_in_focus_payload(payload: bytes) -> DecodedAppInFocus:
     }
 
 
+def decode_mac_app_usage_payload(payload: bytes) -> DecodedAppInFocus:
+    """Decode observed Mac AppUsage start/end records with Unix-second timestamps."""
+    values = _decode_wire(payload)
+    in_foreground_raw = _uint(_one(values, 1, 0), 1)
+    time_raw = _one(values, 2, 1)
+    bundle_id = _utf8(_one(values, 3, 2), 3)
+    if in_foreground_raw not in {0, 1}:
+        raise PayloadDecodeError("protobuf field 1 must be 0 or 1")
+    if not isinstance(time_raw, bytes):
+        raise PayloadDecodeError("protobuf field 2 is required")
+    unix_time = struct.unpack("<d", time_raw)[0]
+    if not math.isfinite(unix_time):
+        raise PayloadDecodeError("protobuf field 2 must be a finite double")
+    if bundle_id is None or not bundle_id.strip():
+        raise PayloadDecodeError("protobuf field 3 is required")
+    try:
+        event_at = datetime.fromtimestamp(unix_time, tz=UTC)
+    except (OverflowError, OSError, ValueError) as error:
+        raise PayloadDecodeError("protobuf field 2 is outside the datetime range") from error
+    return {
+        "transition_reason": None,
+        "kind": None,
+        "in_foreground": bool(in_foreground_raw),
+        "cf_absolute_time": unix_time - UNIX_TO_CF_SECONDS,
+        "event_at": event_at,
+        "bundle_id": bundle_id,
+        "app_version": None,
+        "app_build": None,
+        "platform_flag": None,
+        "unknown_field_count": sum(value.field_number not in {1, 2, 3} for value in values),
+    }
+
+
 def event_key(
     *,
     device_key: str,
@@ -264,6 +299,12 @@ def parse_segb_records(
     segment_kind: str | None = None,
 ) -> list[ParsedScreenTimeRecord]:
     """Keep deletion/CRC metadata without requiring a surviving event payload."""
+    if raw.stream == "app-usage":
+        decode_event = decode_mac_app_usage_payload
+        parser_version = MAC_APP_USAGE_PARSER_VERSION
+    else:
+        decode_event = decode_app_in_focus_payload
+        parser_version = PARSER_VERSION
     parsed: list[ParsedScreenTimeRecord] = []
     for record in records:
         payload = bytes(record.data)
@@ -288,7 +329,7 @@ def parse_segb_records(
             kind = "deleted"
             if crc is not False:
                 try:
-                    decoded = decode_app_in_focus_payload(payload)
+                    decoded = decode_event(payload)
                 except PayloadDecodeError:
                     pass
         elif state_name != "WRITTEN":
@@ -305,7 +346,7 @@ def parse_segb_records(
                 if segment_kind == "tombstones":
                     raise PayloadDecodeError("unrecognized tombstone payload")
                 kind = "event"
-                decoded = decode_app_in_focus_payload(payload)
+                decoded = decode_event(payload)
                 identity = event_key(
                     device_key=raw.subject_key,
                     stream=raw.stream,
@@ -340,7 +381,7 @@ def parse_segb_records(
                 platform_flag=decoded["platform_flag"] if decoded is not None else None,
                 unknown_field_count=decoded["unknown_field_count"] if decoded is not None else 0,
                 original_payload=payload,
-                parser_version=PARSER_VERSION,
+                parser_version=parser_version,
                 record_kind=kind,
                 payload_length=len(payload),
                 record_timestamp_cocoa=timestamp_cocoa,

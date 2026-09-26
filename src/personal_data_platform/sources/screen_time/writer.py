@@ -22,10 +22,15 @@ class ScreenTimeBatch:
     records: Sequence[ParsedScreenTimeRecord]
     source_segment_name: str | None = None
     segment_kind: str | None = None
+    parser_version_override: str | None = None
 
     @property
     def parser_version(self) -> str:
-        return self.records[0].parser_version if self.records else PARSER_VERSION
+        return (
+            self.records[0].parser_version
+            if self.records
+            else (self.parser_version_override or PARSER_VERSION)
+        )
 
     @property
     def record_count(self) -> int:

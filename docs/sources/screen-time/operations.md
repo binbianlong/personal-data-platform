@@ -11,20 +11,22 @@ Collectorのlocal stateは次のSQLite databaseへ保存する。
 segment observationごとに疑似化scope、SHA-256、object key、状態を保持する。`pending`の間は再送に必要な
 deterministic gzip bytesも保持し、GCS upload成功後に`uploaded`へ更新してpayload BLOBをnull化する。
 
-complete scanが成功した場合だけ、scan完了時刻、device数、segment数、uploaded / skipped数を同じdatabaseの
-singleton行へ保存する。device identifierやsegment pathの直接値は保存しない。
+各streamのcomplete scanが成功した場合だけ、scan完了時刻、device数、segment数、uploaded / skipped数を
+同じdatabaseのsingleton行へ保存する。この行は最後に成功したstreamの記録であり、stream別の稼働判定には
+GCS上のreceiptとmanifestを使う。device identifierやsegment pathの直接値は保存しない。
 
 ## 初回scanとwatch
 
-初回はallowlist対象deviceの`App.InFocus/remote/<device_identifier>`に存在する全segmentを走査する。
+初回はallowlist対象iPhoneの`App.InFocus/remote/<device_identifier>`と、有効化したMacの
+`ScreenTime.AppUsage/local`に存在する全segmentを走査する。
 
 ```text
 pdp screen-time collect --once   1回走査して終了
 pdp screen-time collect --watch  完全走査を一定間隔で反復
 ```
 
-`--watch`の確認間隔は`PDP_COLLECTOR_POLL_SECONDS`で指定し、defaultは300秒、最小は10秒である。
-5分ごとの確認でRawを必ず保存するわけではない。端末・親directoryごとに数値のファイル名を数値順で比較し、
+`--watch`の確認間隔は`PDP_COLLECTOR_POLL_SECONDS`で指定し、defaultは1800秒（30分）、最小は10秒である。
+30分ごとの確認でRawを必ず保存するわけではない。端末・親directoryごとに数値のファイル名を数値順で比較し、
 より大きい名前の後続ファイルが存在するsegmentだけを転送対象とする。通常directoryと`tombstone`を含む
 各子directoryは独立して判定する。同じ数値の名前が複数ある場合、それだけでは後続とみなさない。
 
@@ -45,12 +47,17 @@ segmentを途中bytesのままuploadしない。
 
 ## Crash recovery
 
-走査開始時に、現在のallowlistから削除済みのdeviceも含めてpending uploadを先に再送する。Collector credentialには
+各streamの走査開始時に、そのstreamでpendingのuploadを先に再送する。現在のallowlistから削除済みのdeviceも含む。Collector credentialには
 read / list権限がないため、GCSの事前存在確認へ依存しない。同じpending keyにはSQLiteへ保存した同じgzip bytesだけを
 送る。既存pendingは最新ファイルの待機条件より優先し、後続ファイルが消えていても再送する。pendingと今回の
-転送対象すべてのRaw uploadが成功した後、deviceごとのcollector scan receipt、active-device manifestの順に更新し、
+転送対象すべてのRaw uploadが成功した後、stream別のcollector scan receipt、active-device manifestの順に更新し、
 最後にlocal scan成功時刻をcommitする。manifestはfull allowlistを持つため、一部のallowlist対象deviceが未発見なら
-そのdeviceのreceipt欠損をReconciliationが検出する。
+そのdeviceのreceipt欠損をReconciliationが検出する。片方のstreamが失敗してももう片方を試行し、
+失敗したstreamと原因をstderrへ出して全体のcommandはnon-zeroで終了する。
+
+iPhone allowlistまたはMac keyが未設定のstreamは、Collector起動後の最初のscanでdevice数0のmanifestを
+そのstreamのcontrol keyへ書く。これを明示的な休止状態とし、次回以降のscanでは再書込みしない。
+設定を外した後も残るRawや旧receiptは保持し、休止中はreceiptの新規更新を要求しない。
 
 Macが停止またはofflineでもRawを捏造しない。LaunchAgent再起動後のcomplete scanとpending retryで回復する。
 
@@ -61,14 +68,18 @@ pdp screen-time devices
 pdp screen-time doctor
 ```
 
-`devices`は`sync.db`の`platform = 2`だけを列挙し、疑似化`device_key`を表示する。raw device identifierは
-設定へ保存しない。`PDP_SCREEN_TIME_DEVICE_ALLOWLIST`には取得対象の`device_key`を指定する。
+`devices`は`sync.db`のiPhone (`platform = 2`) と唯一のローカルMac
+(`platform = 3 AND me = 1`) を列挙し、疑似化`device_key`とplatformを表示する。Mac keyの未設定時に
+ローカルMac行が見つからない場合はwarningを出し、iPhoneの表示は続ける。
+raw device identifierは設定へ保存しない。iPhoneは`PDP_SCREEN_TIME_DEVICE_ALLOWLIST`、
+Macは`PDP_SCREEN_TIME_MAC_DEVICE_KEY`に表示されたkeyを設定する。
 
 `doctor`は変更を行わず、次を確認する。
 
 - Biome `sync.db`へのread accessとplatform=2 device数
 - allowlistとの一致
 - App.InFocus remote directoryの存在
+- Macを有効化した場合はdevice keyとの一致とScreenTime.AppUsage local directoryの存在
 - SQLite state directoryのwrite可否
 - GCS設定とimpersonated ADCの種類、所有者、mode、target Service Account
 
@@ -92,7 +103,8 @@ gcloud auth application-default login \
 export GOOGLE_APPLICATION_CREDENTIALS="$CLOUDSDK_CONFIG/application_default_credentials.json"
 chmod 600 "$GOOGLE_APPLICATION_CREDENTIALS"
 export PDP_SCREEN_TIME_DEVICE_ALLOWLIST="<device_key>[,<device_key>...]"
-export PDP_COLLECTOR_POLL_SECONDS="300"
+export PDP_SCREEN_TIME_MAC_DEVICE_KEY="<mac_device_key>"  # Macも収集する場合
+export PDP_COLLECTOR_POLL_SECONDS="1800"
 ```
 
 `CLOUDSDK_CONFIG`はADC作成時だけ使う。plistにはGCS project、bucket、target Service Account、ADC pathを保存し、
@@ -101,9 +113,11 @@ ADC本文や疑似化secretは保存しない。疑似化secretはmacOS Keychain
 read-only rebuildにはこのCollector ADCを使わず、[`Platform運用`](../../platform/operations.md#rebuild)の
 別Service Accountと別ADC directoryを使う。
 
-端末を運用対象から外す場合は`PDP_SCREEN_TIME_DEVICE_ALLOWLIST`からdevice keyを削除し、残る対象deviceで
-`collect --once`を成功させる。最後に更新されたmanifestから外れた時点で正式なdecommissionとなる。旧receiptは
-残っていても監査対象外となり、旧Rawはuploadから90日のLifecycle期限まで保持される。
+端末を運用対象から外す場合は該当するiPhone allowlistまたはMac keyを外し、残る対象deviceで
+`collect --once`を成功させる。該当streamの対象が0台になった場合は空のmanifestを書き、休止状態にする。
+最後に更新されたmanifestから外れた時点で正式なdecommissionとなる。旧receiptは残っていても監査対象外となり、
+旧Rawはuploadから90日のLifecycle期限まで保持される。`--watch`の環境変数を変更する場合はLaunchAgentを
+再生成・再起動して反映する。
 
 ```bash
 collector_plist="$HOME/Library/LaunchAgents/com.personal-data-platform.screen-time-collector.plist"
@@ -155,18 +169,22 @@ pending stateを復元できない
 ```
 
 Reconciliationはactive-device manifestまたはmanifest内deviceのscan receiptが24時間以上更新されていない場合も
-失敗にする。新しいeventがないことだけを障害とみなさず、complete scanの成功証跡を使用する。
+失敗にする。空のmanifestを持つstreamは休止中として扱い、未設定でRaw・receipt・manifestが全てないMacも
+初回有効化前として扱う。Rawまたはreceiptがあるのにmanifestがない場合は失敗する。新しいeventがないことだけを
+障害とみなさず、complete scanの成功証跡を使用する。
 
 Loader、通知、rebuildは[`Platform運用`](../../platform/operations.md)に従う。
 
 
-## 他streamとの共存
+## iPhoneとMacの共存
 
-このCollectorのstate DB、active-device manifestとreceiptはiPhoneの`app-in-focus`取得専用である。
-Mac自身のScreen Timeを別Collectorで取得する場合は、stateとcontrol objectを別に所有する。
-別Collectorから同じmanifestを上書きしたり、iPhoneのscan成功で別streamの稼働を証明したりしない。
+同じCollector processとSQLite state DBを使い、pendingとsegment scopeはstreamで分離する。
+iPhoneのcontrol keyは`_control/collector/latest/<device_key>.json`と
+`_control/collector/active.json`、Macは`_control/collector/app-usage/latest/<device_key>.json`と
+`_control/collector/app-usage/active.json`を使う。片方のreceiptで他方の稼働を証明しない。
 
-Loader・監査・再構築は`--source screen_time --stream app-in-focus`でこのstreamを明示できる。
+Loader・監査・再構築は`--source screen_time --all-streams`で両方を処理する。
+単一streamの診断は`--source screen_time --stream app-in-focus`または`app-usage`を使う。
 共通runtimeの更新順序は[`Platform運用`](../../platform/operations.md#dbの初期化と更新)に従う。
 
 ## 初回セットアップとRaw形式
@@ -178,7 +196,7 @@ GCSのv1/v2両prefixの90日Lifecycle、Collector create権限、Loader/Reconcil
 Collectorは新規観測をv2で保存し、既存pendingは元のv1/v2 keyとbytesで再送する。
 LoaderはRaw v1/v2を読み込む。利用可能なRawのparser versionが古い場合も再解析し、
 同一objectの置換と取込成功更新を1 transactionで行う。
-Collectorの5分確認・後続ファイル待ち条件を満たしたsegmentだけを転送する。
+Collectorの30分確認・後続ファイル待ち条件を満たしたsegmentだけを転送する。
 v1で保存済みの完成segmentも、照合情報を伴うv2として一度保存し直し、その後の同内容はskipする。
 
 v1は元segment名を持たないため、同じlogical segmentのv2が未取得ならファイル間の削除照合ができない。
@@ -188,7 +206,8 @@ v1は元segment名を持たないため、同じlogical segmentのv2が未取得
 
 ## イベントと補助状態の保存
 
-`001_initial.sql`でイベントtable、補助状態、SQL macro、分析入口Viewを直接作成する。
+`001_initial.sql`でイベントtable、補助状態、SQL macro、分析入口Viewを作成する。
+`002_screen_time_app_usage_platform.sql`でstreamから`ios`/`macos`を決めるmacroへ更新する。
 分析tableは`event_key`ごとに1行、補助状態はsegment・物理record・tombstone・削除照合の組ごとに保持する。
 同じ内容を繰り返し観測しても補助行数は増えない。新イベント・物理位置・Raw単位の取込記録は増える。
 

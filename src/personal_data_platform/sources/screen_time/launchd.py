@@ -41,6 +41,8 @@ class LaunchAgentSettings:
     collector_service_account_email: str
     device_allowlist: tuple[str, ...]
     poll_seconds: str
+    mac_device_key: str | None = None
+    mac_app_usage_local_dir: Path | None = None
 
     @classmethod
     def from_env(
@@ -74,17 +76,26 @@ class LaunchAgentSettings:
             sorted(
                 {
                     value.strip()
-                    for value in _required(values, "PDP_SCREEN_TIME_DEVICE_ALLOWLIST").split(",")
+                    for value in values.get("PDP_SCREEN_TIME_DEVICE_ALLOWLIST", "").split(",")
                     if value.strip()
                 }
             )
         )
-        if not allowlist or any(_DEVICE_KEY.fullmatch(value) is None for value in allowlist):
+        if any(_DEVICE_KEY.fullmatch(value) is None for value in allowlist):
             raise ConfigurationError(
                 "PDP_SCREEN_TIME_DEVICE_ALLOWLIST must contain lowercase HMAC-SHA-256 keys"
             )
+        mac_device_key = values.get("PDP_SCREEN_TIME_MAC_DEVICE_KEY", "").strip() or None
+        if mac_device_key is not None and _DEVICE_KEY.fullmatch(mac_device_key) is None:
+            raise ConfigurationError(
+                "PDP_SCREEN_TIME_MAC_DEVICE_KEY must be lowercase HMAC-SHA-256"
+            )
+        if not (allowlist or mac_device_key):
+            raise ConfigurationError(
+                "PDP_SCREEN_TIME_DEVICE_ALLOWLIST or PDP_SCREEN_TIME_MAC_DEVICE_KEY is required"
+            )
 
-        poll_seconds = values.get("PDP_COLLECTOR_POLL_SECONDS", "300").strip()
+        poll_seconds = values.get("PDP_COLLECTOR_POLL_SECONDS", "1800").strip()
         try:
             parsed_poll_seconds = float(poll_seconds)
         except ValueError as error:
@@ -119,6 +130,12 @@ class LaunchAgentSettings:
             collector_service_account_email=adc.service_account_email,
             device_allowlist=allowlist,
             poll_seconds=poll_seconds,
+            mac_device_key=mac_device_key,
+            mac_app_usage_local_dir=_path_from_env(
+                values,
+                "PDP_MAC_APP_USAGE_LOCAL_DIR",
+                library / "Biome/streams/restricted/ScreenTime.AppUsage/local",
+            ),
         )
 
 
@@ -138,6 +155,10 @@ def build_launch_agent(settings: LaunchAgentSettings) -> bytes:
         "PDP_SYNC_DB_PATH": str(settings.sync_db_path),
         "PYTHONUNBUFFERED": "1",
     }
+    if settings.mac_device_key is not None:
+        environment["PDP_SCREEN_TIME_MAC_DEVICE_KEY"] = settings.mac_device_key
+        if settings.mac_app_usage_local_dir is not None:
+            environment["PDP_MAC_APP_USAGE_LOCAL_DIR"] = str(settings.mac_app_usage_local_dir)
     if _SENSITIVE_ENVIRONMENT_NAMES & environment.keys():  # pragma: no cover - invariant
         raise RuntimeError("LaunchAgent environment contains a secret name")
 

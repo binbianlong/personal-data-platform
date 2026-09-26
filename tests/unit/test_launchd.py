@@ -104,6 +104,19 @@ def test_preserves_collector_paths_in_launch_agent(tmp_path) -> None:
     assert environment["PDP_COLLECTOR_STATE_DB_PATH"] == configured["PDP_COLLECTOR_STATE_DB_PATH"]
 
 
+def test_launch_agent_passes_mac_opt_in_without_embedding_secret(tmp_path) -> None:
+    configured = _environment(tmp_path)
+    configured["PDP_SCREEN_TIME_DEVICE_ALLOWLIST"] = ""
+    configured["PDP_SCREEN_TIME_MAC_DEVICE_KEY"] = "c" * 64
+    configured["PDP_MAC_APP_USAGE_LOCAL_DIR"] = str(tmp_path / "AppUsage/local")
+    settings = _settings(tmp_path, environ=configured)
+
+    environment = plistlib.loads(build_launch_agent(settings))["EnvironmentVariables"]
+    assert environment["PDP_SCREEN_TIME_MAC_DEVICE_KEY"] == "c" * 64
+    assert environment["PDP_MAC_APP_USAGE_LOCAL_DIR"] == configured["PDP_MAC_APP_USAGE_LOCAL_DIR"]
+    assert "PDP_PSEUDONYM_KEY_HEX" not in environment
+
+
 def test_writes_private_plist_and_log_directory(tmp_path) -> None:
     settings = _settings(tmp_path)
     destination = tmp_path / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"

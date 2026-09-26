@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -157,7 +158,7 @@ def test_raw_bucket_is_standard_and_permanently_deletes_segments_after_90_days()
     raw = storage.split('resource "google_storage_bucket" "raw" {', 1)[1]
     raw = raw.split('resource "google_storage_bucket" "preflight" {', 1)[0]
 
-    assert 'raw_bucket_name       = "${var.project_id}-pdp-raw"' in storage
+    assert re.search(r'raw_bucket_name\s*= "\$\{var.project_id\}-pdp-raw"', storage)
     assert "location                    = var.region" in raw
     assert 'storage_class               = "STANDARD"' in raw
     assert "force_destroy               = false" in raw
@@ -188,7 +189,7 @@ def test_preflight_bucket_isolated_and_orphans_expire_after_one_day() -> None:
     preflight = storage.split('resource "google_storage_bucket" "preflight" {', 1)[1]
     preflight = preflight.split('data "google_iam_policy" "raw_bucket" {', 1)[0]
 
-    assert 'preflight_bucket_name = "${var.project_id}-pdp-preflight"' in storage
+    assert re.search(r'preflight_bucket_name\s*= "\$\{var.project_id\}-pdp-preflight"', storage)
     assert 'storage_class               = "STANDARD"' in preflight
     assert 'type = "Delete"' in preflight
     assert "age            = 1" in preflight
@@ -214,8 +215,22 @@ def test_bucket_iam_is_authoritative_and_service_specific() -> None:
     assert "collector_raw_create_only" in storage
     assert "collector_control_state_only" in storage
     assert "device_manifest_key" in storage
+    assert "mac_receipt_object_prefix" in storage
+    assert "mac_device_manifest_key" in storage
     assert "projectViewer:" not in storage
     assert "projectEditor:" not in storage
+
+
+def test_existing_screen_time_jobs_process_both_streams_without_a_second_pipeline() -> None:
+    sources = _read("infra/terraform/sources.tf")
+    assert "screen_time_app_in_focus = {" in sources
+    assert "screen_time_app_usage = {" not in sources
+    assert (
+        'key == "screen_time_app_in_focus" ? [role, "--source", pipeline.source_id, "--all-streams"]'
+        in sources
+    )
+    assert '"screen-time-loader"' in sources
+    assert '"reconciliation"' in sources
 
 
 def test_rebuild_uses_a_separate_read_only_impersonated_identity() -> None:

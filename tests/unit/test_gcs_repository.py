@@ -19,6 +19,97 @@ from personal_data_platform.sources.screen_time.raw import (
 from personal_data_platform.sources.screen_time.storage import ScreenTimeGCSRepository
 
 
+def test_mac_audit_requires_its_own_receipt_even_when_iphone_is_fresh() -> None:
+    from personal_data_platform.sources.registry import get_source
+    from personal_data_platform.sources.screen_time.audit import audit_source
+
+    now = datetime(2026, 9, 26, tzinfo=UTC)
+    client = FakeGCSClient()
+    phone_repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    mac_repository = ScreenTimeGCSRepository(
+        client=client,
+        bucket="synthetic-bucket",
+        source=get_source("screen_time", "app-usage"),
+    )
+    phone_receipt = CollectorScanReceipt("a" * 64, now, 1)
+    mac_receipt = CollectorScanReceipt("b" * 64, now, 1, stream="app-usage")
+    phone_repository.put_scan_receipt(phone_receipt)
+    phone_repository.put_device_manifest(CollectorDeviceManifest(("a" * 64,), now))
+    client.list_pages = [[_ListedBlob(phone_receipt.key, now)]]
+    mac_source = get_source("screen_time", "app-usage")
+    assert mac_source.audit(mac_repository, [], now).ok
+
+    mac_repository.put_device_manifest(
+        CollectorDeviceManifest(("b" * 64,), now, stream="app-usage")
+    )
+
+    health = audit_source(mac_repository, [], now)
+    assert not health.ok and health.details["missing_collector_receipt_count"] == 1
+
+    mac_repository.put_scan_receipt(mac_receipt)
+    client.list_pages[0].append(_ListedBlob(mac_receipt.key, now))
+    assert audit_source(mac_repository, [], now).ok
+
+
+def test_mac_audit_distinguishes_missing_manifest_from_explicit_deactivation() -> None:
+    from datetime import timedelta
+
+    from personal_data_platform.sources.registry import get_source
+
+    now = datetime(2026, 9, 26, tzinfo=UTC)
+    client = FakeGCSClient()
+    source = get_source("screen_time", "app-usage")
+    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket", source=source)
+    receipt = CollectorScanReceipt("b" * 64, now, 1, stream="app-usage")
+    repository.put_scan_receipt(receipt)
+    client.list_pages = [[_ListedBlob(receipt.key, now)]]
+    assert not source.audit(repository, [], now).ok
+
+    repository.put_device_manifest(
+        CollectorDeviceManifest((), now - timedelta(days=2), stream="app-usage")
+    )
+    health = source.audit(repository, [], now)
+    assert health.ok
+    assert health.details["collector_inactive"] is True
+
+
+def test_iphone_requires_manifest_until_explicitly_marked_inactive() -> None:
+    from datetime import timedelta
+
+    from personal_data_platform.sources.registry import get_source
+
+    now = datetime(2026, 9, 26, tzinfo=UTC)
+    client = FakeGCSClient()
+    source = get_source("screen_time", "app-in-focus")
+    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket", source=source)
+    assert not source.audit(repository, [], now).ok
+
+    repository.put_device_manifest(CollectorDeviceManifest((), now - timedelta(days=2)))
+    health = source.audit(repository, [], now)
+    assert health.ok
+    assert health.details["collector_inactive"] is True
+
+
+def test_mac_raw_without_manifest_is_not_treated_as_never_activated() -> None:
+    from personal_data_platform.sources.registry import get_source
+
+    now = datetime(2026, 9, 26, tzinfo=UTC)
+    source = get_source("screen_time", "app-usage")
+    repository = ScreenTimeGCSRepository(
+        client=FakeGCSClient(), bucket="synthetic-bucket", source=source
+    )
+    raw_key = ScreenTimeRawIdentity(
+        device_key="b" * 64,
+        stream="app-usage",
+        segment_key="c" * 64,
+        observed_at=now,
+        sha256="d" * 64,
+        schema_version=2,
+    ).object_key
+    raw = source.parse_raw_key(raw_key, storage_created_at=now, storage_generation=1)
+    assert not source.audit(repository, [raw], now).ok
+
+
 class _ListedBlob:
     def __init__(
         self,

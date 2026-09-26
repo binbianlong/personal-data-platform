@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 
 import duckdb
 import pytest
@@ -27,7 +28,8 @@ def warehouse():
 def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
     warehouse.migrate()
     assert warehouse.query_rows("SELECT migration_id FROM ops.schema_migration") == [
-        ("001_initial.sql",)
+        ("001_initial.sql",),
+        ("002_screen_time_app_usage_platform.sql",),
     ]
     assert warehouse.query_rows(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'base' "
@@ -151,3 +153,28 @@ def test_failed_migration_rolls_back_schema_data_and_ledger(warehouse, tmp_path,
     assert (
         warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id") == ledger
     )
+
+
+def test_forward_migration_keeps_iphone_rows_and_sets_mac_platform(warehouse, tmp_path):
+    shutil.copyfile(DEFAULT_MIGRATIONS / "001_initial.sql", tmp_path / "001_initial.sql")
+    warehouse.migrate(tmp_path)
+    iphone_raw = _raw()
+    warehouse.load_object(iphone_raw, byte_size=10, batch=ScreenTimeBatch([_record(iphone_raw)]))
+    assert warehouse.query_rows("SELECT event_key, platform FROM base.screen_time_event") == [
+        ("event", "ios")
+    ]
+
+    shutil.copyfile(
+        DEFAULT_MIGRATIONS / "002_screen_time_app_usage_platform.sql",
+        tmp_path / "002_screen_time_app_usage_platform.sql",
+    )
+    warehouse.migrate(tmp_path)
+    mac_raw = replace(
+        iphone_raw, key="raw/mac", subject_key="mac", stream="app-usage", logical_key="mac-segment"
+    )
+    mac_record = replace(_record(mac_raw), event_key="mac-event", parser_version="app-usage-v1")
+    warehouse.load_object(mac_raw, byte_size=10, batch=ScreenTimeBatch([mac_record]))
+
+    assert warehouse.query_rows(
+        "SELECT event_key, platform, source_stream FROM base.screen_time_event ORDER BY event_key"
+    ) == [("event", "ios", "App.InFocus"), ("mac-event", "macos", "app-usage")]

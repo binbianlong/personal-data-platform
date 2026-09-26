@@ -34,7 +34,9 @@ def test_collection_requires_nonempty_device_allowlist(tmp_path) -> None:
     environment = _environment(tmp_path)
     environment["PDP_SCREEN_TIME_DEVICE_ALLOWLIST"] = ""
 
-    with pytest.raises(ConfigurationError, match="DEVICE_ALLOWLIST is required"):
+    with pytest.raises(
+        ConfigurationError, match="DEVICE_ALLOWLIST or PDP_SCREEN_TIME_MAC_DEVICE_KEY is required"
+    ):
         CollectorConfig.from_env(environment)
 
 
@@ -50,6 +52,22 @@ def test_devices_command_configuration_can_load_before_allowlist_is_chosen(tmp_p
 
     assert config.device_allowlist == frozenset()
     assert config.gcs is None
+
+
+def test_mac_key_alone_enables_collection_and_uses_local_app_usage_directory(tmp_path) -> None:
+    environment = _environment(tmp_path)
+    environment["PDP_SCREEN_TIME_DEVICE_ALLOWLIST"] = ""
+    environment["PDP_SCREEN_TIME_MAC_DEVICE_KEY"] = "c" * 64
+    environment["PDP_MAC_APP_USAGE_LOCAL_DIR"] = str(tmp_path / "AppUsage/local")
+
+    config = CollectorConfig.from_env(environment)
+    assert config.mac_device_key == "c" * 64
+    assert config.mac_app_usage_local_dir == tmp_path / "AppUsage/local"
+    assert not config.device_allowlist
+
+    environment["PDP_SCREEN_TIME_MAC_DEVICE_KEY"] = "raw-mac-identifier"
+    with pytest.raises(ConfigurationError, match="MAC_DEVICE_KEY"):
+        CollectorConfig.from_env(environment)
 
 
 def test_collector_reads_existing_keychain_secret_in_python_process(tmp_path, monkeypatch) -> None:

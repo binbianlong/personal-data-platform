@@ -30,8 +30,25 @@ def text_field(tag, value):
     return varint(tag * 8 + 2) + varint(len(value)) + value
 
 
-def event(bundle, timestamp=10.0):
-    return b"\x10\x01\x18\x01\x21" + struct.pack("<d", timestamp) + text_field(6, bundle)
+def event(bundle, timestamp=10.0, *, foreground=True):
+    return (
+        b"\x10\x01\x18"
+        + bytes([int(foreground)])
+        + b"\x21"
+        + struct.pack("<d", timestamp)
+        + text_field(6, bundle)
+    )
+
+
+def mac_usage_event(bundle, timestamp, *, start):
+    return (
+        b"\x08"
+        + varint(int(start))
+        + b"\x11"
+        + struct.pack("<d", timestamp)
+        + text_field(3, bundle)
+        + b"\x28\x01"
+    )
 
 
 def segb(payload, *, state=1, timestamp=10.0, crc=None):
@@ -65,11 +82,21 @@ class Repository:
     def __init__(self):
         self.objects = {}
 
-    def add(self, name, segment, *, kind="events", device="a" * 64, version=2, logical=None):
+    def add(
+        self,
+        name,
+        segment,
+        *,
+        kind="events",
+        device="a" * 64,
+        version=2,
+        logical=None,
+        stream="app-in-focus",
+    ):
         value = encode_segment_envelope(segment, name=name, kind=kind) if version == 2 else segment
         identity = ScreenTimeRawIdentity(
             device_key=device,
-            stream="app-in-focus",
+            stream=stream,
             segment_key=logical or sha256_hex((kind + name).encode()),
             observed_at=NOW + timedelta(seconds=len(self.objects)),
             sha256=sha256_hex(value),

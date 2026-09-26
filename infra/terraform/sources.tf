@@ -21,7 +21,7 @@ locals {
         stream      = pipeline.stream
         name        = key == "screen_time_app_in_focus" ? (role == "loader" ? "screen-time-loader" : "reconciliation") : "pdp-${replace(key, "_", "-")}-${role == "loader" ? "load" : "audit"}"
         role        = role
-        args        = [role, "--source", pipeline.source_id, "--stream", pipeline.stream]
+        args        = key == "screen_time_app_in_focus" ? [role, "--source", pipeline.source_id, "--all-streams"] : [role, "--source", pipeline.source_id, "--stream", pipeline.stream]
         timeout     = role == "loader" ? "7200s" : "9000s"
         max_retries = role == "loader" ? 0 : 1
         resources = {

@@ -83,6 +83,103 @@ def _record(
     )
 
 
+def test_mac_daily_totals_preserve_observed_end_at_next_start(
+    tmp_path, monkeypatch, dbt_project, raw
+) -> None:
+    database = tmp_path / "mac-daily.duckdb"
+    mac_raw = replace(
+        raw, key="raw/mac", subject_key="mac-device", stream="app-usage", logical_key="mac-segment"
+    )
+    before_midnight = datetime(2026, 8, 26, 14, 59, tzinfo=UTC)
+    midnight_plus_one = datetime(2026, 8, 26, 15, 1, tzinfo=UTC)
+    mac_records = [
+        _record(
+            mac_raw,
+            event_key="first-start",
+            offset=1,
+            bundle_id="mac.app",
+            event_at=before_midnight,
+            foreground=True,
+        ),
+        _record(
+            mac_raw,
+            event_key="z-end",
+            offset=2,
+            bundle_id="mac.app",
+            event_at=midnight_plus_one,
+            foreground=False,
+        ),
+        _record(
+            mac_raw,
+            event_key="a-next-start",
+            offset=3,
+            bundle_id="mac.app",
+            event_at=midnight_plus_one,
+            foreground=True,
+        ),
+        _record(
+            mac_raw,
+            event_key="last-end",
+            offset=4,
+            bundle_id="mac.app",
+            event_at=midnight_plus_one + timedelta(minutes=2),
+            foreground=False,
+        ),
+    ]
+    phone_records = [
+        _record(
+            raw,
+            event_key="phone-start",
+            offset=1,
+            bundle_id="phone.app",
+            event_at=before_midnight,
+            foreground=True,
+        ),
+        _record(
+            raw,
+            event_key="phone-end",
+            offset=2,
+            bundle_id="phone.app",
+            event_at=before_midnight + timedelta(minutes=1),
+            foreground=False,
+        ),
+    ]
+    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
+    warehouse.migrate()
+    warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch(phone_records))
+    warehouse.load_object(
+        mac_raw,
+        byte_size=100,
+        batch=ScreenTimeBatch(
+            [replace(record, parser_version="app-usage-v1") for record in mac_records]
+        ),
+    )
+    warehouse.close()
+
+    monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
+    run_dbt(target="local", project_dir=dbt_project, selector="tag:screen_time")
+
+    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
+    try:
+        assert warehouse.query_rows(
+            "SELECT start_event_key, end_event_key, quality FROM base.screen_time_interval "
+            "WHERE platform = 'macos' ORDER BY started_at"
+        ) == [
+            ("first-start", "z-end", "complete"),
+            ("a-next-start", "last-end", "complete"),
+        ]
+        assert warehouse.query_rows(
+            "SELECT activity_date, platform, total_seconds FROM marts.daily_screen_time_total "
+            "ORDER BY platform, activity_date"
+        ) == [
+            (datetime(2026, 8, 26).date(), "ios", 60.0),
+            (datetime(2026, 8, 26).date(), "macos", 60.0),
+            (datetime(2026, 8, 27).date(), "macos", 180.0),
+        ]
+    finally:
+        warehouse.close()
+
+
 def test_dbt_pairs_events_and_splits_tokyo_midnight(
     tmp_path, monkeypatch, dbt_project, raw
 ) -> None:
@@ -249,10 +346,10 @@ def test_dbt_pairs_events_and_splits_tokyo_midnight(
                 ("b-end", 60, False, False),
             ],
             [
-                ("first", None, "inferred_end_from_next_start", 60.0, False),
-                ("a-next", "b-end", "complete", 0.0, False),
+                ("first", "b-end", "complete", 60.0, False),
+                ("a-next", None, "missing_end", None, False),
             ],
-            (0.0, 60.0),
+            (60.0, 0.0),
             id="tied-start-before-end",
         ),
         pytest.param(
@@ -275,8 +372,9 @@ def test_dbt_pairs_events_and_splits_tokyo_midnight(
                 ("c-end", 0, False, False),
             ],
             [
-                ("b-start", "c-end", "complete", 0.0, False),
+                ("b-start", None, "missing_end", None, False),
                 (None, "a-end", "missing_start", None, True),
+                (None, "c-end", "missing_start", None, False),
             ],
             (0.0, 0.0),
             id="tied-unmatched-end-keeps-identity",
@@ -326,7 +424,7 @@ def test_dbt_preserves_boundary_order_and_evidence(
             warehouse.query_rows(
                 "SELECT start_event_key, end_event_key, quality, duration_seconds, "
                 "has_duplicate_source FROM base.screen_time_interval "
-                "ORDER BY started_at NULLS LAST, start_event_key"
+                "ORDER BY started_at NULLS LAST, start_event_key, end_event_key"
             )
             == expected_intervals
         )
@@ -452,7 +550,7 @@ def test_daily_totals_sum_apps_without_combining_devices(tmp_path, monkeypatch, 
         warehouse.close()
 
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
-    run_dbt(target="local", project_dir=dbt_project, selector="tag:screen_time_app_in_focus")
+    run_dbt(target="local", project_dir=dbt_project, selector="tag:screen_time")
 
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
