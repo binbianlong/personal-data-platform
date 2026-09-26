@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from personal_data_platform.raw.models import RawObject
 
 APP_IN_FOCUS_STREAM = "app-in-focus"
+APP_USAGE_STREAM = "app-usage"
 RAW_PREFIX = "raw/screen_time/v1"
 RAW_V2_PREFIX = "raw/screen_time/v2"
 _ENVELOPE_MAGIC = b"PDPST\x02"
@@ -31,9 +32,30 @@ _RAW_KEY_PATTERN = re.compile(
 )
 SCAN_RECEIPT_PREFIX = f"{RAW_PREFIX}/_control/collector/latest"
 SCAN_MANIFEST_KEY = f"{RAW_PREFIX}/_control/collector/active.json"
+MAC_SCAN_RECEIPT_PREFIX = f"{RAW_PREFIX}/_control/collector/app-usage/latest"
+MAC_SCAN_MANIFEST_KEY = f"{RAW_PREFIX}/_control/collector/app-usage/active.json"
 _SCAN_RECEIPT_KEY_PATTERN = re.compile(
     rf"^{re.escape(SCAN_RECEIPT_PREFIX)}/(?P<device_key>[0-9a-f]{{64}})\.json$"
 )
+_MAC_SCAN_RECEIPT_KEY_PATTERN = re.compile(
+    rf"^{re.escape(MAC_SCAN_RECEIPT_PREFIX)}/(?P<device_key>[0-9a-f]{{64}})\.json$"
+)
+
+
+def scan_receipt_prefix(stream: str) -> str:
+    if stream == APP_IN_FOCUS_STREAM:
+        return SCAN_RECEIPT_PREFIX
+    if stream == APP_USAGE_STREAM:
+        return MAC_SCAN_RECEIPT_PREFIX
+    raise ValueError(f"unsupported collector stream: {stream}")
+
+
+def scan_manifest_key(stream: str) -> str:
+    if stream == APP_IN_FOCUS_STREAM:
+        return SCAN_MANIFEST_KEY
+    if stream == APP_USAGE_STREAM:
+        return MAC_SCAN_MANIFEST_KEY
+    raise ValueError(f"unsupported collector stream: {stream}")
 
 
 def sha256_hex(raw_bytes: bytes) -> str:
@@ -128,11 +150,12 @@ class ScreenTimeRawIdentity:
 
 @dataclass(frozen=True, slots=True)
 class CollectorScanReceipt:
-    """Mutable liveness receipt for one pseudonymized iPhone collector scope."""
+    """Mutable liveness receipt for one pseudonymized collector scope."""
 
     device_key: str
     completed_at: datetime
     segment_count: int
+    stream: str = APP_IN_FOCUS_STREAM
 
     def __post_init__(self) -> None:
         if not _HEX_SHA256.fullmatch(self.device_key):
@@ -141,10 +164,11 @@ class CollectorScanReceipt:
             raise ValueError("scan receipt completed_at must be timezone-aware")
         if self.segment_count < 0:
             raise ValueError("scan receipt segment_count must be non-negative")
+        scan_receipt_prefix(self.stream)
 
     @property
     def key(self) -> str:
-        return f"{SCAN_RECEIPT_PREFIX}/{self.device_key}.json"
+        return f"{scan_receipt_prefix(self.stream)}/{self.device_key}.json"
 
     def to_bytes(self) -> bytes:
         return json.dumps(
@@ -162,6 +186,10 @@ class CollectorScanReceipt:
     @classmethod
     def from_bytes(cls, key: str, value: bytes) -> CollectorScanReceipt:
         match = _SCAN_RECEIPT_KEY_PATTERN.fullmatch(key)
+        stream = APP_IN_FOCUS_STREAM
+        if match is None:
+            match = _MAC_SCAN_RECEIPT_KEY_PATTERN.fullmatch(key)
+            stream = APP_USAGE_STREAM
         if match is None:
             raise ValueError(f"invalid collector scan receipt key: {key}")
         try:
@@ -172,6 +200,7 @@ class CollectorScanReceipt:
                 device_key=decoded["device_key"],
                 completed_at=datetime.fromisoformat(decoded["completed_at"]),
                 segment_count=int(decoded["segment_count"]),
+                stream=stream,
             )
         except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("invalid collector scan receipt JSON") from error
@@ -186,14 +215,20 @@ class CollectorDeviceManifest:
 
     device_keys: tuple[str, ...]
     completed_at: datetime
+    stream: str = APP_IN_FOCUS_STREAM
 
     def __post_init__(self) -> None:
-        if not self.device_keys or self.device_keys != tuple(sorted(set(self.device_keys))):
-            raise ValueError("collector device manifest keys must be non-empty, unique, and sorted")
+        if self.device_keys != tuple(sorted(set(self.device_keys))):
+            raise ValueError("collector device manifest keys must be unique and sorted")
         if any(_HEX_SHA256.fullmatch(value) is None for value in self.device_keys):
             raise ValueError("collector device manifest keys must be lowercase SHA-256 hex")
         if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
             raise ValueError("collector device manifest completed_at must be timezone-aware")
+        scan_manifest_key(self.stream)
+
+    @property
+    def key(self) -> str:
+        return scan_manifest_key(self.stream)
 
     def to_bytes(self) -> bytes:
         return json.dumps(
@@ -208,7 +243,9 @@ class CollectorDeviceManifest:
         ).encode()
 
     @classmethod
-    def from_bytes(cls, value: bytes) -> CollectorDeviceManifest:
+    def from_bytes(
+        cls, value: bytes, *, stream: str = APP_IN_FOCUS_STREAM
+    ) -> CollectorDeviceManifest:
         try:
             decoded = json.loads(value)
             if decoded.get("schema_version") != 1 or decoded.get("status") != "succeeded":
@@ -221,6 +258,7 @@ class CollectorDeviceManifest:
             return cls(
                 device_keys=tuple(raw_device_keys),
                 completed_at=datetime.fromisoformat(decoded["completed_at"]),
+                stream=stream,
             )
         except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("invalid collector device manifest JSON") from error
@@ -252,7 +290,10 @@ def validate_raw_object_key(key: str) -> None:
 
 def is_scan_receipt_key(key: str) -> bool:
     """Return whether a key is a canonical current collector receipt."""
-    return _SCAN_RECEIPT_KEY_PATTERN.fullmatch(key) is not None
+    return (
+        _SCAN_RECEIPT_KEY_PATTERN.fullmatch(key) is not None
+        or _MAC_SCAN_RECEIPT_KEY_PATTERN.fullmatch(key) is not None
+    )
 
 
 def _match_raw_object_key(key: str) -> re.Match[str]:

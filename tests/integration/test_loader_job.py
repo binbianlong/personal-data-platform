@@ -8,7 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from personal_data_platform.loader.job import JobAlreadyRunning, run_loader, run_loader_from_env
+from personal_data_platform.loader.job import (
+    JobAlreadyRunning,
+    run_loader,
+    run_loader_all,
+    run_loader_from_env,
+)
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.screen_time.raw import (
     ScreenTimeRawIdentity,
@@ -30,6 +35,112 @@ class _Repository:
     def get_raw(self, key: str, *, generation: int) -> bytes:
         self.get_calls.append((key, generation))
         return self.objects[key]
+
+
+def test_all_streams_loader_holds_one_lease_and_processes_both(tmp_path, monkeypatch) -> None:
+    from personal_data_platform.sources.registry import get_source
+
+    now = datetime(2026, 8, 27, tzinfo=UTC)
+    phone = _raw("phone", b"phone", now)
+    mac = replace(
+        _raw("mac", b"mac", now),
+        key="raw/screen_time/v1/"
+        + "b" * 64
+        + "/app-usage/"
+        + "c" * 64
+        + "/20260827T000000000000Z/"
+        + hashlib.sha256(b"mac").hexdigest()
+        + ".segb.gz",
+        stream="app-usage",
+        subject_key="b" * 64,
+        logical_key="c" * 64,
+    )
+    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "both.duckdb"))))
+    warehouse.migrate()
+    seen_leases = []
+
+    class CheckedRepository(_Repository):
+        def get_raw(self, key, *, generation):
+            seen_leases.append(
+                warehouse.query_value("SELECT count(*) FROM ops.job_lock WHERE job_name = 'loader'")
+            )
+            return super().get_raw(key, generation=generation)
+
+    repositories = {
+        "app-in-focus": CheckedRepository([phone], {phone.key: gzip.compress(b"phone")}),
+        "app-usage": CheckedRepository([mac], {mac.key: gzip.compress(b"mac")}),
+    }
+    monkeypatch.setattr(
+        "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",
+        lambda raw, segment, **kwargs: [],
+    )
+    try:
+        sources = tuple(
+            get_source("screen_time", stream) for stream in ("app-in-focus", "app-usage")
+        )
+        summary = run_loader_all(
+            sources,
+            warehouse=warehouse,
+            repository_factory=lambda source: repositories[source.stream],
+        )
+        assert summary.succeeded == 2 and summary.failed == 0
+        assert seen_leases == [1, 1]
+        assert (
+            warehouse.query_value("SELECT count(*) FROM ops.job_lock WHERE job_name = 'loader'")
+            == 0
+        )
+    finally:
+        warehouse.close()
+
+
+def test_all_streams_loader_attempts_mac_after_iphone_inventory_failure(
+    tmp_path, monkeypatch
+) -> None:
+    from personal_data_platform.sources.registry import get_source
+
+    now = datetime(2026, 8, 27, tzinfo=UTC)
+    mac_content = b"mac"
+    mac = replace(
+        _raw("mac", mac_content, now),
+        key="raw/screen_time/v1/"
+        + "b" * 64
+        + "/app-usage/"
+        + "c" * 64
+        + "/20260827T000000000000Z/"
+        + hashlib.sha256(mac_content).hexdigest()
+        + ".segb.gz",
+        stream="app-usage",
+        subject_key="b" * 64,
+        logical_key="c" * 64,
+    )
+
+    class FailedRepository:
+        def list_raw(self, _prefix):
+            raise RuntimeError("synthetic inventory failure")
+
+    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "failure.duckdb"))))
+    warehouse.migrate()
+    monkeypatch.setattr(
+        "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",
+        lambda raw, segment, **kwargs: [],
+    )
+    sources = tuple(get_source("screen_time", stream) for stream in ("app-in-focus", "app-usage"))
+    repositories = {
+        "app-in-focus": FailedRepository(),
+        "app-usage": _Repository([mac], {mac.key: gzip.compress(mac_content)}),
+    }
+    try:
+        summary = run_loader_all(
+            sources,
+            warehouse=warehouse,
+            repository_factory=lambda source: repositories[source.stream],
+        )
+        assert summary.failed == 1 and summary.succeeded == 1
+        assert warehouse.ingestion_counts(source_id="screen_time", stream="app-usage") == {
+            "succeeded": 1
+        }
+    finally:
+        warehouse.close()
 
 
 def test_scheduled_loader_skips_when_another_run_holds_the_lease(tmp_path, monkeypatch) -> None:

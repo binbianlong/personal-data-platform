@@ -1,4 +1,4 @@
-"""Collector for iPhone App.InFocus segments synced to macOS Biome."""
+"""Collector for iPhone App.InFocus and local Mac AppUsage segments."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from personal_data_platform.sources.screen_time.raw import (
     APP_IN_FOCUS_STREAM,
+    APP_USAGE_STREAM,
     CollectorDeviceManifest,
     CollectorScanReceipt,
     build_device_key,
@@ -43,7 +44,7 @@ class CompressedRawUploader(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class IPhoneDevice:
-    """An iPhone row selected from Biome's DevicePeer table."""
+    """A selected row from Biome's DevicePeer table."""
 
     identifier: str
     name: str | None
@@ -59,6 +60,7 @@ class DeviceSummary:
     model: str | None
     stream_directory_exists: bool
     allowed: bool
+    platform: str = "ios"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +81,13 @@ class BiomeScreenTimeSource:
     def __init__(self, *, sync_db_path: Path, remote_dir: Path) -> None:
         self.sync_db_path = sync_db_path
         self.remote_dir = remote_dir
+
+    raw_stream = APP_IN_FOCUS_STREAM
+    segment_stream = "App.InFocus"
+    platform = "ios"
+
+    def list_devices(self) -> list[IPhoneDevice]:
+        return self.list_iphone_devices()
 
     def list_iphone_devices(self) -> list[IPhoneDevice]:
         if not self.sync_db_path.is_file():
@@ -109,6 +118,43 @@ class BiomeScreenTimeSource:
     def list_segments(self, device: IPhoneDevice) -> list[tuple[Path, str]]:
         directory = self.device_directory(device)
         return list_segment_files(directory)
+
+
+class BiomeMacAppUsageSource:
+    """Read the single local Mac DevicePeer and its AppUsage stream."""
+
+    raw_stream = APP_USAGE_STREAM
+    segment_stream = "ScreenTime.AppUsage"
+    platform = "macos"
+
+    def __init__(self, *, sync_db_path: Path, local_dir: Path) -> None:
+        self.sync_db_path = sync_db_path
+        self.local_dir = local_dir
+
+    def list_devices(self) -> list[IPhoneDevice]:
+        if not self.sync_db_path.is_file():
+            raise CollectorSourceError(f"Biome sync database is not readable: {self.sync_db_path}")
+        uri = f"file:{quote(str(self.sync_db_path), safe='/')}?mode=ro"
+        try:
+            with sqlite3.connect(uri, uri=True) as connection:
+                rows = connection.execute(
+                    """SELECT device_identifier, name, model FROM DevicePeer
+                    WHERE platform = 3 AND me = 1"""
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise CollectorSourceError(f"failed to read local Mac DevicePeer: {error}") from error
+        if len(rows) != 1:
+            raise CollectorSourceError("expected exactly one platform=3 me=1 Mac in Biome sync.db")
+        identifier, name, model = rows[0]
+        _validate_device_identifier(identifier)
+        return [IPhoneDevice(identifier=identifier, name=name, model=model)]
+
+    def device_directory(self, device: IPhoneDevice) -> Path:
+        _validate_device_identifier(device.identifier)
+        return self.local_dir
+
+    def list_segments(self, device: IPhoneDevice) -> list[tuple[Path, str]]:
+        return list_segment_files(self.device_directory(device))
 
 
 def list_segment_files(directory: Path) -> list[tuple[Path, str]]:
@@ -154,7 +200,7 @@ class ScreenTimeCollector:
     def __init__(
         self,
         *,
-        source: BiomeScreenTimeSource,
+        source: BiomeScreenTimeSource | BiomeMacAppUsageSource,
         state: CollectorState,
         uploader: CompressedRawUploader,
         pseudonym_key: bytes,
@@ -168,8 +214,12 @@ class ScreenTimeCollector:
         self._allowed_device_keys = allowed_device_keys
         self._clock = clock or (lambda: datetime.now(UTC))
 
+    @property
+    def stream(self) -> str:
+        return self._source.raw_stream
+
     def devices(self) -> list[DeviceSummary]:
-        """List iPhones without exposing their stable Apple identifiers."""
+        """List selected devices without exposing their stable Apple identifiers."""
         return [
             DeviceSummary(
                 device_key=build_device_key(self._pseudonym_key, device.identifier),
@@ -180,23 +230,24 @@ class ScreenTimeCollector:
                     build_device_key(self._pseudonym_key, device.identifier)
                     in self._allowed_device_keys
                 ),
+                platform=self._source.platform,
             )
-            for device in self._source.list_iphone_devices()
+            for device in self._source.list_devices()
         ]
 
     def collect_once(self) -> CollectionStats:
-        """Retry durable pending uploads, then scan every current iPhone segment."""
+        """Retry this stream's pending uploads, then scan its completed segments."""
         if not self._allowed_device_keys:
             raise CollectorSourceError("Screen Time device allowlist is empty")
         retried = 0
         uploaded = 0
-        for pending_observation in self._state.pending():
+        for pending_observation in self._state.pending(stream=self._source.raw_stream):
             # The observation was allowlisted when this durable upload intent was created.
             self._upload(pending_observation)
             retried += 1
             uploaded += 1
 
-        discovered_devices = self._source.list_iphone_devices()
+        discovered_devices = self._source.list_devices()
         devices = [
             device
             for device in discovered_devices
@@ -204,7 +255,7 @@ class ScreenTimeCollector:
         ]
         if not devices:
             raise CollectorSourceError(
-                "no allowlisted platform=2 iPhone devices found in Biome sync.db"
+                f"no allowlisted {self._source.platform} devices found in Biome sync.db"
             )
 
         missing_directories = [
@@ -212,7 +263,7 @@ class ScreenTimeCollector:
         ]
         if missing_directories:
             raise CollectorSourceError(
-                "App.InFocus directory is missing for "
+                f"{self._source.segment_stream} directory is missing for "
                 f"{len(missing_directories)} allowlisted device(s)"
             )
 
@@ -231,12 +282,12 @@ class ScreenTimeCollector:
                 segment_key = build_segment_key(
                     self._pseudonym_key,
                     device_identifier=device.identifier,
-                    stream="App.InFocus",
+                    stream=self._source.segment_stream,
                     relative_path=relative_path,
                 )
                 observation = self._state.prepare(
                     device_key=device_key,
-                    stream=APP_IN_FOCUS_STREAM,
+                    stream=self._source.raw_stream,
                     segment_key=segment_key,
                     raw_bytes=encode_segment_envelope(
                         raw_bytes,
@@ -269,12 +320,14 @@ class ScreenTimeCollector:
                     device_key=device_key,
                     completed_at=completed_at,
                     segment_count=device_segment_counts[device_key],
+                    stream=self._source.raw_stream,
                 )
             )
         self._uploader.put_device_manifest(
             CollectorDeviceManifest(
                 device_keys=tuple(sorted(self._allowed_device_keys)),
                 completed_at=completed_at,
+                stream=self._source.raw_stream,
             )
         )
         self._state.record_successful_scan(

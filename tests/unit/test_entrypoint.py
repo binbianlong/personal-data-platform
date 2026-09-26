@@ -1,5 +1,7 @@
+import sqlite3
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +27,45 @@ def test_runtime_exception_returns_nonzero(monkeypatch, capsys) -> None:
     assert "synthetic failure" in capsys.readouterr().err
 
 
+def test_collection_exception_group_prints_stream_and_nested_cause(monkeypatch, capsys) -> None:
+    def fail(_args):
+        raise ExceptionGroup(
+            "Screen Time collection failed",
+            [RuntimeError("app-usage: synthetic upload failure")],
+        )
+
+    monkeypatch.setattr(cli, "_dispatch", fail)
+    assert main(["screen-time", "collect", "--once"]) == 1
+    assert "app-usage: synthetic upload failure" in capsys.readouterr().err
+
+
+def test_devices_still_lists_iphone_when_local_mac_row_is_missing(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from personal_data_platform.sources.screen_time.config import CollectorConfig
+
+    sync_db = tmp_path / "sync.db"
+    with sqlite3.connect(sync_db) as connection:
+        connection.execute(
+            "CREATE TABLE DevicePeer (device_identifier TEXT, name TEXT, model TEXT, platform INT, me INT)"
+        )
+        connection.execute("INSERT INTO DevicePeer VALUES ('phone', 'Phone', 'P', 2, 0)")
+    config = CollectorConfig(
+        sync_db_path=sync_db,
+        app_in_focus_remote_dir=tmp_path / "remote",
+        state_db_path=tmp_path / "state.db",
+        pseudonym_key=b"x" * 32,
+        device_allowlist=frozenset(),
+        mac_app_usage_local_dir=tmp_path / "local",
+    )
+    monkeypatch.setattr(cli.CollectorConfig, "from_env", lambda **_kwargs: config)
+
+    assert main(["screen-time", "devices"]) == 0
+    output = capsys.readouterr()
+    assert '"platform": "ios"' in output.out
+    assert "expected exactly one" in output.err
+
+
 def test_loader_command_lazily_calls_job(monkeypatch) -> None:
     calls = []
     fake_module = types.ModuleType("personal_data_platform.loader.job")
@@ -39,6 +80,43 @@ def test_loader_command_lazily_calls_job(monkeypatch) -> None:
 
     assert main(["loader"]) == 0
     assert calls == ["loader"]
+
+
+@pytest.mark.parametrize(
+    ("command", "module_name", "function_name", "extra"),
+    [
+        ("loader", "personal_data_platform.loader.job", "run_loader_from_env", []),
+        (
+            "reconciliation",
+            "personal_data_platform.reconciliation.job",
+            "run_reconciliation_from_env",
+            [],
+        ),
+        (
+            "rebuild",
+            "personal_data_platform.recovery.rebuild",
+            "run_rebuild_from_env",
+            ["--dry-run"],
+        ),
+    ],
+)
+def test_all_streams_flag_reaches_runtime_job(
+    monkeypatch, command, module_name, function_name, extra
+) -> None:
+    calls = []
+    fake_module = types.ModuleType(module_name)
+
+    def run_job(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    setattr(fake_module, function_name, run_job)
+    monkeypatch.setitem(sys.modules, module_name, fake_module)
+
+    assert main([command, *extra, "--source", "screen_time", "--all-streams"]) == 0
+    assert calls[0]["all_streams"] is True
+    assert calls[0]["source_id"] == "screen_time"
+    assert calls[0]["stream"] is None
 
 
 def test_dbt_command_lazily_calls_job(monkeypatch) -> None:

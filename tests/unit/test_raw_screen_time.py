@@ -13,6 +13,38 @@ from personal_data_platform.sources.screen_time.raw import (
     sha256_hex,
 )
 
+
+def test_mac_control_keys_are_separate_from_iphone() -> None:
+    from datetime import UTC, datetime
+
+    from personal_data_platform.sources.screen_time.raw import (
+        CollectorDeviceManifest,
+        CollectorScanReceipt,
+    )
+
+    now = datetime(2026, 9, 26, tzinfo=UTC)
+    device_key = "a" * 64
+    receipt = CollectorScanReceipt(device_key, now, 1, stream="app-usage")
+    manifest = CollectorDeviceManifest((device_key,), now, stream="app-usage")
+
+    assert (
+        receipt.key == f"raw/screen_time/v1/_control/collector/app-usage/latest/{device_key}.json"
+    )
+    assert manifest.key == "raw/screen_time/v1/_control/collector/app-usage/active.json"
+    assert CollectorScanReceipt.from_bytes(receipt.key, receipt.to_bytes()) == receipt
+    assert CollectorDeviceManifest.from_bytes(manifest.to_bytes(), stream="app-usage") == manifest
+
+
+def test_empty_manifest_represents_explicitly_disabled_stream() -> None:
+    from personal_data_platform.sources.screen_time.raw import CollectorDeviceManifest
+
+    now = datetime(2026, 9, 26, tzinfo=UTC)
+    manifest = CollectorDeviceManifest((), now, stream="app-usage")
+    assert CollectorDeviceManifest.from_bytes(manifest.to_bytes(), stream="app-usage") == manifest
+    iphone_manifest = CollectorDeviceManifest((), now)
+    assert CollectorDeviceManifest.from_bytes(iphone_manifest.to_bytes()) == iphone_manifest
+
+
 SECRET = bytes.fromhex("11" * 32)
 OBSERVED_AT = datetime(2026, 8, 27, 1, 2, 3, 456789, tzinfo=UTC)
 

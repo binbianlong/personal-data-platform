@@ -24,7 +24,12 @@ class _CollectorRepository(Protocol):
 
 
 def audit_source(
-    repository: RawRepository, observations: Sequence[RawObject], now: datetime
+    repository: RawRepository,
+    observations: Sequence[RawObject],
+    now: datetime,
+    *,
+    allow_inactive: bool = False,
+    allow_unconfigured_empty: bool = False,
 ) -> SourceHealth:
     collector = cast(_CollectorRepository, repository)
     raw_device_keys = {value.subject_key for value in observations}
@@ -51,14 +56,28 @@ def audit_source(
         device_manifest.completed_at < now - COLLECTOR_FRESHNESS
         or device_manifest.completed_at > now + MAX_CLOCK_SKEW
     )
+    never_activated = (
+        allow_unconfigured_empty
+        and device_manifest is None
+        and not raw_device_keys
+        and not receipts
+    )
+    explicitly_inactive = (
+        allow_inactive and device_manifest is not None and not configured_device_keys
+    )
     return SourceHealth(
         ok=(
-            device_manifest is not None
-            and not manifest_stale
-            and not missing_receipt_devices
-            and not stale_receipts
+            never_activated
+            or explicitly_inactive
+            or (
+                device_manifest is not None
+                and not manifest_stale
+                and not missing_receipt_devices
+                and not stale_receipts
+            )
         ),
         details={
+            "collector_inactive": bool(never_activated or explicitly_inactive),
             "collector_receipt_count": len(receipts),
             "collector_manifest_present": device_manifest is not None,
             "collector_manifest_stale": manifest_stale,

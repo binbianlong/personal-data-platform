@@ -1,4 +1,4 @@
-"""Screen Time App.InFocus ingestion and recovery contract."""
+"""Screen Time stream ingestion and recovery contracts."""
 
 from __future__ import annotations
 
@@ -9,9 +9,10 @@ from datetime import datetime
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import DecodedBatch, RawRepository, SourceHealth
 
-from .parser import PARSER_VERSION, parse_segb_bytes
+from .parser import MAC_APP_USAGE_PARSER_VERSION, PARSER_VERSION, parse_segb_bytes
 from .raw import (
     APP_IN_FOCUS_STREAM,
+    APP_USAGE_STREAM,
     RAW_PREFIX,
     RAW_V2_PREFIX,
     decode_segment_envelope,
@@ -38,10 +39,12 @@ class ScreenTimeSource:
     )
     retention_days = 90
     lifecycle_grace_days = 3
-    dbt_selector = "tag:screen_time_app_in_focus"
+    dbt_selector = "tag:screen_time"
     monitor_name = "screen_time_reconciliation"
 
-    def __init__(self, *, known_streams: tuple[str, ...] = (APP_IN_FOCUS_STREAM,)) -> None:
+    def __init__(
+        self, *, known_streams: tuple[str, ...] = (APP_IN_FOCUS_STREAM, APP_USAGE_STREAM)
+    ) -> None:
         self._known_streams = known_streams
 
     def validate_raw_key(self, key: str) -> None:
@@ -82,6 +85,7 @@ class ScreenTimeSource:
             records,
             source_segment_name=name,
             segment_kind=kind,
+            parser_version_override=self.parser_version,
         )
 
     def repository_from_env(self) -> RawRepository:
@@ -94,7 +98,13 @@ class ScreenTimeSource:
     ) -> SourceHealth:
         from .audit import audit_source
 
-        return audit_source(repository, observations, now)
+        return audit_source(
+            repository,
+            observations,
+            now,
+            allow_inactive=True,
+            allow_unconfigured_empty=self.stream == APP_USAGE_STREAM,
+        )
 
     def inventory(self, observations: Sequence[RawObject]) -> dict[str, object]:
         return {
@@ -103,3 +113,11 @@ class ScreenTimeSource:
                 {(raw.subject_key, raw.stream, raw.logical_key) for raw in observations}
             ),
         }
+
+
+class MacAppUsageSource(ScreenTimeSource):
+    """Read Mac AppUsage observations in the shared Screen Time Raw format."""
+
+    stream = APP_USAGE_STREAM
+    parser_version = MAC_APP_USAGE_PARSER_VERSION
+    monitor_name = "screen_time_app_usage_reconciliation"

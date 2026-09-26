@@ -9,7 +9,42 @@ from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.loader.job import run_loader
 from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-from tests.screen_time_helpers import Repository, event, segb, tombstone
+from tests.screen_time_helpers import Repository, event, mac_usage_event, segb, tombstone
+
+
+def test_mac_tombstone_does_not_delete_iphone_event_in_another_stream() -> None:
+    from personal_data_platform.sources.registry import get_source
+
+    phone_repository = Repository()
+    mac_repository = Repository()
+    phone_repository.add("100", segb(event("shared.app"))[0])
+    mac_payload = mac_usage_event("shared.app", 1_789_000_000.0, start=True)
+    mac_segment, offset = segb(mac_payload)
+    mac_repository.add("100", mac_segment, stream="app-usage")
+    mac_repository.add(
+        "200",
+        segb(tombstone("100", offset, len(mac_payload)))[0],
+        kind="tombstones",
+        stream="app-usage",
+    )
+    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    try:
+        warehouse.migrate()
+        assert run_loader(phone_repository, warehouse).failed == 0
+        assert (
+            run_loader(
+                mac_repository, warehouse, source=get_source("screen_time", "app-usage")
+            ).failed
+            == 0
+        )
+        assert warehouse.query_rows(
+            "SELECT platform, is_active FROM base.screen_time_event ORDER BY platform"
+        ) == [("ios", True), ("macos", False)]
+        assert warehouse.query_rows("SELECT resolution FROM ops.screen_time_tombstone") == [
+            ("user_deletion_applied",)
+        ]
+    finally:
+        warehouse.close()
 
 
 def test_user_deletions_ttl_history_and_reused_positions(tmp_path, monkeypatch):

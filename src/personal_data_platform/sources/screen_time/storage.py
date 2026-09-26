@@ -11,13 +11,13 @@ from personal_data_platform.storage.gcs import GCSRawRepository
 from personal_data_platform.storage.gcs_types import GCSClient
 
 from .raw import (
-    SCAN_MANIFEST_KEY,
-    SCAN_RECEIPT_PREFIX,
     CollectorDeviceManifest,
     CollectorScanReceipt,
     ScreenTimeRawIdentity,
     gzip_raw_bytes,
     is_scan_receipt_key,
+    scan_manifest_key,
+    scan_receipt_prefix,
     sha256_hex,
 )
 
@@ -64,14 +64,15 @@ class ScreenTimeGCSRepository(GCSRawRepository):
 
     def put_device_manifest(self, manifest: CollectorDeviceManifest) -> None:
         """Replace the fixed registry of active pseudonymized devices."""
-        self._bucket.blob(SCAN_MANIFEST_KEY).upload_from_string(
+        self._bucket.blob(manifest.key).upload_from_string(
             manifest.to_bytes(), content_type="application/json"
         )
 
     def list_scan_receipts(self) -> list[CollectorScanReceipt]:
         """Return each current collector liveness receipt."""
         keys: set[str] = set()
-        iterator = self._client.list_blobs(self._bucket, prefix=f"{SCAN_RECEIPT_PREFIX}/")
+        stream = self._source.stream
+        iterator = self._client.list_blobs(self._bucket, prefix=f"{scan_receipt_prefix(stream)}/")
         for page in iterator.pages:
             for blob in page:
                 if is_scan_receipt_key(blob.name):
@@ -86,7 +87,9 @@ class ScreenTimeGCSRepository(GCSRawRepository):
     def get_device_manifest(self) -> CollectorDeviceManifest | None:
         """Return the current expected-device registry, or None when absent."""
         try:
-            value = self._bucket.blob(SCAN_MANIFEST_KEY).download_as_bytes(raw_download=True)
+            value = self._bucket.blob(scan_manifest_key(self._source.stream)).download_as_bytes(
+                raw_download=True
+            )
         except NotFound:
             return None
-        return CollectorDeviceManifest.from_bytes(value)
+        return CollectorDeviceManifest.from_bytes(value, stream=self._source.stream)

@@ -18,7 +18,7 @@ from personal_data_platform.sources.contracts import (
     selected_prefixes,
     validate_runtime_policy,
 )
-from personal_data_platform.sources.registry import get_source
+from personal_data_platform.sources.registry import get_source, get_sources
 from personal_data_platform.storage.motherduck import (
     IngestionState,
     Warehouse,
@@ -280,7 +280,9 @@ def run_reconciliation(
     return result
 
 
-def run_reconciliation_from_env(*, source_id: str | None = None, stream: str | None = None) -> int:
+def run_reconciliation_from_env(
+    *, source_id: str | None = None, stream: str | None = None, all_streams: bool = False
+) -> int:
 
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
     monitoring_mode = os.environ.get("PDP_RECONCILIATION_MONITORING_MODE", "http")
@@ -295,9 +297,14 @@ def run_reconciliation_from_env(*, source_id: str | None = None, stream: str | N
         raise ValueError("RECONCILIATION_HEARTBEAT_URL is required")
     else:
         raise ValueError("PDP_RECONCILIATION_MONITORING_MODE must be http or cloud_monitoring")
-    source = get_source(source_id=source_id, stream=stream)
-    validate_runtime_policy(source)
-    repository = source.repository_from_env()
+    sources = (
+        get_sources(source_id, stream, all_streams=True)
+        if all_streams
+        else (get_source(source_id=source_id, stream=stream),)
+    )
+    for source in sources:
+        validate_runtime_policy(source)
+    repository = None if all_streams else sources[0].repository_from_env()
     warehouse = Warehouse(connect(WarehouseConfig.from_env()))
     try:
         warehouse.migrate()
@@ -307,26 +314,46 @@ def run_reconciliation_from_env(*, source_id: str | None = None, stream: str | N
         ):
             raise RuntimeError("reconciliation already has an unexpired job lease")
         try:
-            result = run_reconciliation(
-                repository,
-                warehouse,
-                heartbeat=heartbeat,
-                source=source,
-            )
+            failed = False
+            for source in sources:
+                try:
+                    selected_repository = (
+                        source.repository_from_env() if all_streams else repository
+                    )
+                    if selected_repository is None:  # guarded by the source selection above
+                        raise RuntimeError("reconciliation repository is unavailable")
+                    result = run_reconciliation(
+                        selected_repository,
+                        warehouse,
+                        heartbeat=heartbeat,
+                        source=source,
+                    )
+                except Exception:
+                    if not all_streams:
+                        raise
+                    LOGGER.exception(
+                        "reconciliation failed source=%s stream=%s", source.source_id, source.stream
+                    )
+                    failed = True
+                    if not warehouse.connection_usable:
+                        break
+                    continue
+                LOGGER.info(
+                    "reconciliation status=%s raw=%d loaded=%d missing=%d failed=%d "
+                    "orphaned=%d source=%s stream=%s",
+                    result.status,
+                    result.raw_object_count,
+                    result.loaded_object_count,
+                    result.missing_object_count,
+                    result.failed_object_count,
+                    result.orphaned_loaded_object_count,
+                    source.source_id,
+                    source.stream,
+                )
+                failed = failed or not result.ok
         finally:
-            warehouse.release_job_lock("reconciliation", owner_id)
-        LOGGER.info(
-            "reconciliation status=%s raw=%d loaded=%d missing=%d failed=%d "
-            "orphaned=%d source=%s stream=%s",
-            result.status,
-            result.raw_object_count,
-            result.loaded_object_count,
-            result.missing_object_count,
-            result.failed_object_count,
-            result.orphaned_loaded_object_count,
-            source.source_id,
-            source.stream,
-        )
-        return 0 if result.ok else 1
+            if warehouse.connection_usable:
+                warehouse.release_job_lock("reconciliation", owner_id)
+        return 1 if failed else 0
     finally:
         warehouse.close()

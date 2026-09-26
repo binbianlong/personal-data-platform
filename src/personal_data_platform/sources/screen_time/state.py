@@ -157,7 +157,7 @@ class CollectorState:
                 created=True,
             )
 
-    def pending(self) -> list[PendingObservation]:
+    def pending(self, *, stream: str | None = None) -> list[PendingObservation]:
         """Return durable upload intents in their original creation order."""
         with self._connect() as connection:
             rows = connection.execute(
@@ -165,9 +165,10 @@ class CollectorState:
                 SELECT device_key, stream, segment_key, observed_at, sha256,
                        object_key, compressed_payload
                 FROM segment_observation
-                WHERE status = 'pending'
+                WHERE status = 'pending' AND (? IS NULL OR stream = ?)
                 ORDER BY id
-                """
+                """,
+                (stream, stream),
             ).fetchall()
         pending: list[PendingObservation] = []
         for row in rows:

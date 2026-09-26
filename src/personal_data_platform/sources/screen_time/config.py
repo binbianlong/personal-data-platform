@@ -1,4 +1,4 @@
-"""Local iPhone Screen Time collection settings and credentials."""
+"""Local Screen Time collection settings and credentials."""
 
 from __future__ import annotations
 
@@ -58,6 +58,8 @@ class CollectorConfig:
     pseudonym_key: bytes
     device_allowlist: frozenset[str]
     gcs: GCSConfig | None = None
+    mac_device_key: str | None = None
+    mac_app_usage_local_dir: Path | None = None
 
     @classmethod
     def from_env(
@@ -95,8 +97,18 @@ class CollectorConfig:
             raise ConfigurationError(
                 "PDP_SCREEN_TIME_DEVICE_ALLOWLIST must contain lowercase HMAC-SHA-256 keys"
             )
-        if require_allowlist and not allowlist:
-            raise ConfigurationError("PDP_SCREEN_TIME_DEVICE_ALLOWLIST is required")
+        mac_device_key = values.get("PDP_SCREEN_TIME_MAC_DEVICE_KEY", "").strip() or None
+        if mac_device_key is not None and (
+            len(mac_device_key) != 64
+            or any(character not in "0123456789abcdef" for character in mac_device_key)
+        ):
+            raise ConfigurationError(
+                "PDP_SCREEN_TIME_MAC_DEVICE_KEY must be a lowercase HMAC-SHA-256 key"
+            )
+        if require_allowlist and not (allowlist or mac_device_key):
+            raise ConfigurationError(
+                "PDP_SCREEN_TIME_DEVICE_ALLOWLIST or PDP_SCREEN_TIME_MAC_DEVICE_KEY is required"
+            )
 
         return cls(
             sync_db_path=Path(
@@ -117,6 +129,13 @@ class CollectorConfig:
             pseudonym_key=pseudonym_key,
             device_allowlist=allowlist,
             gcs=GCSConfig.from_env(values) if require_gcs else None,
+            mac_device_key=mac_device_key,
+            mac_app_usage_local_dir=Path(
+                values.get(
+                    "PDP_MAC_APP_USAGE_LOCAL_DIR",
+                    library / "Biome/streams/restricted/ScreenTime.AppUsage/local",
+                )
+            ).expanduser(),
         )
 
 

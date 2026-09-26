@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import uuid
+from collections.abc import Callable, Iterable
 from dataclasses import asdict
 
 from personal_data_platform.raw.models import RawObject
@@ -16,7 +17,7 @@ from personal_data_platform.sources.contracts import (
     list_source_raw,
     validate_runtime_policy,
 )
-from personal_data_platform.sources.registry import get_source
+from personal_data_platform.sources.registry import get_source, get_sources
 from personal_data_platform.storage.motherduck import (
     Warehouse,
     WarehouseConfig,
@@ -55,6 +56,7 @@ def run_loader(
     *,
     source: SourceAdapter | None = None,
     prefix: str | None = None,
+    _lease_owner: str | None = None,
 ) -> LoadSummary:
     """Load pending observations for one source and stream across supported schemas."""
     source = source or get_source()
@@ -64,7 +66,10 @@ def run_loader(
     run_id = str(uuid.uuid4())
     # All source streams share one warehouse write lease. Source selection does not
     # change the database's concurrency contract.
-    if not warehouse.acquire_job_lock("loader", run_id, lease_seconds=LOADER_LEASE_SECONDS):
+    own_lease = _lease_owner is None
+    if own_lease and not warehouse.acquire_job_lock(
+        "loader", run_id, lease_seconds=LOADER_LEASE_SECONDS
+    ):
         raise JobAlreadyRunning("loader already has an unexpired job lease")
     succeeded = 0
     failed = 0
@@ -111,33 +116,89 @@ def run_loader(
             )
         raise
     finally:
-        if warehouse.connection_usable:
+        if own_lease and warehouse.connection_usable:
             warehouse.release_job_lock("loader", run_id)
 
 
-def run_loader_from_env(*, source_id: str | None = None, stream: str | None = None) -> int:
+def run_loader_all(
+    sources: Iterable[SourceAdapter],
+    *,
+    warehouse: Warehouse,
+    repository_factory: Callable[[SourceAdapter], RawRepository],
+) -> LoadSummary:
+    """Keep one loader lease while attempting every registered stream."""
+    owner_id = str(uuid.uuid4())
+    if not warehouse.acquire_job_lock("loader", owner_id, lease_seconds=LOADER_LEASE_SECONDS):
+        raise JobAlreadyRunning("loader already has an unexpired job lease")
+    totals = LoadSummary(discovered=0, skipped=0, succeeded=0, failed=0, records=0)
+    try:
+        for source in sources:
+            try:
+                summary = run_loader(
+                    repository_factory(source), warehouse, source=source, _lease_owner=owner_id
+                )
+            except Exception:
+                LOGGER.exception(
+                    "failed to load source=%s stream=%s", source.source_id, source.stream
+                )
+                totals = LoadSummary(
+                    discovered=totals.discovered,
+                    skipped=totals.skipped,
+                    succeeded=totals.succeeded,
+                    failed=totals.failed + 1,
+                    records=totals.records,
+                )
+                if not warehouse.connection_usable:
+                    break
+                continue
+            totals = LoadSummary(
+                discovered=totals.discovered + summary.discovered,
+                skipped=totals.skipped + summary.skipped,
+                succeeded=totals.succeeded + summary.succeeded,
+                failed=totals.failed + summary.failed,
+                records=totals.records + summary.records,
+            )
+        return totals
+    finally:
+        if warehouse.connection_usable:
+            warehouse.release_job_lock("loader", owner_id)
+
+
+def run_loader_from_env(
+    *, source_id: str | None = None, stream: str | None = None, all_streams: bool = False
+) -> int:
     """Runtime entrypoint used by a source-scoped Cloud Run loader job."""
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    source = get_source(source_id, stream)
-    validate_runtime_policy(source)
-    repository = source.repository_from_env()
+    sources = (
+        get_sources(source_id, stream, all_streams=True)
+        if all_streams
+        else (get_source(source_id, stream),)
+    )
+    for source in sources:
+        validate_runtime_policy(source)
     warehouse = Warehouse(connect(WarehouseConfig.from_env()))
     try:
         warehouse.migrate()
         try:
-            summary = run_loader(repository, warehouse, source=source)
+            if all_streams:
+                summary = run_loader_all(
+                    sources,
+                    warehouse=warehouse,
+                    repository_factory=lambda source: source.repository_from_env(),
+                )
+            else:
+                summary = run_loader(sources[0].repository_from_env(), warehouse, source=sources[0])
         except JobAlreadyRunning:
             LOGGER.info(
-                "loader skipped source=%s stream=%s: another run is active",
-                source.source_id,
-                source.stream,
+                "loader skipped source=%s: another run is active",
+                sources[0].source_id,
             )
             return 0
         LOGGER.info(
-            "loader complete source=%s stream=%s discovered=%d skipped=%d "
+            "loader complete source=%s streams=%s discovered=%d skipped=%d "
             "succeeded=%d failed=%d records=%d",
-            source.source_id,
-            source.stream,
+            sources[0].source_id,
+            ",".join(source.stream for source in sources),
             summary.discovered,
             summary.skipped,
             summary.succeeded,
