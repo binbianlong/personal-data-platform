@@ -2,7 +2,7 @@
 
 ## System of record
 
-GCSをsourceごとの保持期間内のRaw System of Recordとする。iPhone Screen Timeは90日である。
+GCSをsourceごとの保持期間内のRaw System of Recordとする。iPhoneとMacのScreen Timeは90日である。
 Rawはsourceから取得した内容をlosslessに保持し、長期分析履歴はMotherDuckが保持する。Lifecycle削除後のRawは
 復元できず、MotherDuckの全損時に全期間をRawだけから再構築できるとは保証しない。
 
@@ -14,8 +14,8 @@ Raw objectは次の性質を持つ。
 - object keyだけからsource、schema version、logical scope、観測順、content identityを復元できる。
 - Rawごとのsidecar metadata JSONと永続Parquet中間層は作らない。
 
-取得処理の稼働確認用control objectはsourceが所有し、再構築の入力には使わない。iPhoneではRaw prefix内の
-予約済み`_control/`へmutableなdevice別scan receiptとactive-device manifestを置く。controlのkey、本文、更新権限と
+取得処理の稼働確認用control objectはsourceが所有し、再構築の入力には使わない。Screen TimeではRaw prefix内の
+予約済み`_control/`へstream別のmutableなdevice別scan receiptとactive-device manifestを置く。controlのkey、本文、更新権限と
 稼働監査はsourceのデータモデル・運用で定義し、共通Raw repositoryには要求しない。
 
 GCS bucketの公開範囲、暗号化、credentialは[`security.md`](security.md)に従う。
@@ -27,13 +27,13 @@ production bucketは`us-central1`のStandardを使う。source / streamごとに
 `observed_at`ではなくGCS upload完了時刻から数える。保持中のstorage-class遷移は行わず、Soft Deleteと
 Object Versioningは無効にするため、Lifecycle action後のobjectは復元できない。
 
-実装済みのiPhoneは`raw/screen_time/v1/`または`raw/screen_time/v2/`配下の`.segb.gz`だけを`age=90`のDelete対象とし、control JSONを除外する。
+両Screen Time streamは`raw/screen_time/v1/`または`raw/screen_time/v2/`配下の`.segb.gz`だけを`age=90`のDelete対象とし、control JSONを除外する。
 追加pipelineはRaw namespaceとsuffixを指定する。control objectへ削除条件を重ねず、他streamとRaw領域を共有する場合は保持日数を一致させる。
 複数schema版を保持する場合は、再生に対応する全prefixをadapterとTerraformの両方へ含める。
 
 Lifecycle actionは非同期で、保持日数ちょうどの削除を保証しない。ReconciliationはGCS作成時刻を
 `ops.ingestion_metadata.storage_created_at`へ記録し、保持期限より前の欠損と、保持日数にgrace日数を加えた時点の
-残存を失敗にする。iPhoneでは90日と3日を使い、93日目から残存を異常とする。これは運用SLOであり、GCSの
+残存を失敗にする。両Screen Time streamでは90日と3日を使い、93日目から残存を異常とする。これは運用SLOであり、GCSの
 削除時刻保証ではない。保持期限以降に消えた取込成功済みobjectだけを予定された期限切れとして記録し、
 他の監査項目やheartbeatが失敗した場合は`retention_expired_at`を確定しない。
 
@@ -73,7 +73,7 @@ Collectorまたは取得処理は、upload予定のobject keyをsource所有のs
 返した後だけ、直前hashとwatermarkを進める。途中で停止した場合は、次回も同じobject keyで再開する。
 
 同じkeyへのretryは同一bytesでなければならない。GCSのcreate-only uploadは`if_generation_match=0`を使う。
-iPhone Collectorはlocal stateへ永続化した同じkeyとgzip bytesを
+Screen Time Collectorはlocal stateへ永続化した同じkeyとgzip bytesを
 再送する。write-only credentialを使うため、upload前にGCSの既存objectをreadして比較することはない。
 異なる内容を同じkeyへ保存してはならず、取込時のSHA-256不一致はLoaderで検出して成功取込を拒否する。
 

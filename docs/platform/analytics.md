@@ -22,7 +22,7 @@ commitする。batchはparser version、record数、型付きtableへの書込�
 Warehouseだけが行う。decodeまたは書込に失敗したobjectの分析行は確定せず、`failed`とerror種別を別transactionで
 保存する。
 
-iPhone Screen Timeではccl-segbとApp.InFocus protobufをdecodeした後、`ScreenTimeBatch.write()`が
+Screen Timeではccl-segbと各streamのprotobufをdecodeした後、`ScreenTimeBatch.write()`が
 MotherDuck内で対象segmentの補助状態、関連する削除照合と代表イベントを更新する。
 `base.screen_time_event`は`event_key`ごとに1行で、分析項目・有効状態が変わる場合だけ更新する。
 補助状態には原文payloadを含めない。元bytesはGCS Rawに保存する。
@@ -84,7 +84,8 @@ LoaderはRaw identityの値をそのまま保存し、成功判定と再試行�
 
 forward-only migrationの`migration_id`、ファイルSHA-256、`applied_at`を保持する。一度適用した
 migrationのchecksumが変わっていた場合は停止し、既存migrationを書き換えない。
-`001_initial.sql`で現行の初期スキーマを作成する。以降の変更は`002`から始まる追加SQLで適用する。
+`001_initial.sql`で初期スキーマを作成する。`002_screen_time_app_usage_platform.sql`で
+streamから`ios`/`macos`を決めるmacroへ更新する。
 各SQLと適用履歴は同じtransactionで確定し、失敗時はそのSQLの変更と履歴をrollbackする。
 SQLの正本はPython package内の`src/personal_data_platform/migrations/`に置き、wheelにも同梱する。
 
@@ -114,7 +115,7 @@ Reconciliationは監査に成功したら
 ## dbt
 
 `pdp dbt`は指定なしでは全modelの`dbt run`と`dbt test`を実行する。`--source`と`--stream`を指定した場合は
-adapterのselectorを両commandへ渡す。iPhoneは`tag:screen_time_app_in_focus`を使い、source固有のmodelと
+adapterのselectorを両commandへ渡す。両Screen Time streamは`tag:screen_time`を使い、共通modelと
 そのtestを選択する。Rebuildも選択scopeのselectorを使い、未再生sourceのbaseを前提とするmodelは選択しない。
 
 `base.screen_time_transition`、`base.screen_time_interval`、`marts.daily_screen_time`、

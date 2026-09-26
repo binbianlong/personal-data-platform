@@ -16,10 +16,10 @@ source / stream別Cloud Run Reconciliation Job
   -> 成功時だけ対応する外部monitorへheartbeat
 ```
 
-実データの取得まで実装しているのは、Macへ同期されたiPhoneの
-[`Screen Time App.InFocus`](../sources/screen-time/)だけである。実行単位は
-`source_id=screen_time`、`stream=app-in-focus`で、Raw schema v1/v2を扱う。
-Mac自身のScreen TimeとFitbitの取得処理・decoder・分析modelは未実装である。
+実データの取得まで実装しているのは、Macへ同期されたiPhoneの`App.InFocus`と
+Mac自身の`ScreenTime.AppUsage`である。両方とも[`Screen Time`](../sources/screen-time/)に属し、
+`source_id=screen_time`、`stream=app-in-focus`または`app-usage`でRaw schema v1/v2を扱う。
+Fitbitは未実装である。
 複数source、同じsource内の別stream、複数schema versionを扱う共通処理はsynthetic fixtureで検証する。
 
 単一GCP project内で本番と検証を運用する。本番とは別のRawを使う検証ではGCS bucket、MotherDuck database、

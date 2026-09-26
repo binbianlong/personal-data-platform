@@ -1,9 +1,11 @@
 locals {
-  raw_bucket_name       = "${var.project_id}-pdp-raw"
-  preflight_bucket_name = "${var.project_id}-pdp-preflight"
-  raw_object_prefix     = "raw/screen_time/v1/"
-  receipt_object_prefix = "raw/screen_time/v1/_control/collector/latest/"
-  device_manifest_key   = "raw/screen_time/v1/_control/collector/active.json"
+  raw_bucket_name           = "${var.project_id}-pdp-raw"
+  preflight_bucket_name     = "${var.project_id}-pdp-preflight"
+  raw_object_prefix         = "raw/screen_time/v1/"
+  receipt_object_prefix     = "raw/screen_time/v1/_control/collector/latest/"
+  device_manifest_key       = "raw/screen_time/v1/_control/collector/active.json"
+  mac_receipt_object_prefix = "raw/screen_time/v1/_control/collector/app-usage/latest/"
+  mac_device_manifest_key   = "raw/screen_time/v1/_control/collector/app-usage/active.json"
 
   storage_roles = {
     collector_raw_creator     = "projects/${var.project_id}/roles/pdpCollectorRawCreator"
@@ -109,7 +111,7 @@ data "google_iam_policy" "raw_bucket" {
     condition {
       title       = "collector_control_state_only"
       description = "Allow replacement of latest receipts and the expected-device manifest only."
-      expression  = "(resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${local.receipt_object_prefix}') && resource.name.endsWith('.json')) || resource.name == 'projects/_/buckets/${local.raw_bucket_name}/objects/${local.device_manifest_key}'"
+      expression  = "((resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${local.receipt_object_prefix}') || resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${local.mac_receipt_object_prefix}')) && resource.name.endsWith('.json')) || resource.name == 'projects/_/buckets/${local.raw_bucket_name}/objects/${local.device_manifest_key}' || resource.name == 'projects/_/buckets/${local.raw_bucket_name}/objects/${local.mac_device_manifest_key}'"
     }
   }
 

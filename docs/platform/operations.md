@@ -40,7 +40,8 @@ production databaseへ書き込まない。
 
 ## Loader
 
-source / streamごとにLoader Jobを持つ。既存のiPhoneは`screen-time-loader`を毎時15分に起動する。
+Screen TimeのiPhoneとMacは既存の`screen-time-loader` Jobを共用し、毎時15分に起動する。
+このJobは`--source screen_time --all-streams`で両streamを処理し、最後まで1つの`loader` leaseを保持する。
 各Jobのtask数とparallelismは1とし、さらにMotherDuckの期限付き`loader` leaseを取得する。
 異なるsourceのLoaderもこのleaseを共有するため、scheduleは所要時間を踏まえてずらす。
 
@@ -71,7 +72,7 @@ objectを再試行できるようにする。
 
 ## Reconciliation
 
-監査もsource / streamごとのJobとして実行する。既存iPhoneの`reconciliation`は毎日04:30と16:30 Asia/Tokyoに起動する。
+Screen Timeの監査は既存の`reconciliation` Jobで両streamを処理し、毎日04:30と16:30 Asia/Tokyoに起動する。
 `reconciliation` leaseは同じroleの全sourceで共有し、Loaderとは別leaseである。
 
 1. 選択source / streamのGCS objectとactiveな取込状態だけを照合し、未取込objectを同じadapterで再処理する。
@@ -79,7 +80,8 @@ objectを再試行できるようにする。
 2. 修復や並行Loaderが追加した取込済みkeyはGCSを再確認してから、Raw欠損と判定する。
 3. 取込成功済みobjectの欠損をGCS作成時刻とsourceの保持期限で分類する。期限前は失敗、期限以降は予定された期限切れとする。
 4. 対象scopeの`failed` / `loading` / 作成時刻不明の欠損と、保持期限にgrace日数を加えた時点で残るRawを失敗にする。
-5. adapterの取得状態監査を実行する。iPhoneではmanifestとreceiptの欠損・24時間超過を確認する。
+5. adapterの取得状態監査を実行する。iPhoneとMacは別々のmanifestとreceiptの欠損・24時間超過を確認する。
+   空のmanifestは明示的な休止、Raw・receipt・manifestが全てないMacは初回有効化前として扱う。
    manifestから外れたdeviceの残存Rawや古いreceiptはactive Collectorの異常に数えない。他sourceへ同じcontrol形式を要求しない。
 6. 未取込・`failed` ingestionがないことを確認する。
 7. 必須base / Viewの存在と各relationの代表`count(*)` queryを確認する。
@@ -138,13 +140,13 @@ chmod 600 "$PDP_REBUILD_GOOGLE_APPLICATION_CREDENTIALS"
 `pdp rebuild`はこのADCがimpersonated Service Account形式、現在user所有、mode `0600`、指定target一致であることを
 確認し、実行中だけ`GOOGLE_APPLICATION_CREDENTIALS`として使う。CollectorのADCは変更しない。
 
-1. `pdp rebuild --dry-run`でsource / stream、object数、subject数、scope数、GCS作成期間、保持日数、
+1. `pdp rebuild --source screen_time --all-streams --dry-run`でstreamごとのobject数、subject数、scope数、GCS作成期間、保持日数、
    `full_history_rebuild_guaranteed=false`を表示する。iPhoneは従来のdevice数・segment数も表示する。
-2. `pdp rebuild --target-db <scratch-db> --allow-partial-history`で空のscratch databaseを指定する。
+2. `pdp rebuild --source screen_time --all-streams --target-db <scratch-db> --allow-partial-history`で空のscratch databaseを指定する。
    command内部でmigrationを適用し、GCSに現在残る全pageを1回だけlistingしてinventoryを固定する。各objectは
    選択source / streamのinventoryに記録したgenerationを指定し、`(observed_at, object_key)`順に再生する。途中でそのgenerationが
    Lifecycle削除された場合は別generationへ読み替えず失敗する。
-   `ops.ingestion_metadata`とbaseの再構築後、同じscratch databaseへadapterのselectorで選択した`dbt run`と`dbt test`を実行する。
+   両streamの`ops.ingestion_metadata`とbaseの再構築後、同じscratch databaseへ共通selectorで選択した`dbt run`と`dbt test`を1回実行する。
 3. commandの成功後、productionと件数、stable key集合、代表martを手動で比較する。
 4. 差分を確認した後、参照先を手動で切り替える。
 
@@ -156,18 +158,19 @@ target databaseがproductionと同一、既存tableを持つ、環境識別が�
 
 初回は空のMotherDuck databaseを指定する。`pdp loader`、`pdp reconciliation`、`pdp dbt`は処理開始時に
 package内のSQLを順番に適用する。`001_initial.sql`で運用table、Screen Timeのイベント・補助状態・
-分析入口Viewを作成し、`ops.schema_migration`へchecksumと適用日時を記録する。
+分析入口Viewを作成し、`002_screen_time_app_usage_platform.sql`でplatformをstreamから決める。
+各migrationのchecksumと適用日時を`ops.schema_migration`へ記録する。
 再実行では適用済みSQLをskipし、checksumが変わっていれば停止する。
 
 1. Schedulerを停止した状態で接続先とsecretを設定し、隔離preflightを成功させる。
-2. `pdp dbt --source screen_time --stream app-in-focus`で初期スキーマと分析Viewを作成・検証する。
+2. `pdp dbt --source screen_time --stream app-in-focus`で共通分析Viewを作成・検証する。
 3. CollectorによるRaw保存を確認してLoaderを手動実行し、Reconciliationで取込と分析relationを確認する。
 4. 初回の取込・監査が成功した後に定期実行を有効にする。
 
 既存DBの自動変換や削除は行わない。異なる初期SQLを適用した開発用DBは引き継がず、別の空DBを用意する。
 適用履歴を手で変更してchecksum検証を回避しない。
 
-今後のスキーマ変更は`002`以降のforward migrationで追加し、適用済みSQLは書き換えない。
+今後のスキーマ変更は`003`以降のforward migrationで追加し、適用済みSQLは書き換えない。
 更新時はLoader・Reconciliationの定期実行を止め、実行中のLoader・Reconciliation・dbt Jobが終了してから
 対応runtimeを全Jobへ反映する。migration、dbt、手動Loader・監査の成功を確認して定期実行を再開する。
 新sourceは対応runtime、取得権限・secret・monitorを揃えてから有効にする。
@@ -176,12 +179,14 @@ package内のSQLを順番に適用する。`001_initial.sql`で運用table、Scr
 
 `loader`、`reconciliation`、`rebuild`はsource / stream未指定なら既存iPhoneを選ぶ。
 sourceのみ指定できるのは、そのsourceの登録streamが一つの場合だけである。streamだけの指定や未登録の組合せは拒否する。
+Screen Timeの両streamをまとめて処理する場合は`--source screen_time --all-streams`を使う。
 `pdp dbt`は未指定時には全modelを実行する。
 
 ```text
 pdp loader --source screen_time --stream app-in-focus
-pdp reconciliation --source screen_time --stream app-in-focus
-pdp rebuild --source screen_time --stream app-in-focus --dry-run
+pdp loader --source screen_time --all-streams
+pdp reconciliation --source screen_time --all-streams
+pdp rebuild --source screen_time --all-streams --dry-run
 pdp dbt --source screen_time --stream app-in-focus
 ```
 

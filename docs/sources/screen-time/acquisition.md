@@ -12,11 +12,15 @@
 
 ```text
 ~/Library/Biome/streams/restricted/App.InFocus/remote/<device_identifier>/
+~/Library/Biome/streams/restricted/ScreenTime.AppUsage/local/
 ```
 
 `sync.db`の`DevicePeer`から`platform = 2`のdeviceを列挙し、対応する`remote/<device_identifier>`を読む。
+Macは`platform = 3 AND me = 1`の行がちょうど1件あることを確認して同じsecretで疑似化する。
+`PDP_SCREEN_TIME_MAC_DEVICE_KEY`がそのkeyと一致する場合だけ`ScreenTime.AppUsage/local`を読む。
 
-`pdp screen-time devices`は発見したiPhoneの疑似化`device_key`を表示する。取得対象は環境変数
+`pdp screen-time devices`は発見したiPhoneとローカルMacの疑似化`device_key`を表示する。Mac行が
+見つからなくてもMac keyが未設定ならiPhoneの表示を続ける。iPhoneの取得対象は環境変数
 `PDP_SCREEN_TIME_DEVICE_ALLOWLIST`へカンマ区切りで指定した`device_key`だけとし、raw device identifierを
 設定へ保存しない。allowlistが空、または許可した端末を1台も`DevicePeer`に発見できない場合は設定エラーと
 する。一部だけ未発見の場合は発見済み端末を収集するため、`devices`の結果とallowlistを照合して対象端末の
@@ -96,7 +100,22 @@ SEGB v2のtrailerはdecoderへ渡す前にrecord stateを検査する。未知�
 観測全体を失敗させ、直前の正常観測と既存イベントの有効状態を維持する。`state=0`かつ
 `end_offset=0`の未使用slotと、既知の空レコード`state=4`は引き続き許容する。
 
-## Macのローカル形式検証
+## Mac `ScreenTime.AppUsage` payload
+
+継続収集するMacの`ScreenTime.AppUsage` payloadは次のfieldを使う。時刻はUnix秒で、
+既存のイベント形式には`event_at`と2001-01-01基準の`cf_absolute_time`へ変換して保存する。
+
+| Field | 型 | 内容 |
+|---:|---|---|
+| 1 | uint32 | `1=アプリ開始`、`0=終了` |
+| 2 | double | Unix秒のevent時刻 |
+| 3 | string | Bundle ID |
+| 5 | uint32、省略可 | 意味が未確定のfield。正規化せずRawに保持 |
+
+`app-usage-v1`をparser versionとして記録する。削除済みrecord、CRC不一致、tombstone、
+最新segmentの待機はiPhoneと同じ処理を使う。Webサイト利用とmacOS設定画面の数値一致は対象外である。
+
+### App.InFocus診断command
 
 ```bash
 pdp screen-time inspect-mac
@@ -114,5 +133,5 @@ Bundle IDとstart・end・合計のrecord件数をBundle ID順で出す。時刻
 しない。元payloadや端末identifierは出力せず、取得データの継続保存も行わない。既存parserが使う一時ファイルは
 解析後に削除する。
 
-Biome directoryを読む実行バイナリにはFull Disk Accessが必要。iPhoneの`devices`と`doctor`はevent payloadを
+Biome directoryを読む実行バイナリにはFull Disk Accessが必要。`devices`と`doctor`はevent payloadを
 解析しないため、アプリ別の出力は持たない。

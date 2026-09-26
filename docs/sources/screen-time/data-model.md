@@ -5,14 +5,14 @@
 Rawの保存単位はSEGB segmentの観測版である。既存v1を読み取り、新規Collectorはv2を保存する。
 
 ```text
-raw/screen_time/v<1または2>/<device_key>/app-in-focus/<segment_key>/
+raw/screen_time/v<1または2>/<device_key>/<app-in-focusまたはapp-usage>/<segment_key>/
   <observed_at>/<sha256>.segb.gz
 ```
 
 | 要素 | 契約 |
 |---|---|
 | `device_key` | device identifierを疑似化した64文字のlowercase hex |
-| `app-in-focus` | 初期coreで固定するstream識別子 |
+| `app-in-focus` / `app-usage` | iPhone / Macのstream識別子 |
 | `segment_key` | deviceとsegment相対pathを疑似化した64文字のlowercase hex |
 | `observed_at` | 取得完了UTC時刻。`YYYYMMDDTHHMMSSffffffZ` |
 | `sha256` | gzip前のRaw本文に対するlowercase SHA-256 hex。v1はSEGB、v2はenvelope全体 |
@@ -28,7 +28,8 @@ JSON: {"segment_kind":"events"または"tombstones","source_segment_name":"数�
 
 JSONはUTF-8・key順・空白なしの決定的表現とし、最大1024 bytes。端末identifier・絶対path・親directory名は
 追加しない。元SEGBをbyte-for-byteで復元できる。`device_key`と`segment_key`はv1と同じ計算式のため、
-v2で得た元ファイル名を同一logical segmentのv1観測にも対応付けられる。control JSONはv1の既存keyを継続する。
+v2で得た元ファイル名を同一logical segmentのv1観測にも対応付けられる。iPhoneのcontrol JSONは
+既存keyを継続し、Macは`_control/collector/app-usage/`以下に分ける。
 
 ## 疑似化key
 
@@ -45,17 +46,18 @@ segment_key = HMAC-SHA256(
   secret,
   "screen-time/segment/v1\0"
   || UTF8(device_identifier)
-  || "\0App.InFocus\0"
+  || "\0" || UTF8(source_stream_name) || "\0"
   || UTF8(segment_relative_posix_path)
 )
 ```
 
-`segment_relative_posix_path`は`remote/<device_identifier>/`からの相対POSIX pathである。疑似化secretの
+`source_stream_name`はiPhoneで`App.InFocus`、Macで`ScreenTime.AppUsage`である。
+`segment_relative_posix_path`は各streamのdevice directoryからの相対POSIX pathである。疑似化secretの
 変更は過去との同一性を失うため、通常のcredential rotationでは行わない。
 
 ## Observation semantics
 
-同じ`device_key + app-in-focus + segment_key`をlogical scopeとする。直前にGCS保存を完了した観測と
+同じ`device_key + stream + segment_key`をlogical scopeとする。直前にGCS保存を完了した観測と
 SHA-256が同じ場合だけ新規保存をskipする。転送対象の`A -> B -> A`は3観測として保存する。
 最新segmentの転送待ち中には観測版を作成しない。後続ファイルを確認した時点のbytesを保存対象にする。
 
@@ -68,6 +70,7 @@ complete scanが成功したdeviceごとに、次のmutable control objectを更
 
 ```text
 raw/screen_time/v1/_control/collector/latest/<device_key>.json
+raw/screen_time/v1/_control/collector/app-usage/latest/<mac_device_key>.json
 ```
 
 本文は`schema_version`、`device_key`、UTCの`completed_at`、`segment_count`、`status=succeeded`だけを持つ。
@@ -79,6 +82,7 @@ Raw uploadがすべて成功した後だけ更新する。完成待ちだけの�
 
 ```text
 raw/screen_time/v1/_control/collector/active.json
+raw/screen_time/v1/_control/collector/app-usage/active.json
 ```
 
 本文は`schema_version`、sort済みの`device_keys`、UTCの`completed_at`、`status=succeeded`だけを持つ。
@@ -124,7 +128,8 @@ DBの物理走査量が履歴量によらず一定になることを保証する
 ## Recordの取り込み
 
 parser versionとdecodeした全record数は`ops.ingestion_metadata`に保存する。record数は正常イベントだけでなく、
-削除済みrecord、CRC不一致、tombstoneを含む。parser versionは`app-in-focus-v2`とする。
+削除済みrecord、CRC不一致、tombstoneを含む。parser versionはiPhoneで`app-in-focus-v2`、
+Macで`app-usage-v1`とする。
 
 削除済みrecordやCRC不一致はイベントを生成せず、同じ物理位置の既存recordを無効化する。
 CRC正常の未知payload形式や壊れたSEGB構造はobject全体を失敗させ、部分的な成功として扱わない。
@@ -160,7 +165,7 @@ decode済みtransitionの同一性を表す。次のcanonical bytesのSHA-256と
 ```text
 "screen-time/event/v1\0"
 || uint32be(length(device_key)) || UTF8(device_key)
-|| uint32be(length("app-in-focus")) || UTF8("app-in-focus")
+|| uint32be(length(stream)) || UTF8(stream)
 || uint32be(length(bundle_id)) || UTF8(bundle_id)
 || IEEE-754 binary64 big-endian(cf_absolute_time)
 || uint32be(in_foreground)
@@ -196,7 +201,8 @@ parser_version / unknown_field_count / duplicate_occurrence_count
 
 ## `base.screen_time_interval`
 
-transitionを`device_key + source_stream`内で`(event_at, event_key)`順に評価するdbt Viewである。
+transitionを`device_key + source_stream`内でevent時刻順に評価するdbt Viewである。
+同時刻ならendをstartより先に扱い、次のstartと同時刻の観測済みendを区間の終点に使う。
 
 | 入力 | `quality` |
 |---|---|

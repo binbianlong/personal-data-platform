@@ -1,19 +1,24 @@
 # Screen Time
 
-Macへ同期されたiPhoneのBiome `App.InFocus`から、アプリのforeground遷移を取得する。
+Macへ同期されたiPhoneのBiome `App.InFocus/remote`と、Mac自身の
+`ScreenTime.AppUsage/local`からアプリの開始・終了を取得する。
 
-継続収集・Raw保存・分析の対象は`sync.db`で`platform = 2`として識別できるiPhoneだけである。
-Mac自身の`App.InFocus/local`は`pdp screen-time inspect-mac`でローカルの形式を検証できるが、
-Raw保存や日次Viewには追加しない。`ScreenTime.AppUsage/local`、Web利用、通知、表示用アプリ名の補完は
-対象に含めない。
+Macは`sync.db`の唯一の`platform = 3 AND me = 1`行から疑似化device keyを作り、
+`PDP_SCREEN_TIME_MAC_DEVICE_KEY`を設定した場合に収集する。iPhoneは従来どおり
+`PDP_SCREEN_TIME_DEVICE_ALLOWLIST`で選ぶ。両者は別のdevice keyとstreamを持ち、
+同じ日次Viewで`ios`と`macos`として表示する。Webサイト利用、通知、表示用アプリ名の補完は対象外である。
 
-共通処理へは`source_id=screen_time`、`stream=app-in-focus`、Raw schema v1として登録する。
-`loader`、`reconciliation`、`rebuild`の既定対象であり、明示時は
-`--source screen_time --stream app-in-focus`を使う。dbt selectorは`tag:screen_time_app_in_focus`である。
+`pdp screen-time inspect-mac`はMacの`App.InFocus/local`を調べる診断commandである。
+継続収集する`ScreenTime.AppUsage/local`とは別のstreamを読むため、日次集計の入力には使わない。
+
+共通処理には`source_id=screen_time`、`stream=app-in-focus`と`app-usage`を登録する。
+新規segmentはどちらもRaw v2で保存する。`loader`、`reconciliation`、`rebuild`の引数省略時は
+従来のiPhone stream、両方を処理する場合は`--source screen_time --all-streams`を使う。
+dbt selectorは共通の`tag:screen_time`である。
 
 取得、設定、SQLite state、LaunchAgent、Raw key / control、GCSのcontrol更新、decoder、型付きbatch、
-Collector稼働監査の実装は`src/personal_data_platform/sources/screen_time/`に置く。既存のRaw key、
-SQLite database、LaunchAgent label、cloud Job名は継続して使う。共通処理はdeviceやSEGBの構造に依存しない。
+Collector稼働監査の実装は`src/personal_data_platform/sources/screen_time/`に置く。既存の
+SQLite database、LaunchAgent label、cloud Job名は共用し、manifestとreceiptはstream別に持つ。
 
 ## ファイル
 
