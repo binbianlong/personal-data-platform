@@ -8,12 +8,12 @@ next_events as (
         *,
         first_value(case when state = 'start' then event_key end ignore nulls) over (
             partition by device_key, source_stream
-            order by event_at, event_key
+            order by event_at, case when state = 'end' then 0 else 1 end, event_key
             rows between 1 following and unbounded following
         ) as next_start_event_key,
         first_value(case when state = 'end' then event_key end ignore nulls) over (
             partition by device_key, source_stream, bundle_id
-            order by event_at, event_key
+            order by event_at, case when state = 'end' then 0 else 1 end, event_key
             rows between 1 following and unbounded following
         ) as same_app_end_event_key
     from events
@@ -29,8 +29,7 @@ start_candidates as (
         same_app_end.event_key is not null
         and (
             next_start.event_key is null
-            or (same_app_end.event_at, same_app_end.event_key)
-                < (next_start.event_at, next_start.event_key)
+            or same_app_end.event_at <= next_start.event_at
         ) as end_is_first
     from next_events as start_event
     left join events as same_app_end
