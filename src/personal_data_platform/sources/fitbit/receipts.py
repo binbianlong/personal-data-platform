@@ -215,13 +215,14 @@ class GCSReceiptRepository:
 
     def _write(self, receipt: Receipt, *, generation: int) -> StoredReceipt:
         blob = self._bucket.blob(receipt.key)
-        blob.metadata = {
+        metadata = {
             "state": "completed" if receipt.completed_at is not None else "pending",
             "received_at": receipt.received_at.isoformat(),
             "origin": receipt.origin,
         }
         if receipt.completed_at is not None:
-            blob.metadata["completed_at"] = receipt.completed_at.isoformat()
+            metadata["completed_at"] = receipt.completed_at.isoformat()
+        blob.metadata = metadata
         blob.upload_from_string(
             receipt.to_bytes(), content_type="application/json", if_generation_match=generation
         )

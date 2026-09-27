@@ -29,6 +29,14 @@ class Blob:
         self.time_created = NOW
         self.metadata = None
 
+    @property
+    def metadata(self):
+        return None if self._metadata is None else dict(self._metadata)
+
+    @metadata.setter
+    def metadata(self, value):
+        self._metadata = None if value is None else dict(value)
+
     def upload_from_string(self, data, *, content_type, if_generation_match):
         stored = self.bucket.values.get(self.name)
         actual = stored[0] if stored else 0
