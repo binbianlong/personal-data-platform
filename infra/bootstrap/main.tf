@@ -16,6 +16,7 @@ locals {
   ])
 
   deploy_project_roles = toset([
+    "roles/cloudtasks.admin",
     "roles/cloudscheduler.admin",
     "roles/iam.serviceAccountAdmin",
     "roles/logging.configWriter",

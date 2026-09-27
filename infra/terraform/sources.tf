@@ -41,7 +41,7 @@ locals {
           PDP_RAW_SUFFIXES_JSON    = jsonencode(pipeline.raw_suffixes)
           }, role == "reconciliation" && key == "screen_time_app_in_focus" ? {
           PDP_RECONCILIATION_MONITORING_MODE = "cloud_monitoring"
-        } : {})
+        } : {}, role == "reconciliation" && key == "screen_time_app_in_focus" ? local.fitbit_environment : {})
         secrets = merge({ MOTHERDUCK_TOKEN = "motherduck_token" }, role == "reconciliation" && key != "screen_time_app_in_focus" ? {
           RECONCILIATION_HEARTBEAT_URL = "${key}_heartbeat"
         } : {})

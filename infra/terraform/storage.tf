@@ -39,6 +39,17 @@ resource "google_storage_bucket" "raw" {
     retention_duration_seconds = 0
   }
 
+  dynamic "lifecycle_rule" {
+    for_each = var.enable_fitbit_runtime ? ["raw/fitbit/v1/", "receipts/fitbit/v1/"] : []
+    content {
+      action { type = "Delete" }
+      condition {
+        age            = 30
+        matches_prefix = [lifecycle_rule.value]
+      }
+    }
+  }
+
   lifecycle {
     prevent_destroy = true
 
@@ -86,6 +97,28 @@ resource "google_storage_bucket" "preflight" {
 }
 
 data "google_iam_policy" "raw_bucket" {
+  dynamic "binding" {
+    for_each = var.enable_fitbit_runtime ? ["raw/fitbit/v1/", "receipts/fitbit/v1/"] : []
+    content {
+      role    = binding.value == "raw/fitbit/v1/" ? local.storage_roles.collector_raw_creator : local.storage_roles.collector_receipt_writer
+      members = local.fitbit_storage_members
+      condition {
+        title      = binding.value == "raw/fitbit/v1/" ? "fitbit_raw_create" : "fitbit_receipt_write"
+        expression = "resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${binding.value}')"
+      }
+    }
+  }
+  dynamic "binding" {
+    for_each = var.enable_fitbit_runtime ? [1] : []
+    content {
+      role    = "roles/storage.objectViewer"
+      members = ["serviceAccount:${google_service_account.fitbit[0].email}"]
+      condition {
+        title      = "fitbit_read_and_list"
+        expression = "resource.name == 'projects/_/buckets/${local.raw_bucket_name}' || resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/raw/fitbit/v1/') || resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/receipts/fitbit/v1/')"
+      }
+    }
+  }
   binding {
     role    = "roles/storage.admin"
     members = [var.collector_impersonator_member]
