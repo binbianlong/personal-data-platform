@@ -43,7 +43,7 @@ class CompressedRawUploader(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class IPhoneDevice:
+class BiomeDevice:
     """A selected row from Biome's DevicePeer table."""
 
     identifier: str
@@ -86,10 +86,10 @@ class BiomeScreenTimeSource:
     segment_stream = "App.InFocus"
     platform = "ios"
 
-    def list_devices(self) -> list[IPhoneDevice]:
+    def list_devices(self) -> list[BiomeDevice]:
         return self.list_iphone_devices()
 
-    def list_iphone_devices(self) -> list[IPhoneDevice]:
+    def list_iphone_devices(self) -> list[BiomeDevice]:
         if not self.sync_db_path.is_file():
             raise CollectorSourceError(f"Biome sync database is not readable: {self.sync_db_path}")
         uri = f"file:{quote(str(self.sync_db_path), safe='/')}?mode=ro"
@@ -105,17 +105,17 @@ class BiomeScreenTimeSource:
                 ).fetchall()
         except sqlite3.Error as error:
             raise CollectorSourceError(f"failed to read Biome DevicePeer: {error}") from error
-        devices: list[IPhoneDevice] = []
+        devices: list[BiomeDevice] = []
         for identifier, name, model in rows:
             _validate_device_identifier(identifier)
-            devices.append(IPhoneDevice(identifier=identifier, name=name, model=model))
+            devices.append(BiomeDevice(identifier=identifier, name=name, model=model))
         return devices
 
-    def device_directory(self, device: IPhoneDevice) -> Path:
+    def device_directory(self, device: BiomeDevice) -> Path:
         _validate_device_identifier(device.identifier)
         return self.remote_dir / device.identifier
 
-    def list_segments(self, device: IPhoneDevice) -> list[tuple[Path, str]]:
+    def list_segments(self, device: BiomeDevice) -> list[tuple[Path, str]]:
         directory = self.device_directory(device)
         return list_segment_files(directory)
 
@@ -131,7 +131,7 @@ class BiomeMacAppUsageSource:
         self.sync_db_path = sync_db_path
         self.local_dir = local_dir
 
-    def list_devices(self) -> list[IPhoneDevice]:
+    def list_devices(self) -> list[BiomeDevice]:
         if not self.sync_db_path.is_file():
             raise CollectorSourceError(f"Biome sync database is not readable: {self.sync_db_path}")
         uri = f"file:{quote(str(self.sync_db_path), safe='/')}?mode=ro"
@@ -147,13 +147,13 @@ class BiomeMacAppUsageSource:
             raise CollectorSourceError("expected exactly one platform=3 me=1 Mac in Biome sync.db")
         identifier, name, model = rows[0]
         _validate_device_identifier(identifier)
-        return [IPhoneDevice(identifier=identifier, name=name, model=model)]
+        return [BiomeDevice(identifier=identifier, name=name, model=model)]
 
-    def device_directory(self, device: IPhoneDevice) -> Path:
+    def device_directory(self, device: BiomeDevice) -> Path:
         _validate_device_identifier(device.identifier)
         return self.local_dir
 
-    def list_segments(self, device: IPhoneDevice) -> list[tuple[Path, str]]:
+    def list_segments(self, device: BiomeDevice) -> list[tuple[Path, str]]:
         return list_segment_files(self.device_directory(device))
 
 
