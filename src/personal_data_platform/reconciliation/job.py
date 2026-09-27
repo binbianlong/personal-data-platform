@@ -43,7 +43,7 @@ def _relation_names(warehouse: Warehouse) -> set[str]:
         SELECT table_schema || '.' || table_name
         FROM information_schema.tables
         WHERE table_catalog = current_database()
-          AND table_schema IN ('base', 'marts')
+          AND table_schema IN ('base', 'marts', 'ops')
         """
     )
     return {row[0] for row in rows}

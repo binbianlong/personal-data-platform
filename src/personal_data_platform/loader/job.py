@@ -15,6 +15,7 @@ from personal_data_platform.sources.contracts import (
     RawRepository,
     SourceAdapter,
     list_source_raw,
+    validate_observations,
     validate_runtime_policy,
 )
 from personal_data_platform.sources.registry import get_source, get_sources
@@ -63,6 +64,19 @@ def run_loader(
     refs = sorted(
         list_source_raw(repository, source, prefix), key=lambda raw: (raw.observed_at, raw.key)
     )
+    return run_loader_objects(repository, warehouse, refs, source=source, _lease_owner=_lease_owner)
+
+
+def run_loader_objects(
+    repository: RawRepository,
+    warehouse: Warehouse,
+    observations: Iterable[RawObject],
+    *,
+    source: SourceAdapter,
+    _lease_owner: str | None = None,
+) -> LoadSummary:
+    """Load only generation-pinned references; never list storage or run migrations."""
+    refs = validate_observations(source, observations)
     run_id = str(uuid.uuid4())
     # All source streams share one warehouse write lease. Source selection does not
     # change the database's concurrency contract.
