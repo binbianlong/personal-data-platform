@@ -16,6 +16,7 @@ dependencies = [
   "google-cloud-tasks>=2.20,<3",
   "google-crc32c>=1.6,<2",
   "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
   "tink>=1.12,<2",
   "uvicorn>=0.34,<1",
   "pytz>=2025.2,<2026",
@@ -26,7 +27,6 @@ pdp = "personal_data_platform.cli:main"
 
 [project.optional-dependencies]
 dev = [
-  "httpx>=0.28,<1",
   "mypy==2.3.1",
   "pytest>=8.4,<10",
   "ruff>=0.12,<1",

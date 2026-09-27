@@ -74,6 +74,7 @@ jobs:
           docker run --rm personal-data-platform:ci preflight --help
           docker run --rm personal-data-platform:ci fitbit --help
           docker run --rm personal-data-platform:ci fitbit serve --help
+          docker run --rm --entrypoint python personal-data-platform:ci -c 'import personal_data_platform.sources.fitbit.runtime'
           docker run --rm --entrypoint python personal-data-platform:ci -c '
           from personal_data_platform.dbt_runner import DBT_PROJECT_DIR
           assert (DBT_PROJECT_DIR / "dbt_project.yml").is_file()
