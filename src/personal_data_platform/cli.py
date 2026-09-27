@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pdp", description="Run Personal Data Platform")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    from personal_data_platform.sources.fitbit.cli import configure
+
+    configure(commands.add_parser("fitbit", help="receive and synchronize Fitbit health data"))
+
     screen_time = commands.add_parser("screen-time", help="inspect or collect Screen Time")
     screen_time_commands = screen_time.add_subparsers(dest="screen_time_command", required=True)
     screen_time_commands.add_parser("devices", help="list pseudonymized Screen Time devices")
@@ -118,6 +122,10 @@ def _print_error(error: Exception) -> None:
 
 
 def _dispatch(args: argparse.Namespace) -> int:
+    if args.command == "fitbit":
+        from personal_data_platform.sources.fitbit.cli import run
+
+        return run(args)
     if args.command == "screen-time":
         if args.screen_time_command == "devices":
             return _run_devices()

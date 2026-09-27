@@ -283,6 +283,20 @@ def run_reconciliation(
 def run_reconciliation_from_env(
     *, source_id: str | None = None, stream: str | None = None, all_streams: bool = False
 ) -> int:
+    status = _run_reconciliation_sources(
+        source_id=source_id, stream=stream, all_streams=all_streams
+    )
+    if os.environ.get("PDP_FITBIT_REPAIR_ENABLED", "false").lower() == "true":
+        from personal_data_platform.sources.fitbit.runtime import run_repair_from_env
+
+        result = run_repair_from_env()
+        status = max(status, int(bool(result.failed_count or result.at_risk_count)))
+    return status
+
+
+def _run_reconciliation_sources(
+    *, source_id: str | None = None, stream: str | None = None, all_streams: bool = False
+) -> int:
 
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
     monitoring_mode = os.environ.get("PDP_RECONCILIATION_MONITORING_MODE", "http")
