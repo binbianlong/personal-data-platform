@@ -199,3 +199,11 @@ pdp reconciliation
 pdp rebuild --dry-run
 pdp rebuild --target-db <scratch-db> --allow-partial-history
 ```
+
+## Fitbit Webhook
+
+Fitbitは専用Cloud Run ServiceとCloud Tasks queueで処理する。
+`enable_fitbit_runtime`は既定でfalse、`fitbit_processing_paused`はtrue。
+有効化した場合だけ既存Screen Time reconciliation Jobに受付回復・日次照合を接続する。
+追加Schedulerと通知単位のCloud Run Jobは作らない。
+導入前の隔離検証・使用量測定・購読登録は[Fitbit運用](../sources/fitbit/operations.md)を参照する。

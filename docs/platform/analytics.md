@@ -36,6 +36,10 @@ commit後の再実行は既存の成功判定でskipする。commitの応答が�
 
 Loaderはsource横断JOIN、interval生成、日次集計を行わない。これらはdbt Viewで行う。
 
+FitbitのWebhook workerは指定key/generationだけを`run_loader_objects`へ渡す。
+共通Loaderと同じ取込台帳・transaction・leaseを使い、通知ごとの一覧取得とmigrationを省く。
+完全取得範囲の置換・削除・順位管理は[`Fitbitデータモデル`](../sources/fitbit/data-model.md)に従う。
+
 ## Ops schema
 
 ### `ops.ingestion_metadata`
@@ -86,6 +90,7 @@ forward-only migrationの`migration_id`、ファイルSHA-256、`applied_at`を�
 migrationのchecksumが変わっていた場合は停止し、既存migrationを書き換えない。
 `001_initial.sql`で初期スキーマを作成する。`002_screen_time_app_usage_platform.sql`で
 streamから`ios`/`macos`を決めるmacroへ更新する。
+`003_fitbit.sql`でFitbitの7 base table、範囲台帳、削除IDの順位台帳を追加する。
 各SQLと適用履歴は同じtransactionで確定し、失敗時はそのSQLの変更と履歴をrollbackする。
 SQLの正本はPython package内の`src/personal_data_platform/migrations/`に置き、wheelにも同梱する。
 
@@ -117,6 +122,9 @@ Reconciliationは監査に成功したら
 `pdp dbt`は指定なしでは全modelの`dbt run`と`dbt test`を実行する。`--source`と`--stream`を指定した場合は
 adapterのselectorを両commandへ渡す。両Screen Time streamは`tag:screen_time`を使い、共通modelと
 そのtestを選択する。Rebuildも選択scopeのselectorを使い、未再生sourceのbaseを前提とするmodelは選択しない。
+
+Fitbitは`tag:fitbit tag:screen_time`で健康指標と睡眠前Screen Timeの依存Viewを構築する。
+基礎tableはmigrationで用意される。Screen Time未取り込みなら睡眠前利用時間は空となる。
 
 `base.screen_time_transition`、`base.screen_time_interval`、`marts.daily_screen_time`、
 `marts.daily_screen_time_total`はdbt Viewである。

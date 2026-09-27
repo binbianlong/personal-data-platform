@@ -2,7 +2,7 @@
 
 ## System of record
 
-GCSをsourceごとの保持期間内のRaw System of Recordとする。iPhoneとMacのScreen Timeは90日である。
+GCSをsourceごとの保持期間内のRaw System of Recordとする。iPhoneとMacのScreen Timeは90日、Fitbit API Rawは30日である。
 Rawはsourceから取得した内容をlosslessに保持し、長期分析履歴はMotherDuckが保持する。Lifecycle削除後のRawは
 復元できず、MotherDuckの全損時に全期間をRawだけから再構築できるとは保証しない。
 
@@ -48,7 +48,8 @@ Lifecycle設定をqueryするものではなく、実適用の確認はTerraform
 `sha256`、`key`、`storage_created_at`、`storage_generation`を持つ。subjectとlogical keyの意味はsourceが定義する。
 
 Raw objectは「contentそのもの」ではなく、あるlogical scopeをある時点で観測した事実を表す。
-`observed_at`は取得完了時点のUTC時刻とし、object keyへ含める。
+`observed_at`はsourceが定義する観測順位のUTC時刻で、object keyへ含める。
+Screen Timeは取得完了時点、Fitbitは全ページ取得の開始時点を使う。
 
 重複排除は、同じlogical scopeで直前に保存を完了した観測と比較して行う。
 
@@ -66,16 +67,20 @@ logical scopeはsource / streamとsubject / logical keyで分離する。Raw sch
 区別し、対応schema版の判定とkeyの復元はadapterが行う。共通保存形式はgzipとし、元のbytes、logical scope、
 object keyは各sourceのデータモデルで定義する。
 Screen Timeは[`data-model.md`](../sources/screen-time/data-model.md)を正本とする。
+Fitbitのenvelope・受付記録・範囲更新は[`data-model.md`](../sources/fitbit/data-model.md)を正本とする。
 
 ## 永続化境界
 
-Collectorまたは取得処理は、upload予定のobject keyをsource所有のstateへ先に永続化する。GCSがupload成功を
+Screen Time Collectorは、upload予定のobject keyをsource所有のstateへ先に永続化する。GCSがupload成功を
 返した後だけ、直前hashとwatermarkを進める。途中で停止した場合は、次回も同じobject keyで再開する。
 
 同じkeyへのretryは同一bytesでなければならない。GCSのcreate-only uploadは`if_generation_match=0`を使う。
 Screen Time Collectorはlocal stateへ永続化した同じkeyとgzip bytesを
 再送する。write-only credentialを使うため、upload前にGCSの既存objectをreadして比較することはない。
 異なる内容を同じkeyへ保存してはならず、取込時のSHA-256不一致はLoaderで検出して成功取込を拒否する。
+
+Fitbitは取得予定範囲を受付記録へ先に保存し、Raw保存後にkey/generationを確定してからDBへ反映する。
+参照保存前の障害では未参照Rawを定期補修が拾い、取得順位で再取得との競合を解決する。
 
 ## 検証と再生
 
