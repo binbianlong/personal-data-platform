@@ -187,6 +187,10 @@ def create_app(
             if not complete:
                 await run_in_threadpool(queue.enqueue, key)
             return Response(status_code=204)
+        except ProcessingPaused:
+            # The durable receipt stays pending for repair after processing resumes.
+            LOGGER.info("fitbit task deferred while processing is paused")
+            return Response(status_code=204)
         except Exception as error:
             LOGGER.error("fitbit task failed: %s", type(error).__name__)
             return Response(status_code=503)

@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 
 import duckdb
@@ -130,3 +131,59 @@ def test_worker_pause_and_shared_lock_are_retryable(tmp_path):
     worker.paused = False
     with pytest.raises(JobAlreadyRunning):
         worker.run(stored.receipt.key)
+
+
+@pytest.mark.parametrize("paused", [True, False])
+def test_task_acknowledges_pause_but_retries_failure_and_preserves_receipt(paused, caplog):
+    from personal_data_platform.sources.fitbit.runtime import repair_receipts
+    from personal_data_platform.sources.fitbit.service import ReceiptWorker, create_app
+
+    receipts = GCSReceiptRepository(client=Client(), bucket="test")
+    stored = receipts.create(Receipt.create("self", (WINDOW,), received_at=NOW))
+
+    class Identity:
+        def authenticate(self, authorization):
+            assert authorization == "Bearer test"
+
+    class Queue:
+        def __init__(self):
+            self.keys = []
+
+        def enqueue(self, key):
+            self.keys.append(key)
+
+    def unavailable_warehouse():
+        if paused:
+            pytest.fail("paused tasks must not connect to the warehouse")
+        raise OSError("warehouse unavailable")
+
+    queue = Queue()
+    worker = ReceiptWorker(
+        receipts=receipts,
+        repository=None,
+        client=None,
+        warehouse_factory=unavailable_warehouse,
+        subject_key="self",
+        paused=paused,
+    )
+    client = TestClient(
+        create_app(
+            authenticator=None,
+            identity=Identity(),
+            receipts=receipts,
+            queue=queue,
+            worker=worker,
+        )
+    )
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/internal/tasks/fitbit",
+            headers={"Authorization": "Bearer test"},
+            json={"receipt_key": stored.receipt.key},
+        )
+    assert response.status_code == (204 if paused else 503)
+    assert any(record.levelno >= logging.ERROR for record in caplog.records) is not paused
+    assert receipts.read(stored.receipt.key) == stored
+    assert queue.keys == []
+    repair_receipts(receipts, queue, subject_key="self", now=NOW, paused=False)
+    assert stored.receipt.key in queue.keys
