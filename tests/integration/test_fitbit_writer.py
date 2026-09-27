@@ -78,6 +78,49 @@ def test_writer_does_not_commit_its_callers_transaction(warehouse):
     assert warehouse.query_value("select count(*) from base.fitbit_steps") == 0
 
 
+def test_newer_middle_range_preserves_both_sides_of_an_older_snapshot(warehouse):
+    left = snapshot(10, hour=0, version=2)
+    middle = snapshot(20, hour=8, end_hour=16, version=3)
+    right = snapshot(30, hour=16, version=2)
+    apply(warehouse, middle)
+    apply(warehouse, replace(left, records=left.records + right.records))
+
+    assert warehouse.query_rows(
+        "SELECT record_id, value FROM base.fitbit_steps ORDER BY cursor_at"
+    ) == [("0", 10.0), ("8", 20.0), ("16", 30.0)]
+    assert warehouse.query_rows(
+        "SELECT range_start, range_end FROM ops.fitbit_coverage ORDER BY range_start"
+    ) == [
+        (left.window.start, middle.window.start),
+        (middle.window.start, middle.window.end),
+        (middle.window.end, left.window.end),
+    ]
+
+
+def test_rollback_restores_records_deletions_and_coverage_after_replacement(warehouse):
+    from personal_data_platform.sources.fitbit.writer import FitbitBatch
+
+    original = snapshot(10)
+    apply(warehouse, original)
+    coverage = warehouse.query_rows("SELECT * FROM ops.fitbit_coverage")
+    empty = snapshot(None, hour=8, end_hour=16, version=2)
+    warehouse.connection.execute("BEGIN")
+    FitbitBatch(empty).write_snapshot(
+        warehouse.connection, source_key="empty", loaded_at=empty.fetched_at
+    )
+    deletion = snapshot(None, version=3)
+    FitbitBatch(deletion).write_snapshot(
+        warehouse.connection, source_key="deleted", loaded_at=deletion.fetched_at
+    )
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_steps") == 0
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_deleted_record") == 1
+    warehouse.connection.execute("ROLLBACK")
+
+    assert warehouse.query_rows("SELECT record_id, value FROM base.fitbit_steps") == [("0", 10.0)]
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_deleted_record") == 0
+    assert warehouse.query_rows("SELECT * FROM ops.fitbit_coverage") == coverage
+
+
 def sleep_snapshot(day, version, *, child="stage", origin="api"):
     from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window
 
