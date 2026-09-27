@@ -264,6 +264,15 @@ def test_each_response_is_checked_against_its_chunk_not_only_total_window():
         )
 
 
+def test_steps_true_zero_is_a_record_while_off_wrist_remains_missing():
+    point = {"steps": {"interval": interval()}}
+    result = fetch_points("steps", [point])
+    assert len(result.records) == 1
+    assert result.records[0].value == 0
+    assert result.source_payload == (point,)
+    assert fetch_points("steps", []).records == ()
+
+
 def test_steps_keep_physical_start_cursor_and_both_offsets_and_provider_date():
     point = steps("15", start="2026-09-01T15:59:00Z", end="2026-09-01T16:01:00Z")
     point["steps"]["interval"].update(

@@ -391,8 +391,9 @@ def _normalize(data_type: str, point: dict[str, object], subject_key: str) -> tu
         )
     timing = object_dict(payload["interval"])
     start, end, start_offset, end_offset = _interval(timing)
-    value_field = "count" if data_type == "steps" else "activeZoneMinutes"
-    value = _integer(payload[value_field], maximum=1_000_000 if data_type == "steps" else 2**63 - 1)
+    # Steps records omit count for an on-wrist true zero; no record means missing data.
+    raw_value = payload.get("count", 0) if data_type == "steps" else payload["activeZoneMinutes"]
+    value = _integer(raw_value, maximum=1_000_000 if data_type == "steps" else 2**63 - 1)
     category = None
     if data_type == "active-zone-minutes":
         category = string(payload["heartRateZone"]).lower()
