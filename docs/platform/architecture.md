@@ -81,7 +81,9 @@ source間の処理分離はアプリケーションの契約である。同じRa
 1. `docs/sources/<source>/`に取得対象、Raw identity、型付きmodel、運用契約を定義する。
    同じsourceの別streamでも、取得stateとcontrol objectの所有範囲を分ける。
 2. `sources/<source>/`へ取得処理とadapterを実装し、`sources/registry.py`へ`source_id / stream`を登録する。
-   対応schema versionと全prefix、decode、型付きbatch、稼働監査、保持期限、dbt selectorを定義する。
+   対応schema versionと全prefix、parser version、decode、型付きbatch、稼働監査、保持期限、dbt selectorを定義する。
+   `SourceAdapter.parser_version`は必須とし、decodeが返すbatchの版と一致させる。
+   解析結果を変更するときは版を更新し、保持中のRawを再取り込みの対象にする。
 3. 新しい型付きbaseは既存SQLを書き換えずforward migrationで追加する。batchの書込はWarehouseが開始した
    transaction内で行い、batch自身でcommit / rollbackしない。
 4. dbtにscope別modelとtestを追加し、adapterのselectorで対象のmodelとtestを実行できるようtagを付ける。

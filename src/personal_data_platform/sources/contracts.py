@@ -56,6 +56,7 @@ class SourceHealth:
 
 
 class SourceAdapter(RawCodec, Protocol):
+    parser_version: str
     required_relations: tuple[str, ...]
     retention_days: int
     lifecycle_grace_days: int

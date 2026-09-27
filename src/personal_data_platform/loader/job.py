@@ -93,9 +93,7 @@ def run_loader_objects(
     try:
         warehouse.begin_job(f"loader:{source.source_id}:{source.stream}", run_id)
         job_started = True
-        already_loaded = warehouse.succeeded_keys_for(
-            refs, parser_version=getattr(source, "parser_version", None)
-        )
+        already_loaded = warehouse.succeeded_keys_for(refs, parser_version=source.parser_version)
         pending = [raw for raw in refs if raw.key not in already_loaded]
         for raw in pending:
             byte_size = 0

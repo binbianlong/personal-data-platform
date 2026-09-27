@@ -104,7 +104,7 @@ def run_reconciliation(
     raw_by_key = _list_raw_by_key(repository, source, prefix)
     raw_objects = list(raw_by_key.values())
     raw_keys = set(raw_by_key)
-    parser_version = getattr(source, "parser_version", None)
+    parser_version = source.parser_version
     loaded_keys = warehouse.succeeded_keys_for(raw_objects, parser_version=parser_version)
     missing_before_repair = raw_keys - loaded_keys
     repair_summary: dict[str, int] | None = None

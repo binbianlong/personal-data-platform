@@ -185,6 +185,7 @@ class _EmptyBatch:
 
 
 class _SyntheticSource:
+    parser_version = _EmptyBatch.parser_version
     schema_versions = (1, 2)
     raw_suffixes = (".json.gz",)
     required_relations = ()
