@@ -6,6 +6,14 @@
 実端末から分析までの到達、MotherDuck実CU使用量は未検証。Terraformは`enable_fitbit_runtime=false`、
 有効化時も`fitbit_processing_paused=true`が既定。
 
+検証記録:
+
+- 2026-09-27: Ruff・strict mypy・pytest 505件、Terraform fmt/validate/mock test 11件、wheelビルドを確認した。
+- 2026-09-28: Ruff・整形・strict mypy・pytest 511件の成功を確認した。
+- コンテナ実行は未確認。2026-09-27の検証時はDocker Engineが起動していなかった。
+
+これらはローカルの検証結果であり、クラウド動作・実CUの検証とは分けて扱う。
+
 ## CLI
 
 追加スキーマを明示的に適用し、dbt Viewを構築する。ローカルDBでの準備例:
@@ -32,7 +40,7 @@ serveはHTTPサービスを起動する。repairは有効フラグがfalseなら
 共通Loader・監査・再構築では`--source fitbit --stream health`を指定する。
 
 ZIP取り込み・照合用CLIやファイル取り込み台帳はアプリに持たない。
-過去分の一度限りの投入方針は[連携計画](../../plans/fitbit-integration.md#過去分の一度限りの投入)を参照する。
+過去分の投入は[過去分の一度限りの投入](#過去分の一度限りの投入)に従う。
 
 ## 環境変数
 
@@ -90,14 +98,39 @@ Service処理失敗のlog alertと既存reconciliation Job監視を利用する�
 元入力もAPIアクセスも失った期間を完全再構築できるとは保証しない。
 Rawだけの共通rebuildは保持期間内が対象で、全履歴には一度限りの過去分投入とAPI補完を組み合わせる。
 
+## 過去分の一度限りの投入
+
+本番への初回移行時に、一時スクリプトでTakeout ZIPを検証し、MotherDuckへ一度だけ投入する。
+このスクリプトはアプリの機能・依存・CLIとして配布しない。スクリプト作成と実投入は未実施。
+ZIP由来の健康データ・認証情報・一時スクリプトをGitに追加しない。
+
+一度限りの投入では、次を確認する。
+
+- 元ZIPのhashと処理件数・期間を記録し、元入力と照合結果を手元で保管する。
+- 新CSVだけを使い、旧JSONを混ぜず、スマートフォン由来の歩数を除外する。
+- 睡眠はAPI reconcileが選択したIDで旧/新アルゴリズムの重複を解消する。v2優先だけで代替しない。
+- 同日の安静時心拍の矛盾はAPI照合で確定し、未解決の値は投入しない。
+- 部分失敗からの再開と重複防止は一時スクリプト内で管理する。GCS台帳へ架空のオブジェクトを作らない。
+- API確定済み期間を古いZIPで上書きしない。継続取り込みとの境界を重ねて照合する。
+
+### 2026-09-27時点の調査記録
+
+調査対象は`/Users/binbi/Downloads/takeout-20260926T121107Z-1-001.zip`、
+SHA-256は`ea328ec61e714766208e1cfea368c010c25d28fca48668f9d49676ef8be1f303`。
+調査記録では心拍9,029,170行、歩数49,564行（端末由来47,294行）、安静時心拍254行/252日、
+AZM 2,271行、睡眠611 ID。安静時心拍は2日分に矛盾がある。
+過去のAPI照合では有効な睡眠341 IDがZIPと一致した（v2 259件、v1 82件）。投入時には改めて照合する。
+ローカルDBサイズはMotherDuck実ストレージや課金量の証明として扱わない。
+
 ## 導入前の確認事項
 
 1. 本番と別のバケット・DB・SAで通知・集中到着・再試行を再現し、反映時間、GCS操作数、Raw増加量、MotherDuck使用量を測る。
-2. 既存Screen Timeを含めた月間CU見込みが無料枠に20%の余裕を残すことを確認する。Liteで利用可能な使用量/請求画面を使い、ローカル時間・SQL数をCUの代用にしない。
+2. 既存Screen Timeを含めた月間使用量見込みが無料枠に20%の余裕を残すことを確認する。GCS操作・Raw増加量・MotherDuck実CUを含める。Liteで利用可能な使用量/請求画面を使い、ローカル時間・SQL数やBusiness専用QUERY_HISTORYを実CU計測の代用にしない。
 3. 購読管理APIの実行主体・CPEロール・quota projectを確認する。導入前調査では一覧取得が403だったため、現在の権限を再確認する。
 4. migrationとdbt Viewを明示的に適用し、OAuth owner一致、Webhook署名、OIDC、IAM、実際の保持設定、監視を隔離環境で検証する。
-5. PDP専用`pdp-fitbit`購読を対象5種類だけで登録し、ZIP以降から購読開始までの区間をAPI補完する。切替区間を重ねて照合する。
-6. 実端末の同期から分析ビューまで確認する。目標はWebhook受付から5分以内で、端末→Google同期時間は含めない。現時点では未測定。
+5. [過去分の一度限りの投入](#過去分の一度限りの投入)を実施する。
+6. PDP専用`pdp-fitbit`購読を対象5種類だけで登録し、ZIP以降から購読開始までの区間をAPI補完する。切替区間を重ねて照合する。
+7. 実端末の同期から分析ビューまで確認する。目標はWebhook受付から5分以内で、端末→Google同期時間は含めない。現時点では未測定。
 
 現行想定はproject `health-data-pipeline-503813` / `us-central1`、Raw bucket `health-data-pipeline-503813-pdp-raw`。
 旧`health-data-pipeline-dispatch` queueと`health-data-pipeline-hourly` SchedulerはこのTerraformの対象外。

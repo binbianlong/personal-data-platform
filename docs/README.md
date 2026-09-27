@@ -7,7 +7,6 @@ Personal Data Platformの設計、データ仕様、運用手順を管理する�
 - [`platform/`](platform/)
 - [`sources/`](sources/)
 - [`analytics/`](analytics/)
-- [`Fitbit連携計画`](plans/fitbit-integration.md)
 
 ## 管理ルール
 
