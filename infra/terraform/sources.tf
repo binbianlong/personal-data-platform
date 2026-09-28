@@ -44,7 +44,7 @@ locals {
         } : {}, role == "reconciliation" && key == "screen_time_app_in_focus" ? local.fitbit_environment : {})
         secrets = merge({ MOTHERDUCK_TOKEN = "motherduck_token" }, role == "reconciliation" && key != "screen_time_app_in_focus" ? {
           RECONCILIATION_HEARTBEAT_URL = "${key}_heartbeat"
-        } : {})
+        } : {}, role == "reconciliation" && key == "screen_time_app_in_focus" ? local.fitbit_reconciliation_secrets : {})
       }
     }
   ]...)

@@ -9,10 +9,12 @@ flowchart TD
     R --> P[GCS受付記録]
     P --> Q[Cloud Tasks]
     Q --> W[通知期間をAPIから完全取得]
-    W --> G[GCS圧縮Raw]
+    W --> D{現在内容と同一で安全に省略可能?}
+    D -->|いいえ| G[GCS圧縮Raw]
+    D -->|はい| S[受付完了・Raw保存を省略]
     G --> L[指定Rawだけ取り込み]
     L --> M[MotherDuck]
-    C[既存の定期補修] --> Q
+    C[端末同期進展・週次照合・未完了受付] --> Q
     C --> L
     M --> V[dbt分析ビュー]
     V --> A[既存read-only MCP]

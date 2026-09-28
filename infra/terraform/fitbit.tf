@@ -60,6 +60,14 @@ locals {
   fitbit_service_secrets = var.enable_fitbit_runtime ? merge(var.fitbit_secret_ids, {
     MOTHERDUCK_TOKEN = google_secret_manager_secret.runtime["motherduck_token"].secret_id
   }) : {}
+  fitbit_reconciliation_secrets = var.enable_fitbit_runtime ? {
+    for key in [
+      "PDP_FITBIT_OAUTH_CLIENT_ID",
+      "PDP_FITBIT_OAUTH_CLIENT_SECRET",
+      "PDP_FITBIT_OAUTH_REFRESH_TOKEN",
+      "PDP_FITBIT_HEALTH_USER_ID",
+    ] : key => var.fitbit_secret_ids[key]
+  } : {}
 }
 
 resource "google_service_account" "fitbit" {
@@ -107,6 +115,14 @@ resource "google_secret_manager_secret_iam_member" "fitbit" {
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.fitbit[0].email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "fitbit_reconciliation" {
+  for_each  = local.fitbit_reconciliation_secrets
+  project   = var.project_id
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.runtime["reconciliation"].email}"
 }
 
 resource "google_cloud_tasks_queue" "fitbit" {

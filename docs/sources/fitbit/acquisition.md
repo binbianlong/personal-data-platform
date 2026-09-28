@@ -5,6 +5,16 @@
 OAuth refresh tokenからaccess tokenを得て、Google Health v4のreconcileを呼ぶ。
 データソース指定は`google-wearables`。必要な環境変数は[運用](operations.md#環境変数)を参照する。
 
+既存のReconciliation Jobは`pairedDevices.list`を全ページ取得し、`deviceType=TRACKER`の
+`lastSyncTime`が最も新しい端末を選ぶ。機種名を固定せず、時刻はナノ秒まで解釈する。
+同期時刻の進展は対象期間をAPIで照合する契機であり、データが既にAPIへ到着した証明ではない。
+端末がない、同期時刻がない、権限不足の場合はcheckpointを進めず、取得失敗として報告する。
+初回の端末同期ではTokyoの直近7完了日を対象とする。その後は前回成功した同期日から新しい同期日までを対象とし、
+7日超の空白も自動で補完する。対象はTokyoの1日・1種別の受付に分け、1回の補修で最大90日分を発行する。
+全対象の完了後にのみ端末同期checkpointを進める。同日再同期でも`lastSyncTime`の進展は扱う。
+週1回、直近7完了日を5種別すべて照合し、週単位の一意受付で重複作成を防ぐ。
+初回取得と同じ週には週次照合を重ねない。追加のSchedulerは使わない。
+
 | data type | フィルターに使う値 | 置換cursor |
 |---|---|---|
 | `steps` | `steps.interval.start_time` | 区間開始のUTC時刻 |
@@ -42,13 +52,17 @@ issuer、audience、タスク用サービスアカウントemail、`email_verifi
 Cloud Run Service自体の公開設定を内部処理の認証として扱わない。
 
 ワーカーは1日・1種別ずつ取得する。歩数とアクティブゾーン時間は分境界と既存区間の重なりへ範囲を広げる。
-Rawの保存後にkeyとgenerationを受付記録へ確定し、そのRawだけを共有Loaderへ渡す。
+取得後、同じ完全な範囲の現在内容と一致し未解決のRaw保存予定がなければ、Rawを増やさず受付を完了する。
+保存が必要ならDBにRaw保存予定を先に確定し、GCSへcreate-onlyで書く。keyとgenerationを受付記録へ確定し、
+そのRawだけを共有Loaderへ渡す。停止後の再試行では受付・保存予定・GCS・取込台帳を照合する。
 複数区間の続きは次のタスクへ渡す。通常通知の処理でGCS全件listingやmigrationを実行しない。
+停止中もWebhook受付は続けるが、ワーカーのAPI取得と定期受付の作成はしない。
 
 ## 参考仕様
 
 - [Webhook](https://developers.google.com/health/webhooks)
 - [reconcile API](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/reconcile)
+- [pairedDevices.list](https://developers.google.com/health/reference/rest/v4/users.pairedDevices/list)
 - [日時フィルター](https://developers.google.com/health/filters)
 - [データの統合方針](https://developers.google.com/health/data-management)
 - [睡眠データ](https://developers.google.com/health/data-types/sleep)

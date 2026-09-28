@@ -4,23 +4,28 @@
 
 ```text
 raw/fitbit/v1/<subject_key>/health/<data-type>/<YYYYMMDDTHHMMSSffffffZ>/<sha256>.json.gz
-receipts/fitbit/v1/<YYYY-MM-DD>/<uuid または daily>.json
+receipts/fitbit/v1/<YYYY-MM-DD>/<受付ID>.json
+raw/fitbit/v1/_control/device-sync/<subject_key>.json
 ```
 
 subjectは個人を表す安定した疑似識別子を使う。OAuthのIDやtokenをkeyに含めない。
 Rawはschema version 1のJSON envelopeで、subject、data type、取得した半開区間、取得開始時刻、
 `complete=true`、正規化行、元API data pointの全フィールドを保持する。SHA-256はgzip前のenvelopeに対して計算する。
 JSONのwire表記自体は保存せず、未知フィールドを含むpoint内容を保持する。gzipは決定的で、Rawはcreate-only。
+Rawは90日保持する。端末同期checkpointは世代条件付きで更新する小さなcontrol JSONで、Rawの削除対象から外す。
 共通`observed_at`にはこのsourceでは取得開始時刻を使い、遅れて完了した古い取得による上書きを防ぐ。
 
 受付記録は取得予定区間、保存済みRawのkey/generation、区間ごとの完了状態を持つ。
-generationの条件付き更新を使い、全通知履歴を毎回複製しない。受付とRawの作成は別操作なので、
-Raw保存後・参照保存前の障害では未参照Rawが残り得る。定期補修が取り込み、再取得との順位は共通台帳で解決する。
-Raw参照を保存済みなら、再試行で同じgenerationを使う。
+変更なしで保存を省いた区間は取得時刻・内容hashと完了を記録し、旧形式の受付も読み取る。
+generationの条件付き更新を使い、全通知履歴を毎回複製しない。Raw保存予定はDBに先に確定する。
+受付とRawの作成は別操作なので、Raw保存後・参照保存前の障害では未参照Rawが残り得る。
+再試行時は保存予定、GCS、取込台帳を照合し、存在しない予定Rawは元の拡張範囲をより新しい時刻で再取得する。
+Raw参照を保存済みなら同じgenerationを使う。
 
 ## テーブルと単位
 
-追加migrationは`003_fitbit.sql`。既存migrationは変更しない。
+Fitbitの初期スキーマは`003_fitbit.sql`、内容hashとRaw保存予定の拡張は追記migrationとする。
+適用済みmigrationは変更しない。
 
 | base table | 行とvalueの単位 |
 |---|---|
@@ -44,6 +49,13 @@ IDのないサンプルはsubject・種別・時刻/区間から決定的なID�
 `ops.fitbit_coverage`は重ならない範囲ごとの取得順位と現在内容のhashを保持する。
 順位は`(fetched_at, source_key)`。新しい範囲を保護し、古い取得は未反映部分だけを更新する。
 
+Snapshot全体から`fetched_at`だけを除き、未知の元API項目も含めた別のhashを重複判定に使う。
+ページ順の差で保存が増えないよう、比較用hashでは正規化行と元API pointの並びだけを揃える。
+Rawには取得時の並びをそのまま残す。
+同じ取得範囲が完全に覆われ、hashが一致し、同じ利用者・種別に未解決のRaw保存予定がない場合だけ
+新しいRawを省く。範囲の重なりや記録IDの移動など、判定に不確実さがあればフルRawを保存する。
+`A→B→A`では3回保存する。空の完全取得も同じ規則で照合する。
+
 同一範囲で現在と同じ内容なら分析行の書き換えを省き、取得順位を進める。
 過去のhashを永久に除外しないためA→B→Aも反映する。
 同じ睡眠IDの日付が動いた場合は子も親ID単位で置き換える。
@@ -53,6 +65,8 @@ IDのないサンプルはsubject・種別・時刻/区間から決定的なID�
 取引境界は共通Warehouseが所有する。Rawの取込結果を`ops.ingestion_metadata`へ記録し、
 分析行と台帳を同じtransactionでcommitする。
 commit結果不明・rollback失敗では接続を破棄し、再接続後の台帳で判定する。
+Rawを省いた期間は元のRawが90日後に消えるとRawだけでの完全再構築を保証しない。
+これはScreen Timeと同じ復旧範囲であり、必要ならAPI再取得で補う。
 
 ## 分析ビュー
 

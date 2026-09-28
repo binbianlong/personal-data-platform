@@ -2,7 +2,7 @@
 
 ## System of record
 
-GCSをsourceごとの保持期間内のRaw System of Recordとする。iPhoneとMacのScreen Timeは90日、Fitbit API Rawは30日である。
+GCSをsourceごとの保持期間内のRaw System of Recordとする。iPhoneとMacのScreen Time、Fitbit API Rawは90日である。
 Rawはsourceから取得した内容をlosslessに保持し、長期分析履歴はMotherDuckが保持する。Lifecycle削除後のRawは
 復元できず、MotherDuckの全損時に全期間をRawだけから再構築できるとは保証しない。
 
@@ -16,7 +16,8 @@ Raw objectは次の性質を持つ。
 
 取得処理の稼働確認用control objectはsourceが所有し、再構築の入力には使わない。Screen TimeではRaw prefix内の
 予約済み`_control/`へstream別のmutableなdevice別scan receiptとactive-device manifestを置く。controlのkey、本文、更新権限と
-稼働監査はsourceのデータモデル・運用で定義し、共通Raw repositoryには要求しない。
+稼働監査はsourceのデータモデル・運用で定義し、共通Raw repositoryには要求しない。Fitbitの端末同期checkpointも
+`raw/fitbit/v1/_control/`に置き、Rawとは別のmutable JSONとして90日Lifecycleの対象から外す。
 
 GCS bucketの公開範囲、暗号化、credentialは[`security.md`](security.md)に従う。
 
@@ -28,6 +29,8 @@ production bucketは`us-central1`のStandardを使う。source / streamごとに
 Object Versioningは無効にするため、Lifecycle action後のobjectは復元できない。
 
 両Screen Time streamは`raw/screen_time/v1/`または`raw/screen_time/v2/`配下の`.segb.gz`だけを`age=90`のDelete対象とし、control JSONを除外する。
+Fitbitは`raw/fitbit/v1/`配下の`.json.gz`と`receipts/fitbit/v1/`配下の受付を`age=90`のDelete対象とし、
+`raw/fitbit/v1/_control/`配下のcheckpoint JSONを除外する。
 追加pipelineはRaw namespaceとsuffixを指定する。control objectへ削除条件を重ねず、他streamとRaw領域を共有する場合は保持日数を一致させる。
 複数schema版を保持する場合は、再生に対応する全prefixをadapterとTerraformの両方へ含める。
 
@@ -51,7 +54,8 @@ Raw objectは「contentそのもの」ではなく、あるlogical scopeをあ�
 `observed_at`はsourceが定義する観測順位のUTC時刻で、object keyへ含める。
 Screen Timeは取得完了時点、Fitbitは全ページ取得の開始時点を使う。
 
-重複排除は、同じlogical scopeで直前に保存を完了した観測と比較して行う。
+重複排除は、同じlogical scopeで直前に保存を完了した観測と比較して行う。Fitbitは取得範囲の現在の
+完全なcoverageと元API項目を含む内容を照合し、未解決のRaw保存予定がない場合だけ省略する。
 
 ```text
 A -> 保存
@@ -79,8 +83,9 @@ Screen Time Collectorはlocal stateへ永続化した同じkeyとgzip bytesを
 再送する。write-only credentialを使うため、upload前にGCSの既存objectをreadして比較することはない。
 異なる内容を同じkeyへ保存してはならず、取込時のSHA-256不一致はLoaderで検出して成功取込を拒否する。
 
-Fitbitは取得予定範囲を受付記録へ先に保存し、Raw保存後にkey/generationを確定してからDBへ反映する。
-参照保存前の障害では未参照Rawを定期補修が拾い、取得順位で再取得との競合を解決する。
+Fitbitは取得予定範囲を受付記録へ先に保存し、Raw保存予定をDBへ確定してからGCSへcreate-onlyで書く。
+Rawのkey/generationを確定してからLoaderへ渡す。障害時は保存予定とGCS・取込台帳を照合する。
+変更なしと確認してRawを省略した期間は、元のRawが期限切れになればRawだけでは完全再構築できない。
 
 ## 検証と再生
 

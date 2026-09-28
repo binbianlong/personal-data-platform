@@ -40,12 +40,13 @@ resource "google_storage_bucket" "raw" {
   }
 
   dynamic "lifecycle_rule" {
-    for_each = var.enable_fitbit_runtime ? ["raw/fitbit/v1/", "receipts/fitbit/v1/"] : []
+    for_each = var.enable_fitbit_runtime ? toset(["raw", "receipts"]) : toset([])
     content {
       action { type = "Delete" }
       condition {
-        age            = 30
-        matches_prefix = [lifecycle_rule.value]
+        age            = 90
+        matches_prefix = [lifecycle_rule.value == "raw" ? "raw/fitbit/v1/" : "receipts/fitbit/v1/"]
+        matches_suffix = lifecycle_rule.value == "raw" ? [".json.gz"] : null
       }
     }
   }
@@ -98,13 +99,17 @@ resource "google_storage_bucket" "preflight" {
 
 data "google_iam_policy" "raw_bucket" {
   dynamic "binding" {
-    for_each = var.enable_fitbit_runtime ? ["raw/fitbit/v1/", "receipts/fitbit/v1/"] : []
+    for_each = var.enable_fitbit_runtime ? [
+      { prefix = "raw/fitbit/v1/", role = local.storage_roles.collector_raw_creator, title = "fitbit_raw_create", suffix = ".json.gz" },
+      { prefix = "receipts/fitbit/v1/", role = local.storage_roles.collector_receipt_writer, title = "fitbit_receipt_write", suffix = ".json" },
+      { prefix = "raw/fitbit/v1/_control/device-sync/", role = local.storage_roles.collector_receipt_writer, title = "fitbit_device_sync_write", suffix = ".json" },
+    ] : []
     content {
-      role    = binding.value == "raw/fitbit/v1/" ? local.storage_roles.collector_raw_creator : local.storage_roles.collector_receipt_writer
+      role    = binding.value.role
       members = local.fitbit_storage_members
       condition {
-        title      = binding.value == "raw/fitbit/v1/" ? "fitbit_raw_create" : "fitbit_receipt_write"
-        expression = "resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${binding.value}')"
+        title      = binding.value.title
+        expression = "resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${binding.value.prefix}') && resource.name.endsWith('${binding.value.suffix}')"
       }
     }
   }
