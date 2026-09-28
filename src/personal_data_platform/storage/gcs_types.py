@@ -41,6 +41,7 @@ class GCSBlob(Protocol):
 
 class GCSBucket(Protocol):
     def blob(self, blob_name: str, *, generation: int | None = None) -> GCSBlob: ...
+    def get_blob(self, blob_name: str) -> GCSBlob | None: ...
 
 
 class GCSBlobIterator(Protocol):

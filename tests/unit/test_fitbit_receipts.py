@@ -2,7 +2,8 @@
 
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from google.api_core.exceptions import PreconditionFailed
@@ -88,6 +89,43 @@ def test_every_delivery_has_independent_receipt_and_safe_payload() -> None:
     encoded = first.to_bytes()
     assert Receipt.from_bytes(encoded) == first
     assert "healthUserId" not in json.loads(encoded)
+
+
+def test_physical_work_uses_tokyo_day_boundary():
+    start = datetime(2026, 9, 28, tzinfo=ZoneInfo("Asia/Tokyo"))
+    end = start + timedelta(days=1)
+    receipt = Receipt.create(
+        "subject", (Window("steps", start, end),), received_at=NOW
+    )
+    assert len(receipt.work) == 1
+    assert receipt.work[0].window == Window("steps", start, end)
+
+
+def test_skipped_work_retains_observation_evidence_and_reads_legacy_v1() -> None:
+    original = receipt()
+    old_payload = original.to_bytes()
+    assert Receipt.from_bytes(old_payload) == original
+    observed = ReceiptWork(
+        WINDOW, completed=True, fetched_at=NOW, source_sha256="a" * 64
+    )
+    updated = replace(original, work=(observed,), completed_at=NOW)
+    assert Receipt.from_bytes(updated.to_bytes()) == updated
+    assert Receipt.from_bytes(old_payload).work[0].source_sha256 is None
+
+
+@pytest.mark.parametrize(
+    ("identity", "origin"),
+    [
+        ("bootstrap", "bootstrap"),
+        ("weekly", "weekly"),
+        ("device-0123456789ab", "device-sync"),
+    ],
+)
+def test_deterministic_repair_receipts_have_safe_keys(identity: str, origin: str) -> None:
+    key = f"receipts/fitbit/v1/2026-09-27/{identity}.json"
+    value = Receipt.create("subject", (WINDOW,), received_at=NOW, key=key, origin=origin)
+    assert value.key == key
+    assert Receipt.from_bytes(value.to_bytes()) == value
 
 
 def test_cas_retains_progress_and_daily_receipt_is_create_once() -> None:

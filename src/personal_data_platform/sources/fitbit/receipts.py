@@ -7,17 +7,22 @@ import re
 import uuid
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from google.api_core.exceptions import PreconditionFailed
 
 from personal_data_platform.raw.models import RawObject
 
-from .models import Window, aware, date_cursor, object_dict, parse_time, string
+from .models import DATE_TYPES, Window, aware, date_cursor, object_dict, parse_time, string
 
 RECEIPT_PREFIX = "receipts/fitbit/v1/"
-_KEY_PATTERN = re.compile(r"receipts/fitbit/v1/\d{4}-\d{2}-\d{2}/(?:[a-f0-9]{32}|daily)\.json")
+_TOKYO = ZoneInfo("Asia/Tokyo")
+_KEY_PATTERN = re.compile(
+    r"receipts/fitbit/v1/\d{4}-\d{2}-\d{2}/"
+    r"(?:[a-f0-9]{32}|daily|bootstrap|weekly|device-[a-f0-9]{12})\.json"
+)
 
 
 def validate_receipt_key(key: str) -> None:
@@ -58,6 +63,18 @@ class ReceiptWork:
     window: Window
     raw: RawObject | None = None
     completed: bool = False
+    fetched_at: datetime | None = None
+    source_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.fetched_at is not None:
+            object.__setattr__(self, "fetched_at", aware(self.fetched_at))
+        if (self.fetched_at is None) != (self.source_sha256 is None):
+            raise ValueError("skipped acquisition needs both time and digest")
+        if self.source_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", self.source_sha256) is None:
+            raise ValueError("invalid acquisition digest")
+        if self.source_sha256 is not None and (self.raw is not None or not self.completed):
+            raise ValueError("no-change evidence requires completed work without Raw")
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +90,9 @@ class Receipt:
         validate_receipt_key(self.key)
         if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.subject_key) is None:
             raise ValueError("invalid pseudonymous subject key")
-        if not self.work or self.origin not in ("webhook", "daily", "manual"):
+        if not self.work or self.origin not in (
+            "webhook", "daily", "manual", "bootstrap", "weekly", "device-sync"
+        ):
             raise ValueError("invalid receipt work or origin")
         object.__setattr__(self, "received_at", aware(self.received_at))
         if self.completed_at is not None:
@@ -97,6 +116,7 @@ class Receipt:
         received_at: datetime,
         daily: bool = False,
         origin: str = "webhook",
+        key: str | None = None,
     ) -> Receipt:
         now = aware(received_at)
         identity = "daily" if daily else uuid.uuid4().hex
@@ -104,13 +124,20 @@ class Receipt:
         for window in windows:
             start = window.start
             while start < window.end:
-                # Keep each acquisition/lease to one UTC day (or one civil day
-                # for date metrics) even when a repair spans seven days.
-                end = min(window.end, date_cursor(start.date()) + timedelta(days=1))
+                # Physical ranges follow Tokyo days; provider civil dates use
+                # their UTC-midnight comparison cursors.
+                boundary = (
+                    date_cursor(start.date()) + timedelta(days=1)
+                    if window.data_type in DATE_TYPES
+                    else datetime.combine(
+                        start.astimezone(_TOKYO).date() + timedelta(days=1), time(), _TOKYO
+                    )
+                )
+                end = min(window.end, boundary)
                 work.append(ReceiptWork(Window(window.data_type, start, end)))
                 start = end
         return cls(
-            f"{RECEIPT_PREFIX}{now.date().isoformat()}/{identity}.json",
+            key or f"{RECEIPT_PREFIX}{now.date().isoformat()}/{identity}.json",
             subject_key,
             now,
             tuple(work),
@@ -150,6 +177,10 @@ class Receipt:
                     ),
                     _raw_from_dict(item["raw"]) if item.get("raw") is not None else None,
                     completed,
+                    parse_time(string(item["fetched_at"]))
+                    if item.get("fetched_at") is not None else None,
+                    string(item["source_sha256"])
+                    if item.get("source_sha256") is not None else None,
                 )
             )
         return cls(

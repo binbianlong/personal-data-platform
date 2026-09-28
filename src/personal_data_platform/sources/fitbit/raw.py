@@ -21,6 +21,7 @@ _KEY = re.compile(
 
 class SnapshotRepository(Protocol):
     def put_raw_object(self, key: str, compressed_bytes: bytes) -> RawObject: ...
+    def head_raw(self, key: str) -> RawObject | None: ...
 
 
 def parse_raw_key(key: str, *, storage_created_at: datetime, storage_generation: int) -> RawObject:

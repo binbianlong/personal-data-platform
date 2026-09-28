@@ -20,7 +20,7 @@ class FitbitSource:
     schema_versions: tuple[int, ...] = (1,)
     raw_prefixes: tuple[str, ...] = (PREFIX,)
     raw_suffixes: tuple[str, ...] = (".json.gz",)
-    retention_days = 30
+    retention_days = 90
     lifecycle_grace_days = 3
     parser_version = PARSER_VERSION
     dbt_selector = "tag:fitbit tag:screen_time"
@@ -28,6 +28,7 @@ class FitbitSource:
     required_relations = tuple(f"base.{name}" for name in TABLES.values()) + (
         "ops.fitbit_coverage",
         "ops.fitbit_deleted_record",
+        "ops.fitbit_raw_intent",
         "marts.daily_fitbit_health",
         "marts.fitbit_steps_time_series",
         "marts.fitbit_heart_rate_time_series",

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from typing import Protocol
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -23,7 +25,7 @@ from personal_data_platform.storage.gcs import GCSRawRepository
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 from .adapter import FitbitSource
-from .api import HealthClient
+from .api import HealthClient, HealthError, SyncTime
 from .models import DATA_TYPES, DATE_TYPES, Window, date_cursor
 from .oauth import GoogleOAuth
 from .receipts import (
@@ -35,6 +37,7 @@ from .receipts import (
 )
 from .service import Queue, ReceiptWorker, create_app
 from .signatures import GoogleTaskIdentity, TinkSignatures
+from .sync_state import GCSFitbitSyncState, StoredSyncState
 from .webhook import GoogleHealthAuthenticator
 
 LOGGER = logging.getLogger(__name__)
@@ -188,6 +191,189 @@ class RepairSummary:
     latest_completed_at: str | None = None
 
 
+class DeviceClient(Protocol):
+    def latest_tracker_sync(self) -> SyncTime | None: ...
+
+
+class DeviceCheckError(RuntimeError):
+    """A tracker lookup that should be reported without hiding storage failures."""
+
+
+def _tokyo_start(day: date) -> datetime:
+    return datetime.combine(day, time(), ZoneInfo("Asia/Tokyo"))
+
+
+def _week(day: date) -> str:
+    year, number, _ = day.isocalendar()
+    return f"{year:04d}-W{number:02d}"
+
+
+def _receipt_key(day: date, identity: str) -> str:
+    return f"{RECEIPT_PREFIX}{day.isoformat()}/{identity}.json"
+
+
+def _ensure_scheduled(
+    receipts: ReceiptRepository, *, subject_key: str, key: str,
+    windows: tuple[Window, ...], received_at: datetime, origin: str,
+) -> None:
+    expected = Receipt.create(
+        subject_key, windows, received_at=received_at, key=key, origin=origin
+    )
+    current = receipts.create(expected).receipt
+    def matches(actual: Window, original: Window) -> bool:
+        if actual.data_type != original.data_type:
+            return False
+        if actual.data_type in ("steps", "active-zone-minutes"):
+            return actual.start <= original.start and actual.end >= original.end
+        return actual == original
+
+    if (
+        current.subject_key != subject_key or current.origin != origin
+        or len(current.work) != len(expected.work)
+        or any(
+            not matches(actual.window, original.window)
+            for actual, original in zip(current.work, expected.work, strict=True)
+        )
+    ):
+        raise RuntimeError("scheduled Fitbit receipt identity changed")
+
+
+def _completed(receipts: ReceiptRepository, key: str) -> bool:
+    try:
+        return receipts.read(key).receipt.completed_at is not None
+    except FileNotFoundError:
+        return False
+
+
+def _bootstrap(
+    receipts: ReceiptRepository, sync_store: GCSFitbitSyncState,
+    stored: StoredSyncState, *, subject_key: str, today: date, now: datetime,
+) -> StoredSyncState:
+    state = stored.state
+    if state.bootstrap_day is None:
+        state = replace(state, bootstrap_day=today)
+        stored = sync_store.replace(stored, state)
+    assert state.bootstrap_day is not None
+    day = state.bootstrap_day
+    key = _receipt_key(day, "bootstrap")
+    _ensure_scheduled(
+        receipts, subject_key=subject_key, key=key,
+        windows=sync_windows(_tokyo_start(day - timedelta(days=7)), _tokyo_start(day), DATA_TYPES),
+        received_at=now, origin="bootstrap",
+    )
+    if _completed(receipts, key):
+        state = replace(
+            state, bootstrap_complete=True,
+            last_completed_sync=SyncTime.from_datetime(_tokyo_start(day)),
+            weekly_completed=_week(day),
+        )
+        stored = sync_store.replace(stored, state)
+    return stored
+
+
+def _weekly(
+    receipts: ReceiptRepository, sync_store: GCSFitbitSyncState,
+    stored: StoredSyncState, *, subject_key: str, today: date, now: datetime,
+) -> StoredSyncState:
+    state = stored.state
+    current_week = _week(today)
+    if state.weekly_pending is None and state.weekly_completed != current_week:
+        state = replace(state, weekly_pending=current_week, weekly_end_day=today - timedelta(days=1))
+        stored = sync_store.replace(stored, state)
+    if state.weekly_pending is None:
+        return stored
+    assert state.weekly_end_day is not None
+    monday = state.weekly_end_day + timedelta(days=1)
+    monday -= timedelta(days=monday.weekday())
+    key = _receipt_key(monday, "weekly")
+    end = state.weekly_end_day + timedelta(days=1)
+    _ensure_scheduled(
+        receipts, subject_key=subject_key, key=key,
+        windows=sync_windows(_tokyo_start(end - timedelta(days=7)), _tokyo_start(end), DATA_TYPES),
+        received_at=now, origin="weekly",
+    )
+    if _completed(receipts, key):
+        stored = sync_store.replace(
+            stored, replace(state, weekly_completed=state.weekly_pending,
+                            weekly_pending=None, weekly_end_day=None)
+        )
+    return stored
+
+
+def _device_key(subject_key: str, target: SyncTime, day: date) -> str:
+    identity = hashlib.sha256(
+        f"{subject_key}:{target.text}:{day.isoformat()}".encode()
+    ).hexdigest()[:12]
+    return _receipt_key(day, f"device-{identity}")
+
+
+def _device_windows(day: date, target: SyncTime) -> tuple[Window, ...]:
+    start = _tokyo_start(day)
+    end = _tokyo_start(day + timedelta(days=1))
+    if day == target.tokyo_date():
+        # Reconcile's upper bound is exclusive; include the sync instant.
+        end = min(end, target.utc_second + timedelta(microseconds=target.nanosecond // 1000 + 1))
+    if end <= start:
+        raise ValueError("tracker sync time does not cover the selected day")
+    return sync_windows(start, end, DATA_TYPES)
+
+
+def _device(
+    receipts: ReceiptRepository, sync_store: GCSFitbitSyncState,
+    stored: StoredSyncState, device_client: DeviceClient,
+    *, subject_key: str, today: date, now: datetime,
+) -> StoredSyncState:
+    state = stored.state
+    if state.device_target is None:
+        try:
+            latest = device_client.latest_tracker_sync()
+        except HealthError as error:
+            raise DeviceCheckError("paired tracker request failed") from error
+        if latest is None:
+            raise DeviceCheckError("no paired tracker sync time is available")
+        if latest > SyncTime.from_datetime(now + timedelta(minutes=5)):
+            raise DeviceCheckError("tracker sync time is in the future")
+        assert state.last_completed_sync is not None
+        if latest <= state.last_completed_sync:
+            return stored
+        state = replace(
+            state, device_target=latest,
+            device_next_day=state.last_completed_sync.tokyo_date(),
+        )
+        stored = sync_store.replace(stored, state)
+    assert state.device_target is not None and state.device_next_day is not None
+    if state.device_batch_end is None:
+        end_day = min(state.device_next_day + timedelta(days=89), state.device_target.tokyo_date())
+        state = replace(state, device_batch_end=end_day)
+        stored = sync_store.replace(stored, state)
+    assert state.device_batch_end is not None
+    next_day = state.device_next_day
+    batch_end = state.device_batch_end
+    target = state.device_target
+    assert next_day is not None and batch_end is not None and target is not None
+    days = [next_day + timedelta(days=index) for index in range(
+        (batch_end - next_day).days + 1
+    )]
+    for day in days:
+        _ensure_scheduled(
+            receipts, subject_key=subject_key,
+            key=_device_key(subject_key, target, day),
+            windows=_device_windows(day, target),
+            received_at=now, origin="device-sync",
+        )
+    if all(_completed(receipts, _device_key(subject_key, target, day)) for day in days):
+        next_day = batch_end + timedelta(days=1)
+        if next_day > target.tokyo_date():
+            state = replace(
+                state, last_completed_sync=target,
+                device_target=None, device_next_day=None, device_batch_end=None,
+            )
+        else:
+            state = replace(state, device_next_day=next_day, device_batch_end=None)
+        stored = sync_store.replace(stored, state)
+    return stored
+
+
 def repair_receipts(
     receipts: ReceiptRepository,
     queue: Queue,
@@ -195,27 +381,44 @@ def repair_receipts(
     subject_key: str,
     now: datetime,
     paused: bool = False,
+    sync_store: GCSFitbitSyncState,
+    device_client: DeviceClient,
 ) -> RepairSummary:
     today = now.astimezone(ZoneInfo("Asia/Tokyo")).date()
-    start = datetime.combine(today - timedelta(days=6), datetime.min.time(), ZoneInfo("Asia/Tokyo"))
-    end = start + timedelta(days=7)
-    daily = Receipt.create(
-        subject_key, sync_windows(start, end, DATA_TYPES), received_at=now, daily=True
-    )
-    receipts.create(replace(daily, key=f"{RECEIPT_PREFIX}{today.isoformat()}/daily.json"))
+    failed = 0
+    if not paused:
+        stored = sync_store.read(subject_key)
+        if not stored.state.bootstrap_complete:
+            stored = _bootstrap(
+                receipts, sync_store, stored,
+                subject_key=subject_key, today=today, now=now,
+            )
+        if stored.state.bootstrap_complete:
+            stored = _weekly(
+                receipts, sync_store, stored,
+                subject_key=subject_key, today=today, now=now,
+            )
+            try:
+                _device(
+                    receipts, sync_store, stored, device_client,
+                    subject_key=subject_key, today=today, now=now,
+                )
+            except DeviceCheckError as error:
+                LOGGER.error("fitbit paired-device check failed: %s", type(error).__name__)
+                failed += 1
     inventory = receipts.inventory()
-    queued = failed = at_risk = 0
+    queued = at_risk = 0
     oldest = 0.0
-    for stored in inventory.pending:
-        age = max(0.0, (now - stored.receipt.received_at).total_seconds())
+    for pending_receipt in inventory.pending:
+        age = max(0.0, (now - pending_receipt.receipt.received_at).total_seconds())
         oldest = max(oldest, age)
-        at_risk += age >= 27 * 86400
+        at_risk += age >= 87 * 86400
         if paused:
             continue
         try:
-            if stored.receipt.subject_key != subject_key:
+            if pending_receipt.receipt.subject_key != subject_key:
                 raise ValueError("receipt subject does not match runtime")
-            queue.enqueue(stored.receipt.key)
+            queue.enqueue(pending_receipt.receipt.key)
             queued += 1
         except Exception as error:
             LOGGER.error("fitbit repair enqueue failed: %s", type(error).__name__)
@@ -240,12 +443,19 @@ def run_repair_from_env() -> RepairSummary:
         return RepairSummary(enabled=False)
     receipts, repository = _stores()
     paused = enabled("PDP_FITBIT_PROCESSING_PAUSED")
+    config = GCSConfig.from_env()
+    sync_store = GCSFitbitSyncState(
+        client=storage.Client(project=config.project_id), bucket=config.bucket
+    )
+    device_client = HealthClient(access_token=GoogleOAuth.from_env())
     summary = repair_receipts(
         receipts,
         _queue(),
         subject_key=required("PDP_FITBIT_SUBJECT_KEY"),
         now=datetime.now(UTC),
         paused=paused,
+        sync_store=sync_store,
+        device_client=device_client,
     )
     if not paused:
         warehouse = _warehouse()
@@ -266,6 +476,7 @@ def run_repair_from_env() -> RepairSummary:
             if acquired and warehouse.connection_usable:
                 warehouse.release_job_lock("reconciliation", owner)
             warehouse.close()
+        _worker(receipts, repository).recover_orphan_intents(limit=1)
     LOGGER.info("fitbit repair %s", json.dumps(asdict(summary)))
     if summary.at_risk_count or summary.failed_count:
         LOGGER.error("fitbit repair backlog requires attention")

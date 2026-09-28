@@ -59,6 +59,62 @@ def test_replace_empty_and_a_b_a(warehouse):
     assert warehouse.query_value("select count(*) from base.fitbit_steps") == 0
 
 
+def test_full_source_digest_changes_with_unknown_fields_but_not_fetch_time(warehouse):
+    from personal_data_platform.sources.fitbit.writer import can_skip_snapshot
+
+    first = replace(snapshot(10), source_payload=({"unknown": {"value": 1}},))
+    apply(warehouse, first)
+    later = replace(first, fetched_at=first.fetched_at + timedelta(hours=1))
+    assert can_skip_snapshot(warehouse, later)
+    changed = replace(later, source_payload=({"unknown": {"value": 2}},))
+    assert not can_skip_snapshot(warehouse, changed)
+
+
+def test_full_source_digest_requires_exact_coverage_and_no_unresolved_intent(warehouse):
+    from personal_data_platform.sources.fitbit.writer import can_skip_snapshot
+
+    first = snapshot(10)
+    apply(warehouse, first)
+    assert can_skip_snapshot(warehouse, replace(first, fetched_at=first.fetched_at + timedelta(hours=1)))
+    warehouse.connection.execute(
+        "INSERT INTO ops.fitbit_raw_intent VALUES (?,?,?,?,?,?,?,?)",
+        [
+            "receipt", 0, "self", "steps", first.window.start, first.window.end,
+            "raw/fitbit/v1/pending", first.fetched_at,
+        ],
+    )
+    assert not can_skip_snapshot(warehouse, first)
+
+
+def test_loaded_raw_clears_earlier_intents_in_same_transaction(warehouse):
+    from personal_data_platform.sources.fitbit.adapter import FitbitSource
+    from personal_data_platform.sources.fitbit.raw import encode_snapshot
+    from personal_data_platform.sources.fitbit.writer import FitbitBatch, can_skip_snapshot
+
+    first = snapshot(10)
+    receipt_key = "receipts/fitbit/v1/2026-09-27/" + "a" * 32 + ".json"
+    old = replace(first, fetched_at=first.fetched_at - timedelta(hours=1))
+    for value in (old, first):
+        key, _ = encode_snapshot(value)
+        warehouse.connection.execute(
+            "INSERT INTO ops.fitbit_raw_intent VALUES (?,?,?,?,?,?,?,?)",
+            [receipt_key, 0, "self", "steps", value.window.start, value.window.end,
+             key, value.fetched_at],
+        )
+    assert not can_skip_snapshot(warehouse, first)
+    key, _ = encode_snapshot(first)
+    raw = FitbitSource().parse_raw_key(
+        key, storage_created_at=first.fetched_at, storage_generation=1
+    )
+    warehouse.load_object(raw, byte_size=len(first.to_bytes()), batch=FitbitBatch(first))
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_raw_intent") == 0
+    assert can_skip_snapshot(warehouse, replace(first, fetched_at=first.fetched_at + timedelta(hours=1)))
+    warehouse.connection.execute("DELETE FROM ops.fitbit_raw_intent")
+    middle = snapshot(20, hour=8, end_hour=16, version=2)
+    apply(warehouse, middle)
+    assert not can_skip_snapshot(warehouse, first)
+
+
 def test_old_overlapping_acquisition_cannot_erase_newer_empty_range(warehouse):
     apply(warehouse, snapshot(None, hour=12, version=3))
     apply(warehouse, snapshot(5, hour=0, version=2))

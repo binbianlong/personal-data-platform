@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -205,6 +206,22 @@ class Snapshot:
             separators=(",", ":"),
             allow_nan=False,
         ).encode()
+
+    def source_sha256(self) -> str:
+        """Hash every persisted source field except observation time."""
+        payload = json.loads(self.to_bytes())
+        del payload["fetched_at"]
+        # API pages do not promise a stable order. Raw keeps their original
+        # sequence, while equality compares the same complete set of points.
+        for field in ("records", "source_payload"):
+            payload[field].sort(
+                key=lambda item: json.dumps(
+                    item, sort_keys=True, separators=(",", ":"), allow_nan=False
+                )
+            )
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        ).hexdigest()
 
     @classmethod
     def from_bytes(cls, payload: bytes) -> Snapshot:

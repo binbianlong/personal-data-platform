@@ -41,6 +41,38 @@ class _Coverage:
     origin: str
     source_key: str
     content_sha256: str
+    source_sha256: str
+
+
+def can_skip_snapshot(warehouse: Warehouse, snapshot: Snapshot) -> bool:
+    """Omit Raw only for one exact, fully loaded, unchanged acquisition scope."""
+    window = snapshot.window
+    if warehouse.query_value(
+        "SELECT count(*) FROM ops.fitbit_raw_intent WHERE subject_key=? AND data_type=?",
+        [snapshot.subject_key, window.data_type],
+    ):
+        return False
+    rows = warehouse.query_rows(
+        "SELECT range_start, range_end, origin, source_sha256 "
+        "FROM ops.fitbit_coverage WHERE subject_key=? AND data_type=? "
+        "AND range_start < ? AND range_end > ?",
+        [snapshot.subject_key, window.data_type, window.end, window.start],
+    )
+    return rows == [(window.start, window.end, snapshot.origin, snapshot.source_sha256())]
+
+
+def clear_intents_for_loaded_raw(connection: DuckDBPyConnection, raw: RawObject) -> None:
+    """Resolve this work's planned attempts no newer than a loaded Raw."""
+    row = connection.execute(
+        "SELECT receipt_key, work_index FROM ops.fitbit_raw_intent WHERE raw_key=?",
+        [raw.key],
+    ).fetchone()
+    if row is not None:
+        connection.execute(
+            "DELETE FROM ops.fitbit_raw_intent WHERE receipt_key=? AND work_index=? "
+            "AND fetched_at <= ?",
+            [row[0], row[1], raw.observed_at],
+        )
 
 
 def _accepted_ranges(
@@ -60,11 +92,15 @@ def _accepted_ranges(
 
 
 def _content_digest(snapshot: Snapshot) -> str:
+    records = [asdict(record) for record in snapshot.records]
+    records.sort(key=lambda item: json.dumps(
+        item, default=str, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ))
     return hashlib.sha256(
         json.dumps(
             {
                 "origin": snapshot.origin,
-                "records": [asdict(record) for record in snapshot.records],
+                "records": records,
             },
             default=str,
             sort_keys=True,
@@ -95,6 +131,7 @@ class FitbitBatch:
         loaded_at: datetime,
     ) -> None:
         self.write_snapshot(connection, source_key=raw.key, loaded_at=loaded_at)
+        clear_intents_for_loaded_raw(connection, raw)
 
     def write_snapshot(
         self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
@@ -106,6 +143,7 @@ class FitbitBatch:
         if not accepted:
             return
         digest = _content_digest(self.snapshot)
+        source_digest = self.snapshot.source_sha256()
         unchanged = (
             len(coverage) == 1
             and coverage[0].start == window.start
@@ -119,13 +157,19 @@ class FitbitBatch:
             if protected_ids:
                 # Filtered stale identities no longer describe a complete payload.
                 digest = ""
-        self._replace_coverage(connection, coverage, accepted, source_key=source_key, digest=digest)
+                source_digest = ""
+        if accepted != [(window.start, window.end)]:
+            source_digest = ""
+        self._replace_coverage(
+            connection, coverage, accepted, source_key=source_key, digest=digest,
+            source_digest=source_digest,
+        )
 
     def _read_coverage(self, connection: DuckDBPyConnection) -> list[_Coverage]:
         snapshot = self.snapshot
         window = snapshot.window
         rows = connection.execute(
-            "SELECT range_start, range_end, fetched_at, origin, source_key, content_sha256 "
+            "SELECT range_start, range_end, fetched_at, origin, source_key, content_sha256, source_sha256 "
             "FROM ops.fitbit_coverage WHERE subject_key = ? AND data_type = ? "
             "AND range_start < ? AND range_end > ? ORDER BY range_start",
             [snapshot.subject_key, window.data_type, window.end, window.start],
@@ -220,7 +264,7 @@ class FitbitBatch:
                 moved_cursors.add(cursor)
         if moved_cursors:
             connection.execute(
-                "UPDATE ops.fitbit_coverage SET content_sha256='' "
+                "UPDATE ops.fitbit_coverage SET content_sha256='', source_sha256='' "
                 "WHERE subject_key=? AND data_type=? AND EXISTS "
                 "(SELECT 1 FROM unnest(?::TIMESTAMPTZ[]) previous(cursor_at) "
                 " WHERE range_start <= previous.cursor_at AND range_end > previous.cursor_at)",
@@ -341,6 +385,7 @@ class FitbitBatch:
         *,
         source_key: str,
         digest: str,
+        source_digest: str,
     ) -> None:
         snapshot = self.snapshot
         window = snapshot.window
@@ -358,7 +403,7 @@ class FitbitBatch:
             )
             for left, right in remaining:
                 connection.execute(
-                    "INSERT INTO ops.fitbit_coverage VALUES (?,?,?,?,?,?,?,?)",
+                    "INSERT INTO ops.fitbit_coverage VALUES (?,?,?,?,?,?,?,?,?)",
                     [
                         snapshot.subject_key,
                         window.data_type,
@@ -370,11 +415,12 @@ class FitbitBatch:
                         # The remaining fragment was not fetched as a complete
                         # window, so its old whole-window digest is not reusable.
                         "",
+                        "",
                     ],
                 )
         for start, end in accepted:
             connection.execute(
-                "INSERT INTO ops.fitbit_coverage VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO ops.fitbit_coverage VALUES (?,?,?,?,?,?,?,?,?)",
                 [
                     snapshot.subject_key,
                     window.data_type,
@@ -384,6 +430,7 @@ class FitbitBatch:
                     snapshot.origin,
                     source_key,
                     digest,
+                    source_digest,
                 ],
             )
 

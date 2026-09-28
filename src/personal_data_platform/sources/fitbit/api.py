@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 import time
@@ -27,6 +28,7 @@ from personal_data_platform.sources.fitbit.models import (
 )
 
 DATA_SOURCE_FAMILY = "users/me/dataSourceFamilies/google-wearables"
+LOGGER = logging.getLogger(__name__)
 _FIELDS = {
     "steps": ("steps", "steps.interval.start_time"),
     "heart-rate": ("heartRate", "heart_rate.sample_time.physical_time"),
@@ -58,6 +60,51 @@ class RateLimitError(TransientError):
 
 class InvalidResponseError(HealthError):
     """The response cannot establish a complete, unambiguous replacement range."""
+
+
+_SYNC_TIME = re.compile(
+    r"(?P<second>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
+    r"(?:\.(?P<fraction>\d{1,9}))?(?P<zone>Z|[+-]\d{2}:\d{2})\Z"
+)
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class SyncTime:
+    """RFC 3339 provider timestamp ordered without losing nanoseconds."""
+
+    utc_second: datetime
+    nanosecond: int
+
+    @classmethod
+    def parse(cls, value: str) -> SyncTime:
+        match = _SYNC_TIME.fullmatch(value)
+        if match is None:
+            raise ValueError("invalid tracker sync time")
+        fraction = match.group("fraction") or ""
+        try:
+            point = datetime.fromisoformat(
+                match.group("second") + match.group("zone").replace("Z", "+00:00")
+            ).astimezone(UTC)
+        except ValueError:
+            raise ValueError("invalid tracker sync time") from None
+        return cls(point, int(fraction.ljust(9, "0")) if fraction else 0)
+
+    @classmethod
+    def from_datetime(cls, value: datetime) -> SyncTime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("sync time must be timezone-aware")
+        utc = value.astimezone(UTC)
+        return cls(utc.replace(microsecond=0), utc.microsecond * 1000)
+
+    @property
+    def text(self) -> str:
+        head = self.utc_second.strftime("%Y-%m-%dT%H:%M:%S")
+        return f"{head}.{self.nanosecond:09d}Z" if self.nanosecond else head + "Z"
+
+    def tokyo_date(self) -> date:
+        from zoneinfo import ZoneInfo
+
+        return self.utc_second.astimezone(ZoneInfo("Asia/Tokyo")).date()
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +234,49 @@ class HealthClient:
         self._clock = clock
         self._max_pages = max_pages
 
+    def latest_tracker_sync(self) -> SyncTime | None:
+        """Read every paired-device page and take the newest tracker sync."""
+        latest: SyncTime | None = None
+        page_token = ""
+        seen_tokens: set[str] = set()
+        for _ in range(self._max_pages):
+            token = self._access_token()
+            if not isinstance(token, str) or not token.strip():
+                raise AuthenticationError("Google Health access token is missing")
+            query = {"pageSize": "100"}
+            if page_token:
+                query["pageToken"] = page_token
+            LOGGER.info("fitbit api_request endpoint=pairedDevices count=1")
+            page = request_json(
+                self._transport,
+                "GET",
+                f"https://health.googleapis.com/v4/users/me/pairedDevices?{urlencode(query)}",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                timeout=self._timeout,
+            )
+            devices = page.get("pairedDevices", [])
+            if not isinstance(devices, list):
+                raise InvalidResponseError("Google Health pairedDevices must be an array")
+            for device in devices:
+                try:
+                    item = object_dict(device)
+                    if item.get("deviceType") != "TRACKER" or item.get("lastSyncTime") is None:
+                        continue
+                    candidate = SyncTime.parse(string(item["lastSyncTime"]))
+                except (ValueError, TypeError):
+                    raise InvalidResponseError("Malformed Google Health tracker sync time") from None
+                latest = max(latest, candidate) if latest else candidate
+            next_token = page.get("nextPageToken", "")
+            if not isinstance(next_token, str):
+                raise InvalidResponseError("Google Health page token must be a string")
+            if not next_token:
+                return latest
+            if next_token in seen_tokens:
+                raise InvalidResponseError("Google Health repeated a page token")
+            seen_tokens.add(next_token)
+            page_token = next_token
+        raise InvalidResponseError("Google Health paired device page limit exceeded")
+
     def fetch(self, window: Window, *, subject_key: str) -> Snapshot:
         snapshot = Snapshot(subject_key, window, self._clock(), ())
         points: list[dict[str, object]] = []
@@ -258,6 +348,7 @@ class HealthClient:
         token = self._access_token()
         if not isinstance(token, str) or not token.strip():
             raise AuthenticationError("Google Health access token is missing")
+        LOGGER.info("fitbit api_request endpoint=reconcile data_type=%s count=1", window.data_type)
         return request_json(
             self._transport,
             "GET",

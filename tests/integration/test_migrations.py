@@ -31,6 +31,7 @@ def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
         ("001_initial.sql",),
         ("002_screen_time_app_usage_platform.sql",),
         ("003_fitbit.sql",),
+        ("004_fitbit_acquisition.sql",),
     ]
     assert warehouse.query_rows(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'base' "
@@ -67,6 +68,7 @@ def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
         for name in (
             "fitbit_coverage",
             "fitbit_deleted_record",
+            "fitbit_raw_intent",
             "heartbeat",
             "ingestion_metadata",
             "job_lock",
@@ -84,6 +86,11 @@ def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
         "WHERE table_schema = 'ops' AND table_name = 'ingestion_metadata' "
         "AND column_name IN ('source_id', 'schema_version') ORDER BY column_name"
     ) == [("schema_version", None), ("source_id", None)]
+    assert warehouse.query_rows(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema='ops' AND table_name='fitbit_coverage' "
+        "AND column_name='source_sha256'"
+    ) == [("source_sha256",)]
     raw = _raw()
     warehouse.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
     assert warehouse.query_rows("SELECT event_key FROM base.screen_time_transition") == [("event",)]

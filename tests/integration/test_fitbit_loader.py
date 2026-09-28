@@ -51,7 +51,7 @@ def test_fitbit_reconciliation_checks_schema_and_expires_old_raw(
     from personal_data_platform.sources.fitbit.raw import encode_snapshot
 
     now = datetime(2026, 9, 27, tzinfo=UTC)
-    old = now - timedelta(days=31)
+    old = now - timedelta(days=94)
     source = FitbitSource()
     key, compressed = encode_snapshot(
         Snapshot("self", Window("steps", old, old + timedelta(days=1)), old, ())
