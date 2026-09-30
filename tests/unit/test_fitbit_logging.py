@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-PROBE = r'''
+PROBE = r"""
 import json
 import logging
 import os
@@ -44,7 +44,7 @@ api.LOGGER.info("api probe")
 service.LOGGER.info("acquisition probe")
 runtime.LOGGER.error("failure probe\nsecond line")
 print("ready")
-'''
+"""
 
 
 def _probe(command, root="default", *, level=None):
@@ -54,7 +54,10 @@ def _probe(command, root="default", *, level=None):
         environ["LOG_LEVEL"] = level
     return subprocess.run(
         [sys.executable, "-c", PROBE, command, root],
-        env=environ, capture_output=True, text=True, check=False,
+        env=environ,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 
@@ -67,7 +70,8 @@ def test_entrypoint_enables_json_app_logs_without_duplicates(command, root):
     entries = [json.loads(line) for line in result.stderr.splitlines()]
     info = [entry for entry in entries if entry["severity"] == "INFO"]
     assert [entry["message"] for entry in info if "probe" in entry["message"]] == [
-        "api probe", "acquisition probe"
+        "api probe",
+        "acquisition probe",
     ]
     errors = [entry for entry in entries if entry["severity"] == "ERROR"]
     assert len(errors) == 1

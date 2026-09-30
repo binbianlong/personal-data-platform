@@ -264,7 +264,9 @@ class HealthClient:
                         continue
                     candidate = SyncTime.parse(string(item["lastSyncTime"]))
                 except (ValueError, TypeError):
-                    raise InvalidResponseError("Malformed Google Health tracker sync time") from None
+                    raise InvalidResponseError(
+                        "Malformed Google Health tracker sync time"
+                    ) from None
                 latest = max(latest, candidate) if latest else candidate
             next_token = page.get("nextPageToken", "")
             if not isinstance(next_token, str):

@@ -31,9 +31,13 @@ class SyncState:
     def __post_init__(self) -> None:
         if _SUBJECT.fullmatch(self.subject_key) is None:
             raise ValueError("invalid sync subject")
-        if self.bootstrap_complete and (self.bootstrap_day is None or self.last_completed_sync is None):
+        if self.bootstrap_complete and (
+            self.bootstrap_day is None or self.last_completed_sync is None
+        ):
             raise ValueError("completed bootstrap needs a day and sync cursor")
-        if self.device_target is None and (self.device_next_day is not None or self.device_batch_end is not None):
+        if self.device_target is None and (
+            self.device_next_day is not None or self.device_batch_end is not None
+        ):
             raise ValueError("device progress needs a target")
         if self.device_target is not None and self.device_next_day is None:
             raise ValueError("device target needs a next day")
@@ -90,7 +94,9 @@ class _Blob(Protocol):
     generation: int | None
     metadata: dict[str, str] | None
 
-    def upload_from_string(self, data: bytes, *, content_type: str, if_generation_match: int) -> None: ...
+    def upload_from_string(
+        self, data: bytes, *, content_type: str, if_generation_match: int
+    ) -> None: ...
     def download_as_bytes(self, *, raw_download: bool, if_generation_match: int) -> bytes: ...
 
 

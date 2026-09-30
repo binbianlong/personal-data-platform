@@ -87,9 +87,9 @@ def test_repair_defers_busy_leases_without_releasing_another_owner(
         from personal_data_platform.sources.fitbit.raw import encode_snapshot
 
         key, _ = encode_snapshot(Snapshot("self", WINDOW, NOW, ()))
-        repair_env.raw.objects.append(FitbitSource().parse_raw_key(
-            key, storage_created_at=NOW, storage_generation=1
-        ))
+        repair_env.raw.objects.append(
+            FitbitSource().parse_raw_key(key, storage_created_at=NOW, storage_generation=1)
+        )
     warehouse = repair_env.warehouse()
     assert warehouse.acquire_job_lock(lease, "other", lease_seconds=3600)
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_raw_intent") == 0
@@ -102,9 +102,10 @@ def test_repair_defers_busy_leases_without_releasing_another_owner(
     assert summary.queued_count == 1
     assert not any(getattr(record, "status", None) == "succeeded" for record in caplog.records)
     warehouse = repair_env.warehouse()
-    assert warehouse.query_value(
-        "SELECT owner_id FROM ops.job_lock WHERE job_name=?", [lease]
-    ) == "other"
+    assert (
+        warehouse.query_value("SELECT owner_id FROM ops.job_lock WHERE job_name=?", [lease])
+        == "other"
+    )
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_raw_intent") == 0
     warehouse.release_job_lock(lease, "other")
     warehouse.close()
@@ -114,7 +115,9 @@ def test_repair_completion_emits_one_success_even_with_async_pending_receipts(re
     summary = runtime.run_repair_from_env()
     assert summary.status == "succeeded"
     assert summary.pending_count == summary.queued_count == 1
-    events = [record for record in caplog.records if getattr(record, "event", None) == "fitbit_repair"]
+    events = [
+        record for record in caplog.records if getattr(record, "event", None) == "fitbit_repair"
+    ]
     assert len(events) == 1
     assert events[0].status == "succeeded"
     warehouse = repair_env.warehouse()
@@ -123,12 +126,12 @@ def test_repair_completion_emits_one_success_even_with_async_pending_receipts(re
 
 
 @pytest.mark.parametrize("failure", ["enqueue", "audit", "retention"])
-def test_repair_real_failures_take_priority_over_deferral(
-    repair_env, monkeypatch, failure, capsys
-):
+def test_repair_real_failures_take_priority_over_deferral(repair_env, monkeypatch, failure, capsys):
     if failure == "enqueue":
+
         def broken_enqueue(key):
             raise OSError("queue unavailable")
+
         monkeypatch.setattr(repair_env.queue, "enqueue", broken_enqueue)
     elif failure == "audit":
         warehouse = repair_env.warehouse()
@@ -136,9 +139,10 @@ def test_repair_real_failures_take_priority_over_deferral(
         warehouse.close()
     else:
         from datetime import timedelta
-        repair_env.receipts.create(Receipt.create(
-            "self", (WINDOW,), received_at=datetime.now(UTC) - timedelta(days=88)
-        ))
+
+        repair_env.receipts.create(
+            Receipt.create("self", (WINDOW,), received_at=datetime.now(UTC) - timedelta(days=88))
+        )
     warehouse = repair_env.warehouse()
     assert warehouse.acquire_job_lock("loader", "other", lease_seconds=3600)
     warehouse.close()
@@ -165,19 +169,19 @@ def test_repair_cli_exposes_deferral_and_recovery(repair_env, capsys):
 
 
 @pytest.mark.parametrize("phase", ["scheduled_receipts", "receipt_inventory"])
-def test_receipt_deferral_still_enqueues_unaffected_work(
-    repair_env, monkeypatch, phase, caplog
-):
+def test_receipt_deferral_still_enqueues_unaffected_work(repair_env, monkeypatch, phase, caplog):
     unaffected = repair_env.receipts.create(Receipt.create("self", (WINDOW,), received_at=NOW))
     if phase == "scheduled_receipts":
+
         def changing_read(key):
             raise ReceiptReadConflict("receipt keeps changing")
+
         monkeypatch.setattr(repair_env.receipts, "read", changing_read)
     else:
         inventory = repair_env.receipts.inventory
-        monkeypatch.setattr(repair_env.receipts, "inventory", lambda: replace(
-            inventory(), deferred_count=1
-        ))
+        monkeypatch.setattr(
+            repair_env.receipts, "inventory", lambda: replace(inventory(), deferred_count=1)
+        )
     summary = runtime.run_repair_from_env()
     assert unaffected.receipt.key in repair_env.queue.keys
     assert summary.status == "deferred"
@@ -187,9 +191,9 @@ def test_receipt_deferral_still_enqueues_unaffected_work(
     assert not any(getattr(record, "status", None) == "succeeded" for record in caplog.records)
 
 
-@pytest.mark.parametrize(("enabled", "paused", "status"), [
-    (False, False, "disabled"), (True, True, "paused")
-])
+@pytest.mark.parametrize(
+    ("enabled", "paused", "status"), [(False, False, "disabled"), (True, True, "paused")]
+)
 def test_inactive_repair_does_not_report_completion(
     repair_env, monkeypatch, caplog, enabled, paused, status
 ):
@@ -206,10 +210,13 @@ def test_orphan_storage_failure_remains_a_failed_cli_execution(
 ):
     def failed_recovery(self, *, limit):
         raise OSError("storage unavailable")
+
     monkeypatch.setattr(ReceiptWorker, "recover_orphan_intents", failed_recovery)
     assert main(["fitbit", "repair"]) == 1
     assert "storage unavailable" in capsys.readouterr().err
-    events = [record for record in caplog.records if getattr(record, "event", None) == "fitbit_repair"]
+    events = [
+        record for record in caplog.records if getattr(record, "event", None) == "fitbit_repair"
+    ]
     assert len(events) == 1
     assert events[0].status == "failed"
     assert events[0].levelno == logging.ERROR
@@ -226,12 +233,16 @@ def test_worker_lease_contention_retries_without_failure_alert(repair_env, caplo
         receipts=repair_env.receipts,
         queue=repair_env.queue,
         worker=ReceiptWorker(
-            receipts=repair_env.receipts, repository=repair_env.raw, client=None,
-            warehouse_factory=repair_env.warehouse, subject_key="self",
+            receipts=repair_env.receipts,
+            repository=repair_env.raw,
+            client=None,
+            warehouse_factory=repair_env.warehouse,
+            subject_key="self",
         ),
     )
     response = TestClient(app).post(
-        "/internal/tasks/fitbit", headers={"Authorization": "Bearer test"},
+        "/internal/tasks/fitbit",
+        headers={"Authorization": "Bearer test"},
         json={"receipt_key": stored.receipt.key},
     )
     assert response.status_code == 503

@@ -240,13 +240,17 @@ def _receipt_key(day: date, identity: str) -> str:
 
 
 def _ensure_scheduled(
-    receipts: ReceiptRepository, *, subject_key: str, key: str,
-    windows: tuple[Window, ...], received_at: datetime, origin: str,
+    receipts: ReceiptRepository,
+    *,
+    subject_key: str,
+    key: str,
+    windows: tuple[Window, ...],
+    received_at: datetime,
+    origin: str,
 ) -> None:
-    expected = Receipt.create(
-        subject_key, windows, received_at=received_at, key=key, origin=origin
-    )
+    expected = Receipt.create(subject_key, windows, received_at=received_at, key=key, origin=origin)
     current = receipts.create(expected).receipt
+
     def matches(actual: Window, original: Window) -> bool:
         if actual.data_type != original.data_type:
             return False
@@ -255,7 +259,8 @@ def _ensure_scheduled(
         return actual == original
 
     if (
-        current.subject_key != subject_key or current.origin != origin
+        current.subject_key != subject_key
+        or current.origin != origin
         or len(current.work) != len(expected.work)
         or any(
             not matches(actual.window, original.window)
@@ -273,8 +278,13 @@ def _completed(receipts: ReceiptRepository, key: str) -> bool:
 
 
 def _bootstrap(
-    receipts: ReceiptRepository, sync_store: GCSFitbitSyncState,
-    stored: StoredSyncState, *, subject_key: str, today: date, now: datetime,
+    receipts: ReceiptRepository,
+    sync_store: GCSFitbitSyncState,
+    stored: StoredSyncState,
+    *,
+    subject_key: str,
+    today: date,
+    now: datetime,
 ) -> StoredSyncState:
     state = stored.state
     if state.bootstrap_day is None:
@@ -284,13 +294,17 @@ def _bootstrap(
     day = state.bootstrap_day
     key = _receipt_key(day, "bootstrap")
     _ensure_scheduled(
-        receipts, subject_key=subject_key, key=key,
+        receipts,
+        subject_key=subject_key,
+        key=key,
         windows=sync_windows(_tokyo_start(day - timedelta(days=7)), _tokyo_start(day), DATA_TYPES),
-        received_at=now, origin="bootstrap",
+        received_at=now,
+        origin="bootstrap",
     )
     if _completed(receipts, key):
         state = replace(
-            state, bootstrap_complete=True,
+            state,
+            bootstrap_complete=True,
             last_completed_sync=SyncTime.from_datetime(_tokyo_start(day)),
             weekly_completed=_week(day),
         )
@@ -299,13 +313,20 @@ def _bootstrap(
 
 
 def _weekly(
-    receipts: ReceiptRepository, sync_store: GCSFitbitSyncState,
-    stored: StoredSyncState, *, subject_key: str, today: date, now: datetime,
+    receipts: ReceiptRepository,
+    sync_store: GCSFitbitSyncState,
+    stored: StoredSyncState,
+    *,
+    subject_key: str,
+    today: date,
+    now: datetime,
 ) -> StoredSyncState:
     state = stored.state
     current_week = _week(today)
     if state.weekly_pending is None and state.weekly_completed != current_week:
-        state = replace(state, weekly_pending=current_week, weekly_end_day=today - timedelta(days=1))
+        state = replace(
+            state, weekly_pending=current_week, weekly_end_day=today - timedelta(days=1)
+        )
         stored = sync_store.replace(stored, state)
     if state.weekly_pending is None:
         return stored
@@ -315,14 +336,22 @@ def _weekly(
     key = _receipt_key(monday, "weekly")
     end = state.weekly_end_day + timedelta(days=1)
     _ensure_scheduled(
-        receipts, subject_key=subject_key, key=key,
+        receipts,
+        subject_key=subject_key,
+        key=key,
         windows=sync_windows(_tokyo_start(end - timedelta(days=7)), _tokyo_start(end), DATA_TYPES),
-        received_at=now, origin="weekly",
+        received_at=now,
+        origin="weekly",
     )
     if _completed(receipts, key):
         stored = sync_store.replace(
-            stored, replace(state, weekly_completed=state.weekly_pending,
-                            weekly_pending=None, weekly_end_day=None)
+            stored,
+            replace(
+                state,
+                weekly_completed=state.weekly_pending,
+                weekly_pending=None,
+                weekly_end_day=None,
+            ),
         )
     return stored
 
@@ -346,9 +375,14 @@ def _device_windows(day: date, target: SyncTime) -> tuple[Window, ...]:
 
 
 def _device(
-    receipts: ReceiptRepository, sync_store: GCSFitbitSyncState,
-    stored: StoredSyncState, device_client: DeviceClient,
-    *, subject_key: str, today: date, now: datetime,
+    receipts: ReceiptRepository,
+    sync_store: GCSFitbitSyncState,
+    stored: StoredSyncState,
+    device_client: DeviceClient,
+    *,
+    subject_key: str,
+    today: date,
+    now: datetime,
 ) -> StoredSyncState:
     state = stored.state
     if state.device_target is None:
@@ -364,7 +398,8 @@ def _device(
         if latest <= state.last_completed_sync:
             return stored
         state = replace(
-            state, device_target=latest,
+            state,
+            device_target=latest,
             device_next_day=state.last_completed_sync.tokyo_date(),
         )
         stored = sync_store.replace(stored, state)
@@ -378,22 +413,25 @@ def _device(
     batch_end = state.device_batch_end
     target = state.device_target
     assert next_day is not None and batch_end is not None and target is not None
-    days = [next_day + timedelta(days=index) for index in range(
-        (batch_end - next_day).days + 1
-    )]
+    days = [next_day + timedelta(days=index) for index in range((batch_end - next_day).days + 1)]
     for day in days:
         _ensure_scheduled(
-            receipts, subject_key=subject_key,
+            receipts,
+            subject_key=subject_key,
             key=_device_key(subject_key, target, day),
             windows=_device_windows(day, target),
-            received_at=now, origin="device-sync",
+            received_at=now,
+            origin="device-sync",
         )
     if all(_completed(receipts, _device_key(subject_key, target, day)) for day in days):
         next_day = batch_end + timedelta(days=1)
         if next_day > target.tokyo_date():
             state = replace(
-                state, last_completed_sync=target,
-                device_target=None, device_next_day=None, device_batch_end=None,
+                state,
+                last_completed_sync=target,
+                device_target=None,
+                device_next_day=None,
+                device_batch_end=None,
             )
         else:
             state = replace(state, device_next_day=next_day, device_batch_end=None)
@@ -419,18 +457,31 @@ def repair_receipts(
             stored = sync_store.read(subject_key)
             if not stored.state.bootstrap_complete:
                 stored = _bootstrap(
-                    receipts, sync_store, stored,
-                    subject_key=subject_key, today=today, now=now,
+                    receipts,
+                    sync_store,
+                    stored,
+                    subject_key=subject_key,
+                    today=today,
+                    now=now,
                 )
             if stored.state.bootstrap_complete:
                 stored = _weekly(
-                    receipts, sync_store, stored,
-                    subject_key=subject_key, today=today, now=now,
+                    receipts,
+                    sync_store,
+                    stored,
+                    subject_key=subject_key,
+                    today=today,
+                    now=now,
                 )
                 try:
                     _device(
-                        receipts, sync_store, stored, device_client,
-                        subject_key=subject_key, today=today, now=now,
+                        receipts,
+                        sync_store,
+                        stored,
+                        device_client,
+                        subject_key=subject_key,
+                        today=today,
+                        now=now,
                     )
                 except DeviceCheckError as error:
                     LOGGER.error("fitbit paired-device check failed: %s", type(error).__name__)
@@ -478,7 +529,8 @@ def repair_receipts(
 def _report_repair(summary: RepairSummary) -> RepairSummary:
     details = asdict(summary)
     LOGGER.info(
-        "fitbit repair %s", json.dumps(details),
+        "fitbit repair %s",
+        json.dumps(details),
         extra={"event": "fitbit_repair", "status": summary.status, "summary": details},
     )
     if summary.failed_count or summary.at_risk_count:
@@ -497,7 +549,8 @@ def run_repair_from_env() -> RepairSummary:
         return _run_repair_from_env()
     except Exception as error:
         LOGGER.error(
-            "fitbit repair failed: %s", type(error).__name__,
+            "fitbit repair failed: %s",
+            type(error).__name__,
             extra={"event": "fitbit_repair", "status": "failed"},
         )
         raise

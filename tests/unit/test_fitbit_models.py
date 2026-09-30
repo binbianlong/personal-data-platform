@@ -44,11 +44,17 @@ def test_source_digest_ignores_api_page_order_but_keeps_original_raw_order():
     second_at = start + timedelta(minutes=1)
     second = Record("steps", "b", second_at, second_at, second_at + timedelta(minutes=1), 2)
     a = Snapshot(
-        "owner", window, start, (first, second),
+        "owner",
+        window,
+        start,
+        (first, second),
         source_payload=({"id": "a", "unknown": 1}, {"id": "b", "unknown": 2}),
     )
     b = Snapshot(
-        "owner", window, start + timedelta(hours=1), (second, first),
+        "owner",
+        window,
+        start + timedelta(hours=1),
+        (second, first),
         source_payload=({"id": "b", "unknown": 2}, {"id": "a", "unknown": 1}),
     )
     assert a.to_bytes() != b.to_bytes()

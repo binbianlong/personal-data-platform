@@ -59,17 +59,25 @@ def _worker_setup(tmp_path, states):
             state = states[len(self.calls)]
             self.calls.append(window)
             return Snapshot(
-                subject_key, window, NOW + timedelta(seconds=len(self.calls)), (),
+                subject_key,
+                window,
+                NOW + timedelta(seconds=len(self.calls)),
+                (),
                 source_payload=({"state": state},),
             )
 
     raw = Raw()
     api = API()
+
     def factory():
         return Warehouse(duckdb.connect(database))
+
     worker = ReceiptWorker(
-        receipts=receipts, repository=raw, client=api,
-        warehouse_factory=factory, subject_key="self",
+        receipts=receipts,
+        repository=raw,
+        client=api,
+        warehouse_factory=factory,
+        subject_key="self",
     )
     return receipts, raw, api, worker, factory
 
@@ -219,12 +227,18 @@ def test_orphan_repair_is_not_blocked_by_older_pending_receipt(tmp_path):
     assert worker.recover_orphan_intents(limit=1) == 1
     assert len(api.calls) == 1 and raw.put_count == 1
     warehouse = factory()
-    assert warehouse.query_value(
-        "SELECT count(*) FROM ops.fitbit_raw_intent WHERE receipt_key=?", [expired_key]
-    ) == 0
-    assert warehouse.query_value(
-        "SELECT count(*) FROM ops.fitbit_raw_intent WHERE receipt_key=?", [pending.receipt.key]
-    ) == 1
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM ops.fitbit_raw_intent WHERE receipt_key=?", [expired_key]
+        )
+        == 0
+    )
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM ops.fitbit_raw_intent WHERE receipt_key=?", [pending.receipt.key]
+        )
+        == 1
+    )
     warehouse.close()
 
 
@@ -407,7 +421,11 @@ def test_task_acknowledges_pause_but_retries_failure_and_preserves_receipt(pause
             return SyncTime.from_datetime(NOW)
 
     repair_receipts(
-        receipts, queue, subject_key="self", now=NOW, paused=False,
+        receipts,
+        queue,
+        subject_key="self",
+        now=NOW,
+        paused=False,
         sync_store=GCSFitbitSyncState(client=Client(), bucket="test"),
         device_client=Devices(),
     )

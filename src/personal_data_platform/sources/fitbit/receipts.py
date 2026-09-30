@@ -73,7 +73,10 @@ class ReceiptWork:
             object.__setattr__(self, "fetched_at", aware(self.fetched_at))
         if (self.fetched_at is None) != (self.source_sha256 is None):
             raise ValueError("skipped acquisition needs both time and digest")
-        if self.source_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", self.source_sha256) is None:
+        if (
+            self.source_sha256 is not None
+            and re.fullmatch(r"[0-9a-f]{64}", self.source_sha256) is None
+        ):
             raise ValueError("invalid acquisition digest")
         if self.source_sha256 is not None and (self.raw is not None or not self.completed):
             raise ValueError("no-change evidence requires completed work without Raw")
@@ -93,7 +96,12 @@ class Receipt:
         if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.subject_key) is None:
             raise ValueError("invalid pseudonymous subject key")
         if not self.work or self.origin not in (
-            "webhook", "daily", "manual", "bootstrap", "weekly", "device-sync"
+            "webhook",
+            "daily",
+            "manual",
+            "bootstrap",
+            "weekly",
+            "device-sync",
         ):
             raise ValueError("invalid receipt work or origin")
         object.__setattr__(self, "received_at", aware(self.received_at))
@@ -180,9 +188,11 @@ class Receipt:
                     _raw_from_dict(item["raw"]) if item.get("raw") is not None else None,
                     completed,
                     parse_time(string(item["fetched_at"]))
-                    if item.get("fetched_at") is not None else None,
+                    if item.get("fetched_at") is not None
+                    else None,
                     string(item["source_sha256"])
-                    if item.get("source_sha256") is not None else None,
+                    if item.get("source_sha256") is not None
+                    else None,
                 )
             )
         return cls(
@@ -310,7 +320,9 @@ class GCSReceiptRepository:
                 return blob, self._read_blob(blob)
             except (NotFound, PreconditionFailed) as error:
                 if attempt == 2:
-                    raise ReceiptReadConflict("Fitbit receipt changed during three reads") from error
+                    raise ReceiptReadConflict(
+                        "Fitbit receipt changed during three reads"
+                    ) from error
                 refreshed = self._bucket.get_blob(key)
                 if refreshed is None:
                     raise FileNotFoundError("Fitbit receipt does not exist") from error

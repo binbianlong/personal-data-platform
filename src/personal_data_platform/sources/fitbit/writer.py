@@ -93,9 +93,11 @@ def _accepted_ranges(
 
 def _content_digest(snapshot: Snapshot) -> str:
     records = [asdict(record) for record in snapshot.records]
-    records.sort(key=lambda item: json.dumps(
-        item, default=str, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ))
+    records.sort(
+        key=lambda item: json.dumps(
+            item, default=str, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    )
     return hashlib.sha256(
         json.dumps(
             {
@@ -161,7 +163,11 @@ class FitbitBatch:
         if accepted != [(window.start, window.end)]:
             source_digest = ""
         self._replace_coverage(
-            connection, coverage, accepted, source_key=source_key, digest=digest,
+            connection,
+            coverage,
+            accepted,
+            source_key=source_key,
+            digest=digest,
             source_digest=source_digest,
         )
 

@@ -36,6 +36,6 @@ def test_sync_control_rejects_other_subject_or_malformed_payload():
     current = store.read("self")
     with pytest.raises(ValueError, match="subject"):
         store.replace(current, SyncState(subject_key="other"))
-    client.values["raw/fitbit/v1/_control/device-sync/self.json"] = (1, b'{}', {})
+    client.values["raw/fitbit/v1/_control/device-sync/self.json"] = (1, b"{}", {})
     with pytest.raises(ValueError, match="schema"):
         store.read("self")

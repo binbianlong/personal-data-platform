@@ -94,9 +94,7 @@ def test_every_delivery_has_independent_receipt_and_safe_payload() -> None:
 def test_physical_work_uses_tokyo_day_boundary():
     start = datetime(2026, 9, 28, tzinfo=ZoneInfo("Asia/Tokyo"))
     end = start + timedelta(days=1)
-    receipt = Receipt.create(
-        "subject", (Window("steps", start, end),), received_at=NOW
-    )
+    receipt = Receipt.create("subject", (Window("steps", start, end),), received_at=NOW)
     assert len(receipt.work) == 1
     assert receipt.work[0].window == Window("steps", start, end)
 
@@ -105,9 +103,7 @@ def test_skipped_work_retains_observation_evidence_and_reads_legacy_v1() -> None
     original = receipt()
     old_payload = original.to_bytes()
     assert Receipt.from_bytes(old_payload) == original
-    observed = ReceiptWork(
-        WINDOW, completed=True, fetched_at=NOW, source_sha256="a" * 64
-    )
+    observed = ReceiptWork(WINDOW, completed=True, fetched_at=NOW, source_sha256="a" * 64)
     updated = replace(original, work=(observed,), completed_at=NOW)
     assert Receipt.from_bytes(updated.to_bytes()) == updated
     assert Receipt.from_bytes(old_payload).work[0].source_sha256 is None
@@ -193,9 +189,11 @@ def test_receipt_read_refreshes_changed_generation(monkeypatch, error, operation
     updated = []
 
     def change():
-        updated.append(repository.replace(
-            stored, replace(stored.receipt, received_at=NOW + timedelta(seconds=1))
-        ))
+        updated.append(
+            repository.replace(
+                stored, replace(stored.receipt, received_at=NOW + timedelta(seconds=1))
+            )
+        )
 
     generations = _race_download(monkeypatch, stored.receipt.key, change, error=error)
     if operation == "read":
@@ -214,10 +212,14 @@ def test_inventory_refreshes_completed_metadata_without_downloading_body(monkeyp
     completed_at = NOW + timedelta(seconds=10)
 
     def complete():
-        repository.replace(stored, replace(
-            stored.receipt, work=(ReceiptWork(WINDOW, completed=True),),
-            completed_at=completed_at,
-        ))
+        repository.replace(
+            stored,
+            replace(
+                stored.receipt,
+                work=(ReceiptWork(WINDOW, completed=True),),
+                completed_at=completed_at,
+            ),
+        )
 
     generations = _race_download(monkeypatch, stored.receipt.key, complete)
     inventory = repository.inventory()
@@ -235,7 +237,9 @@ def test_receipt_disappearance_requires_fresh_metadata(monkeypatch, operation):
     stored = repository.create(receipt())
     other = repository.create(receipt())
     generations = _race_download(
-        monkeypatch, stored.receipt.key, lambda: client.values.pop(stored.receipt.key),
+        monkeypatch,
+        stored.receipt.key,
+        lambda: client.values.pop(stored.receipt.key),
         error=NotFound,
     )
     if operation == "read":
@@ -262,9 +266,10 @@ def test_receipt_read_is_bounded_and_defers_only_changing_entry(
 
     def change():
         stored = current[0]
-        current[0] = repository.replace(stored, replace(
-            stored.receipt, received_at=stored.receipt.received_at + timedelta(seconds=1)
-        ))
+        current[0] = repository.replace(
+            stored,
+            replace(stored.receipt, received_at=stored.receipt.received_at + timedelta(seconds=1)),
+        )
 
     generations = _race_download(
         monkeypatch, current[0].receipt.key, change, error=NotFound, conflicts=conflicts

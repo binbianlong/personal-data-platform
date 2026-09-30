@@ -75,12 +75,20 @@ def test_full_source_digest_requires_exact_coverage_and_no_unresolved_intent(war
 
     first = snapshot(10)
     apply(warehouse, first)
-    assert can_skip_snapshot(warehouse, replace(first, fetched_at=first.fetched_at + timedelta(hours=1)))
+    assert can_skip_snapshot(
+        warehouse, replace(first, fetched_at=first.fetched_at + timedelta(hours=1))
+    )
     warehouse.connection.execute(
         "INSERT INTO ops.fitbit_raw_intent VALUES (?,?,?,?,?,?,?,?)",
         [
-            "receipt", 0, "self", "steps", first.window.start, first.window.end,
-            "raw/fitbit/v1/pending", first.fetched_at,
+            "receipt",
+            0,
+            "self",
+            "steps",
+            first.window.start,
+            first.window.end,
+            "raw/fitbit/v1/pending",
+            first.fetched_at,
         ],
     )
     assert not can_skip_snapshot(warehouse, first)
@@ -98,8 +106,16 @@ def test_loaded_raw_clears_earlier_intents_in_same_transaction(warehouse):
         key, _ = encode_snapshot(value)
         warehouse.connection.execute(
             "INSERT INTO ops.fitbit_raw_intent VALUES (?,?,?,?,?,?,?,?)",
-            [receipt_key, 0, "self", "steps", value.window.start, value.window.end,
-             key, value.fetched_at],
+            [
+                receipt_key,
+                0,
+                "self",
+                "steps",
+                value.window.start,
+                value.window.end,
+                key,
+                value.fetched_at,
+            ],
         )
     assert not can_skip_snapshot(warehouse, first)
     key, _ = encode_snapshot(first)
@@ -108,7 +124,9 @@ def test_loaded_raw_clears_earlier_intents_in_same_transaction(warehouse):
     )
     warehouse.load_object(raw, byte_size=len(first.to_bytes()), batch=FitbitBatch(first))
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_raw_intent") == 0
-    assert can_skip_snapshot(warehouse, replace(first, fetched_at=first.fetched_at + timedelta(hours=1)))
+    assert can_skip_snapshot(
+        warehouse, replace(first, fetched_at=first.fetched_at + timedelta(hours=1))
+    )
     warehouse.connection.execute("DELETE FROM ops.fitbit_raw_intent")
     middle = snapshot(20, hour=8, end_hour=16, version=2)
     apply(warehouse, middle)

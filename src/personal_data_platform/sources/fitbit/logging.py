@@ -32,9 +32,12 @@ def configure_logging() -> None:
     logger = logging.getLogger("personal_data_platform.sources.fitbit")
     handler = next(
         (
-            item for item in logger.handlers
-            if isinstance(item, logging.StreamHandler) and isinstance(item.formatter, _JSONFormatter)
-        ), None
+            item
+            for item in logger.handlers
+            if isinstance(item, logging.StreamHandler)
+            and isinstance(item.formatter, _JSONFormatter)
+        ),
+        None,
     )
     if handler is None:
         handler = logging.StreamHandler(sys.stderr)

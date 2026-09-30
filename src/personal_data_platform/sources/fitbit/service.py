@@ -95,7 +95,9 @@ class ReceiptWorker:
                 raise ValueError("receipt subject does not match runtime")
             if stored.receipt.completed_at is not None:
                 return True
-            pending = [index for index, item in enumerate(stored.receipt.work) if not item.completed]
+            pending = [
+                index for index, item in enumerate(stored.receipt.work) if not item.completed
+            ]
             if not pending:
                 raise ValueError("receipt has inconsistent completion state")
             index = pending[0]
@@ -108,7 +110,10 @@ class ReceiptWorker:
                     self._load(warehouse, owner, (item.raw,))
                     return self._complete(stored, index, item)
                 existing = self.repository.head_raw(item.raw.key)
-                if existing is not None and existing.storage_generation == item.raw.storage_generation:
+                if (
+                    existing is not None
+                    and existing.storage_generation == item.raw.storage_generation
+                ):
                     self._load(warehouse, owner, (item.raw,))
                     return self._complete(stored, index, item)
                 window = Window(
@@ -116,9 +121,7 @@ class ReceiptWorker:
                     min([item.window.start, *(row[1] for row in intents)]),
                     max([item.window.end, *(row[2] for row in intents)]),
                 )
-                minimum_fetched_at = max(
-                    [item.raw.observed_at, *(row[3] for row in intents)]
-                )
+                minimum_fetched_at = max([item.raw.observed_at, *(row[3] for row in intents)])
             elif intents:
                 located = [(row, self.repository.head_raw(row[0])) for row in intents]
                 if all(raw is not None for _, raw in located):
@@ -127,8 +130,13 @@ class ReceiptWorker:
                     newest = located[-1]
                     assert newest[1] is not None
                     return self._complete(
-                        stored, index,
-                        replace(item, window=Window(item.window.data_type, newest[0][1], newest[0][2]), raw=newest[1]),
+                        stored,
+                        index,
+                        replace(
+                            item,
+                            window=Window(item.window.data_type, newest[0][1], newest[0][2]),
+                            raw=newest[1],
+                        ),
                     )
                 window = Window(
                     item.window.data_type,
@@ -146,11 +154,19 @@ class ReceiptWorker:
                 raise RuntimeError("recovery acquisition must be newer than its unresolved Raw")
             if item.raw is None and not intents and can_skip_snapshot(warehouse, snapshot):
                 result = self._complete(
-                    stored, index,
-                    replace(item, window=window, completed=True,
-                            fetched_at=snapshot.fetched_at, source_sha256=snapshot.source_sha256()),
+                    stored,
+                    index,
+                    replace(
+                        item,
+                        window=window,
+                        completed=True,
+                        fetched_at=snapshot.fetched_at,
+                        source_sha256=snapshot.source_sha256(),
+                    ),
                 )
-                LOGGER.info("fitbit acquisition fetched=1 raw_saved=0 raw_skipped=1 compressed_bytes=0")
+                LOGGER.info(
+                    "fitbit acquisition fetched=1 raw_saved=0 raw_skipped=1 compressed_bytes=0"
+                )
                 return result
             raw = self._save(warehouse, receipt_key, index, snapshot)
             item = replace(item, window=window, raw=raw)
@@ -185,13 +201,24 @@ class ReceiptWorker:
         window = snapshot.window
         warehouse.connection.execute(
             "INSERT INTO ops.fitbit_raw_intent VALUES (?,?,?,?,?,?,?,?)",
-            [receipt_key, index, snapshot.subject_key, window.data_type,
-             window.start, window.end, key, snapshot.fetched_at],
+            [
+                receipt_key,
+                index,
+                snapshot.subject_key,
+                window.data_type,
+                window.start,
+                window.end,
+                key,
+                snapshot.fetched_at,
+            ],
         )
         # Confirm the write-ahead barrier before an immutable GCS PUT.
-        if warehouse.query_value(
-            "SELECT count(*) FROM ops.fitbit_raw_intent WHERE raw_key=?", [key]
-        ) != 1:
+        if (
+            warehouse.query_value(
+                "SELECT count(*) FROM ops.fitbit_raw_intent WHERE raw_key=?", [key]
+            )
+            != 1
+        ):
             raise RuntimeError("Fitbit Raw intent was not persisted")
         raw = self.repository.put_raw_object(key, compressed)
         LOGGER.info(
@@ -221,7 +248,8 @@ class ReceiptWorker:
         work[index] = replace(item, completed=True)
         complete = all(value.completed for value in work)
         receipt = replace(
-            stored.receipt, work=tuple(work),
+            stored.receipt,
+            work=tuple(work),
             completed_at=datetime.now(UTC) if complete else None,
         )
         self.receipts.replace(stored, receipt)
@@ -268,7 +296,8 @@ class ReceiptWorker:
                 located = [(row, self.repository.head_raw(row[0])) for row in intents]
                 if all(raw is not None for _, raw in located):
                     self._load(
-                        warehouse, owner,
+                        warehouse,
+                        owner,
                         tuple(raw for _, raw in located if raw is not None),
                     )
                 else:
@@ -280,14 +309,17 @@ class ReceiptWorker:
                     if len(types) != 1:
                         raise RuntimeError("orphan Raw intent has inconsistent data types")
                     window = Window(
-                        types[0][0], min(row[1] for row in intents),
+                        types[0][0],
+                        min(row[1] for row in intents),
                         max(row[2] for row in intents),
                     )
                     snapshot = self.client.fetch(window, subject_key=self.subject_key)
                     if snapshot.subject_key != self.subject_key or snapshot.window != window:
                         raise ValueError("Fitbit client returned a different acquisition scope")
                     if snapshot.fetched_at <= max(row[3] for row in intents):
-                        raise RuntimeError("recovery acquisition must be newer than its unresolved Raw")
+                        raise RuntimeError(
+                            "recovery acquisition must be newer than its unresolved Raw"
+                        )
                     raw = self._save(warehouse, receipt_key, work_index, snapshot)
                     self._load(warehouse, owner, (raw,))
                 recovered += 1
