@@ -6,9 +6,9 @@ import hashlib
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -17,6 +17,7 @@ import uvicorn
 from google.cloud import tasks_v2
 
 from personal_data_platform.config import GCSConfig
+from personal_data_platform.loader.job import JobAlreadyRunning
 from personal_data_platform.reconciliation.job import (
     RECONCILIATION_LEASE_SECONDS,
     run_reconciliation,
@@ -32,6 +33,7 @@ from .receipts import (
     RECEIPT_PREFIX,
     GCSReceiptRepository,
     Receipt,
+    ReceiptReadConflict,
     ReceiptRepository,
     validate_receipt_key,
 )
@@ -179,6 +181,10 @@ def run_sync_from_env(
     return 0
 
 
+RepairPhase = Literal["scheduled_receipts", "receipt_inventory", "raw_audit", "orphan_recovery"]
+RepairStatus = Literal["disabled", "paused", "succeeded", "deferred", "failed"]
+
+
 @dataclass(frozen=True, slots=True)
 class RepairSummary:
     enabled: bool = True
@@ -189,6 +195,24 @@ class RepairSummary:
     at_risk_count: int = 0
     latest_received_at: str | None = None
     latest_completed_at: str | None = None
+    paused: bool = False
+    deferred_phases: tuple[RepairPhase, ...] = ()
+    receipt_read_deferred_count: int = 0
+    status: RepairStatus = field(init=False)
+
+    def __post_init__(self) -> None:
+        status: RepairStatus
+        if self.failed_count or self.at_risk_count:
+            status = "failed"
+        elif not self.enabled:
+            status = "disabled"
+        elif self.paused:
+            status = "paused"
+        elif self.deferred_phases or self.receipt_read_deferred_count:
+            status = "deferred"
+        else:
+            status = "succeeded"
+        object.__setattr__(self, "status", status)
 
 
 class DeviceClient(Protocol):
@@ -386,27 +410,34 @@ def repair_receipts(
 ) -> RepairSummary:
     today = now.astimezone(ZoneInfo("Asia/Tokyo")).date()
     failed = 0
+    deferred: list[RepairPhase] = []
     if not paused:
-        stored = sync_store.read(subject_key)
-        if not stored.state.bootstrap_complete:
-            stored = _bootstrap(
-                receipts, sync_store, stored,
-                subject_key=subject_key, today=today, now=now,
-            )
-        if stored.state.bootstrap_complete:
-            stored = _weekly(
-                receipts, sync_store, stored,
-                subject_key=subject_key, today=today, now=now,
-            )
-            try:
-                _device(
-                    receipts, sync_store, stored, device_client,
+        try:
+            stored = sync_store.read(subject_key)
+            if not stored.state.bootstrap_complete:
+                stored = _bootstrap(
+                    receipts, sync_store, stored,
                     subject_key=subject_key, today=today, now=now,
                 )
-            except DeviceCheckError as error:
-                LOGGER.error("fitbit paired-device check failed: %s", type(error).__name__)
-                failed += 1
+            if stored.state.bootstrap_complete:
+                stored = _weekly(
+                    receipts, sync_store, stored,
+                    subject_key=subject_key, today=today, now=now,
+                )
+                try:
+                    _device(
+                        receipts, sync_store, stored, device_client,
+                        subject_key=subject_key, today=today, now=now,
+                    )
+                except DeviceCheckError as error:
+                    LOGGER.error("fitbit paired-device check failed: %s", type(error).__name__)
+                    failed += 1
+        except ReceiptReadConflict:
+            deferred.append("scheduled_receipts")
+            LOGGER.info("fitbit repair deferred phase=scheduled_receipts")
     inventory = receipts.inventory()
+    if inventory.deferred_count:
+        deferred.append("receipt_inventory")
     queued = at_risk = 0
     oldest = 0.0
     for pending_receipt in inventory.pending:
@@ -424,6 +455,9 @@ def repair_receipts(
             LOGGER.error("fitbit repair enqueue failed: %s", type(error).__name__)
             failed += 1
     return RepairSummary(
+        paused=paused,
+        deferred_phases=tuple(deferred),
+        receipt_read_deferred_count=inventory.deferred_count,
         pending_count=len(inventory.pending),
         queued_count=queued,
         failed_count=failed,
@@ -438,9 +472,25 @@ def repair_receipts(
     )
 
 
+def _report_repair(summary: RepairSummary) -> RepairSummary:
+    details = asdict(summary)
+    LOGGER.info(
+        "fitbit repair %s", json.dumps(details),
+        extra={"event": "fitbit_repair", "status": summary.status, "summary": details},
+    )
+    if summary.failed_count or summary.at_risk_count:
+        LOGGER.error("fitbit repair backlog requires attention")
+    return summary
+
+
+def _defer_repair(summary: RepairSummary, phase: RepairPhase) -> RepairSummary:
+    LOGGER.info("fitbit repair deferred phase=%s", phase)
+    return replace(summary, deferred_phases=(*summary.deferred_phases, phase))
+
+
 def run_repair_from_env() -> RepairSummary:
     if not enabled("PDP_FITBIT_REPAIR_ENABLED"):
-        return RepairSummary(enabled=False)
+        return _report_repair(RepairSummary(enabled=False))
     receipts, repository = _stores()
     paused = enabled("PDP_FITBIT_PROCESSING_PAUSED")
     config = GCSConfig.from_env()
@@ -466,18 +516,22 @@ def run_repair_from_env() -> RepairSummary:
                 "reconciliation", owner, lease_seconds=RECONCILIATION_LEASE_SECONDS
             )
             if not acquired:
-                raise RuntimeError("reconciliation already has an unexpired job lease")
-            audited = run_reconciliation(
-                repository, warehouse, source=FitbitSource(), heartbeat=lambda _: None
-            )
-            if not audited.ok:
-                summary = replace(summary, failed_count=summary.failed_count + 1)
+                summary = _defer_repair(summary, "raw_audit")
+            else:
+                try:
+                    audited = run_reconciliation(
+                        repository, warehouse, source=FitbitSource(), heartbeat=lambda _: None
+                    )
+                    if not audited.ok:
+                        summary = replace(summary, failed_count=summary.failed_count + 1)
+                except JobAlreadyRunning:
+                    summary = _defer_repair(summary, "raw_audit")
         finally:
             if acquired and warehouse.connection_usable:
                 warehouse.release_job_lock("reconciliation", owner)
             warehouse.close()
-        _worker(receipts, repository).recover_orphan_intents(limit=1)
-    LOGGER.info("fitbit repair %s", json.dumps(asdict(summary)))
-    if summary.at_risk_count or summary.failed_count:
-        LOGGER.error("fitbit repair backlog requires attention")
-    return summary
+        try:
+            _worker(receipts, repository).recover_orphan_intents(limit=1)
+        except (JobAlreadyRunning, ReceiptReadConflict):
+            summary = _defer_repair(summary, "orphan_recovery")
+    return _report_repair(summary)

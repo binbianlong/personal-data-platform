@@ -25,7 +25,14 @@ from personal_data_platform.storage.motherduck import Warehouse
 from .adapter import FitbitSource
 from .models import Snapshot, Window, object_dict, string
 from .raw import SnapshotRepository, encode_snapshot
-from .receipts import Receipt, ReceiptRepository, ReceiptWork, StoredReceipt, validate_receipt_key
+from .receipts import (
+    Receipt,
+    ReceiptReadConflict,
+    ReceiptRepository,
+    ReceiptWork,
+    StoredReceipt,
+    validate_receipt_key,
+)
 from .signatures import GoogleTaskIdentity
 from .webhook import AuthenticationError, GoogleHealthAuthenticator, PayloadError, Verification
 from .writer import can_skip_snapshot, expand_window
@@ -361,6 +368,9 @@ def create_app(
             # The durable receipt stays pending for repair after processing resumes.
             LOGGER.info("fitbit task deferred while processing is paused")
             return Response(status_code=204)
+        except (JobAlreadyRunning, ReceiptReadConflict) as error:
+            LOGGER.info("fitbit task deferred: %s", type(error).__name__)
+            return Response(status_code=503)
         except Exception as error:
             LOGGER.error("fitbit task failed: %s", type(error).__name__)
             return Response(status_code=503)

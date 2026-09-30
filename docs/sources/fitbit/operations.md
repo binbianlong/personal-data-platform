@@ -69,6 +69,7 @@ MotherDuck secretは既存参照を使う。旧環境リポジトリへの実行
 `enable_fitbit_runtime=true`で専用Service・queue・SA・IAM・Raw lifecycleを追加する。
 Cloud Runはmin 0 / max 1、HTTP同時処理16。Cloud Tasksは同時dispatch 1、最大20回/24時間の再試行。
 内部workerも既存Screen Timeと同じ`loader` leaseを取得する。ロック競合時は503で再試行する。
+ロック競合や受付の読み取り競合による再試行はINFOの延期logに記録し、実際の処理失敗と区別する。
 異常終了で残ったleaseは期限切れ後に回復する。DB確定結果が不明な接続を再利用しない。
 
 既存のScreen Time reconciliation JobにFitbit補修を接続し、Schedulerを増設しない。
@@ -87,6 +88,12 @@ API Rawと受付記録はGCS作成から90日で削除対象。Rawが93日以降
 受付の読み取り中に更新があった場合は最新の世代を取得し直す。本文の読み取りは合計3回までとし、
 一覧取得で上限に達した受付は延期件数に数えて、ほかの受付の確認を続ける。完了済み受付の本文は取得しない。
 権限不足、通信障害、不正な受付内容は更新競合として省略しない。
+`repair`の結果JSONには`status`、`deferred_phases`、`receipt_read_deferred_count`を含める。
+状態は`disabled`・`paused`・`succeeded`・`deferred`・`failed`。ロックや受付読み取りの競合だけなら
+終了コード0で次回へ延期する。再投入失敗、監査失敗、保持期限リスクは延期より優先し、終了コード1となる。
+延期段階は`scheduled_receipts`・`receipt_inventory`・`raw_audit`・`orphan_recovery`で記録する。
+定期受付の読み取りを延期した場合も、完了checkpointを進めずに既存受付の再投入を続ける。
+`succeeded`は今回の補修巡回を終えた状態であり、非同期workerの全受付完了は意味しない。
 端末一覧・reconcileのHTTP照会試行数、成功したSnapshot取得件数、変更なしで省いたRaw件数、
 新規Raw件数と圧縮後bytesを別々のlogに記録する。実際のGCS操作数・増加量は隔離環境で照合する。
 Service処理失敗のlog alertと既存reconciliation Job監視を利用する。
