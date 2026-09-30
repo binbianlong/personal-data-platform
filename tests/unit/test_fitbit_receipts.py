@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from google.api_core.exceptions import PreconditionFailed
+from google.api_core.exceptions import Forbidden, NotFound, PreconditionFailed, ServiceUnavailable
 
 from personal_data_platform.sources.fitbit.models import Window
 from personal_data_platform.sources.fitbit.receipts import (
@@ -166,3 +166,157 @@ def test_inventory_downloads_only_pending_and_reports_staleness() -> None:
 def test_receipt_keys_cannot_read_arbitrary_bucket_objects(key: str) -> None:
     with pytest.raises(ValueError):
         validate_receipt_key(key)
+
+
+def _race_download(monkeypatch, key, change, *, error=PreconditionFailed, conflicts=1):
+    original = Blob.download_as_bytes
+    generations = []
+
+    def download(blob, **kwargs):
+        if blob.name == key:
+            generations.append(kwargs["if_generation_match"])
+            if len(generations) <= conflicts:
+                change()
+                raise error("listed generation no longer exists")
+        return original(blob, **kwargs)
+
+    monkeypatch.setattr(Blob, "download_as_bytes", download)
+    return generations
+
+
+@pytest.mark.parametrize("error", [NotFound, PreconditionFailed])
+@pytest.mark.parametrize("operation", ["read", "inventory"])
+def test_receipt_read_refreshes_changed_generation(monkeypatch, error, operation):
+    client = Client()
+    repository = GCSReceiptRepository(client=client, bucket="test")
+    stored = repository.create(receipt())
+    updated = []
+
+    def change():
+        updated.append(repository.replace(
+            stored, replace(stored.receipt, received_at=NOW + timedelta(seconds=1))
+        ))
+
+    generations = _race_download(monkeypatch, stored.receipt.key, change, error=error)
+    if operation == "read":
+        result = repository.read(stored.receipt.key)
+    else:
+        result = repository.inventory().pending[0]
+    assert result == updated[0]
+    assert generations == [1, 2]
+
+
+def test_inventory_refreshes_completed_metadata_without_downloading_body(monkeypatch):
+    client = Client()
+    repository = GCSReceiptRepository(client=client, bucket="test")
+    stored = repository.create(receipt())
+    other = repository.create(receipt())
+    completed_at = NOW + timedelta(seconds=10)
+
+    def complete():
+        repository.replace(stored, replace(
+            stored.receipt, work=(ReceiptWork(WINDOW, completed=True),),
+            completed_at=completed_at,
+        ))
+
+    generations = _race_download(monkeypatch, stored.receipt.key, complete)
+    inventory = repository.inventory()
+    assert inventory.pending == (other,)
+    assert inventory.latest_completed_at == completed_at
+    assert inventory.deferred_count == 0
+    assert generations == [1]
+    assert client.downloads == 1
+
+
+@pytest.mark.parametrize("operation", ["read", "inventory"])
+def test_receipt_disappearance_requires_fresh_metadata(monkeypatch, operation):
+    client = Client()
+    repository = GCSReceiptRepository(client=client, bucket="test")
+    stored = repository.create(receipt())
+    other = repository.create(receipt())
+    generations = _race_download(
+        monkeypatch, stored.receipt.key, lambda: client.values.pop(stored.receipt.key),
+        error=NotFound,
+    )
+    if operation == "read":
+        with pytest.raises(FileNotFoundError):
+            repository.read(stored.receipt.key)
+    else:
+        inventory = repository.inventory()
+        assert inventory.pending == (other,)
+        assert inventory.deferred_count == 0
+    assert generations == [1]
+
+
+@pytest.mark.parametrize("conflicts", [2, 3])
+@pytest.mark.parametrize("operation", ["read", "inventory"])
+def test_receipt_read_is_bounded_and_defers_only_changing_entry(
+    monkeypatch, caplog, conflicts, operation
+):
+    from personal_data_platform.sources.fitbit import receipts as module
+
+    client = Client()
+    repository = GCSReceiptRepository(client=client, bucket="test")
+    current = [repository.create(receipt())]
+    other = repository.create(receipt())
+
+    def change():
+        stored = current[0]
+        current[0] = repository.replace(stored, replace(
+            stored.receipt, received_at=stored.receipt.received_at + timedelta(seconds=1)
+        ))
+
+    generations = _race_download(
+        monkeypatch, current[0].receipt.key, change, error=NotFound, conflicts=conflicts
+    )
+    if operation == "read" and conflicts == 3:
+        with pytest.raises(module.ReceiptReadConflict):
+            repository.read(current[0].receipt.key)
+    elif operation == "read":
+        assert repository.read(current[0].receipt.key) == current[0]
+    else:
+        inventory = repository.inventory()
+        if conflicts == 3:
+            assert inventory.pending == (other,)
+            assert inventory.deferred_count == 1
+            assert any(record.levelname == "WARNING" for record in caplog.records)
+        else:
+            assert set(inventory.pending) == {other, current[0]}
+            assert inventory.deferred_count == 0
+    assert generations == [1, 2, 3]
+
+
+@pytest.mark.parametrize("error", [Forbidden, ServiceUnavailable, OSError])
+@pytest.mark.parametrize("operation", ["read", "inventory"])
+def test_receipt_read_does_not_hide_non_race_errors(monkeypatch, error, operation):
+    client = Client()
+    repository = GCSReceiptRepository(client=client, bucket="test")
+    stored = repository.create(receipt())
+    generations = _race_download(monkeypatch, stored.receipt.key, lambda: None, error=error)
+    with pytest.raises(error):
+        if operation == "read":
+            repository.read(stored.receipt.key)
+        else:
+            repository.inventory()
+    assert generations == [1]
+
+
+@pytest.mark.parametrize("bad_body", [b"{", b"{}"])
+def test_inventory_does_not_hide_invalid_receipt_body(bad_body):
+    client = Client()
+    repository = GCSReceiptRepository(client=client, bucket="test")
+    stored = repository.create(receipt())
+    generation, _, metadata = client.values[stored.receipt.key]
+    client.values[stored.receipt.key] = (generation, bad_body, metadata)
+    with pytest.raises((ValueError, KeyError)):
+        repository.inventory()
+
+
+def test_receipt_read_does_not_hide_body_key_mismatch():
+    client = Client()
+    repository = GCSReceiptRepository(client=client, bucket="test")
+    stored = repository.create(receipt())
+    generation, _, metadata = client.values[stored.receipt.key]
+    client.values[stored.receipt.key] = (generation, receipt().to_bytes(), metadata)
+    with pytest.raises(ValueError, match="object key"):
+        repository.inventory()

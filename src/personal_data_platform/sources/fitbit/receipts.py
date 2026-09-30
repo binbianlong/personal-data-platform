@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from collections.abc import Iterable
@@ -11,13 +12,14 @@ from datetime import datetime, time, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from google.api_core.exceptions import PreconditionFailed
+from google.api_core.exceptions import NotFound, PreconditionFailed
 
 from personal_data_platform.raw.models import RawObject
 
 from .models import DATE_TYPES, Window, aware, date_cursor, object_dict, parse_time, string
 
 RECEIPT_PREFIX = "receipts/fitbit/v1/"
+LOGGER = logging.getLogger(__name__)
 _TOKYO = ZoneInfo("Asia/Tokyo")
 _KEY_PATTERN = re.compile(
     r"receipts/fitbit/v1/\d{4}-\d{2}-\d{2}/"
@@ -206,6 +208,11 @@ class ReceiptInventory:
     pending: tuple[StoredReceipt, ...]
     latest_received_at: datetime | None
     latest_completed_at: datetime | None
+    deferred_count: int = 0
+
+
+class ReceiptReadConflict(RuntimeError):
+    """A receipt kept changing throughout the bounded generation-pinned reads."""
 
 
 class ReceiptRepository(Protocol):
@@ -287,7 +294,28 @@ class GCSReceiptRepository:
         blob = self._bucket.get_blob(key)
         if blob is None:
             raise FileNotFoundError("Fitbit receipt does not exist")
-        return self._read_blob(blob)
+        _, stored = self._read_with_retry(blob)
+        assert stored is not None
+        return stored
+
+    def _read_with_retry(
+        self, blob: ReceiptBlob, *, skip_completed: bool = False
+    ) -> tuple[ReceiptBlob, StoredReceipt | None]:
+        key = blob.name
+        validate_receipt_key(key)
+        for attempt in range(3):
+            if skip_completed and (blob.metadata or {}).get("state") == "completed":
+                return blob, None
+            try:
+                return blob, self._read_blob(blob)
+            except (NotFound, PreconditionFailed) as error:
+                if attempt == 2:
+                    raise ReceiptReadConflict("Fitbit receipt changed during three reads") from error
+                refreshed = self._bucket.get_blob(key)
+                if refreshed is None:
+                    raise FileNotFoundError("Fitbit receipt does not exist") from error
+                blob = refreshed
+        raise AssertionError("receipt retry bound was not enforced")
 
     def replace(self, stored: StoredReceipt, receipt: Receipt) -> StoredReceipt:
         if stored.receipt.key != receipt.key or stored.receipt.subject_key != receipt.subject_key:
@@ -298,8 +326,17 @@ class GCSReceiptRepository:
         pending: list[StoredReceipt] = []
         latest_received: datetime | None = None
         latest_completed: datetime | None = None
+        deferred = 0
         for blob in self._client.list_blobs(self._bucket, prefix=RECEIPT_PREFIX):
             validate_receipt_key(blob.name)
+            try:
+                blob, stored = self._read_with_retry(blob, skip_completed=True)
+            except FileNotFoundError:
+                continue
+            except ReceiptReadConflict:
+                deferred += 1
+                LOGGER.warning("fitbit receipt read deferred key=%s", blob.name)
+                continue
             metadata = blob.metadata or {}
             if metadata.get("origin") == "webhook" and "received_at" in metadata:
                 received = parse_time(metadata["received_at"])
@@ -309,12 +346,13 @@ class GCSReceiptRepository:
                 latest_completed = (
                     max(latest_completed, completed) if latest_completed else completed
                 )
-            else:
-                pending.append(self._read_blob(blob))
+            elif stored is not None:
+                pending.append(stored)
         return ReceiptInventory(
             tuple(
                 sorted(pending, key=lambda entry: (entry.receipt.received_at, entry.receipt.key))
             ),
             latest_received,
             latest_completed,
+            deferred,
         )
