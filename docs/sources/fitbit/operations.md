@@ -2,7 +2,7 @@
 
 ## 現在の状態
 
-2026-09-28時点で取得・保存の見直しを含むローカル実装とオフライン検証を完了した。
+2026-09-30時点で取得・保存の見直し、補修競合の回復、JSONログと完了欠測監視のローカル実装・オフライン検証を完了した。
 この変更に対するCI、隔離環境のGoogle Health実端末・権限、GCS実操作量、MotherDuck実CU使用量は未検証。
 クラウド適用、PDP購読登録、本番ZIP投入、実端末から分析までの到達も未検証。Terraformは`enable_fitbit_runtime=false`、
 有効化時も`fitbit_processing_paused=true`が既定。
@@ -12,6 +12,8 @@
 - 2026-09-27: Ruff・strict mypy・pytest 505件、Terraform fmt/validate/mock test 11件、wheelビルドを確認した。
 - 2026-09-28: Ruff・整形・strict mypy・pytest 511件の成功を確認した。
 - 2026-09-28: 取得・保存の見直し後にRuff・strict mypy・pytest 537件、Terraform fmt/validate/mock test 11件を確認した。
+- 2026-09-30: 受付の限定再読込、補修の延期・失敗、起動時のJSONログをPython 3.13で検証した。
+  Terraformの3ルートでfmt/validate/mock test計14件とwheelビルドを確認した。通知の発火・復旧は未検証。
 - コンテナ実行は未確認。2026-09-27の検証時はDocker Engineが起動していなかった。
 
 CI、クラウド動作、実CUはこのローカル検証の対象外。
@@ -57,6 +59,7 @@ ZIP取り込み・照合用CLIやファイル取り込み台帳はアプリに�
 | `PDP_FITBIT_TASKS_PARENT` | `projects/.../locations/.../queues/pdp-fitbit` |
 | `PDP_FITBIT_PROCESSING_PAUSED` | `true`でworkerのAPI/DB更新、補修のAPI照会と定期受付作成を停止 |
 | `PDP_FITBIT_REPAIR_ENABLED` | `true`で受付再投入、端末同期補完、週次照合を有効化 |
+| `LOG_LEVEL` | Fitbitアプリlogの重要度。既定は`INFO`。完了監視を利用する環境では`INFO`または`DEBUG`を使用 |
 | `GOOGLE_CLOUD_PROJECT` / `GCS_BUCKET` | 既存GCS設定 |
 | `MOTHERDUCK_DATABASE` / `MOTHERDUCK_TOKEN` | 既存DB設定 |
 
@@ -96,7 +99,29 @@ API Rawと受付記録はGCS作成から90日で削除対象。Rawが93日以降
 `succeeded`は今回の補修巡回を終えた状態であり、非同期workerの全受付完了は意味しない。
 端末一覧・reconcileのHTTP照会試行数、成功したSnapshot取得件数、変更なしで省いたRaw件数、
 新規Raw件数と圧縮後bytesを別々のlogに記録する。実際のGCS操作数・増加量は隔離環境で照合する。
-Service処理失敗のlog alertと既存reconciliation Job監視を利用する。
+`serve`・`sync`・`repair`は起動時に共通のlog設定を適用する。Fitbitアプリlogは`severity`と`message`を
+持つ1行JSONでstderrへ出力し、CLIの結果JSONはstdoutに出力する。既存のroot loggerへ重複出力しない。
+Cloud RunはJSONの`severity`を重要度として認識する。[Cloud Runのログ仕様](https://docs.cloud.google.com/run/docs/logging)
+Service処理失敗のlog alertは`jsonPayload.message`と移行中の旧`textPayload`の両方を検知する。
+
+補修の最終結果は`event="fitbit_repair"`と`status`付きで記録する。処理中の例外も`status="failed"`で
+ERROR logに残し、元の失敗を呼出元へ伝える。
+`status="succeeded"`だけを既存reconciliation Jobの成功メトリクスに数え、23.5時間の欠測と
+10分の集計窓で約1日補修が完了しない状態を既存メール通知先へ送る。実行IDなどの個別ラベルは付けない。
+`enable_fitbit_runtime=false`では監視リソースを作らず、`fitbit_processing_paused=true`では
+欠測通知ポリシーを無効にしてメトリクスの履歴を維持する。既存のreconciliation Job監視も継続する。
+`LOG_LEVEL=WARNING`以上では成功logが出ず、稼働中でも欠測通知の対象になるため、監視環境では使用しない。
+
+欠測監視は最初のデータ点がない系列を検知できない。有効化・再開・監視設定の変更後は、次の確認を行う。
+
+1. 稼働環境の`LOG_LEVEL`が`INFO`または`DEBUG`であることを確認する。
+2. 定期または手動で既存reconciliation Jobを実行し、`event="fitbit_repair"`、`status="succeeded"`のlogを確認する。
+   手元での`pdp fitbit repair`はCloud Run Jobのリソースラベルがないため、監視用データ点の代用にしない。
+3. Cloud Monitoringで`logging.googleapis.com/user/pdp-fitbit-repair-success`に新しいデータ点があることを確認する。
+   完了logとデータ点の両方を確認するまで欠測監視の準備完了としない。
+4. 隔離環境で補修が完了しない場合の発火と、正常な完了後の復旧・通知先への到達を確認する。
+
+最初のデータ点と設定変更後の再確認については[欠測監視の仕様](https://docs.cloud.google.com/monitoring/alerts/metric-absence)を参照する。
 
 ## 復旧と停止
 

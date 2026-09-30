@@ -220,7 +220,7 @@ resource "google_monitoring_alert_policy" "fitbit_failure" {
   conditions {
     display_name = "Fitbit failure log"
     condition_matched_log {
-      filter = "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"pdp-fitbit\" AND textPayload=~\"fitbit (webhook|task) failed\""
+      filter = "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"pdp-fitbit\" AND (textPayload=~\"fitbit (webhook|task) failed\" OR jsonPayload.message=~\"fitbit (webhook|task) failed\")"
     }
   }
   alert_strategy {
@@ -228,6 +228,60 @@ resource "google_monitoring_alert_policy" "fitbit_failure" {
     auto_close = "86400s"
   }
   notification_channels = [google_monitoring_notification_channel.email.name]
+}
+
+resource "google_logging_metric" "fitbit_repair_success" {
+  count       = var.enable_fitbit_runtime ? 1 : 0
+  project     = var.project_id
+  name        = "pdp-fitbit-repair-success"
+  description = "Complete bounded Fitbit repair passes, excluding paused, deferred and failed results."
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_job\"",
+    "resource.labels.project_id=\"${var.project_id}\"",
+    "resource.labels.location=\"${var.region}\"",
+    "resource.labels.job_name=\"reconciliation\"",
+    "jsonPayload.event=\"fitbit_repair\"",
+    "jsonPayload.status=\"succeeded\"",
+  ])
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+  depends_on = [google_project_service.runtime]
+}
+
+resource "google_monitoring_alert_policy" "fitbit_repair_absent" {
+  count        = var.enable_fitbit_runtime ? 1 : 0
+  project      = var.project_id
+  display_name = "Fitbit repair: successful completion absent"
+  combiner     = "OR"
+  enabled      = !var.fitbit_processing_paused
+  conditions {
+    display_name = "No completed Fitbit repair pass for approximately one day"
+    condition_absent {
+      filter = join(" AND ", [
+        "resource.type = \"cloud_run_job\"",
+        "resource.labels.project_id = \"${var.project_id}\"",
+        "resource.labels.location = \"${var.region}\"",
+        "resource.labels.job_name = \"reconciliation\"",
+        "metric.type = \"logging.googleapis.com/user/${google_logging_metric.fitbit_repair_success[0].name}\"",
+      ])
+      duration = "84600s"
+      aggregations {
+        alignment_period     = "600s"
+        per_series_aligner   = "ALIGN_DELTA"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+      trigger { count = 1 }
+    }
+  }
+  notification_channels = [google_monitoring_notification_channel.email.name]
+  documentation {
+    mime_type = "text/markdown"
+    content   = "No successful Fitbit repair pass has been observed for approximately one day. Inspect deferred_phases, receipt_read_deferred_count, shared leases and scheduled executions. Succeeded means the bounded pass completed, not that all queued receipts have finished. After enabling, unpausing or modifying this policy, confirm a fresh success metric point before relying on absence detection."
+  }
+  depends_on = [google_project_service.runtime]
 }
 
 output "fitbit_service_url" {

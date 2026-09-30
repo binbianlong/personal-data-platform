@@ -27,6 +27,7 @@ from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig
 
 from .adapter import FitbitSource
 from .api import HealthClient, HealthError, SyncTime
+from .logging import configure_logging
 from .models import DATA_TYPES, DATE_TYPES, Window, date_cursor
 from .oauth import GoogleOAuth
 from .receipts import (
@@ -123,6 +124,7 @@ def _worker(receipts: GCSReceiptRepository, repository: GCSRawRepository) -> Rec
 
 
 def run_serve_from_env() -> int:
+    configure_logging()
     receipts, repository = _stores()
     app = create_app(
         authenticator=GoogleHealthAuthenticator(
@@ -167,6 +169,7 @@ def sync_windows(start: datetime, end: datetime, data_types: tuple[str, ...]) ->
 def run_sync_from_env(
     *, start: datetime, end: datetime, data_types: tuple[str, ...] = DATA_TYPES
 ) -> int:
+    configure_logging()
     receipts, repository = _stores()
     receipt = Receipt.create(
         required("PDP_FITBIT_SUBJECT_KEY"),
@@ -489,6 +492,18 @@ def _defer_repair(summary: RepairSummary, phase: RepairPhase) -> RepairSummary:
 
 
 def run_repair_from_env() -> RepairSummary:
+    configure_logging()
+    try:
+        return _run_repair_from_env()
+    except Exception as error:
+        LOGGER.error(
+            "fitbit repair failed: %s", type(error).__name__,
+            extra={"event": "fitbit_repair", "status": "failed"},
+        )
+        raise
+
+
+def _run_repair_from_env() -> RepairSummary:
     if not enabled("PDP_FITBIT_REPAIR_ENABLED"):
         return _report_repair(RepairSummary(enabled=False))
     receipts, repository = _stores()

@@ -201,12 +201,18 @@ def test_inactive_repair_does_not_report_completion(
     assert not any(getattr(record, "status", None) == "succeeded" for record in caplog.records)
 
 
-def test_orphan_storage_failure_remains_a_failed_cli_execution(repair_env, monkeypatch, capsys):
+def test_orphan_storage_failure_remains_a_failed_cli_execution(
+    repair_env, monkeypatch, capsys, caplog
+):
     def failed_recovery(self, *, limit):
         raise OSError("storage unavailable")
     monkeypatch.setattr(ReceiptWorker, "recover_orphan_intents", failed_recovery)
     assert main(["fitbit", "repair"]) == 1
     assert "storage unavailable" in capsys.readouterr().err
+    events = [record for record in caplog.records if getattr(record, "event", None) == "fitbit_repair"]
+    assert len(events) == 1
+    assert events[0].status == "failed"
+    assert events[0].levelno == logging.ERROR
 
 
 def test_worker_lease_contention_retries_without_failure_alert(repair_env, caplog):
