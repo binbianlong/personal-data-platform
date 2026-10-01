@@ -18,3 +18,4 @@ data typeごとの仕様が独立して増える場合はpackage内で追加分�
 | データソース | 仕様 |
 |---|---|
 | Screen Time | [`screen-time/`](screen-time/) |
+| Fitbit | [`fitbit/`](fitbit/) |

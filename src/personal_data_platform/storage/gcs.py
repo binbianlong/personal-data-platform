@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import base64
 
+import google.cloud.storage as storage
 import google_crc32c
 from google.api_core.exceptions import PreconditionFailed
-from google.cloud import storage
 from google.cloud.storage.retry import DEFAULT_RETRY_IF_GENERATION_SPECIFIED
 
 from personal_data_platform.config import GCSConfig
@@ -59,12 +59,35 @@ class GCSRawRepository:
             # verifies the uncompressed checksum of the stored generation again.
             return
 
+    def put_raw_object(self, key: str, compressed_bytes: bytes) -> RawObject:
+        """Save one immutable observation and obtain its exact storage generation."""
+        self.put_compressed_raw(key, compressed_bytes)
+        blob = self._bucket.blob(key)
+        blob.reload()
+        if blob.time_created is None or blob.generation is None:
+            raise RuntimeError("GCS omitted immutable object metadata")
+        return self._source.parse_raw_key(
+            key, storage_created_at=blob.time_created, storage_generation=int(blob.generation)
+        )
+
     def get_raw(self, key: str, *, generation: int) -> bytes:
         """Download the listed generation without GCS content transcoding."""
         self._source.validate_raw_key(key)
         return self._bucket.blob(key, generation=generation).download_as_bytes(
             raw_download=True,
             if_generation_match=generation,
+        )
+
+    def head_raw(self, key: str) -> RawObject | None:
+        """Find one immutable Raw generation without listing the namespace."""
+        self._source.validate_raw_key(key)
+        blob = self._bucket.get_blob(key)
+        if blob is None:
+            return None
+        if blob.time_created is None or blob.generation is None:
+            raise RuntimeError("GCS omitted immutable object metadata")
+        return self._source.parse_raw_key(
+            key, storage_created_at=blob.time_created, storage_generation=int(blob.generation)
         )
 
     def list_raw(self, prefix: str | None = None) -> list[RawObject]:

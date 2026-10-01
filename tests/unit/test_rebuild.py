@@ -340,6 +340,7 @@ def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(mon
             written.append(raw)
 
     class Source:
+        parser_version = Batch.parser_version
         source_id = "synthetic"
         stream = "metrics"
         schema_versions = (1, 2)

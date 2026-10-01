@@ -262,7 +262,7 @@ def test_missing_directory_for_one_allowlisted_device_fails_the_complete_scan(tm
 
 
 def test_waits_through_updates_and_restart_until_successor_exists(tmp_path, capsys) -> None:
-    from personal_data_platform.cli import _print_collection_stats
+    from personal_data_platform.sources.screen_time.cli import _print_collection_stats
 
     source, segment = _source_tree(tmp_path, successor=False)
     uploader = RecordingUploader()

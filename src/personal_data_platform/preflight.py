@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from google.cloud import storage
+import google.cloud.storage as storage
 
 from personal_data_platform.config import GCSConfig
 from personal_data_platform.recovery.rebuild import validate_rebuild_target

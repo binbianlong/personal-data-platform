@@ -11,6 +11,9 @@
 
 source単独で完結する派生値と品質定義は[`sources/`](../sources/)を正本とする。
 
+睡眠開始前2時間の端末別使用時間は`marts.fitbit_sleep_screen_time`を使う。
+重複区間・欠測・日付・端末分離の定義は[Fitbitデータモデル](../sources/fitbit/data-model.md#分析ビュー)に従う。
+
 ## 日次Screen Timeの参照
 
 アプリ別には`marts.daily_screen_time`、端末別の合計には`marts.daily_screen_time_total`を使う。

@@ -1,5 +1,5 @@
 locals {
-  runtime_services = toset([
+  runtime_services = toset(concat([
     "cloudscheduler.googleapis.com",
     "iam.googleapis.com",
     "logging.googleapis.com",
@@ -7,7 +7,7 @@ locals {
     "run.googleapis.com",
     "secretmanager.googleapis.com",
     "storage.googleapis.com",
-  ])
+  ], var.enable_fitbit_runtime ? ["cloudtasks.googleapis.com"] : []))
 }
 
 resource "google_project_service" "runtime" {

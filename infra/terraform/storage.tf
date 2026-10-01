@@ -39,6 +39,18 @@ resource "google_storage_bucket" "raw" {
     retention_duration_seconds = 0
   }
 
+  dynamic "lifecycle_rule" {
+    for_each = var.enable_fitbit_runtime ? toset(["raw", "receipts"]) : toset([])
+    content {
+      action { type = "Delete" }
+      condition {
+        age            = 90
+        matches_prefix = [lifecycle_rule.value == "raw" ? "raw/fitbit/v1/" : "receipts/fitbit/v1/"]
+        matches_suffix = lifecycle_rule.value == "raw" ? [".json.gz"] : null
+      }
+    }
+  }
+
   lifecycle {
     prevent_destroy = true
 
@@ -86,6 +98,32 @@ resource "google_storage_bucket" "preflight" {
 }
 
 data "google_iam_policy" "raw_bucket" {
+  dynamic "binding" {
+    for_each = var.enable_fitbit_runtime ? [
+      { prefix = "raw/fitbit/v1/", role = local.storage_roles.collector_raw_creator, title = "fitbit_raw_create", suffix = ".json.gz" },
+      { prefix = "receipts/fitbit/v1/", role = local.storage_roles.collector_receipt_writer, title = "fitbit_receipt_write", suffix = ".json" },
+      { prefix = "raw/fitbit/v1/_control/device-sync/", role = local.storage_roles.collector_receipt_writer, title = "fitbit_device_sync_write", suffix = ".json" },
+    ] : []
+    content {
+      role    = binding.value.role
+      members = local.fitbit_storage_members
+      condition {
+        title      = binding.value.title
+        expression = "resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${binding.value.prefix}') && resource.name.endsWith('${binding.value.suffix}')"
+      }
+    }
+  }
+  dynamic "binding" {
+    for_each = var.enable_fitbit_runtime ? [1] : []
+    content {
+      role    = "roles/storage.objectViewer"
+      members = ["serviceAccount:${google_service_account.fitbit[0].email}"]
+      condition {
+        title      = "fitbit_read_and_list"
+        expression = "resource.name == 'projects/_/buckets/${local.raw_bucket_name}' || resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/raw/fitbit/v1/') || resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/receipts/fitbit/v1/')"
+      }
+    }
+  }
   binding {
     role    = "roles/storage.admin"
     members = [var.collector_impersonator_member]

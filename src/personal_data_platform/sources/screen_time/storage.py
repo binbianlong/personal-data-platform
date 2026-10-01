@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import google.cloud.storage as storage
 from google.api_core.exceptions import NotFound
-from google.cloud import storage
 
 from personal_data_platform.config import GCSConfig
 from personal_data_platform.sources.contracts import RawCodec

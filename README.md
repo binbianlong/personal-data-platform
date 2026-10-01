@@ -3,7 +3,7 @@
 個人データの取得、Raw保存、MotherDuckへの取込、dbt分析を行うPythonプロジェクト。
 
 Loader、監査、再構築はsourceとstreamを選んで実行する。Screen TimeはiPhoneの`App.InFocus`と
-Macの`ScreenTime.AppUsage`を扱う。Fitbitは未実装である。共通処理とsourceの分離・追加手順は
+Macの`ScreenTime.AppUsage`を扱う。FitbitはGoogle Health Webhook経由の取り込みを実装し、本番導入は準備段階である。共通処理とsourceの分離・追加手順は
 [`アーキテクチャ`](docs/platform/architecture.md)を参照する。
 
 ## 開発環境
@@ -38,6 +38,9 @@ pdp reconciliation
 pdp rebuild --dry-run
 pdp rebuild --target-db <scratch-database> --allow-partial-history
 pdp preflight
+pdp fitbit serve
+pdp fitbit sync --from 2026-09-20 --to 2026-09-27
+pdp fitbit repair
 ```
 
 `loader`、`reconciliation`、`rebuild`は指定を省略すると既存iPhoneの`screen_time / app-in-focus`を対象にする。
@@ -45,7 +48,8 @@ pdp preflight
 `--source screen_time --stream app-in-focus`または`--stream app-usage`を付ける。
 未登録の組合せは拒否する。`pdp dbt`は指定なしでは全model、source / stream指定時は対応するmodelとtestを実行する。
 
-未実装の`webhook`と`fetch`はcommandとして受理しない。
+Fitbitの設定・スキーマ準備・復旧手順は[`Fitbit運用`](docs/sources/fitbit/operations.md)を参照する。
+ZIP取り込み機能はアプリに含めない。
 
 `pdp screen-time inspect-mac`はMac自身の`App.InFocus/local`にある完成済みsegmentを読み取り専用で
 解析する。`--directory PATH`で検証対象を変更できる。JSONにはBundle ID別の開始・終了レコード件数、

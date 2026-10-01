@@ -58,7 +58,7 @@ def test_devices_still_lists_iphone_when_local_mac_row_is_missing(
         device_allowlist=frozenset(),
         mac_app_usage_local_dir=tmp_path / "local",
     )
-    monkeypatch.setattr(cli.CollectorConfig, "from_env", lambda **_kwargs: config)
+    monkeypatch.setattr(CollectorConfig, "from_env", lambda **_kwargs: config)
 
     assert main(["screen-time", "devices"]) == 0
     output = capsys.readouterr()

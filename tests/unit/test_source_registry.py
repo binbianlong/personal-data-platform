@@ -11,7 +11,7 @@ def test_registry_defaults_and_explicit_scope_keep_screen_time() -> None:
         registry.get_source("screen_time", "app-in-focus"),
     ):
         assert (source.source_id, source.stream) == ("screen_time", "app-in-focus")
-    assert registry.source_ids() == ("screen_time",)
+    assert registry.source_ids() == ("fitbit", "screen_time")
     assert registry.get_source("screen_time", "app-usage").stream == "app-usage"
     with pytest.raises(ValueError, match="multiple streams"):
         registry.get_source("screen_time")
@@ -48,7 +48,7 @@ def test_registry_requires_stream_when_a_source_has_multiple_streams(monkeypatch
         registry.get_source("screen_time")
     assert registry.get_source("screen_time", "synthetic-other") is other
     assert registry.get_source().stream == "app-in-focus"
-    assert registry.source_ids() == ("screen_time",)
+    assert registry.source_ids() == ("fitbit", "screen_time")
 
 
 @pytest.mark.parametrize(

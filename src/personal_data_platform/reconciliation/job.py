@@ -43,7 +43,7 @@ def _relation_names(warehouse: Warehouse) -> set[str]:
         SELECT table_schema || '.' || table_name
         FROM information_schema.tables
         WHERE table_catalog = current_database()
-          AND table_schema IN ('base', 'marts')
+          AND table_schema IN ('base', 'marts', 'ops')
         """
     )
     return {row[0] for row in rows}
@@ -104,7 +104,7 @@ def run_reconciliation(
     raw_by_key = _list_raw_by_key(repository, source, prefix)
     raw_objects = list(raw_by_key.values())
     raw_keys = set(raw_by_key)
-    parser_version = getattr(source, "parser_version", None)
+    parser_version = source.parser_version
     loaded_keys = warehouse.succeeded_keys_for(raw_objects, parser_version=parser_version)
     missing_before_repair = raw_keys - loaded_keys
     repair_summary: dict[str, int] | None = None
@@ -281,6 +281,20 @@ def run_reconciliation(
 
 
 def run_reconciliation_from_env(
+    *, source_id: str | None = None, stream: str | None = None, all_streams: bool = False
+) -> int:
+    status = _run_reconciliation_sources(
+        source_id=source_id, stream=stream, all_streams=all_streams
+    )
+    if os.environ.get("PDP_FITBIT_REPAIR_ENABLED", "false").lower() == "true":
+        from personal_data_platform.sources.fitbit.runtime import run_repair_from_env
+
+        result = run_repair_from_env()
+        status = max(status, int(bool(result.failed_count or result.at_risk_count)))
+    return status
+
+
+def _run_reconciliation_sources(
     *, source_id: str | None = None, stream: str | None = None, all_streams: bool = False
 ) -> int:
 

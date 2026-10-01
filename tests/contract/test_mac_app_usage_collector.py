@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from personal_data_platform.cli import _collect_all
+from personal_data_platform.sources.screen_time.cli import _collect_all
 from personal_data_platform.sources.screen_time.collector import (
     BiomeMacAppUsageSource,
     BiomeScreenTimeSource,

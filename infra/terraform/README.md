@@ -1,6 +1,6 @@
 # GCP runtime
 
-GCS Raw/preflight bucket、Cloud Run Jobs、Secret Manager、Scheduler、Cloud Logging/Monitoringを管理する。既定のiPhone構成は4つのJobを持つ。追加source / streamは独立したLoader・Reconciliation・Scheduler・heartbeatを持つ。HTTP Service、Cloud Tasks、空のwebhook/fetch runtimeは作成しない。Cloud Run、GCS、Artifact Registryは`us-central1`に固定し、Schedulerの時刻解釈だけは`Asia/Tokyo`を使う。
+GCS Raw/preflight bucket、Cloud Run Jobs、Secret Manager、Scheduler、Cloud Logging/Monitoringを管理する。既定のiPhone構成は4つのJobを持つ。追加pipelineは独立したLoader・Reconciliation・Scheduler・heartbeatを持つ。Fitbitは`enable_fitbit_runtime=true`の場合だけ専用HTTP ServiceとCloud Tasksを追加し、定期補修は既存reconciliationを利用する。Cloud Run、GCS、Artifact Registryは`us-central1`に固定し、Schedulerの時刻解釈だけは`Asia/Tokyo`を使う。
 
 ## 初回構築
 
@@ -58,7 +58,7 @@ printf '%s' "$SECRET_VALUE" | gcloud secrets versions add SECRET_ID --data-file=
 - LoaderのTask自動リトライは無効（`max_retries = 0`）とし、失敗は失敗として記録する。未処理Rawは次の毎時起動で再処理する。異常終了で排他が残った場合は、排他期限が切れた後の定期起動で再開する。
 - `dbt-runner`はSchedulerから起動せず、初回構築、dbt定義・SQL migration変更時、または`run_dbt=true`を指定したdeploy時に実行する。初回はapply前のTerraform planでdbt Jobの新規作成を検出し、applyと隔離preflightが成功した後にmodelを作成する。Job再作成も同じ扱いとする。
 - 各Jobは専用Service Accountを持ち、必要なSecretだけを参照する。
-- deploy identityの`actAs`は、Terraformが作成するJob用Service AccountとScheduler用Service Accountだけへ付与する。
+- deploy identityの`actAs`は、Terraformが作成するJob/Scheduler用SAと、有効化時のFitbit Service/Task用SAへ限定する。
 
 手動実行例:
 
@@ -71,6 +71,23 @@ gcloud run jobs execute reconciliation --region=us-central1 --wait
 
 
 ## Source / streamの追加
+
+Fitbitは`additional_ingestion_pipelines`へ重複登録せず、`enable_fitbit_runtime`、`fitbit_subject_key`、
+`fitbit_secret_ids`を設定する。`fitbit_processing_paused=true`が既定。
+隔離検証・費用確認・購読登録の条件は[`Fitbit運用`](../../docs/sources/fitbit/operations.md)を参照する。
+
+GitHub ActionsのPlanとDeployは、次のrepository variablesを同じTerraform入力として使う。
+未設定ではFitbitを作成せず、処理を停止する。秘密値は登録せず、既存Secret Manager IDだけを渡す。
+
+| Repository variable | Terraform入力 | 未設定時 |
+|---|---|---|
+| `PDP_FITBIT_ENABLED` | `enable_fitbit_runtime` | `false` |
+| `PDP_FITBIT_PROCESSING_PAUSED` | `fitbit_processing_paused` | `true` |
+| `PDP_FITBIT_SUBJECT_KEY` | `fitbit_subject_key` | 空文字 |
+| `PDP_FITBIT_SECRET_IDS` | `fitbit_secret_ids` | `{}`。環境変数名からSecret Manager IDへのJSON object |
+
+稼働後もこれらを維持する。`PDP_FITBIT_ENABLED=false`は受信Serviceやqueueの削除計画になるため、
+運用停止には`PDP_FITBIT_PROCESSING_PAUSED=true`を使い、Planを確認してからDeployする。
 
 `sources.tf`の既定pipelineは`screen_time / app-in-focus`である。`additional_ingestion_pipelines`へ実装済みの
 source / streamを追加すると、共通imageを使うLoaderとReconciliation、それぞれのService Account・Scheduler・

@@ -45,7 +45,10 @@ locals {
 
   job_secret_access = merge([
     for job_key, job in local.runtime_jobs : {
-      for secret_key in toset(values(job.secrets)) :
+      for secret_key in toset([
+        for env_name, managed_secret_key in job.secrets : managed_secret_key
+        if !(job_key == "reconciliation" && contains(keys(local.fitbit_reconciliation_secrets), env_name))
+      ]) :
       "${job_key}:${secret_key}" => {
         job_key    = job_key
         secret_key = secret_key
@@ -160,7 +163,7 @@ resource "google_cloud_run_v2_job" "runtime" {
             name = env.key
             value_source {
               secret_key_ref {
-                secret  = google_secret_manager_secret.runtime[env.value].secret_id
+                secret  = each.key == "reconciliation" && contains(keys(local.fitbit_reconciliation_secrets), env.key) ? env.value : google_secret_manager_secret.runtime[env.value].secret_id
                 version = "latest"
               }
             }
@@ -174,5 +177,6 @@ resource "google_cloud_run_v2_job" "runtime" {
     google_service_account_iam_member.deployer_act_as_runtime,
     google_project_service.runtime,
     google_secret_manager_secret_iam_member.runtime,
+    google_secret_manager_secret_iam_member.fitbit_reconciliation,
   ]
 }

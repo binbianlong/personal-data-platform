@@ -307,6 +307,7 @@ class _JsonBatch:
 
 
 class _JsonSource:
+    parser_version = _JsonBatch.parser_version
     source_id = "synthetic"
     schema_versions = (1, 2)
     raw_prefixes = ("raw/synthetic/v1/", "raw/synthetic/v2/")

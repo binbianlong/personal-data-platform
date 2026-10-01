@@ -7,7 +7,7 @@ import pytest
 
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.sources.screen_time.models import PayloadDecodeError
-from personal_data_platform.sources.screen_time.parser import decode_mac_app_usage_payload
+from personal_data_platform.sources.screen_time.payloads import decode_mac_app_usage_payload
 from personal_data_platform.sources.screen_time.raw import (
     ScreenTimeRawIdentity,
     encode_segment_envelope,
@@ -57,7 +57,18 @@ def test_app_usage_events_use_unix_time_and_a_distinct_parser_version() -> None:
     assert start.kind is None and start.unknown_field_count == 1
     assert start.source_stream == "app-usage"
     assert start.parser_version == "app-usage-v1"
+    assert start.event_key == "225462b40f4270cd33b8251bed6ef515ef835081e1596e6456b31b5b7f1ffe77"
     assert start.event_key != end.event_key
+
+
+def test_app_usage_payload_retains_its_unix_timestamp_before_event_conversion() -> None:
+    decoded = decode_mac_app_usage_payload(_payload())
+
+    assert decoded["unix_time"] == 1_789_000_000.5
+    assert decoded["event_at"] == datetime(2026, 9, 10, 0, 26, 40, 500_000, tzinfo=UTC)
+    assert decoded["in_foreground"] is True
+    assert decoded["bundle_id"] == "com.example.mac"
+    assert decoded["unknown_field_count"] == 1
 
 
 @pytest.mark.parametrize(

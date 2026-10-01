@@ -1,6 +1,16 @@
 version: 2
 
 sources:
+  - name: fitbit_base
+    schema: base
+    tables:
+      - name: fitbit_steps
+      - name: fitbit_heart_rate
+      - name: fitbit_resting_heart_rate
+      - name: fitbit_active_zone
+      - name: fitbit_sleep
+      - name: fitbit_sleep_stage
+      - name: fitbit_sleep_wake
   - name: screen_time_base
     schema: base
     tables:

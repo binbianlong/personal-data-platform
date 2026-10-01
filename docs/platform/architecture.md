@@ -5,7 +5,7 @@
 ```text
 Source固有の取得処理
   -> GCS Raw（source固有のkey、schema version、保持期限）
-  -> source / stream別Cloud Run Loader Job
+  -> source / stream別Loader（Cloud Run JobまたはWebhook worker）
   -> MotherDuckの型付きbase
   -> dbt View
   -> MotherDuck Remote MCP（read-only）
@@ -19,7 +19,8 @@ source / stream別Cloud Run Reconciliation Job
 実データの取得まで実装しているのは、Macへ同期されたiPhoneの`App.InFocus`と
 Mac自身の`ScreenTime.AppUsage`である。両方とも[`Screen Time`](../sources/screen-time/)に属し、
 `source_id=screen_time`、`stream=app-in-focus`または`app-usage`でRaw schema v1/v2を扱う。
-Fitbitは未実装である。
+Fitbitは`fitbit / health`としてWebhook受信・API取得・Raw保存・取込・分析を実装し、
+本番導入は準備段階である。専用Service/queueで即時処理し、定期補修は既存reconciliationを使う。
 複数source、同じsource内の別stream、複数schema versionを扱う共通処理はsynthetic fixtureで検証する。
 
 単一GCP project内で本番と検証を運用する。本番とは別のRawを使う検証ではGCS bucket、MotherDuck database、
@@ -80,21 +81,23 @@ source間の処理分離はアプリケーションの契約である。同じRa
 1. `docs/sources/<source>/`に取得対象、Raw identity、型付きmodel、運用契約を定義する。
    同じsourceの別streamでも、取得stateとcontrol objectの所有範囲を分ける。
 2. `sources/<source>/`へ取得処理とadapterを実装し、`sources/registry.py`へ`source_id / stream`を登録する。
-   対応schema versionと全prefix、decode、型付きbatch、稼働監査、保持期限、dbt selectorを定義する。
+   対応schema versionと全prefix、parser version、decode、型付きbatch、稼働監査、保持期限、dbt selectorを定義する。
+   `SourceAdapter.parser_version`は必須とし、decodeが返すbatchの版と一致させる。
+   解析結果を変更するときは版を更新し、保持中のRawを再取り込みの対象にする。
 3. 新しい型付きbaseは既存SQLを書き換えずforward migrationで追加する。batchの書込はWarehouseが開始した
    transaction内で行い、batch自身でcommit / rollbackしない。
 4. dbtにscope別modelとtestを追加し、adapterのselectorで対象のmodelとtestを実行できるようtagを付ける。
    source横断分析は各sourceのbaseが存在することを別途前提にする。
 5. fixtureで別source・別stream・schema版の混入拒否、object単位rollback、監査の分離、rebuildのgeneration固定を
    検証する。実providerの認証、取得、更新、停止検出はfixture検証とは別に受け入れる。
-6. [`Terraform runtime`](../../infra/terraform/)へ追加pipelineを設定し、取得identity、Raw create権限、保持期限、
-   cron、専用heartbeatを用意する。source独自のcontrol更新権限やprovider認証は取得方式に合わせて追加する。
+6. [`Terraform runtime`](../../infra/terraform/)へ取得方式に応じたJobまたはServiceを設定し、取得identity、Raw create権限、保持期限、
+   定期補修と監視を用意する。source独自のcontrol更新権限やprovider認証は取得方式に合わせて追加する。
 7. [`DBの初期化と更新`](operations.md#dbの初期化と更新)に従い、既存runtimeをすべて更新して旧実行の終了を確認した後に、
    新sourceの取得と定期実行を有効にする。
 
 ## 対象外
 
-- Webhook、Cloud Tasks、常駐Cloud Run Service
+- ZIP取り込みの常設機能
 - 独自UI、独自MCP server、データ更新ごとのdbt実行
 - RawのObject Lock、永続Parquet中間層
 

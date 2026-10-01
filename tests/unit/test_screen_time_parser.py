@@ -10,10 +10,12 @@ import pytest
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.screen_time.models import PayloadDecodeError
 from personal_data_platform.sources.screen_time.parser import (
-    CF_ABSOLUTE_TIME_EPOCH,
-    decode_app_in_focus_payload,
     event_key,
     parse_segb_records,
+)
+from personal_data_platform.sources.screen_time.payloads import (
+    CF_ABSOLUTE_TIME_EPOCH,
+    decode_app_in_focus_payload,
 )
 from personal_data_platform.sources.screen_time.raw import (
     ScreenTimeRawIdentity,
