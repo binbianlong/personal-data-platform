@@ -87,7 +87,9 @@ class CloudTasksQueue:
                     "dispatch_deadline": {"seconds": 1800},
                 },
             },
-            timeout=30,
+            # Cloud Tasks caps RPC deadlines at 30s. Leave room for clock skew
+            # and transport overhead instead of sending the exact upper bound.
+            timeout=20,
         )
 
 
