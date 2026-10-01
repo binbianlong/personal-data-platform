@@ -76,6 +76,19 @@ Fitbitは`additional_ingestion_pipelines`へ重複登録せず、`enable_fitbit_
 `fitbit_secret_ids`を設定する。`fitbit_processing_paused=true`が既定。
 隔離検証・費用確認・購読登録の条件は[`Fitbit運用`](../../docs/sources/fitbit/operations.md)を参照する。
 
+GitHub ActionsのPlanとDeployは、次のrepository variablesを同じTerraform入力として使う。
+未設定ではFitbitを作成せず、処理を停止する。秘密値は登録せず、既存Secret Manager IDだけを渡す。
+
+| Repository variable | Terraform入力 | 未設定時 |
+|---|---|---|
+| `PDP_FITBIT_ENABLED` | `enable_fitbit_runtime` | `false` |
+| `PDP_FITBIT_PROCESSING_PAUSED` | `fitbit_processing_paused` | `true` |
+| `PDP_FITBIT_SUBJECT_KEY` | `fitbit_subject_key` | 空文字 |
+| `PDP_FITBIT_SECRET_IDS` | `fitbit_secret_ids` | `{}`。環境変数名からSecret Manager IDへのJSON object |
+
+稼働後もこれらを維持する。`PDP_FITBIT_ENABLED=false`は受信Serviceやqueueの削除計画になるため、
+運用停止には`PDP_FITBIT_PROCESSING_PAUSED=true`を使い、Planを確認してからDeployする。
+
 `sources.tf`の既定pipelineは`screen_time / app-in-focus`である。`additional_ingestion_pipelines`へ実装済みの
 source / streamを追加すると、共通imageを使うLoaderとReconciliation、それぞれのService Account・Scheduler・
 監視と、専用heartbeat secretが作られる。iPhoneの既存resource addressと名前、preflight、dbt-runnerは維持する。

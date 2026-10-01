@@ -34,6 +34,10 @@ jobs:
       TF_VAR_alert_email: ${{ vars.GCP_ALERT_EMAIL }}
       TF_VAR_collector_impersonator_member: ${{ vars.GCP_COLLECTOR_IMPERSONATOR_MEMBER }}
       TF_VAR_deployer_service_account_email: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      TF_VAR_enable_fitbit_runtime: ${{ vars.PDP_FITBIT_ENABLED || 'false' }}
+      TF_VAR_fitbit_processing_paused: ${{ vars.PDP_FITBIT_PROCESSING_PAUSED || 'true' }}
+      TF_VAR_fitbit_subject_key: ${{ vars.PDP_FITBIT_SUBJECT_KEY }}
+      TF_VAR_fitbit_secret_ids: ${{ vars.PDP_FITBIT_SECRET_IDS || '{}' }}
       TF_VAR_image_uri: ${{ vars.GCP_RUNTIME_IMAGE_URI }}
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
       TF_VAR_region: us-central1
