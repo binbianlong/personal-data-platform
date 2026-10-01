@@ -99,6 +99,7 @@ resource "google_service_account_iam_member" "fitbit_task_creator" {
   service_account_id = google_service_account.fitbit_task[0].name
   role               = "roles/iam.serviceAccountUser"
   member             = each.value
+  depends_on         = [google_service_account.fitbit, google_service_account.runtime]
 }
 
 resource "google_service_account_iam_member" "fitbit_task_token" {
@@ -145,12 +146,13 @@ resource "google_cloud_tasks_queue" "fitbit" {
 }
 
 resource "google_cloud_tasks_queue_iam_member" "fitbit" {
-  for_each = toset(local.fitbit_storage_members)
-  project  = var.project_id
-  location = var.region
-  name     = google_cloud_tasks_queue.fitbit[0].name
-  role     = "roles/cloudtasks.enqueuer"
-  member   = each.value
+  for_each   = toset(local.fitbit_storage_members)
+  project    = var.project_id
+  location   = var.region
+  name       = google_cloud_tasks_queue.fitbit[0].name
+  role       = "roles/cloudtasks.enqueuer"
+  member     = each.value
+  depends_on = [google_service_account.fitbit, google_service_account.runtime]
 }
 
 resource "google_cloud_run_v2_service" "fitbit" {
