@@ -62,16 +62,28 @@ def can_skip_snapshot(warehouse: Warehouse, snapshot: Snapshot) -> bool:
 
 
 def clear_intents_for_loaded_raw(connection: DuckDBPyConnection, raw: RawObject) -> None:
-    """Resolve this work's planned attempts no newer than a loaded Raw."""
+    """Resolve covered attempts and their failures inside the load transaction."""
     row = connection.execute(
-        "SELECT receipt_key, work_index FROM ops.fitbit_raw_intent WHERE raw_key=?",
+        "SELECT receipt_key, work_index, subject_key, data_type, range_start, range_end "
+        "FROM ops.fitbit_raw_intent WHERE raw_key=?",
         [raw.key],
     ).fetchone()
     if row is not None:
+        scope = (
+            "receipt_key=? AND work_index=? AND subject_key=? AND data_type=? "
+            "AND range_start >= ? AND range_end <= ? AND fetched_at <= ?"
+        )
+        parameters = [*row, raw.observed_at]
+        # A successfully loaded replacement retires the superseded failure,
+        # rather than claiming the missing original Raw was loaded or expired.
         connection.execute(
-            "DELETE FROM ops.fitbit_raw_intent WHERE receipt_key=? AND work_index=? "
-            "AND fetched_at <= ?",
-            [row[0], row[1], raw.observed_at],
+            "DELETE FROM ops.ingestion_metadata WHERE status='failed' AND object_key IN "
+            f"(SELECT raw_key FROM ops.fitbit_raw_intent WHERE {scope})",
+            parameters,
+        )
+        connection.execute(
+            f"DELETE FROM ops.fitbit_raw_intent WHERE {scope}",
+            parameters,
         )
 
 

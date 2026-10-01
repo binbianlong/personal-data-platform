@@ -184,7 +184,11 @@ def test_repair_refetches_missing_orphan_with_newer_observation(tmp_path):
     warehouse.close()
 
 
-def test_worker_refetches_missing_raw_attached_to_pending_receipt(tmp_path):
+@pytest.mark.parametrize("receipt_expired", [False, True])
+def test_refetching_missing_raw_restores_healthy_audit(tmp_path, receipt_expired):
+    from personal_data_platform.reconciliation.job import run_reconciliation
+    from personal_data_platform.sources.fitbit.adapter import FitbitSource
+
     receipts, raw, api, worker, factory = _worker_setup(tmp_path, ["A", "B"])
     stored = receipts.create(Receipt.create("self", (WINDOW,), received_at=NOW))
     original_get = raw.get_raw
@@ -202,10 +206,32 @@ def test_worker_refetches_missing_raw_attached_to_pending_receipt(tmp_path):
         worker.run(stored.receipt.key)
     assert receipts.read(stored.receipt.key).receipt.work[0].raw is not None
 
-    assert worker.run(stored.receipt.key)
+    warehouse = factory()
+    assert (
+        warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata WHERE status='failed'")
+        == 1
+    )
+    warehouse.close()
+    if receipt_expired:
+        del receipts._bucket.values[stored.receipt.key]
+        assert worker.recover_orphan_intents() == 1
+    else:
+        assert worker.run(stored.receipt.key)
     assert len(api.calls) == 2 and raw.put_count == 2
     warehouse = factory()
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_raw_intent") == 0
+    # These marts are built by dbt in production; this test audits acquisition state.
+    source = FitbitSource()
+    for relation in source.required_relations:
+        if relation.startswith("marts."):
+            warehouse.connection.execute(f"CREATE VIEW {relation} AS SELECT 1 AS value")
+    raw.list_raw = lambda prefix: [entry[0] for entry in raw.objects.values()]
+    result = run_reconciliation(
+        raw, warehouse, source=source, heartbeat=lambda _: None, now=NOW + timedelta(days=1)
+    )
+    assert result.ok
+    assert result.failed_object_count == 0
+    assert result.details["unrecoverable_uningested_object_count"] == 0
     warehouse.close()
 
 

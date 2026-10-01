@@ -140,6 +140,99 @@ def test_old_overlapping_acquisition_cannot_erase_newer_empty_range(warehouse):
     assert warehouse.query_rows("select record_id, value from base.fitbit_steps") == [("0", 5.0)]
 
 
+@pytest.mark.parametrize("rollback", [False, True])
+def test_recovery_retires_only_covered_failed_attempts_atomically(warehouse, rollback):
+    from personal_data_platform.sources.fitbit.adapter import FitbitSource
+    from personal_data_platform.sources.fitbit.raw import encode_snapshot
+    from personal_data_platform.sources.fitbit.writer import FitbitBatch
+
+    recovered = snapshot()
+    old = replace(recovered, fetched_at=recovered.fetched_at - timedelta(hours=1))
+    protected_keys = []
+    old_key = None
+    for number, (receipt, index, data, status) in enumerate(
+        (
+            ("receipt", 0, old, "failed"),
+            ("other-receipt", 0, old, "failed"),
+            ("receipt", 1, old, "failed"),
+            (
+                "receipt",
+                0,
+                replace(old, fetched_at=recovered.fetched_at + timedelta(hours=1)),
+                "failed",
+            ),
+            ("receipt", 0, replace(snapshot(hour=-1), fetched_at=old.fetched_at), "failed"),
+            ("receipt", 0, old, "succeeded"),
+        )
+    ):
+        data = replace(data, fetched_at=data.fetched_at + timedelta(seconds=number))
+        key, _ = encode_snapshot(data)
+        raw = FitbitSource().parse_raw_key(
+            key, storage_created_at=data.fetched_at, storage_generation=1
+        )
+        if status == "failed":
+            warehouse.mark_failed(raw, byte_size=0, error=FileNotFoundError("Raw missing"))
+        else:
+            warehouse.load_object(raw, byte_size=0, batch=FitbitBatch(data))
+        warehouse.connection.execute(
+            "INSERT INTO ops.fitbit_raw_intent VALUES (?,?,?,?,?,?,?,?)",
+            [
+                receipt,
+                index,
+                "self",
+                "steps",
+                data.window.start,
+                data.window.end,
+                key,
+                data.fetched_at,
+            ],
+        )
+        if number == 0:
+            old_key = key
+        else:
+            protected_keys.append((key, status))
+
+    key, _ = encode_snapshot(recovered)
+    raw = FitbitSource().parse_raw_key(
+        key, storage_created_at=recovered.fetched_at, storage_generation=1
+    )
+    warehouse.connection.execute(
+        "INSERT INTO ops.fitbit_raw_intent VALUES (?,?,?,?,?,?,?,?)",
+        [
+            "receipt",
+            0,
+            "self",
+            "steps",
+            recovered.window.start,
+            recovered.window.end,
+            key,
+            recovered.fetched_at,
+        ],
+    )
+
+    class InterruptedBatch(FitbitBatch):
+        def write(self, *args, **kwargs):
+            super().write(*args, **kwargs)
+            raise OSError("interrupted before commit")
+
+    if rollback:
+        with pytest.raises(OSError, match="interrupted before commit"):
+            warehouse.load_object(raw, byte_size=0, batch=InterruptedBatch(recovered))
+        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_raw_intent") == 7
+    else:
+        warehouse.load_object(raw, byte_size=0, batch=FitbitBatch(recovered))
+    assert warehouse.query_rows(
+        "SELECT status FROM ops.ingestion_metadata WHERE object_key=?", [old_key]
+    ) == ([("failed",)] if rollback else [])
+    for protected_key, status in protected_keys:
+        assert (
+            warehouse.query_value(
+                "SELECT status FROM ops.ingestion_metadata WHERE object_key=?", [protected_key]
+            )
+            == status
+        )
+
+
 def test_writer_does_not_commit_its_callers_transaction(warehouse):
     from personal_data_platform.sources.fitbit.writer import FitbitBatch
 
