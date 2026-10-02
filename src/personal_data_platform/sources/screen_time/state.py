@@ -40,6 +40,11 @@ CREATE TABLE IF NOT EXISTS collector_scan (
     uploaded_count INTEGER NOT NULL,
     skipped_count INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS collector_publication (
+    stream TEXT PRIMARY KEY,
+    completed_at TEXT NOT NULL,
+    device_configuration TEXT NOT NULL
+);
 """
 
 
@@ -59,6 +64,13 @@ class SuccessfulScan:
     segment_count: int
     uploaded_count: int
     skipped_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ScanPublication:
+    stream: str
+    completed_at: datetime
+    device_configuration: str
 
 
 class CollectorState:
@@ -211,8 +223,10 @@ class CollectorState:
                 raise RuntimeError(f"pending observation not found: {object_key}")
             connection.commit()
 
-    def record_successful_scan(self, scan: SuccessfulScan) -> None:
-        """Persist liveness only after all Raw uploads and GCS receipts succeeded."""
+    def record_successful_scan(
+        self, scan: SuccessfulScan, *, publication: ScanPublication | None = None
+    ) -> None:
+        """Commit a complete local scan and any successful GCS control publication."""
         with self._connect() as connection:
             connection.execute(
                 """
@@ -232,6 +246,39 @@ class CollectorState:
                     scan.skipped_count,
                 ),
             )
+            if publication is not None:
+                connection.execute(
+                    """
+                    INSERT INTO collector_publication VALUES (?, ?, ?)
+                    ON CONFLICT (stream) DO UPDATE SET
+                        completed_at = excluded.completed_at,
+                        device_configuration = excluded.device_configuration
+                    """,
+                    (
+                        publication.stream,
+                        format_observed_at(publication.completed_at),
+                        publication.device_configuration,
+                    ),
+                )
+
+    def last_publication(self, *, stream: str) -> ScanPublication | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT completed_at, device_configuration FROM collector_publication WHERE stream = ?",
+                (stream,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ScanPublication(
+            stream=stream,
+            completed_at=parse_observed_at(row[0]),
+            device_configuration=row[1],
+        )
+
+    def forget_publication(self, *, stream: str) -> None:
+        """Ensure a re-enabled stream immediately replaces its inactive GCS manifest."""
+        with self._connect() as connection:
+            connection.execute("DELETE FROM collector_publication WHERE stream = ?", (stream,))
 
     def last_successful_scan(self) -> SuccessfulScan | None:
         with self._connect() as connection:

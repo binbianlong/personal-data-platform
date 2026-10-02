@@ -39,8 +39,14 @@ segmentへの修正はevent timestampのwatermarkで切り捨てず、内容が�
 
 実行結果のJSONは`devices`、`segments`、`uploaded`、`skipped`、`retried`に加えて、最新ファイルとして待機した
 件数`deferred`を出力する。`segments`とscan receiptの`segment_count`は待機分を含む発見総数、`skipped`は
-完成扱いの転送対象のうち内容が同じだった件数である。待機分しかなくても正常走査ならreceiptとmanifestを
-更新する。`deferred`は実行結果だけに追加し、既存SQLiteとcontrol objectの形式は変更しない。
+完成扱いの転送対象のうち内容が同じだった件数である。`deferred`は実行結果だけに追加し、control objectの
+形式は変更しない。
+
+collector scan receiptとactive-device manifestは、streamごとの初回成功scanと、その後24時間ごとに更新する。
+端末allowlistや発見した対象端末が変わった場合、または時計が最後の送信時刻より戻った場合は即時更新する。
+送信時刻と端末構成をlocal SQLiteへ保存するため、再起動や`--once`の反復でも送信間隔を維持する。
+新規・変更Rawの保存とpendingのretryは各scanで実行し、稼働記録の送信時刻を待たない。
+新規Rawがない正常scanも、送信時刻になればreceiptとmanifestを更新する。
 
 segmentはread前後のinode、size、mtimeを比較し、読込中に変わった場合は短いretry後に再読込する。安定しない
 segmentを途中bytesのままuploadしない。
@@ -50,14 +56,18 @@ segmentを途中bytesのままuploadしない。
 各streamの走査開始時に、そのstreamでpendingのuploadを先に再送する。現在のallowlistから削除済みのdeviceも含む。Collector credentialには
 read / list権限がないため、GCSの事前存在確認へ依存しない。同じpending keyにはSQLiteへ保存した同じgzip bytesだけを
 送る。既存pendingは最新ファイルの待機条件より優先し、後続ファイルが消えていても再送する。pendingと今回の
-転送対象すべてのRaw uploadが成功した後、stream別のcollector scan receipt、active-device manifestの順に更新し、
-最後にlocal scan成功時刻をcommitする。manifestはfull allowlistを持つため、一部のallowlist対象deviceが未発見なら
+転送対象すべてのRaw uploadが成功した後、送信時刻または端末構成の変更時はlocal送信状態を先に解除してから、
+stream別のcollector scan receipt、active-device manifestの順に更新する。最後にlocal scan成功時刻と、
+今回送信した場合はその送信状態を同時にcommitする。送信途中の失敗や停止ではlocal送信状態が未完了のまま残り、
+端末設定や時計が元に戻っても次のscanで再試行する。manifestはfull allowlistを持つため、対象deviceが未発見なら
 そのdeviceのreceipt欠損をReconciliationが検出する。片方のstreamが失敗してももう片方を試行し、
 失敗したstreamと原因をstderrへ出して全体のcommandはnon-zeroで終了する。
 
 iPhone allowlistまたはMac keyが未設定のstreamは、Collector起動後の最初のscanでdevice数0のmanifestを
 そのstreamのcontrol keyへ書く。これを明示的な休止状態とし、次回以降のscanでは再書込みしない。
-設定を外した後も残るRawや旧receiptは保持し、休止中はreceiptの新規更新を要求しない。
+休止manifestの送信前に、そのstreamのlocal送信状態を解除する。再有効化時は最初の成功scanで
+receiptとactive-device manifestを更新する。設定を外した後も残るRawや旧receiptは保持し、
+休止中はreceiptの新規更新を要求しない。
 
 Macが停止またはofflineでもRawを捏造しない。LaunchAgent再起動後のcomplete scanとpending retryで回復する。
 
@@ -168,7 +178,7 @@ GCS Raw、scan receipt、またはactive-device manifestのuploadに失敗する
 pending stateを復元できない
 ```
 
-Reconciliationはactive-device manifestまたはmanifest内deviceのscan receiptが24時間以上更新されていない場合も
+Reconciliationはactive-device manifestまたはmanifest内deviceのscan receiptが48時間を超えて更新されていない場合も
 失敗にする。空のmanifestを持つstreamは休止中として扱い、未設定でRaw・receipt・manifestが全てないMacも
 初回有効化前として扱う。Rawまたはreceiptがあるのにmanifestがない場合は失敗する。新しいeventがないことだけを
 障害とみなさず、complete scanの成功証跡を使用する。

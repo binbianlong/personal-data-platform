@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
@@ -24,8 +25,11 @@ from personal_data_platform.sources.screen_time.raw import (
 from personal_data_platform.sources.screen_time.state import (
     CollectorState,
     PendingObservation,
+    ScanPublication,
     SuccessfulScan,
 )
+
+SCAN_PUBLICATION_INTERVAL = timedelta(hours=24)
 
 
 class CollectorSourceError(RuntimeError):
@@ -313,23 +317,40 @@ class ScreenTimeCollector:
             deferred=deferred,
         )
         completed_at = self._clock()
-        for device in devices:
-            device_key = build_device_key(self._pseudonym_key, device.identifier)
-            self._uploader.put_scan_receipt(
-                CollectorScanReceipt(
-                    device_key=device_key,
+        current_publication = ScanPublication(
+            stream=self.stream,
+            completed_at=completed_at,
+            device_configuration=json.dumps(
+                [sorted(self._allowed_device_keys), sorted(device_segment_counts)]
+            ),
+        )
+        previous = self._state.last_publication(stream=self.stream)
+        publication: ScanPublication | None = None
+        if (
+            previous is None
+            or previous.device_configuration != current_publication.device_configuration
+            or completed_at < previous.completed_at
+            or completed_at - previous.completed_at >= SCAN_PUBLICATION_INTERVAL
+        ):
+            # An interrupted write must stay due even if devices or the clock change back.
+            self._state.forget_publication(stream=self.stream)
+            for device_key, segment_count in device_segment_counts.items():
+                self._uploader.put_scan_receipt(
+                    CollectorScanReceipt(
+                        device_key=device_key,
+                        completed_at=completed_at,
+                        segment_count=segment_count,
+                        stream=self.stream,
+                    )
+                )
+            self._uploader.put_device_manifest(
+                CollectorDeviceManifest(
+                    device_keys=tuple(sorted(self._allowed_device_keys)),
                     completed_at=completed_at,
-                    segment_count=device_segment_counts[device_key],
-                    stream=self._source.raw_stream,
+                    stream=self.stream,
                 )
             )
-        self._uploader.put_device_manifest(
-            CollectorDeviceManifest(
-                device_keys=tuple(sorted(self._allowed_device_keys)),
-                completed_at=completed_at,
-                stream=self._source.raw_stream,
-            )
-        )
+            publication = current_publication
         self._state.record_successful_scan(
             SuccessfulScan(
                 completed_at=completed_at,
@@ -337,7 +358,8 @@ class ScreenTimeCollector:
                 segment_count=stats.segments,
                 uploaded_count=stats.uploaded,
                 skipped_count=stats.skipped,
-            )
+            ),
+            publication=publication,
         )
         return stats
 

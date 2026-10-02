@@ -277,7 +277,12 @@ def _run_collect(*, watch: bool) -> int:
     )
     if not watch:
         _print_collection_stats(
-            _collect_all(collectors, inactive_streams=inactive_streams, inactive_uploader=uploader)
+            _collect_all(
+                collectors,
+                inactive_streams=inactive_streams,
+                inactive_uploader=uploader,
+                state=state,
+            )
         )
         return 0
 
@@ -286,7 +291,10 @@ def _run_collect(*, watch: bool) -> int:
         while True:
             _print_collection_stats(
                 _collect_all(
-                    collectors, inactive_streams=inactive_streams, inactive_uploader=uploader
+                    collectors,
+                    inactive_streams=inactive_streams,
+                    inactive_uploader=uploader,
+                    state=state,
                 )
             )
             inactive_streams = ()
@@ -364,8 +372,11 @@ def _collect_all(
     *,
     inactive_streams: Sequence[str] = (),
     inactive_uploader: CompressedRawUploader | None = None,
+    state: CollectorState | None = None,
 ) -> CollectionStats:
     """Attempt each configured stream and report failure after all attempts."""
+    if inactive_streams and (inactive_uploader is None or state is None):
+        raise ValueError("inactive_uploader and state are required for inactive streams")
     results: list[CollectionStats] = []
     failures: list[Exception] = []
     for collector in collectors:
@@ -373,11 +384,12 @@ def _collect_all(
             results.append(collector.collect_once())
         except Exception as error:
             failures.append(RuntimeError(f"{collector.stream}: {error}"))
-    if inactive_streams and inactive_uploader is None:
-        raise ValueError("inactive_uploader is required for inactive streams")
     for stream in inactive_streams:
         assert inactive_uploader is not None
+        assert state is not None
         try:
+            # Invalidate before GCS so an interruption cannot suppress reactivation.
+            state.forget_publication(stream=stream)
             inactive_uploader.put_device_manifest(
                 CollectorDeviceManifest((), datetime.now(UTC), stream=stream)
             )

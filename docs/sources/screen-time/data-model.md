@@ -66,7 +66,8 @@ SHA-256が同じ場合だけ新規保存をskipする。転送対象の`A -> B -
 
 ## Collector scan receipt
 
-complete scanが成功したdeviceごとに、次のmutable control objectを更新する。
+稼働記録の送信時に、complete scanが成功したdeviceごとに次のmutable control objectを更新する。
+送信間隔と再送条件は[`Collector運用`](operations.md#初回scanとwatch)に従う。
 
 ```text
 raw/screen_time/v1/_control/collector/latest/<device_key>.json
@@ -76,7 +77,7 @@ raw/screen_time/v1/_control/collector/app-usage/latest/<mac_device_key>.json
 本文は`schema_version`、`device_key`、UTCの`completed_at`、`segment_count`、`status=succeeded`だけを持つ。
 RawのSystem of Recordではなく稼働確認用であり、端末identifier、path、Bundle IDは含めない。`segment_count`は
 最新ファイルとして転送待ちの分も含む発見総数である。走査が正常に完了し、pendingと完成扱いの転送対象の
-Raw uploadがすべて成功した後だけ更新する。完成待ちだけの場合も更新する。
+Raw uploadがすべて成功した後だけ更新する。完成待ちだけの場合も、稼働記録の送信時には更新する。
 
 今回発見できたallowlist対象deviceのreceiptを更新した後、次のmutable manifestを最後に更新する。
 

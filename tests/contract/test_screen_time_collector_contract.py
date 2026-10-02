@@ -30,6 +30,7 @@ class RecordingUploader:
         self.manifests: list[CollectorDeviceManifest] = []
         self.operations: list[str] = []
         self.fail_once = fail_once
+        self.fail_control_once: str | None = None
 
     def put_compressed_raw(self, key: str, compressed_bytes: bytes) -> None:
         self.operations.append("raw")
@@ -40,10 +41,16 @@ class RecordingUploader:
 
     def put_scan_receipt(self, receipt: CollectorScanReceipt) -> None:
         self.operations.append("receipt")
+        if self.fail_control_once == "receipt":
+            self.fail_control_once = None
+            raise RuntimeError("synthetic control outage")
         self.receipts.append(receipt)
 
     def put_device_manifest(self, manifest: CollectorDeviceManifest) -> None:
         self.operations.append("manifest")
+        if self.fail_control_once == "manifest":
+            self.fail_control_once = None
+            raise RuntimeError("synthetic control outage")
         self.manifests.append(manifest)
 
 
@@ -123,12 +130,12 @@ def test_collects_a_b_a_but_skips_consecutive_same_segment(tmp_path) -> None:
         b"state-b",
         b"state-a",
     ]
-    assert len(uploader.receipts) == 4
+    assert len(uploader.receipts) == 1
     assert all(
         receipt.device_key == build_device_key(SECRET, DEVICE_IDENTIFIER)
         for receipt in uploader.receipts
     )
-    assert len(uploader.manifests) == 4
+    assert len(uploader.manifests) == 1
     assert uploader.manifests[-1].device_keys == (build_device_key(SECRET, DEVICE_IDENTIFIER),)
 
 
@@ -150,6 +157,179 @@ def test_upload_failure_retries_the_same_key_and_bytes_after_restart(tmp_path) -
     assert failing_uploader.calls[0] == successful_uploader.calls[0]
     assert len(successful_uploader.receipts) == 1
     assert len(successful_uploader.manifests) == 1
+
+
+def test_control_publication_waits_a_day_after_restart_but_raw_does_not(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"state-a")
+    clock = AdvancingClock()
+    uploader = RecordingUploader()
+    collector = _collector(tmp_path, source, uploader, clock)
+    assert collector.collect_once().uploaded == 1
+    first_completed_at = uploader.receipts[0].completed_at
+
+    clock.current = first_completed_at + timedelta(hours=23, minutes=59)
+    segment.write_bytes(b"state-b")
+    restarted = _collector(tmp_path, source, uploader, clock)
+    assert restarted.collect_once().uploaded == 1
+    assert len(uploader.receipts) == len(uploader.manifests) == 1
+    assert CollectorState(tmp_path / "collector.db").last_successful_scan().completed_at > (
+        first_completed_at
+    )
+
+    clock.current = first_completed_at + timedelta(hours=24)
+    assert restarted.collect_once().uploaded == 0
+    assert len(uploader.receipts) == len(uploader.manifests) == 2
+    assert [decode_segment_envelope(gzip.decompress(body))[0] for _, body in uploader.calls] == [
+        b"state-a",
+        b"state-b",
+    ]
+
+
+@pytest.mark.parametrize("operation", ["receipt", "manifest"])
+def test_failed_control_publication_remains_due_after_restart(tmp_path, operation) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"state-a")
+    clock = AdvancingClock()
+    uploader = RecordingUploader()
+    collector = _collector(tmp_path, source, uploader, clock)
+    collector.collect_once()
+    state = CollectorState(tmp_path / "collector.db")
+    previous_scan = state.last_successful_scan()
+
+    clock.current = previous_scan.completed_at + timedelta(hours=24)
+    uploader.fail_control_once = operation
+    with pytest.raises(RuntimeError, match="synthetic control outage"):
+        collector.collect_once()
+    assert state.last_successful_scan() == previous_scan
+
+    retried_uploader = RecordingUploader()
+    restarted = _collector(tmp_path, source, retried_uploader, clock)
+    assert restarted.collect_once().uploaded == 0
+    assert retried_uploader.operations == ["receipt", "manifest"]
+    assert state.last_successful_scan().completed_at > previous_scan.completed_at
+    restarted.collect_once()
+    assert retried_uploader.operations == ["receipt", "manifest"]
+
+
+def test_pending_raw_is_retried_during_control_publication_interval(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"state-a")
+    clock = AdvancingClock()
+    uploader = RecordingUploader()
+    collector = _collector(tmp_path, source, uploader, clock)
+    collector.collect_once()
+    previous_scan = CollectorState(tmp_path / "collector.db").last_successful_scan()
+
+    clock.current += timedelta(hours=1)
+    segment.write_bytes(b"state-b")
+    uploader.fail_once = True
+    with pytest.raises(RuntimeError, match="synthetic GCS outage"):
+        collector.collect_once()
+    failed_upload = uploader.calls[-1]
+    state = CollectorState(tmp_path / "collector.db")
+    assert state.last_successful_scan() == previous_scan
+
+    restarted = _collector(tmp_path, source, uploader, clock)
+    assert restarted.collect_once().retried == 1
+    assert uploader.calls[-1] == failed_upload
+    assert state.pending() == []
+    assert len(uploader.receipts) == len(uploader.manifests) == 1
+
+
+def test_allowlist_change_publishes_control_without_waiting_a_day(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"state-a")
+    clock = AdvancingClock()
+    uploader = RecordingUploader()
+    _collector(tmp_path, source, uploader, clock).collect_once()
+    device_key = build_device_key(SECRET, DEVICE_IDENTIFIER)
+
+    changed = ScreenTimeCollector(
+        source=source,
+        state=CollectorState(tmp_path / "collector.db"),
+        uploader=uploader,
+        pseudonym_key=SECRET,
+        allowed_device_keys=frozenset({device_key, "f" * 64}),
+        clock=clock,
+    )
+    changed.collect_once()
+    assert uploader.manifests[-1].device_keys == tuple(sorted((device_key, "f" * 64)))
+    assert len(uploader.manifests) == 2
+    changed.collect_once()
+    assert len(uploader.manifests) == 2
+
+
+def test_newly_discovered_allowlisted_device_gets_receipt_immediately(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"state-a")
+    clock = AdvancingClock()
+    uploader = RecordingUploader()
+    second_identifier = "synthetic-second-iphone"
+    second_key = build_device_key(SECRET, second_identifier)
+    collector = ScreenTimeCollector(
+        source=source,
+        state=CollectorState(tmp_path / "collector.db"),
+        uploader=uploader,
+        pseudonym_key=SECRET,
+        allowed_device_keys=frozenset({build_device_key(SECRET, DEVICE_IDENTIFIER), second_key}),
+        clock=clock,
+    )
+    collector.collect_once()
+    with sqlite3.connect(source.sync_db_path) as connection:
+        connection.execute(
+            "INSERT INTO DevicePeer VALUES (?, 'Second Phone', 'Synthetic2,1', 2, 1)",
+            (second_identifier,),
+        )
+    (source.remote_dir / second_identifier).mkdir()
+
+    collector.collect_once()
+    assert second_key in {receipt.device_key for receipt in uploader.receipts}
+    assert len(uploader.manifests) == 2
+    collector.collect_once()
+    assert len(uploader.manifests) == 2
+
+
+def test_clock_rollback_refreshes_remote_control_timestamps(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"state-a")
+    clock = AdvancingClock()
+    uploader = RecordingUploader()
+    collector = _collector(tmp_path, source, uploader, clock)
+    collector.collect_once()
+    first_completed_at = uploader.receipts[0].completed_at
+
+    clock.current = first_completed_at - timedelta(hours=2)
+    collector.collect_once()
+    assert len(uploader.receipts) == len(uploader.manifests) == 2
+    assert uploader.receipts[-1].completed_at < first_completed_at
+    collector.collect_once()
+    assert len(uploader.receipts) == len(uploader.manifests) == 2
+
+
+def test_partial_publication_is_retried_even_after_clock_correction(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"state-a")
+    clock = AdvancingClock()
+    uploader = RecordingUploader()
+    collector = _collector(tmp_path, source, uploader, clock)
+    collector.collect_once()
+    previous_scan = CollectorState(tmp_path / "collector.db").last_successful_scan()
+
+    clock.current = previous_scan.completed_at - timedelta(days=2)
+    uploader.fail_control_once = "manifest"
+    with pytest.raises(RuntimeError, match="synthetic control outage"):
+        collector.collect_once()
+    assert uploader.receipts[-1].completed_at < previous_scan.completed_at
+    assert CollectorState(tmp_path / "collector.db").last_successful_scan() == previous_scan
+
+    clock.current = previous_scan.completed_at + timedelta(hours=1)
+    restarted = _collector(tmp_path, source, uploader, clock)
+    restarted.collect_once()
+    assert uploader.receipts[-1].completed_at > previous_scan.completed_at
+    assert uploader.manifests[-1].completed_at == uploader.receipts[-1].completed_at
+    restarted.collect_once()
+    assert len(uploader.receipts) == 3
 
 
 def test_decommissioned_device_pending_is_retried_before_manifest_update(tmp_path) -> None:
@@ -275,7 +455,7 @@ def test_waits_through_updates_and_restart_until_successor_exists(tmp_path, caps
     state = CollectorState(tmp_path / "collector.db")
     assert state.pending() == []
     assert state.last_successful_scan() is not None
-    assert len(uploader.receipts) == len(uploader.manifests) == 2
+    assert len(uploader.receipts) == len(uploader.manifests) == 1
     assert uploader.receipts[-1].segment_count == 1
 
     clock.current += timedelta(days=30)

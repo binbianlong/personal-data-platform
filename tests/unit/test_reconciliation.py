@@ -289,7 +289,7 @@ def test_stale_collector_receipt_blocks_success() -> None:
     published: list[dict[str, object]] = []
 
     result = run_reconciliation(
-        _Repository([_key("one")], receipt_at=NOW - timedelta(hours=25)),
+        _Repository([_key("one")], receipt_at=NOW - timedelta(hours=49)),
         warehouse,  # type: ignore[arg-type]
         heartbeat=published.append,
         repair_missing=False,
@@ -299,6 +299,30 @@ def test_stale_collector_receipt_blocks_success() -> None:
     assert not result.ok
     assert result.stale_collector_count == 1
     assert published == []
+
+
+@pytest.mark.parametrize(
+    ("age", "healthy"),
+    [
+        (timedelta(hours=24), True),
+        (timedelta(hours=47, minutes=59), True),
+        (timedelta(hours=48), True),
+        (timedelta(hours=48, minutes=1), False),
+    ],
+)
+def test_daily_collector_publication_has_two_days_of_freshness(age, healthy) -> None:
+    published = []
+    result = run_reconciliation(
+        _Repository([], receipt_at=NOW - age, manifest_at=NOW - age),
+        _Warehouse(set()),
+        heartbeat=published.append,
+        repair_missing=False,
+        now=NOW,
+    )
+    assert result.ok is healthy
+    assert result.details["collector_manifest_stale"] is not healthy
+    assert result.stale_collector_count == int(not healthy)
+    assert len(published) == int(healthy)
 
 
 def test_expected_lifecycle_expiry_is_persisted_and_does_not_block_heartbeat() -> None:

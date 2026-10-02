@@ -23,6 +23,7 @@ class Uploader:
         self.receipts = []
         self.manifests = []
         self.fail_stream = None
+        self.inactive_failure = None
 
     def put_compressed_raw(self, key, compressed_bytes):
         self.raw.append((key, compressed_bytes))
@@ -34,6 +35,10 @@ class Uploader:
 
     def put_device_manifest(self, manifest):
         self.manifests.append(manifest)
+        if not manifest.device_keys and self.inactive_failure is not None:
+            failure = self.inactive_failure
+            self.inactive_failure = None
+            raise failure("synthetic interruption after inactive write")
 
 
 def _collectors(tmp_path):
@@ -53,25 +58,7 @@ def _collectors(tmp_path):
     for directory in (remote, local):
         (directory / "100").write_bytes(b"complete")
         (directory / "200").write_bytes(b"active")
-    state = CollectorState(tmp_path / "state.db")
-    uploader = Uploader()
-    phone = ScreenTimeCollector(
-        source=BiomeScreenTimeSource(sync_db_path=sync_db, remote_dir=remote.parent),
-        state=state,
-        uploader=uploader,
-        pseudonym_key=SECRET,
-        allowed_device_keys=frozenset({build_device_key(SECRET, "phone")}),
-        clock=lambda: NOW,
-    )
-    mac = ScreenTimeCollector(
-        source=BiomeMacAppUsageSource(sync_db_path=sync_db, local_dir=local),
-        state=state,
-        uploader=uploader,
-        pseudonym_key=SECRET,
-        allowed_device_keys=frozenset({build_device_key(SECRET, "mac")}),
-        clock=lambda: NOW,
-    )
-    return phone, mac, uploader, state
+    return _collectors_for_restart(tmp_path, Uploader())
 
 
 def test_mac_and_iphone_upload_separate_streams_and_control_keys(tmp_path) -> None:
@@ -88,6 +75,7 @@ def test_mac_and_iphone_upload_separate_streams_and_control_keys(tmp_path) -> No
     }
     assert state.pending() == []
     assert _collect_all([phone, mac]).skipped == 2
+    assert len(uploader.receipts) == len(uploader.manifests) == 2
 
 
 def test_failed_mac_upload_does_not_prevent_phone_and_retries_only_mac(tmp_path) -> None:
@@ -107,11 +95,13 @@ def test_failed_mac_upload_does_not_prevent_phone_and_retries_only_mac(tmp_path)
 
 
 def test_disabled_mac_manifest_is_published_even_if_iphone_collection_fails(tmp_path) -> None:
-    phone, _, uploader, _ = _collectors(tmp_path)
+    phone, _, uploader, state = _collectors(tmp_path)
     uploader.fail_stream = "app-in-focus"
 
     with pytest.raises(ExceptionGroup, match="Screen Time collection failed") as error:
-        _collect_all([phone], inactive_streams=("app-usage",), inactive_uploader=uploader)
+        _collect_all(
+            [phone], inactive_streams=("app-usage",), inactive_uploader=uploader, state=state
+        )
 
     assert "app-in-focus" in str(error.value.exceptions[0])
     assert uploader.manifests[-1].stream == "app-usage"
@@ -119,14 +109,76 @@ def test_disabled_mac_manifest_is_published_even_if_iphone_collection_fails(tmp_
 
 
 def test_mac_only_collection_marks_iphone_explicitly_inactive(tmp_path) -> None:
-    _, mac, uploader, _ = _collectors(tmp_path)
+    _, mac, uploader, state = _collectors(tmp_path)
 
     assert (
-        _collect_all([mac], inactive_streams=("app-in-focus",), inactive_uploader=uploader).uploaded
+        _collect_all(
+            [mac], inactive_streams=("app-in-focus",), inactive_uploader=uploader, state=state
+        ).uploaded
         == 1
     )
     assert uploader.manifests[-1].stream == "app-in-focus"
     assert uploader.manifests[-1].device_keys == ()
+
+
+def test_reenabled_stream_replaces_inactive_manifest_without_waiting_a_day(tmp_path) -> None:
+    phone, mac, uploader, state = _collectors(tmp_path)
+    _collect_all([phone, mac])
+    _collect_all([phone], inactive_streams=("app-usage",), inactive_uploader=uploader, state=state)
+    assert uploader.manifests[-1].device_keys == ()
+
+    phone, mac, _, restarted_state = _collectors_for_restart(tmp_path, uploader)
+    _collect_all([phone, mac])
+    assert uploader.manifests[-1].stream == "app-usage"
+    assert uploader.manifests[-1].device_keys == (build_device_key(SECRET, "mac"),)
+    assert len(uploader.receipts) == 3
+    assert restarted_state.pending() == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "reported"),
+    [(RuntimeError, ExceptionGroup), (KeyboardInterrupt, KeyboardInterrupt)],
+)
+def test_interrupted_deactivation_does_not_delay_reactivation(tmp_path, failure, reported) -> None:
+    phone, mac, uploader, state = _collectors(tmp_path)
+    _collect_all([phone, mac])
+    uploader.inactive_failure = failure
+    with pytest.raises(reported):
+        _collect_all(
+            [phone], inactive_streams=("app-usage",), inactive_uploader=uploader, state=state
+        )
+    assert uploader.manifests[-1].device_keys == ()
+
+    phone, mac, _, _ = _collectors_for_restart(tmp_path, uploader)
+    _collect_all([phone, mac])
+    assert uploader.manifests[-1].stream == "app-usage"
+    assert uploader.manifests[-1].device_keys == (build_device_key(SECRET, "mac"),)
+    assert len(uploader.receipts) == 3
+
+
+def _collectors_for_restart(tmp_path, uploader):
+    state = CollectorState(tmp_path / "state.db")
+    common = {
+        "state": state,
+        "uploader": uploader,
+        "pseudonym_key": SECRET,
+        "clock": lambda: NOW,
+    }
+    phone = ScreenTimeCollector(
+        source=BiomeScreenTimeSource(
+            sync_db_path=tmp_path / "sync.db", remote_dir=tmp_path / "remote"
+        ),
+        allowed_device_keys=frozenset({build_device_key(SECRET, "phone")}),
+        **common,
+    )
+    mac = ScreenTimeCollector(
+        source=BiomeMacAppUsageSource(
+            sync_db_path=tmp_path / "sync.db", local_dir=tmp_path / "local"
+        ),
+        allowed_device_keys=frozenset({build_device_key(SECRET, "mac")}),
+        **common,
+    )
+    return phone, mac, uploader, state
 
 
 def test_mac_source_requires_exactly_one_local_device(tmp_path) -> None:
