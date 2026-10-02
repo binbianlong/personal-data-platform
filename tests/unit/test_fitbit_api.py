@@ -589,6 +589,81 @@ def test_oauth_reads_only_explicitly_supplied_environment_credentials():
         )
 
 
+@pytest.mark.parametrize("include_legacy", [False, True])
+def test_oauth_reads_an_atomic_credential_bundle_before_legacy_values(include_legacy):
+    from personal_data_platform.sources.fitbit.oauth import GoogleOAuth
+
+    transport = FakeTransport(
+        [{"access_token": "synthetic-access", "expires_in": 3600, "token_type": "Bearer"}]
+    )
+    environ = {
+        "PDP_FITBIT_OAUTH_CREDENTIALS": json.dumps(
+            {
+                "client_id": "bundled-client",
+                "client_secret": "bundled-secret&+",
+                "refresh_token": "bundled-refresh=+",
+            }
+        )
+    }
+    if include_legacy:
+        environ.update(
+            {
+                "PDP_FITBIT_OAUTH_CLIENT_ID": "legacy-client",
+                "PDP_FITBIT_OAUTH_CLIENT_SECRET": "legacy-secret",
+                "PDP_FITBIT_OAUTH_REFRESH_TOKEN": "legacy-refresh",
+            }
+        )
+    oauth = GoogleOAuth.from_env(environ, transport=transport)
+    assert oauth() == "synthetic-access"
+    assert parse_qs(transport.calls[0][3].decode()) == {
+        "client_id": ["bundled-client"],
+        "client_secret": ["bundled-secret&+"],
+        "refresh_token": ["bundled-refresh=+"],
+        "grant_type": ["refresh_token"],
+    }
+
+
+@pytest.mark.parametrize(
+    "bundle",
+    [
+        "",
+        '{"client_secret": "synthetic-secret", malformed}',
+        "null",
+        "[]",
+        json.dumps({"client_id": "client", "client_secret": "synthetic-secret"}),
+        *[
+            json.dumps(
+                {
+                    "client_id": "client",
+                    "client_secret": "synthetic-secret",
+                    "refresh_token": "synthetic-refresh",
+                    field: invalid,
+                }
+            )
+            for field in ("client_id", "client_secret", "refresh_token")
+            for invalid in (" ", 123, None)
+        ],
+    ],
+)
+def test_invalid_oauth_bundle_fails_without_leaking_values_or_using_legacy(bundle):
+    from personal_data_platform.sources.fitbit.oauth import GoogleOAuth
+
+    with pytest.raises(ValueError, match="PDP_FITBIT_OAUTH_CREDENTIALS") as caught:
+        GoogleOAuth.from_env(
+            {
+                "PDP_FITBIT_OAUTH_CREDENTIALS": bundle,
+                "PDP_FITBIT_OAUTH_CLIENT_ID": "legacy-client",
+                "PDP_FITBIT_OAUTH_CLIENT_SECRET": "legacy-secret",
+                "PDP_FITBIT_OAUTH_REFRESH_TOKEN": "legacy-refresh",
+            }
+        )
+    import traceback
+
+    error = "".join(traceback.format_exception(caught.value))
+    assert "synthetic-secret" not in error
+    assert "synthetic-refresh" not in error
+
+
 @pytest.mark.parametrize(
     "payload",
     [

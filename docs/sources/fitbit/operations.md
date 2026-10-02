@@ -51,7 +51,8 @@ ZIP取り込み・照合用CLIやファイル取り込み台帳はアプリに�
 | 変数 | 用途 |
 |---|---|
 | `PDP_FITBIT_SUBJECT_KEY` | 安定した疑似subject |
-| `PDP_FITBIT_OAUTH_CLIENT_ID` / `PDP_FITBIT_OAUTH_CLIENT_SECRET` / `PDP_FITBIT_OAUTH_REFRESH_TOKEN` | API OAuth |
+| `PDP_FITBIT_OAUTH_CREDENTIALS` | API OAuthのJSON。`client_id`・`client_secret`・`refresh_token`を1つのSecret versionで渡す |
+| `PDP_FITBIT_OAUTH_CLIENT_ID` / `PDP_FITBIT_OAUTH_CLIENT_SECRET` / `PDP_FITBIT_OAUTH_REFRESH_TOKEN` | 移行中の個別OAuth設定。JSON設定がない場合だけ使用 |
 | `PDP_FITBIT_HEALTH_USER_ID` | Webhookの対象owner。OAuthのownerと一致させる |
 | `PDP_FITBIT_WEBHOOK_AUTHORIZATION` | 購読に設定するAuthorization共有値 |
 | `PDP_FITBIT_SERVICE_URL` | ServiceのHTTPS URL。内部タスクOIDC audienceにも使う |
@@ -63,9 +64,45 @@ ZIP取り込み・照合用CLIやファイル取り込み台帳はアプリに�
 | `GOOGLE_CLOUD_PROJECT` / `GCS_BUCKET` | 既存GCS設定 |
 | `MOTHERDUCK_DATABASE` / `MOTHERDUCK_TOKEN` | 既存DB設定 |
 
-Terraformには5つの既存Secret Manager IDを`fitbit_secret_ids`で渡す。秘密値・秘密versionの本文をstateに持たせない。
-Reconciliation JobにはOAuth client ID・client secret・refresh token・health user IDの既存Secretを参照させる。
+TerraformにはOAuth JSON・health user ID・Webhook Authorizationの3つの既存Secret Manager IDを
+`fitbit_secret_ids`で渡す。移行中は従来の5つのIDも使用できるが、両形式を混在させない。
+秘密値・秘密versionの本文をstateに持たせない。
+Reconciliation JobにはOAuth JSONとhealth user IDを参照させ、Webhook Authorizationは渡さない。
 MotherDuck secretは既存参照を使う。旧環境リポジトリへの実行時依存はない。
+
+### OAuth Secretの集約
+
+OAuth JSONの形式は次のとおり。値はprivateなファイルまたは標準入力からSecret Managerへ登録し、
+Git、tfvars、Repository Variables、ログには含めない。
+
+```json
+{"client_id":"<client-id>","client_secret":"<client-secret>","refresh_token":"<refresh-token>"}
+```
+
+JSONが設定されている場合は3項目を同じversionから読み、個別設定より優先する。
+不正なJSON、項目の欠落、空文字、文字列以外の値は起動時に拒否し、個別設定へは切り戻さない。
+
+1. 個別設定を残したまま、JSONに対応したimageをServiceとreconciliation Jobへdeployする。
+2. 現行の3値をまとめた`pdp-fitbit-oauth` Secretを作成し、1つのversionを登録する。
+3. `fitbit_secret_ids`とRepository Variable `PDP_FITBIT_SECRET_IDS`を次の形式に変更し、planを確認する。
+   `PDP_FITBIT_HEALTH_USER_ID`とWebhookのIDは現行のものを引き継ぐ。
+
+   ```json
+   {"PDP_FITBIT_OAUTH_CREDENTIALS":"pdp-fitbit-oauth","PDP_FITBIT_HEALTH_USER_ID":"pdp-fitbit-health-user-id","PDP_FITBIT_WEBHOOK_AUTHORIZATION":"pdp-fitbit-webhook-authorization"}
+   ```
+
+4. apply後に両実行主体のSecret読み出し、OAuth更新とGoogle Health APIの読み取り、Webhook認証を確認する。
+   `fitbit_processing_paused`と既存Schedulerの停止状態は維持する。
+5. 旧3Secretを参照する稼働revision、Job template、実行中Job、CI設定やほかの利用元がないことを確認する。
+   rollbackに必要な値をprivateにバックアップしてから旧versionをdestroyする。
+   古いimageへ戻す場合は個別Secretのversionと参照設定も復元する。
+6. project内の有効versionが7から5になったことと、同じ請求アカウントの合計を確認する。
+
+EnabledとDisabledのversionはともに課金対象なので、disableだけでは集約が完了しない。
+MotherDuck本番・preflight、health user ID、WebhookのSecretは分離を維持する。
+無料枠は請求アカウント全体で有効6版と月10,000回のアクセス。
+version更新後は新旧versionの併存数を確認し、Secret環境変数を再読み込みするServiceの新revisionを作成する。
+旧versionのdestroyは全利用元の切替確認後に行う。[Secret Manager料金](https://cloud.google.com/secret-manager/pricing)
 
 ## クラウド構成と定期補修
 

@@ -86,6 +86,11 @@ GitHub ActionsのPlanとDeployは、次のrepository variablesを同じTerraform
 | `PDP_FITBIT_SUBJECT_KEY` | `fitbit_subject_key` | 空文字 |
 | `PDP_FITBIT_SECRET_IDS` | `fitbit_secret_ids` | `{}`。環境変数名からSecret Manager IDへのJSON object |
 
+OAuthは`PDP_FITBIT_OAUTH_CREDENTIALS`の1つのJSON Secretへ集約し、`PDP_FITBIT_HEALTH_USER_ID`、
+`PDP_FITBIT_WEBHOOK_AUTHORIZATION`と合わせて3つのIDを渡す。
+移行中はOAuthを3つの個別Secretで渡す従来の5-ID形式も使用できる。
+JSON対応imageのdeployと旧versionを廃止する順序は[OAuth Secretの集約](../../docs/sources/fitbit/operations.md#oauth-secretの集約)を参照する。
+
 稼働後もこれらを維持する。`PDP_FITBIT_ENABLED=false`は受信Serviceやqueueの削除計画になるため、
 運用停止には`PDP_FITBIT_PROCESSING_PAUSED=true`を使い、Planを確認してからDeployする。
 

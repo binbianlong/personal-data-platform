@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -42,13 +43,27 @@ class GoogleOAuth:
         cls, environ: Mapping[str, str] | None = None, *, transport: HttpTransport | None = None
     ) -> GoogleOAuth:
         values = os.environ if environ is None else environ
-        credentials = {}
-        for name in ("CLIENT_ID", "CLIENT_SECRET", "REFRESH_TOKEN"):
-            key = "PDP_FITBIT_OAUTH_" + name
-            value = values.get(key, "")
-            if not value.strip():
-                raise ValueError(f"{key} is required")
-            credentials[name.lower()] = value
+        credentials: dict[str, str] = {}
+        bundle_key = "PDP_FITBIT_OAUTH_CREDENTIALS"
+        if bundle_key in values:
+            try:
+                bundle = json.loads(values[bundle_key])
+            except json.JSONDecodeError:
+                raise ValueError(f"{bundle_key} must be a valid JSON object") from None
+            if not isinstance(bundle, dict):
+                raise ValueError(f"{bundle_key} must be a JSON object")
+            for name in ("client_id", "client_secret", "refresh_token"):
+                value = bundle.get(name)
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"{bundle_key} requires a non-empty string for {name}")
+                credentials[name] = value
+        else:
+            for name in ("CLIENT_ID", "CLIENT_SECRET", "REFRESH_TOKEN"):
+                key = "PDP_FITBIT_OAUTH_" + name
+                value = values.get(key, "")
+                if not value.strip():
+                    raise ValueError(f"{key} is required")
+                credentials[name.lower()] = value
         return cls(
             client_id=credentials["client_id"],
             client_secret=credentials["client_secret"],

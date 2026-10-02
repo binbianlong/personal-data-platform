@@ -112,6 +112,46 @@ run "active_repair_monitoring" {
   }
 }
 
+run "bundled_oauth_credentials" {
+  command = plan
+  variables {
+    enable_fitbit_runtime = true
+    fitbit_subject_key    = "synthetic-owner"
+    fitbit_secret_ids = {
+      PDP_FITBIT_OAUTH_CREDENTIALS     = "existing-oauth-bundle"
+      PDP_FITBIT_HEALTH_USER_ID        = "existing-owner"
+      PDP_FITBIT_WEBHOOK_AUTHORIZATION = "existing-webhook-secret"
+    }
+  }
+  assert {
+    condition = alltrue([
+      length(google_secret_manager_secret_iam_member.fitbit) == 4,
+      length(google_secret_manager_secret_iam_member.fitbit_reconciliation) == 2,
+      local.runtime_jobs.reconciliation.secrets.PDP_FITBIT_OAUTH_CREDENTIALS == "existing-oauth-bundle",
+      !contains(keys(local.runtime_jobs.reconciliation.secrets), "PDP_FITBIT_WEBHOOK_AUTHORIZATION"),
+      !contains(keys(local.runtime_jobs.reconciliation.secrets), "PDP_FITBIT_OAUTH_REFRESH_TOKEN"),
+      one([for env in google_cloud_run_v2_service.fitbit[0].template[0].containers[0].env : env.value_source[0].secret_key_ref[0].secret if env.name == "PDP_FITBIT_OAUTH_CREDENTIALS"]) == "existing-oauth-bundle",
+      one([for env in google_cloud_run_v2_job.runtime["reconciliation"].template[0].template[0].containers[0].env : env.value_source[0].secret_key_ref[0].secret if env.name == "PDP_FITBIT_OAUTH_CREDENTIALS"]) == "existing-oauth-bundle",
+    ])
+    error_message = "Receiver and reconciliation must share one OAuth bundle without granting webhook access to reconciliation."
+  }
+}
+
+run "mixed_oauth_references_rejected" {
+  command = plan
+  variables {
+    enable_fitbit_runtime = true
+    fitbit_subject_key    = "synthetic-owner"
+    fitbit_secret_ids = {
+      PDP_FITBIT_OAUTH_CREDENTIALS     = "existing-oauth-bundle"
+      PDP_FITBIT_OAUTH_CLIENT_ID       = "existing-client-id"
+      PDP_FITBIT_HEALTH_USER_ID        = "existing-owner"
+      PDP_FITBIT_WEBHOOK_AUTHORIZATION = "existing-webhook-secret"
+    }
+  }
+  expect_failures = [var.fitbit_secret_ids]
+}
+
 run "external_secret_id_collision" {
   command = plan
   variables {

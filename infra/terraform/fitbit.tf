@@ -25,12 +25,17 @@ variable "fitbit_secret_ids" {
   type        = map(string)
   default     = {}
   validation {
-    condition = !var.enable_fitbit_runtime || toset(keys(var.fitbit_secret_ids)) == toset([
-      "PDP_FITBIT_OAUTH_CLIENT_ID", "PDP_FITBIT_OAUTH_CLIENT_SECRET",
-      "PDP_FITBIT_OAUTH_REFRESH_TOKEN", "PDP_FITBIT_HEALTH_USER_ID",
-      "PDP_FITBIT_WEBHOOK_AUTHORIZATION",
-    ])
-    error_message = "Provide existing IDs for the five Fitbit credential/owner secrets."
+    condition = !var.enable_fitbit_runtime || (
+      toset(keys(var.fitbit_secret_ids)) == toset([
+        "PDP_FITBIT_OAUTH_CREDENTIALS", "PDP_FITBIT_HEALTH_USER_ID",
+        "PDP_FITBIT_WEBHOOK_AUTHORIZATION",
+        ]) || toset(keys(var.fitbit_secret_ids)) == toset([
+        "PDP_FITBIT_OAUTH_CLIENT_ID", "PDP_FITBIT_OAUTH_CLIENT_SECRET",
+        "PDP_FITBIT_OAUTH_REFRESH_TOKEN", "PDP_FITBIT_HEALTH_USER_ID",
+        "PDP_FITBIT_WEBHOOK_AUTHORIZATION",
+      ])
+    )
+    error_message = "Provide the three bundled Fitbit secret IDs or the five legacy secret IDs, without mixing the two formats."
   }
   validation {
     condition     = alltrue([for value in values(var.fitbit_secret_ids) : can(regex("^[A-Za-z0-9_-]+$", value))])
@@ -61,12 +66,8 @@ locals {
     MOTHERDUCK_TOKEN = google_secret_manager_secret.runtime["motherduck_token"].secret_id
   }) : {}
   fitbit_reconciliation_secrets = var.enable_fitbit_runtime ? {
-    for key in [
-      "PDP_FITBIT_OAUTH_CLIENT_ID",
-      "PDP_FITBIT_OAUTH_CLIENT_SECRET",
-      "PDP_FITBIT_OAUTH_REFRESH_TOKEN",
-      "PDP_FITBIT_HEALTH_USER_ID",
-    ] : key => var.fitbit_secret_ids[key]
+    for key, secret_id in var.fitbit_secret_ids : key => secret_id
+    if key != "PDP_FITBIT_WEBHOOK_AUTHORIZATION"
   } : {}
 }
 
