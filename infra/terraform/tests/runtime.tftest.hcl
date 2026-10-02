@@ -47,8 +47,12 @@ run "runtime_contract" {
   }
 
   assert {
-    condition     = local.scheduled_jobs.loader.schedule == "15 * * * *"
-    error_message = "The loader must run at minute 15 of every hour."
+    condition = alltrue([
+      toset(keys(google_cloud_scheduler_job.runtime)) == toset(["reconciliation"]),
+      toset(keys(google_cloud_run_v2_job_iam_member.scheduler)) == toset(["reconciliation"]),
+      google_cloud_run_v2_job.runtime["loader"].name == "screen-time-loader",
+    ])
+    error_message = "Daily reconciliation must be the only default schedule; retain the manual loader without scheduler invoker access."
   }
 
   assert {
@@ -63,8 +67,21 @@ run "runtime_contract" {
   }
 
   assert {
-    condition     = local.scheduled_jobs.reconciliation.schedule == "30 4,16 * * *"
-    error_message = "Reconciliation must run at 04:30 and 16:30."
+    condition     = local.scheduled_jobs.reconciliation.schedule == "30 4 * * *"
+    error_message = "Reconciliation must load and audit both Screen Time streams daily at 04:30."
+  }
+
+  assert {
+    condition = alltrue([
+      length(google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_absent) == 0,
+      google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_prometheus_query_language[0].duration == "0s",
+      google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_prometheus_query_language[0].evaluation_interval == "300s",
+      strcontains(google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_prometheus_query_language[0].query, "[48h]"),
+      strcontains(google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_prometheus_query_language[0].query, "or vector(0)"),
+      strcontains(google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_prometheus_query_language[0].query, "project_id=\"example-project\""),
+      strcontains(google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_prometheus_query_language[0].query, "location=\"us-central1\""),
+    ])
+    error_message = "Daily execution monitoring needs a scoped 48-hour system metric query, an empty-series fallback, and a supported five-minute evaluation interval."
   }
 
   assert {
@@ -276,11 +293,11 @@ run "additional_source_and_stream_contract" {
   assert {
     condition = alltrue([
       length(google_cloud_run_v2_job.runtime) == 8,
-      length(google_cloud_scheduler_job.runtime) == 6,
+      length(google_cloud_scheduler_job.runtime) == 5,
       length(toset([for account in values(google_service_account.runtime) : account.account_id])) == 8,
       google_cloud_run_v2_job.runtime["loader"].name == "screen-time-loader",
       google_cloud_run_v2_job.runtime["reconciliation"].name == "reconciliation",
-      google_cloud_scheduler_job.runtime["loader"].name == "screen-time-loader-hourly",
+      !contains(keys(google_cloud_scheduler_job.runtime), "loader"),
       google_cloud_scheduler_job.runtime["reconciliation"].name == "reconciliation-daily",
     ])
     error_message = "Additional source streams need independent Jobs and identities while preserving existing resource names."
@@ -330,8 +347,7 @@ run "additional_source_and_stream_contract" {
       local.runtime_jobs.fixture_sleep_reconciliation.secrets.RECONCILIATION_HEARTBEAT_URL == "fixture_sleep_heartbeat",
       local.runtime_jobs.reconciliation.environment.PDP_RECONCILIATION_MONITORING_MODE == "cloud_monitoring",
       !contains(keys(local.runtime_jobs.reconciliation.secrets), "RECONCILIATION_HEARTBEAT_URL"),
-      google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_absent[0].duration == "84600s",
-      google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_absent[0].aggregations[0].cross_series_reducer == "REDUCE_SUM",
+      google_monitoring_alert_policy.reconciliation_absent.conditions[0].condition_prometheus_query_language[0].duration == "0s",
       contains(keys(google_secret_manager_secret_iam_member.runtime), "fixture_steps_reconciliation:fixture_steps_heartbeat"),
       !contains(keys(google_secret_manager_secret_iam_member.runtime), "fixture_sleep_reconciliation:fixture_steps_heartbeat"),
       !contains(keys(google_secret_manager_secret_iam_member.runtime), "fixture_steps_loader:fixture_steps_heartbeat"),

@@ -138,25 +138,16 @@ resource "google_monitoring_alert_policy" "reconciliation_absent" {
   enabled      = true
 
   conditions {
-    display_name = "No reconciliation completion for 23.5 hours"
+    display_name = "No reconciliation completion for 48 hours"
 
-    condition_absent {
-      filter = join(" AND ", [
-        "resource.type = \"cloud_run_job\"",
-        "resource.labels.job_name = \"reconciliation\"",
-        "metric.type = \"run.googleapis.com/job/completed_execution_count\"",
+    condition_prometheus_query_language {
+      query = join("", [
+        "(sum(sum_over_time({\"run.googleapis.com/job/completed_execution_count\",",
+        "monitored_resource=\"cloud_run_job\",project_id=\"${var.project_id}\",",
+        "location=\"${var.region}\",job_name=\"reconciliation\"}[48h])) or vector(0)) < 1",
       ])
-      duration = "84600s"
-
-      aggregations {
-        alignment_period     = "60s"
-        per_series_aligner   = "ALIGN_DELTA"
-        cross_series_reducer = "REDUCE_SUM"
-      }
-
-      trigger {
-        count = 1
-      }
+      duration            = "0s"
+      evaluation_interval = "300s"
     }
   }
 
@@ -164,7 +155,7 @@ resource "google_monitoring_alert_policy" "reconciliation_absent" {
 
   documentation {
     mime_type = "text/markdown"
-    content   = "The `reconciliation` Cloud Run Job has no completion metric for 23.5 hours. Check Cloud Scheduler, Job executions, and the Collector manifest and receipts. A failed execution is also covered by the failure policy."
+    content   = "The `reconciliation` Cloud Run Job has no completed execution in the last 48 hours. Empty and zero-valued series both trigger this policy. Check Cloud Scheduler, Job executions, and the Collector manifest and receipts. A failed execution is also covered by the failure policy."
   }
 
   user_labels = {

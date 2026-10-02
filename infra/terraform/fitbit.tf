@@ -254,6 +254,31 @@ resource "google_logging_metric" "fitbit_repair_success" {
   depends_on = [google_project_service.runtime]
 }
 
+resource "google_logging_metric" "fitbit_repair_age" {
+  count       = var.enable_fitbit_runtime ? 1 : 0
+  project     = var.project_id
+  name        = "pdp-fitbit-repair-success-age"
+  description = "Seconds since a fully completed Fitbit repair pass, or its first attempt before any success."
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_job\"",
+    "resource.labels.project_id=\"${var.project_id}\"",
+    "resource.labels.location=\"${var.region}\"",
+    "resource.labels.job_name=\"reconciliation\"",
+    "jsonPayload.event=\"fitbit_repair\"",
+    "jsonPayload.summary.full_success_age_seconds>=0",
+  ])
+  value_extractor = "EXTRACT(jsonPayload.summary.full_success_age_seconds)"
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "DISTRIBUTION"
+    unit        = "s"
+  }
+  bucket_options {
+    explicit_buckets { bounds = [0, 86400, 172800, 604800] }
+  }
+  depends_on = [google_project_service.runtime]
+}
+
 resource "google_monitoring_alert_policy" "fitbit_repair_absent" {
   count        = var.enable_fitbit_runtime ? 1 : 0
   project      = var.project_id
@@ -261,20 +286,22 @@ resource "google_monitoring_alert_policy" "fitbit_repair_absent" {
   combiner     = "OR"
   enabled      = !var.fitbit_processing_paused
   conditions {
-    display_name = "No completed Fitbit repair pass for approximately one day"
-    condition_absent {
+    display_name = "Full Fitbit repair pass overdue by more than 48 hours"
+    condition_threshold {
       filter = join(" AND ", [
         "resource.type = \"cloud_run_job\"",
         "resource.labels.project_id = \"${var.project_id}\"",
         "resource.labels.location = \"${var.region}\"",
         "resource.labels.job_name = \"reconciliation\"",
-        "metric.type = \"logging.googleapis.com/user/${google_logging_metric.fitbit_repair_success[0].name}\"",
+        "metric.type = \"logging.googleapis.com/user/${google_logging_metric.fitbit_repair_age[0].name}\"",
       ])
-      duration = "84600s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 172800
+      duration        = "0s"
       aggregations {
-        alignment_period     = "600s"
-        per_series_aligner   = "ALIGN_DELTA"
-        cross_series_reducer = "REDUCE_SUM"
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_MEAN"
       }
       trigger { count = 1 }
     }
@@ -282,7 +309,7 @@ resource "google_monitoring_alert_policy" "fitbit_repair_absent" {
   notification_channels = [google_monitoring_notification_channel.email.name]
   documentation {
     mime_type = "text/markdown"
-    content   = "No successful Fitbit repair pass has been observed for approximately one day. Inspect deferred_phases, receipt_read_deferred_count, shared leases and scheduled executions. Succeeded means the bounded pass completed, not that all queued receipts have finished. After enabling, unpausing or modifying this policy, confirm a fresh success metric point before relying on absence detection."
+    content   = "The latest daily Fitbit repair reports more than 48 hours since its last full success, or since its first attempt if none succeeded. Deferred and failed passes do not advance that clock. Daily sampling can delay detection until the next pass, approaching 72 hours. Inspect shared leases, deferred_phases and scheduled executions. Succeeded means the bounded pass completed, not that all queued receipts finished. Missing executions are covered by the reconciliation policy. Verify a fresh zero-age sample and notification recovery after enabling or updating this policy."
   }
   depends_on = [google_project_service.runtime]
 }

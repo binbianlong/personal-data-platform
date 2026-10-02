@@ -7,7 +7,7 @@ locals {
       raw_suffixes            = [".segb.gz"]
       retention_days          = 90
       lifecycle_grace_days    = 3
-      loader_schedule         = var.loader_schedule
+      loader_schedule         = null
       reconciliation_schedule = var.reconciliation_schedule
       raw_creator_members     = ["serviceAccount:${google_service_account.collector.email}"]
     }

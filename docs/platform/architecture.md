@@ -74,7 +74,9 @@ source間の処理分離はアプリケーションの契約である。同じRa
 5. GCSに残る選択source / streamの保持範囲を、明示的なpartial historyとしてscratch databaseへ再構築できる。
 6. 選択scopeの全監査項目が成功した後だけ対応する外部heartbeatを送信する。確定順序と制約は
    [`analytics.md`](analytics.md)に従う。
-7. iPhone Screen Timeは毎時Loaderを実行し、upload完了から2時間以内の分析View反映を通常時のfreshness基準とする。
+7. Screen Timeは毎朝04:30 Asia/TokyoのReconciliationで取込と修復をまとめて実行する。
+   upload完了から取込開始まで最大約24時間待つため、通常時の分析View反映はJobの最大実行時間150分を
+   含めて約26.5時間をfreshnessの目安とする。Macの走査は30分間隔で続け、完成扱いの新規・変更Rawは随時保存する。
 
 ## Source・stream追加手順
 

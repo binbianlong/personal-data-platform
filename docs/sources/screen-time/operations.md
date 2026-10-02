@@ -182,6 +182,7 @@ Reconciliationはactive-device manifestまたはmanifest内deviceのscan receipt
 失敗にする。空のmanifestを持つstreamは休止中として扱い、未設定でRaw・receipt・manifestが全てないMacも
 初回有効化前として扱う。Rawまたはreceiptがあるのにmanifestがない場合は失敗する。新しいeventがないことだけを
 障害とみなさず、complete scanの成功証跡を使用する。
+判定は1日1回の監査時に行うため、最終稼働記録から48〜72時間程度にJobの実行時間を加えて検知する。
 
 Loader、通知、rebuildは[`Platform運用`](../../platform/operations.md)に従う。
 

@@ -203,6 +203,8 @@ class RepairSummary:
     paused: bool = False
     deferred_phases: tuple[RepairPhase, ...] = ()
     receipt_read_deferred_count: int = 0
+    full_success_age_seconds: float | None = None
+    last_full_success_at: str | None = None
     status: RepairStatus = field(init=False)
 
     def __post_init__(self) -> None:
@@ -545,6 +547,35 @@ def _defer_repair(summary: RepairSummary, phase: RepairPhase) -> RepairSummary:
     return replace(summary, deferred_phases=(*summary.deferred_phases, phase))
 
 
+def _record_repair_progress(warehouse: Warehouse, summary: RepairSummary) -> RepairSummary:
+    """Report success age without advancing the clock on a deferred or failed pass."""
+    run_id = str(uuid4())
+    # A separate baseline detects never-completed repair without claiming success.
+    # DO NOTHING also preserves a baseline installed by another invocation.
+    warehouse.connection.execute(
+        """
+        INSERT INTO ops.heartbeat VALUES ('fitbit_repair_started', current_timestamp, ?, '{}')
+        ON CONFLICT (monitor_name) DO NOTHING
+        """,
+        [run_id],
+    )
+    if summary.status == "succeeded":
+        warehouse.publish_heartbeat("fitbit_repair_pass", run_id, {"status": summary.status})
+    age, succeeded_at = warehouse.query_rows(
+        """
+        SELECT epoch(current_timestamp - coalesce(
+            (SELECT succeeded_at FROM ops.heartbeat WHERE monitor_name = 'fitbit_repair_pass'),
+            (SELECT succeeded_at FROM ops.heartbeat WHERE monitor_name = 'fitbit_repair_started')
+        )), (SELECT succeeded_at FROM ops.heartbeat WHERE monitor_name = 'fitbit_repair_pass')
+        """
+    )[0]
+    return replace(
+        summary,
+        full_success_age_seconds=max(0.0, float(age)),
+        last_full_success_at=succeeded_at.isoformat() if succeeded_at is not None else None,
+    )
+
+
 def run_repair_from_env() -> RepairSummary:
     configure_logging()
     try:
@@ -582,26 +613,29 @@ def _run_repair_from_env() -> RepairSummary:
         owner = str(uuid4())
         acquired = False
         try:
-            acquired = warehouse.acquire_job_lock(
-                "reconciliation", owner, lease_seconds=RECONCILIATION_LEASE_SECONDS
-            )
-            if not acquired:
-                summary = _defer_repair(summary, "raw_audit")
-            else:
-                try:
-                    audited = run_reconciliation(
-                        repository, warehouse, source=FitbitSource(), heartbeat=lambda _: None
-                    )
-                    if not audited.ok:
-                        summary = replace(summary, failed_count=summary.failed_count + 1)
-                except JobAlreadyRunning:
+            try:
+                acquired = warehouse.acquire_job_lock(
+                    "reconciliation", owner, lease_seconds=RECONCILIATION_LEASE_SECONDS
+                )
+                if not acquired:
                     summary = _defer_repair(summary, "raw_audit")
+                else:
+                    try:
+                        audited = run_reconciliation(
+                            repository, warehouse, source=FitbitSource(), heartbeat=lambda _: None
+                        )
+                        if not audited.ok:
+                            summary = replace(summary, failed_count=summary.failed_count + 1)
+                    except JobAlreadyRunning:
+                        summary = _defer_repair(summary, "raw_audit")
+            finally:
+                if acquired and warehouse.connection_usable:
+                    warehouse.release_job_lock("reconciliation", owner)
+            try:
+                _worker(receipts, repository).recover_orphan_intents(limit=1)
+            except (JobAlreadyRunning, ReceiptReadConflict):
+                summary = _defer_repair(summary, "orphan_recovery")
+            summary = _record_repair_progress(warehouse, summary)
         finally:
-            if acquired and warehouse.connection_usable:
-                warehouse.release_job_lock("reconciliation", owner)
             warehouse.close()
-        try:
-            _worker(receipts, repository).recover_orphan_intents(limit=1)
-        except (JobAlreadyRunning, ReceiptReadConflict):
-            summary = _defer_repair(summary, "orphan_recovery")
     return _report_repair(summary)

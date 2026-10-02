@@ -3,7 +3,7 @@
 import json
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import duckdb
@@ -120,6 +120,8 @@ def test_repair_completion_emits_one_success_even_with_async_pending_receipts(re
     ]
     assert len(events) == 1
     assert events[0].status == "succeeded"
+    assert summary.full_success_age_seconds < 1
+    assert summary.last_full_success_at is not None
     warehouse = repair_env.warehouse()
     assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     warehouse.close()
@@ -201,8 +203,88 @@ def test_inactive_repair_does_not_report_completion(
     monkeypatch.setenv("PDP_FITBIT_PROCESSING_PAUSED", str(paused).lower())
     summary = runtime.run_repair_from_env()
     assert summary.status == status
+    assert summary.full_success_age_seconds is None
+    assert summary.last_full_success_at is None
     assert repair_env.queue.keys == []
     assert not any(getattr(record, "status", None) == "succeeded" for record in caplog.records)
+    warehouse = repair_env.warehouse()
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM ops.heartbeat WHERE monitor_name LIKE 'fitbit_repair_%'"
+        )
+        == 0
+    )
+    warehouse.close()
+
+
+@pytest.mark.parametrize("previous_success", [False, True])
+def test_deferred_daily_pass_preserves_success_age_and_recovers(repair_env, previous_success):
+    warehouse = repair_env.warehouse()
+    overdue = datetime.now(UTC) - timedelta(hours=49)
+    baseline = overdue - timedelta(days=2)
+    warehouse.connection.execute(
+        "INSERT INTO ops.heartbeat VALUES ('fitbit_repair_started', ?, 'first', '{}')",
+        [baseline if previous_success else overdue],
+    )
+    if previous_success:
+        warehouse.connection.execute(
+            "INSERT INTO ops.heartbeat VALUES ('fitbit_repair_pass', ?, 'previous', '{}')",
+            [overdue],
+        )
+    warehouse.acquire_job_lock("loader", "other", lease_seconds=3600)
+    warehouse.close()
+
+    summary = runtime.run_repair_from_env()
+    assert summary.status == "deferred"
+    assert 49 * 3600 <= summary.full_success_age_seconds < 49 * 3600 + 60
+    assert (summary.last_full_success_at is not None) is previous_success
+    warehouse = repair_env.warehouse()
+    assert warehouse.query_value(
+        "SELECT succeeded_at FROM ops.heartbeat WHERE monitor_name = 'fitbit_repair_started'"
+    ) == (baseline if previous_success else overdue)
+    assert warehouse.query_value(
+        "SELECT succeeded_at FROM ops.heartbeat WHERE monitor_name = 'fitbit_repair_pass'"
+    ) == (overdue if previous_success else None)
+    warehouse.release_job_lock("loader", "other")
+    warehouse.close()
+
+    recovered = runtime.run_repair_from_env()
+    assert recovered.status == "succeeded"
+    assert recovered.full_success_age_seconds < 1
+    assert datetime.fromisoformat(recovered.last_full_success_at) > overdue
+
+
+def test_first_deferred_daily_pass_creates_baseline_once_without_claiming_success(repair_env):
+    warehouse = repair_env.warehouse()
+    warehouse.acquire_job_lock("loader", "other", lease_seconds=3600)
+    warehouse.close()
+    first = runtime.run_repair_from_env()
+    assert first.status == "deferred"
+    assert first.full_success_age_seconds < 1
+    assert first.last_full_success_at is None
+    warehouse = repair_env.warehouse()
+    started_at = warehouse.query_value(
+        "SELECT succeeded_at FROM ops.heartbeat WHERE monitor_name = 'fitbit_repair_started'"
+    )
+    warehouse.close()
+    again = runtime.run_repair_from_env()
+    assert again.status == "deferred"
+    assert again.full_success_age_seconds >= first.full_success_age_seconds
+    assert again.last_full_success_at is None
+    warehouse = repair_env.warehouse()
+    assert (
+        warehouse.query_value(
+            "SELECT succeeded_at FROM ops.heartbeat WHERE monitor_name = 'fitbit_repair_started'"
+        )
+        == started_at
+    )
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM ops.heartbeat WHERE monitor_name = 'fitbit_repair_pass'"
+        )
+        == 0
+    )
+    warehouse.close()
 
 
 def test_orphan_storage_failure_remains_a_failed_cli_execution(

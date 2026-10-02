@@ -54,10 +54,14 @@ printf '%s' "$SECRET_VALUE" | gcloud secrets versions add SECRET_ID --data-file=
 
 - imageはtagではなく`@sha256:`付きdigestだけを受け付ける。
 - `platform-preflight`は隔離したGCS bucketとMotherDuck test databaseを使い、deployごとにworkflowから実行する。
-- `screen-time-loader`は毎時15分、`reconciliation`は毎日04:30と16:30に、どちらも`Asia/Tokyo`で起動する。
-- `reconciliation`の完了metricが23.5時間届かない場合と、Jobが失敗した場合はCloud Monitoringから通知する。欠落監視を作成・更新した後は23.5時間以内にJobを1回成功または失敗まで完了させ、監視対象の時系列を初期化する。
-- LoaderのTask timeoutは120分、MotherDuck上の排他期限は125分とする。前回実行が続いている間の定期起動は成功扱いでスキップし、次の定期起動で未処理Rawを再確認する。
-- LoaderのTask自動リトライは無効（`max_retries = 0`）とし、失敗は失敗として記録する。未処理Rawは次の毎時起動で再処理する。異常終了で排他が残った場合は、排他期限が切れた後の定期起動で再開する。
+- `reconciliation`は毎日04:30 `Asia/Tokyo`に1回起動し、両Screen Time streamの取込・修復・監査と、有効な場合のFitbit補修を実行する。
+  `screen-time-loader`は手動実行用に残し、そのSchedulerとScheduler用invoker bindingだけを削除する。既存tfvarsの`loader_schedule`は削除する。追加pipelineのLoader scheduleは維持する。
+- `reconciliation`の完了数が直近48時間で0の場合と、Jobが失敗した場合はCloud Monitoringから通知する。
+  48時間のPromQL監視はGoogleの長期間query機能（Preview）を使い、5分ごとに評価する。通常のmetric-absenceの最大23.5時間では日次運転を監視できない。
+  対象のqueryが当該projectで評価できること、完了metric、通知先、発報と回復を適用後に確認する。初回から完了metricがない場合も通知対象になる。
+- Fitbitの完全な補修巡回が48時間を超えて成功していない場合は、現在の補修logにある経過秒数で検出する。日次測定のため最終成功から約72時間まで検知が遅れることがある。巡回成功時の0秒の測定で回復を確認する。
+- LoaderのTask timeoutは120分、MotherDuck上の排他期限は125分とする。前回Loaderが続いている間の手動実行は成功扱いでスキップし、次の日次修復で未処理Rawを再確認する。ReconciliationのTask timeoutは150分、排他期限は155分とする。
+- LoaderのTask自動リトライは無効（`max_retries = 0`）とし、失敗は失敗として記録する。未処理Rawは翌日のReconciliationの修復または手動Loaderで再処理する。異常終了で排他が残った場合は、排他期限が切れた後に再開する。
 - `dbt-runner`はSchedulerから起動せず、初回構築、dbt定義・SQL migration変更時、または`run_dbt=true`を指定したdeploy時に実行する。初回はapply前のTerraform planでdbt Jobの新規作成を検出し、applyと隔離preflightが成功した後にmodelを作成する。Job再作成も同じ扱いとする。
 - 各Jobは専用Service Accountを持ち、必要なSecretだけを参照する。
 - deploy identityの`actAs`は、Terraformが作成するJob/Scheduler用SAと、有効化時のFitbit Service/Task用SAへ限定する。

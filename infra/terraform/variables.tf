@@ -60,16 +60,10 @@ variable "alert_email" {
   }
 }
 
-variable "loader_schedule" {
-  description = "Cron schedule for the hourly Screen Time loader."
-  type        = string
-  default     = "15 * * * *"
-}
-
 variable "reconciliation_schedule" {
-  description = "Cron schedule for twice-daily reconciliation, within the Cloud Monitoring absence window."
+  description = "Cron schedule for daily Screen Time ingestion and reconciliation."
   type        = string
-  default     = "30 4,16 * * *"
+  default     = "30 4 * * *"
 }
 
 variable "scheduler_time_zone" {

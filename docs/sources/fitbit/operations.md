@@ -112,7 +112,7 @@ Cloud Runはmin 0 / max 1、HTTP同時処理16。Cloud Tasksは同時dispatch 1�
 ロック競合や受付の読み取り競合による再試行はINFOの延期logに記録し、実際の処理失敗と区別する。
 異常終了で残ったleaseは期限切れ後に回復する。DB確定結果が不明な接続を再利用しない。
 
-既存のScreen Time reconciliation JobにFitbit補修を接続し、Schedulerを増設しない。
+既存のScreen Time reconciliation JobにFitbit補修を接続し、毎朝04:30 Asia/Tokyoに1回実行する。
 未完了受付を再投入する。`pairedDevices.list`の全ページを調べ、機種名に依存せず最新の同期時刻を持つ
 `TRACKER`を選ぶ。初回はTokyoの直近7完了日を取得し、その後は前回成功した同期日から新しい同期日まで
 7日超の空白も補完する。1回に作る受付は最大90日分とし、すべて完了してからcheckpointを進める。
@@ -128,7 +128,8 @@ API Rawと受付記録はGCS作成から90日で削除対象。Rawが93日以降
 受付の読み取り中に更新があった場合は最新の世代を取得し直す。本文の読み取りは合計3回までとし、
 一覧取得で上限に達した受付は延期件数に数えて、ほかの受付の確認を続ける。完了済み受付の本文は取得しない。
 権限不足、通信障害、不正な受付内容は更新競合として省略しない。
-`repair`の結果JSONには`status`、`deferred_phases`、`receipt_read_deferred_count`を含める。
+`repair`の結果JSONには`status`、`deferred_phases`、`receipt_read_deferred_count`、
+`full_success_age_seconds`、`last_full_success_at`を含める。
 状態は`disabled`・`paused`・`succeeded`・`deferred`・`failed`。ロックや受付読み取りの競合だけなら
 終了コード0で次回へ延期する。再投入失敗、監査失敗、保持期限リスクは延期より優先し、終了コード1となる。
 延期段階は`scheduled_receipts`・`receipt_inventory`・`raw_audit`・`orphan_recovery`で記録する。
@@ -143,19 +144,26 @@ Service処理失敗のlog alertは`jsonPayload.message`と移行中の旧`textPa
 
 補修の最終結果は`event="fitbit_repair"`と`status`付きで記録する。処理中の例外も`status="failed"`で
 ERROR logに残し、元の失敗を呼出元へ伝える。
-`status="succeeded"`だけを既存reconciliation Jobの成功メトリクスに数え、23.5時間の欠測と
-10分の集計窓で約1日補修が完了しない状態を既存メール通知先へ送る。実行IDなどの個別ラベルは付けない。
+`status="succeeded"`だけを既存reconciliation Jobの成功メトリクスに数える。
+既存の`ops.heartbeat`に、初回補修の監視開始時刻（`fitbit_repair_started`）と完全な巡回の最終成功時刻
+（`fitbit_repair_pass`）を別々に保存する。初回の開始時刻は1回だけ保存し、並行実行で置き換えない。
+延期・失敗時は最終成功を進めず、成功が一度もなければ初回開始からの経過時間を報告する。
+この経過秒数を現在のlogからdistribution metricへ抽出し、60秒の集計で平均値が172800秒を超えた場合に
+既存メール通知先へ送る。実行IDなどの個別ラベルは付けず、成功時の0秒の測定で回復する。
+測定は日次処理時に行うため、最終成功から48〜72時間程度に処理時間を加えて検知する。
+Jobが起動せず測定自体がない場合は、共有Reconciliationの48時間の完了数監視で検出する。
 `enable_fitbit_runtime=false`では監視リソースを作らず、`fitbit_processing_paused=true`では
-欠測通知ポリシーを無効にしてメトリクスの履歴を維持する。既存のreconciliation Job監視も継続する。
-`LOG_LEVEL=WARNING`以上では成功logが出ず、稼働中でも欠測通知の対象になるため、監視環境では使用しない。
+補修の経過時間通知ポリシーを無効にしてメトリクスの履歴を維持する。既存のreconciliation Job監視も継続する。
+`LOG_LEVEL=WARNING`以上では成功・延期の経過時間logが出ず補修の監視ができないため、監視環境では使用しない。
 
-欠測監視は最初のデータ点がない系列を検知できない。有効化・再開・監視設定の変更後は、次の確認を行う。
+古い成功logだけでは新しい経過時間metricを検証できない。有効化・再開・監視設定の変更後は、次の確認を行う。
 
 1. 稼働環境の`LOG_LEVEL`が`INFO`または`DEBUG`であることを確認する。
 2. 定期または手動で既存reconciliation Jobを実行し、`event="fitbit_repair"`、`status="succeeded"`のlogを確認する。
    手元での`pdp fitbit repair`はCloud Run Jobのリソースラベルがないため、監視用データ点の代用にしない。
-3. Cloud Monitoringで`logging.googleapis.com/user/pdp-fitbit-repair-success`に新しいデータ点があることを確認する。
-   完了logとデータ点の両方を確認するまで欠測監視の準備完了としない。
+3. Cloud Monitoringで`logging.googleapis.com/user/pdp-fitbit-repair-success`と
+   `logging.googleapis.com/user/pdp-fitbit-repair-success-age`に新しいデータ点があることを確認する。
+   完了logと0秒の測定値の両方を確認するまで補修監視の準備完了としない。
 4. 隔離環境で補修が完了しない場合の発火と、正常な完了後の復旧・通知先への到達を確認する。
 
 最初のデータ点と設定変更後の再確認については[欠測監視の仕様](https://docs.cloud.google.com/monitoring/alerts/metric-absence)を参照する。

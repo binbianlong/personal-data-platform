@@ -5,6 +5,7 @@ locals {
       schedule    = job.schedule
       description = "Run ${job.role} for ${job.source_id}/${job.stream}"
     }
+    if key != "loader"
   }
 }
 

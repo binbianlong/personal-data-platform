@@ -27,7 +27,7 @@ run "disabled_by_default" {
     error_message = "Disabled Fitbit must not change existing runtime behavior."
   }
   assert {
-    condition     = length(google_logging_metric.fitbit_repair_success) == 0 && length(google_monitoring_alert_policy.fitbit_repair_absent) == 0
+    condition     = length(google_logging_metric.fitbit_repair_success) == 0 && length(google_logging_metric.fitbit_repair_age) == 0 && length(google_monitoring_alert_policy.fitbit_repair_absent) == 0
     error_message = "Disabled Fitbit must not provision repair monitoring."
   }
 }
@@ -50,7 +50,7 @@ run "enabled_runtime_contract" {
     error_message = "One task writer must coexist with concurrent webhook reception and scale to zero."
   }
   assert {
-    condition     = length(local.scheduled_jobs) == 2 && local.runtime_jobs.reconciliation.environment.PDP_FITBIT_REPAIR_ENABLED == "true" && local.runtime_jobs.reconciliation.environment.PDP_FITBIT_PROCESSING_PAUSED == "true"
+    condition     = length(local.scheduled_jobs) == 1 && local.runtime_jobs.reconciliation.environment.PDP_FITBIT_REPAIR_ENABLED == "true" && local.runtime_jobs.reconciliation.environment.PDP_FITBIT_PROCESSING_PAUSED == "true"
     error_message = "Fitbit repair must reuse the existing schedule and begin paused."
   }
   assert {
@@ -88,14 +88,20 @@ run "active_repair_monitoring" {
       google_logging_metric.fitbit_repair_success[0].metric_descriptor[0].value_type == "INT64",
       length(google_logging_metric.fitbit_repair_success[0].metric_descriptor[0].labels) == 0,
       length(coalesce(google_logging_metric.fitbit_repair_success[0].label_extractors, {})) == 0,
-      google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_absent[0].duration == "84600s",
-      google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_absent[0].aggregations[0].alignment_period == "600s",
-      google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_absent[0].aggregations[0].per_series_aligner == "ALIGN_DELTA",
-      google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_absent[0].aggregations[0].cross_series_reducer == "REDUCE_SUM",
-      length(coalesce(google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_absent[0].aggregations[0].group_by_fields, [])) == 0,
+      google_logging_metric.fitbit_repair_age[0].metric_descriptor[0].metric_kind == "DELTA",
+      google_logging_metric.fitbit_repair_age[0].metric_descriptor[0].value_type == "DISTRIBUTION",
+      google_logging_metric.fitbit_repair_age[0].value_extractor == "EXTRACT(jsonPayload.summary.full_success_age_seconds)",
+      length(google_logging_metric.fitbit_repair_age[0].metric_descriptor[0].labels) == 0,
+      google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_threshold[0].comparison == "COMPARISON_GT",
+      google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_threshold[0].threshold_value == 172800,
+      google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_threshold[0].duration == "0s",
+      google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_threshold[0].aggregations[0].alignment_period == "60s",
+      google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_threshold[0].aggregations[0].per_series_aligner == "ALIGN_SUM",
+      google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_threshold[0].aggregations[0].cross_series_reducer == "REDUCE_MEAN",
+      length(coalesce(google_monitoring_alert_policy.fitbit_repair_absent[0].conditions[0].condition_threshold[0].aggregations[0].group_by_fields, [])) == 0,
       google_monitoring_alert_policy.fitbit_repair_absent[0].notification_channels == tolist([google_monitoring_notification_channel.email.name]),
     ])
-    error_message = "Active repair must detect absence on a stable, low-cardinality success counter and reuse its notification channel."
+    error_message = "Active daily repair must detect a full pass overdue by 48 hours from current, low-cardinality age samples and reuse its notification channel."
   }
   assert {
     condition = alltrue([

@@ -40,7 +40,8 @@ production databaseへ書き込まない。
 
 ## Loader
 
-Screen TimeのiPhoneとMacは既存の`screen-time-loader` Jobを共用し、毎時15分に起動する。
+Screen TimeのiPhoneとMacは既存の`screen-time-loader` Jobを共用し、日本時間の02:15と14:15に起動する。
+04:30と16:30のReconciliationまでに、最大実行時間120分以上の間隔を置く。
 このJobは`--source screen_time --all-streams`で両streamを処理し、最後まで1つの`loader` leaseを保持する。
 各Jobのtask数とparallelismは1とし、さらにMotherDuckの期限付き`loader` leaseを取得する。
 異なるsourceのLoaderもこのleaseを共有するため、scheduleは所要時間を踏まえてずらす。
@@ -52,7 +53,7 @@ Screen TimeのiPhoneとMacは既存の`screen-time-loader` Jobを共用し、毎
 5. 1件でも未処理の失敗が残ればJobをnon-zeroで終了する。
 
 LoaderのCloud Run Task自動リトライは無効（`max_retries = 0`）とし、失敗した実行を成功扱いにせず、
-未処理Rawの再処理は次の毎時起動に任せる。異常終了でleaseが残った場合は、取得から125分の期限が
+未処理Rawは次の定期起動またはReconciliationの修復で再処理する。異常終了でleaseが残った場合は、取得から125分の期限が
 切れた後の定期起動で再開する。期限内の定期起動は処理せず成功扱いでスキップする。
 
 poison objectは失敗として記録するが、自動削除や上書きを行わない。修正したdecoderをdeployした後に同じ
@@ -72,15 +73,19 @@ objectを再試行できるようにする。
 
 ## Reconciliation
 
-Screen Timeの監査は既存の`reconciliation` Jobで両streamを処理し、毎日04:30と16:30 Asia/Tokyoに起動する。
+Screen Timeの取込・監査は既存の`reconciliation` Jobで両streamを処理し、毎日04:30 Asia/Tokyoに起動する。
+`screen-time-loader`は手動実行用に残し、定期Schedulerとその起動権限は削除する。
 `reconciliation` leaseは同じroleの全sourceで共有し、Loaderとは別leaseである。
 
 1. 選択source / streamのGCS objectとactiveな取込状態だけを照合し、未取込objectを同じadapterで再処理する。
    sourceがparser versionを指定する場合は旧parserの成功記録も未取込扱いにし、修復後も現在のversionを確認する。
+   最初の一覧にある世代をそのまま修復へ渡す。両streamは1回のJob内だけでv1/v2のRaw一覧を共有し、
+   streamごとの検証と絞り込みは個別に行う。receiptとmanifestの最新本文は共有しない。
 2. 修復や並行Loaderが追加した取込済みkeyはGCSを再確認してから、Raw欠損と判定する。
+   この確認では共有した一覧を無効化して取得し直し、未確認の世代を成功扱いにしない。
 3. 取込成功済みobjectの欠損をGCS作成時刻とsourceの保持期限で分類する。期限前は失敗、期限以降は予定された期限切れとする。
 4. 対象scopeの`failed` / `loading` / 作成時刻不明の欠損と、保持期限にgrace日数を加えた時点で残るRawを失敗にする。
-5. adapterの取得状態監査を実行する。iPhoneとMacは別々のmanifestとreceiptの欠損・24時間超過を確認する。
+5. adapterの取得状態監査を実行する。iPhoneとMacは別々のmanifestとreceiptの欠損・48時間超過を確認する。
    空のmanifestは明示的な休止、Raw・receipt・manifestが全てないMacは初回有効化前として扱う。
    manifestから外れたdeviceの残存Rawや古いreceiptはactive Collectorの異常に数えない。他sourceへ同じcontrol形式を要求しない。
 6. 未取込・`failed` ingestionがないことを確認する。
@@ -99,15 +104,18 @@ Cloud Logging / MonitoringとEmailで次を通知する。
 
 - LoaderまたはReconciliation Jobの失敗
 - decode失敗
-- Collectorの成功scanが24時間以上ない状態
+- Collectorの稼働記録が48時間を超えて更新されていない状態
 - 期限前のRaw欠損、未取込Rawの期限切れ、93日を超えたLifecycle未削除
 
 93日判定はLifecycleの遅延を検知するこのprojectの運用SLOであり、GCSが90日ちょうどの削除時刻を保証するものではない。
 
-Collector停止はReconciliationのreceipt検査で検出する。Job自体が起動しない場合は、Cloud Runの
-`completed_execution_count`が23.5時間届かないことをCloud Monitoringで検出する。通常の12時間間隔に対して
-1回の遅延を許容する。欠落監視は実行が1回完了するまで監視対象の時系列を持たないため、作成・更新直後に
-Reconciliationを手動実行し、完了metricと通知先の状態を確認する。Job失敗は別の失敗alertで検出する。
+Collector停止はReconciliationのreceipt検査で検出する。48時間の閾値を超えた後の日次監査で判定するため、
+最終稼働記録から検知までは概ね48〜72時間にJobの実行時間を加えた時間となる。
+Job自体が起動しない場合は、Cloud Runの`completed_execution_count`が直近48時間で0であることを
+Cloud MonitoringのPromQLで5分ごとに検出する。時系列自体がない場合も0として扱う。
+通常のmetric-absenceには23.5時間の上限があるため、48時間のsystem metric queryはGoogleの長期間query機能
+（Preview）を使う。適用後は当該projectでのquery評価、完了metric、通知先、発報と回復を確認する。
+Job失敗は別の失敗alertで検出する。Fitbitの完全な補修巡回の監視は[Fitbit運用](../sources/fitbit/operations.md#クラウド構成と定期補修)に従う。
 
 新しいsource eventがないことだけを障害とみなさない。scan完了、GCS listing、取込状態、query成功を
 組み合わせて判定する。
