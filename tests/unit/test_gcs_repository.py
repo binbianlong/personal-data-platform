@@ -432,3 +432,241 @@ def test_gcs_rejects_foreign_listing_prefix_before_cloud_access() -> None:
     with pytest.raises(ValueError, match="selected source namespace"):
         repository.list_raw("raw/another_source/v1/")
     assert client.list_calls == []
+
+
+def test_raw_inventory_shares_all_pages_between_streams_and_clients() -> None:
+    from dataclasses import replace
+
+    from personal_data_platform.sources.registry import get_source
+    from personal_data_platform.storage.gcs import GCSRawInventory
+
+    now = datetime(2026, 9, 26, tzinfo=UTC)
+    phone = _identity(now)
+    mac = replace(phone, stream="app-usage", schema_version=2)
+    first_client, second_client = FakeGCSClient(), FakeGCSClient()
+    first_client.list_pages = [
+        [_ListedBlob(phone.object_key, now, 7)],
+        [_ListedBlob(mac.object_key, now, 9)],
+    ]
+    inventory = GCSRawInventory()
+    phone_repo = ScreenTimeGCSRepository(client=first_client, bucket="synthetic-bucket")
+    mac_repo = ScreenTimeGCSRepository(
+        client=second_client,
+        bucket="synthetic-bucket",
+        source=get_source("screen_time", "app-usage"),
+    )
+    for repo in (phone_repo, mac_repo):
+        repo.use_raw_inventory(inventory)
+
+    assert [(raw.key, raw.storage_generation) for raw in phone_repo.list_raw()] == [
+        (phone.object_key, 7)
+    ]
+    assert [(raw.key, raw.storage_generation) for raw in mac_repo.list_raw()] == [
+        (mac.object_key, 9)
+    ]
+    assert first_client.list_calls == [
+        {"prefix": "raw/screen_time/v1/"},
+        {"prefix": "raw/screen_time/v2/"},
+    ]
+    assert second_client.list_calls == []
+
+
+def test_raw_inventory_keeps_generation_snapshot_until_explicit_refresh() -> None:
+    from personal_data_platform.storage.gcs import GCSRawInventory
+
+    now = datetime(2026, 9, 26, tzinfo=UTC)
+    original, later = _identity(now), _identity(now, "b")
+    client = FakeGCSClient()
+    original_blob = _ListedBlob(original.object_key, now, 7)
+    client.list_pages = [[original_blob]]
+    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository.use_raw_inventory(GCSRawInventory())
+    assert [raw.storage_generation for raw in repository.list_raw()] == [7]
+
+    original_blob.generation = 9
+    client.list_pages[0].append(_ListedBlob(later.object_key, now, 11))
+    assert [raw.storage_generation for raw in repository.list_raw()] == [7]
+    assert len(client.list_calls) == 2
+
+    repository.invalidate_raw_inventory()
+    assert [(raw.key, raw.storage_generation) for raw in repository.list_raw()] == [
+        (original.object_key, 9),
+        (later.object_key, 11),
+    ]
+    assert len(client.list_calls) == 4
+
+
+def test_failed_listing_page_is_not_reused_as_complete_inventory() -> None:
+    from types import SimpleNamespace
+
+    from personal_data_platform.storage.gcs import GCSRawInventory
+
+    now = datetime(2026, 9, 26, tzinfo=UTC)
+    first, second = _identity(now), _identity(now, "b")
+
+    class InterruptedClient(FakeGCSClient):
+        fail = True
+
+        def list_blobs(self, bucket, **kwargs):
+            iterator = super().list_blobs(bucket, **kwargs)
+
+            def pages():
+                for page in iterator.pages:
+                    yield page
+                    if self.fail:
+                        raise RuntimeError("synthetic pagination outage")
+
+            return SimpleNamespace(pages=pages())
+
+    client = InterruptedClient()
+    client.list_pages = [
+        [_ListedBlob(first.object_key, now)],
+        [_ListedBlob(second.object_key, now)],
+    ]
+    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository.use_raw_inventory(GCSRawInventory())
+    with pytest.raises(RuntimeError, match="pagination outage"):
+        repository.list_raw()
+
+    client.fail = False
+    assert [raw.key for raw in repository.list_raw()] == [first.object_key, second.object_key]
+    assert client.list_calls == [
+        {"prefix": "raw/screen_time/v1/"},
+        {"prefix": "raw/screen_time/v1/"},
+        {"prefix": "raw/screen_time/v2/"},
+    ]
+
+
+def test_daily_job_repairs_both_streams_with_one_inventory_and_refreshes_next_run(
+    monkeypatch,
+) -> None:
+    from personal_data_platform.reconciliation import job
+    from personal_data_platform.sources.registry import get_sources
+    from personal_data_platform.sources.screen_time.raw import scan_receipt_prefix
+    from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig
+    from tests.screen_time_helpers import Repository, event, mac_usage_event, segb
+
+    now = datetime.now(UTC)
+    sources = get_sources("screen_time", all_streams=True)
+    client = FakeGCSClient()
+    input_repository = Repository()
+    phone = input_repository.add("100", segb(event("app.phone"))[0], version=1)
+    mac = input_repository.add(
+        "200", segb(mac_usage_event("app.mac", 12, start=True))[0], stream="app-usage"
+    )
+    client.list_pages = [[_ListedBlob(raw.key, now) for raw in (phone, mac)]]
+    for source in sources:
+        repository = ScreenTimeGCSRepository(
+            client=client, bucket="synthetic-bucket", source=source
+        )
+        receipt = CollectorScanReceipt("a" * 64, now, 1, stream=source.stream)
+        repository.put_scan_receipt(receipt)
+        repository.put_device_manifest(
+            CollectorDeviceManifest(("a" * 64,), now, stream=source.stream)
+        )
+        client.list_pages[0].append(_ListedBlob(receipt.key, now))
+    client.bucket_ref.objects.update(
+        {key: payload for key, (_, payload) in input_repository.objects.items()}
+    )
+    reports = []
+
+    class AuditWarehouse(Warehouse):
+        def migrate(self):
+            super().migrate()
+            required = {relation for source in sources for relation in source.required_relations}
+            for relation in required - job._relation_names(self):
+                self.connection.execute(f"CREATE OR REPLACE VIEW {relation} AS SELECT 1 AS value")
+
+        def record_reconciliation(self, result):
+            super().record_reconciliation(result)
+            if result.status != "running":
+                reports.append(
+                    (result.details["stream"], result.status, result.loaded_object_count)
+                )
+
+    monkeypatch.setenv("PDP_RECONCILIATION_MONITORING_MODE", "cloud_monitoring")
+    monkeypatch.setenv("PDP_FITBIT_REPAIR_ENABLED", "false")
+    monkeypatch.delenv("RECONCILIATION_HEARTBEAT_URL", raising=False)
+    monkeypatch.setattr(job.WarehouseConfig, "from_env", lambda: WarehouseConfig(":memory:"))
+    monkeypatch.setattr(job, "Warehouse", AuditWarehouse)
+    monkeypatch.setattr(
+        ScreenTimeGCSRepository,
+        "from_env",
+        classmethod(
+            lambda cls, *, source=None: cls(client=client, bucket="synthetic-bucket", source=source)
+        ),
+    )
+    assert job.run_reconciliation_from_env(source_id="screen_time", all_streams=True) == 0
+    assert reports == [("app-in-focus", "succeeded", 1), ("app-usage", "succeeded", 1)]
+
+    later = input_repository.add("300", segb(event("app.later"))[0])
+    client.list_pages[0].append(_ListedBlob(later.key, now))
+    client.bucket_ref.objects[later.key] = input_repository.objects[later.key][1]
+    assert job.run_reconciliation_from_env(source_id="screen_time", all_streams=True) == 0
+    assert reports[-2:] == [("app-in-focus", "succeeded", 2), ("app-usage", "succeeded", 1)]
+    assert (
+        client.list_calls
+        == [
+            {"prefix": prefix}
+            for prefix in (
+                "raw/screen_time/v1/",
+                "raw/screen_time/v2/",
+                f"{scan_receipt_prefix('app-in-focus')}/",
+                f"{scan_receipt_prefix('app-usage')}/",
+            )
+        ]
+        * 2
+    )
+    raw_reads = [
+        call for call in client.bucket_ref.download_calls if call["name"].endswith(".segb.gz")
+    ]
+    assert len(raw_reads) == 5
+    assert all(call["generation"] == call["if_generation_match"] == 1 for call in raw_reads)
+
+
+def test_reconciliation_refresh_bypasses_shared_inventory_for_concurrent_warehouse_keys() -> None:
+    from personal_data_platform.reconciliation.job import _relation_names, run_reconciliation
+    from personal_data_platform.sources.registry import get_source
+    from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
+    from personal_data_platform.storage.gcs import GCSRawInventory
+    from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+
+    now = datetime.now(UTC)
+    identity = _identity(now)
+    source = get_source()
+    client = FakeGCSClient()
+    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository.use_raw_inventory(GCSRawInventory())
+    receipt = CollectorScanReceipt(identity.device_key, now, 1)
+    repository.put_scan_receipt(receipt)
+    repository.put_device_manifest(CollectorDeviceManifest((identity.device_key,), now))
+    client.list_pages = [[_ListedBlob(receipt.key, now)]]
+
+    class ConcurrentWarehouse(Warehouse):
+        def active_ingestion_states(self, **kwargs):
+            if not any(blob.name == identity.object_key for blob in client.list_pages[0]):
+                client.list_pages[0].append(_ListedBlob(identity.object_key, now, 7))
+                raw = source.parse_raw_key(
+                    identity.object_key, storage_created_at=now, storage_generation=7
+                )
+                self.load_object(raw, byte_size=0, batch=ScreenTimeBatch([]))
+            return super().active_ingestion_states(**kwargs)
+
+    warehouse = ConcurrentWarehouse(connect(WarehouseConfig(":memory:")))
+    try:
+        warehouse.migrate()
+        for relation in set(source.required_relations) - _relation_names(warehouse):
+            warehouse.connection.execute(f"CREATE OR REPLACE VIEW {relation} AS SELECT 1 AS value")
+        result = run_reconciliation(repository, warehouse, heartbeat=lambda _: None, now=now)
+        assert result.ok
+        assert result.loaded_object_count == result.raw_object_count == 1
+        assert result.orphaned_loaded_object_count == 0
+        assert client.list_calls == [
+            {"prefix": "raw/screen_time/v1/"},
+            {"prefix": "raw/screen_time/v2/"},
+            {"prefix": "raw/screen_time/v1/"},
+            {"prefix": "raw/screen_time/v2/"},
+            {"prefix": "raw/screen_time/v1/_control/collector/latest/"},
+        ]
+    finally:
+        warehouse.close()

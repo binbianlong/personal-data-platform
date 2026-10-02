@@ -591,15 +591,16 @@ def test_repair_rechecks_objects_uploaded_after_initial_inventory(monkeypatch) -
     warehouse = _Warehouse(set())
     published: list[dict[str, object]] = []
 
-    def repair(repository, warehouse, *, source, prefix):
+    def repair(repository, warehouse, observations, *, source):
         assert (source.source_id, source.stream) == ("screen_time", "app-in-focus")
+        assert [raw.key for raw in observations] == [_key("original")]
         repository.keys.append(_key("arrived-during-repair"))
         warehouse.set_succeeded(repository.keys)
         # This later upload has not been loaded and belongs to the next audit.
         repository.keys.append(_key("arrived-after-repair"))
         return LoadSummary(discovered=2, skipped=0, succeeded=2, failed=0, records=2)
 
-    monkeypatch.setattr("personal_data_platform.reconciliation.job.run_loader", repair)
+    monkeypatch.setattr("personal_data_platform.reconciliation.job.run_loader_objects", repair)
 
     result = run_reconciliation(repository, warehouse, heartbeat=published.append, now=NOW)
 

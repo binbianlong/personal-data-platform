@@ -252,9 +252,11 @@ def test_reconciliation_isolates_source_and_stream_and_repairs_all_supported_sch
     other_old = _synthetic_raw(*other_scope, 1, now - timedelta(days=20), name="old")
     source = _SyntheticSource("synthetic", "metrics", [raw_v1, raw_v2])
     reads = []
+    listings = []
 
     class Repository:
         def list_raw(self, prefix):
+            listings.append(prefix)
             return [raw for raw in (raw_v1, raw_v2) if raw.key.startswith(prefix)]
 
         def get_raw(self, key, *, generation):
@@ -282,6 +284,8 @@ def test_reconciliation_isolates_source_and_stream_and_repairs_all_supported_sch
             (raw_v1, raw_v2), key=lambda raw: (raw.observed_at, raw.key)
         )
         assert reads == [(raw_v2.key, raw_v2.storage_generation)]
+        # Expired warehouse keys still require a fresh inventory check.
+        assert listings == list(source.raw_prefixes) * 2
         assert (
             warehouse.query_value("SELECT monitor_name FROM ops.heartbeat") == source.monitor_name
         )

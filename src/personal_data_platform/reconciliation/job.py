@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 
-from personal_data_platform.loader.job import run_loader
+from personal_data_platform.loader.job import run_loader_objects
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import (
     RawRepository,
@@ -19,6 +19,7 @@ from personal_data_platform.sources.contracts import (
     validate_runtime_policy,
 )
 from personal_data_platform.sources.registry import get_source, get_sources
+from personal_data_platform.storage.gcs import GCSRawInventory, GCSRawRepository
 from personal_data_platform.storage.motherduck import (
     IngestionState,
     Warehouse,
@@ -75,8 +76,10 @@ def _active_status_keys(states: dict[str, IngestionState], status: str) -> set[s
 
 
 def _list_raw_by_key(
-    repository: RawRepository, source: SourceAdapter, prefix: str | None
+    repository: RawRepository, source: SourceAdapter, prefix: str | None, *, refresh: bool = False
 ) -> dict[str, RawObject]:
+    if refresh and isinstance(repository, GCSRawRepository):
+        repository.invalidate_raw_inventory()
     return {value.key: value for value in list_source_raw(repository, source, prefix)}
 
 
@@ -109,7 +112,7 @@ def run_reconciliation(
     missing_before_repair = raw_keys - loaded_keys
     repair_summary: dict[str, int] | None = None
     if missing_before_repair and repair_missing:
-        summary = run_loader(repository, warehouse, source=source, prefix=prefix)
+        summary = run_loader_objects(repository, warehouse, raw_objects, source=source)
         repair_summary = {
             "discovered": summary.discovered,
             "skipped": summary.skipped,
@@ -121,7 +124,7 @@ def run_reconciliation(
     # A repair or concurrent loader can commit keys newer than the initial listing.
     # Refresh before classifying any active warehouse key as absent from GCS.
     if set(states) - raw_keys:
-        latest_raw_by_key = _list_raw_by_key(repository, source, prefix)
+        latest_raw_by_key = _list_raw_by_key(repository, source, prefix, refresh=True)
         for key in set(states):
             if key in latest_raw_by_key:
                 raw_by_key[key] = latest_raw_by_key[key]
@@ -329,6 +332,7 @@ def _run_reconciliation_sources(
             raise RuntimeError("reconciliation already has an unexpired job lease")
         try:
             failed = False
+            raw_inventory = GCSRawInventory()
             for source in sources:
                 try:
                     selected_repository = (
@@ -336,6 +340,8 @@ def _run_reconciliation_sources(
                     )
                     if selected_repository is None:  # guarded by the source selection above
                         raise RuntimeError("reconciliation repository is unavailable")
+                    if isinstance(selected_repository, GCSRawRepository):
+                        selected_repository.use_raw_inventory(raw_inventory)
                     result = run_reconciliation(
                         selected_repository,
                         warehouse,
