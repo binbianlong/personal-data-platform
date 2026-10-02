@@ -123,14 +123,14 @@ resource "google_project_iam_member" "github_plan_bucket_reader" {
   member  = "serviceAccount:${google_service_account.github_plan.email}"
 }
 
-resource "google_storage_bucket_iam_member" "github_plan_state" {
-  bucket = google_storage_bucket.terraform_state.name
+resource "google_storage_bucket_iam_member" "github_plan_state_us" {
+  bucket = google_storage_bucket.terraform_state_us.name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.github_plan.email}"
 }
 
-resource "google_storage_bucket_iam_member" "github_deploy_state" {
-  bucket = google_storage_bucket.terraform_state.name
+resource "google_storage_bucket_iam_member" "github_deploy_state_us" {
+  bucket = google_storage_bucket.terraform_state_us.name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.github_deploy.email}"
 }

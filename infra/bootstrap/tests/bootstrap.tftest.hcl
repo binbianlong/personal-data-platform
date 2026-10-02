@@ -5,27 +5,32 @@ run "secure_bootstrap_contract" {
 
   variables {
     project_id        = "example-project"
-    state_bucket_name = "example-project-personal-data-platform-tfstate"
+    state_bucket_name = "example-project-personal-data-platform-tfstate-us"
   }
 
   assert {
-    condition     = google_storage_bucket.terraform_state.uniform_bucket_level_access
+    condition     = google_storage_bucket.terraform_state_us.uniform_bucket_level_access
     error_message = "Terraform state must use uniform bucket-level access."
   }
 
   assert {
-    condition     = google_storage_bucket.terraform_state.public_access_prevention == "enforced"
+    condition     = google_storage_bucket.terraform_state_us.public_access_prevention == "enforced"
     error_message = "Terraform state must prevent public access."
   }
 
   assert {
-    condition     = google_storage_bucket.terraform_state.versioning[0].enabled
+    condition     = google_storage_bucket.terraform_state_us.versioning[0].enabled
     error_message = "Terraform state versioning must be enabled."
   }
 
   assert {
-    condition     = google_storage_bucket.terraform_state.location == "ASIA"
-    error_message = "The existing Terraform state location contract must remain ASIA by default."
+    condition     = google_storage_bucket.terraform_state_us.location == "us-central1"
+    error_message = "Terraform state must use the Cloud Storage free-tier region by default."
+  }
+
+  assert {
+    condition     = google_storage_bucket.terraform_state_us.soft_delete_policy[0].retention_duration_seconds == 0
+    error_message = "Versioned state must not add a separate soft-delete retention cost."
   }
 
   assert {
@@ -105,12 +110,12 @@ run "secure_bootstrap_contract" {
   }
 
   assert {
-    condition     = google_storage_bucket_iam_member.github_plan_state.role == "roles/storage.objectViewer"
+    condition     = google_storage_bucket_iam_member.github_plan_state_us.role == "roles/storage.objectViewer" && google_storage_bucket_iam_member.github_plan_state_us.bucket == google_storage_bucket.terraform_state_us.name
     error_message = "The plan identity must have read-only state access."
   }
 
   assert {
-    condition     = google_storage_bucket_iam_member.github_deploy_state.role == "roles/storage.objectAdmin"
+    condition     = google_storage_bucket_iam_member.github_deploy_state_us.role == "roles/storage.objectAdmin" && google_storage_bucket_iam_member.github_deploy_state_us.bucket == google_storage_bucket.terraform_state_us.name
     error_message = "The deploy identity must be able to update and lock state."
   }
 
@@ -121,4 +126,14 @@ run "secure_bootstrap_contract" {
     ])
     error_message = "Runtime deployment must not receive project-wide IAM or act-as permissions."
   }
+}
+
+run "paid_state_region_rejected" {
+  command = plan
+  variables {
+    project_id            = "example-project"
+    state_bucket_name     = "example-project-personal-data-platform-tfstate-us"
+    state_bucket_location = "ASIA"
+  }
+  expect_failures = [var.state_bucket_location]
 }

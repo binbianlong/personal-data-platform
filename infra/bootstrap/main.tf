@@ -36,7 +36,7 @@ resource "google_project_service" "bootstrap" {
   disable_dependent_services = false
 }
 
-resource "google_storage_bucket" "terraform_state" {
+resource "google_storage_bucket" "terraform_state_us" {
   name                        = var.state_bucket_name
   project                     = var.project_id
   location                    = var.state_bucket_location
@@ -48,11 +48,41 @@ resource "google_storage_bucket" "terraform_state" {
     enabled = true
   }
 
+  soft_delete_policy {
+    retention_duration_seconds = 0
+  }
+
   lifecycle {
     prevent_destroy = true
   }
 
   depends_on = [google_project_service.bootstrap]
+}
+
+# Retain the old bucket and its access bindings until runtime state has been
+# migrated and verified. A region change must never replace the active backend.
+removed {
+  from = google_storage_bucket.terraform_state
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = google_storage_bucket_iam_member.github_plan_state
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = google_storage_bucket_iam_member.github_deploy_state
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "google_artifact_registry_repository" "runtime_us" {

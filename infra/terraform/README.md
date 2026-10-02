@@ -4,7 +4,9 @@ GCS Raw/preflight bucket、Cloud Run Jobs、Secret Manager、Scheduler、Cloud L
 
 ## 初回構築
 
-先に`infra/bootstrap`を再適用し、US Artifact Registryとstorage custom roleを作る。bootstrap outputのstate bucketをbackendへ渡す。既存state bucketのlocationは変更しない。
+先に`infra/bootstrap`を再適用し、US Artifact Registryとstorage custom roleを作る。bootstrap outputのstate bucketをbackendへ渡す。
+既存backendを移す場合は[bootstrapのstate移行手順](../bootstrap/README.md#既存stateの米国への移行)で
+`init -migrate-state`を使い、既存stateを引き継ぐ。新bucketへの`-reconfigure`だけで移行を代用しない。
 
 ```bash
 terraform init -backend-config="bucket=$TF_STATE_BUCKET" -lockfile=readonly

@@ -30,9 +30,14 @@ variable "state_bucket_name" {
 }
 
 variable "state_bucket_location" {
-  description = "Location for the Terraform state bucket."
+  description = "Cloud Storage free-tier region for the new Terraform state bucket."
   type        = string
-  default     = "ASIA"
+  default     = "us-central1"
+
+  validation {
+    condition     = var.state_bucket_location == "us-central1"
+    error_message = "The new Terraform state bucket must use us-central1."
+  }
 }
 
 variable "artifact_repository_id" {

@@ -1,6 +1,6 @@
 output "state_bucket_name" {
   description = "GCS bucket passed to the runtime backend configuration."
-  value       = google_storage_bucket.terraform_state.name
+  value       = google_storage_bucket.terraform_state_us.name
 }
 
 output "artifact_repository" {

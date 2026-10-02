@@ -17,7 +17,61 @@ terraform plan -out=bootstrap.tfplan
 terraform apply bootstrap.tfplan
 ```
 
-state bucketは`prevent_destroy`、public access prevention、uniform bucket-level access、versioningを有効にしている。既存stateを移動しないため、`state_bucket_location`のdefaultは従来どおり`ASIA`である。GCS RawやArtifact Registryの`us-central1`移行とは分けて扱い、既存bucketのlocationを変更しない。bootstrap自身のstateは、このbucketを作成する循環を避けるためローカルに残る。暗号化した安全な場所へバックアップし、Gitには追加しない。
+state bucketは無料枠対象の`us-central1`に作成する。`prevent_destroy`、public access prevention、
+uniform bucket-level access、versioningを有効にし、別途のSoft Delete保持は0秒にする。
+bootstrap自身のstateは、このbucketを作成する循環を避けるためローカルに残る。
+暗号化した安全な場所へバックアップし、Gitには追加しない。
+
+## 既存stateの米国への移行
+
+既存bucketのlocationを変更せず、別名のbucketを`google_storage_bucket.terraform_state_us`で作成する。
+旧`google_storage_bucket.terraform_state`と旧plan/deploy用bucket IAMは
+`removed { destroy = false }`で管理対象から外し、移行が終わるまで実物を残す。
+既存のtfvarsでは`state_bucket_name`を旧名から別名へ変更する。
+例は`<project-id>-personal-data-platform-tfstate-us`。
+bucket名だけをRepository Variableで先に変更すると空のstateを参照するため、次の順序を守る。
+
+1. Terraform Plan / Deployのworkflowが実行中でないことを確認し、移行中の起動を止める。
+   それぞれの元の有効・無効状態を記録する。SchedulerやFitbitの処理停止状態は変更しない。
+2. 現行backendを確認し、privateなdirectoryへruntime stateとローカルbootstrap stateをバックアップする。
+   `STATE_BACKUP_DIR`は作業用の既存directoryを指定する。
+
+   ```bash
+   umask 077
+   terraform -chdir=infra/terraform state pull > "$STATE_BACKUP_DIR/runtime-before.tfstate"
+   cp infra/bootstrap/terraform.tfstate "$STATE_BACKUP_DIR/bootstrap-before.tfstate"
+   ```
+
+3. bootstrapをplanする。旧bucketと旧IAMは「削除せず管理対象から外す」、新bucketと新IAMはcreateと
+   なることを確認する。稼働resourceのdestroyやreplaceがあればapplyしない。
+   確認したplanをapplyし、新bucketのlocation・versioning・非公開設定、planのViewerとdeployの
+   Object Admin権限を確認する。新bucketのbackend prefixに既存stateがないことも確認する。
+4. 新bucket名を`NEW_STATE_BUCKET`へ設定し、現行backendからstateを移す。
+   `-reconfigure`はstateをコピーしないため、この移行では使わない。
+
+   ```bash
+   terraform -chdir=infra/terraform init -migrate-state \
+     -backend-config="bucket=$NEW_STATE_BUCKET" -lockfile=readonly
+   terraform -chdir=infra/terraform state pull > "$STATE_BACKUP_DIR/runtime-after.tfstate"
+   ```
+
+5. 移行前後でlineage、resourceのaddress/IDとoutputが一致し、serialが後退していないことを確認する。
+   現行imageと現行runtime入力でplanし、**変更なし**になるまでCIの保存先を変更しない。
+   stateのlockを勝手に削除せず、競合時はほかの実行終了を待つ。
+6. Repository Variable `TF_STATE_BUCKET`を新bucketへ変更する。
+   他checkoutも新backendを設定し、旧bucketを使う利用元がないことを確認する。
+   Planの新backend読み取りとDeploy identityのstate/lock権限を確認し、workflowを元の状態へ戻す。
+7. バックアップと新backendの確認後、旧bucketの全世代を削除してbucketを廃止する。
+   削除前に旧bucketのSoft Delete保持を0秒にし、削除後の保存課金が残らないようにする。
+   確認が済む前の切り戻しは旧backendと旧`TF_STATE_BUCKET`へ戻す。切替後に新stateへの書き込みが
+   あった場合は、旧stateをそのまま使わず最新stateを旧backendへ移す。
+
+bootstrapのapplyだけではruntime stateやRepository Variableは移動しない。
+移行前の旧bucketを残している間は、その保存料金も残る。
+無料枠は対象3地域の合計でStandard保存5 GB、月5,000 Class A・50,000 Class B操作なので、
+RawやCI操作も含めて使用量を確認する。[GCS料金](https://cloud.google.com/storage/pricing)
+backendの移行とversioningは[Terraform GCS backend](https://developer.hashicorp.com/terraform/language/backend/gcs)と
+[`terraform init`](https://developer.hashicorp.com/terraform/cli/commands/init)を参照する。
 
 以前の`google_artifact_registry_repository.runtime`がstateにある場合、最初のplanはそのAsia repositoryを「削除せず管理対象から外す」と表示し、`google_artifact_registry_repository.runtime_us`を`us-central1`へ作成する。旧repositoryとimageは自動削除しない。planに旧repositoryのdestroyが出る場合はapplyしない。
 
