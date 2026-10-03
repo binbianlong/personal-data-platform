@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from math import ceil
 from time import monotonic
@@ -21,7 +21,7 @@ from .adapter import FitbitSource
 from .api import SyncTime
 from .models import DATA_TYPES, DATE_TYPES, Snapshot, Window, date_cursor
 from .raw import SnapshotBundle, SnapshotRepository, encode_bundle
-from .state import CheckedWindow, DailyState, DailyStateStore, PendingBatch
+from .state import CheckedWindow, DailyState, DailyStateStore, HistoricalRecheck, PendingBatch
 from .writer import can_skip_snapshot, expand_window
 
 LOGGER = logging.getLogger(__name__)
@@ -149,6 +149,39 @@ def _expanded(
                 window = Window(kind, previous.start, max(previous.end, window.end))
             result.append(window)
     return tuple(result)
+
+
+def _historical_recheck(
+    prior: DailyState, first: date, latest: SyncTime, today: date
+) -> HistoricalRecheck | None:
+    recheck = prior.recheck
+    if recheck is not None and today > recheck.expires and recheck.cursor == recheck.stop:
+        recheck = None
+    stop = today - timedelta(days=LOOKBACK_DAYS)
+    if first < stop and (
+        recheck is None or recheck.sync_time != latest.text or first < recheck.first
+    ):
+        first = min(first, recheck.first) if recheck else first
+        stop = max(stop, recheck.stop) if recheck else stop
+        recheck = HistoricalRecheck(
+            first, stop, today + timedelta(days=LOOKBACK_DAYS), first, today, latest.text
+        )
+    if recheck is not None and recheck.cursor == recheck.stop and recheck.checked_on < today:
+        recheck = replace(recheck, cursor=recheck.first, checked_on=today)
+    return recheck
+
+
+def _advance_recheck(
+    recheck: HistoricalRecheck | None, first: date, stop: date, today: date
+) -> HistoricalRecheck | None:
+    if recheck is not None and first <= recheck.cursor < stop:
+        cursor = min(stop, recheck.stop)
+        return replace(
+            recheck,
+            cursor=cursor,
+            checked_on=today if cursor == recheck.stop else recheck.checked_on,
+        )
+    return recheck
 
 
 def _load(warehouse: Warehouse, owner: str, raw: RawObject, compressed: bytes) -> None:
@@ -319,17 +352,20 @@ def collect_daily(
             first = min(first, prior.completed_through + timedelta(days=1))
         if prior.last_sync_time is not None and latest > prior.last_sync_time:
             first = min(first, prior.sync_covered_through or prior.last_sync_time.tokyo_date())
+        recheck = _historical_recheck(prior, first, latest, today)
         stop = min(today, first + timedelta(days=MAX_DAILY_DAYS))
         day = first
         while day < stop:
             batch_stop = min(stop, day + timedelta(days=BUNDLE_DAYS))
             final = batch_stop == today
+            recheck = _advance_recheck(recheck, day, batch_stop, today)
             progress = DailyState(
                 subject_key,
                 batch_stop - timedelta(days=1),
                 min(batch_stop - timedelta(days=1), latest.tokyo_date()),
                 latest if final else None,
-                today if final else None,
+                today if final and (recheck is None or recheck.cursor == recheck.stop) else None,
+                recheck,
             )
             _capture(
                 repository,
@@ -343,6 +379,31 @@ def collect_daily(
             )
             day = batch_stop
         if stop < today:
+            summary.status = "deferred"
+            return summary
+        remaining = MAX_DAILY_DAYS - (stop - first).days
+        current = state.read()
+        while recheck is not None and recheck.cursor < recheck.stop and remaining > 0:
+            day = recheck.cursor
+            batch_stop = min(recheck.stop, day + timedelta(days=min(BUNDLE_DAYS, remaining)))
+            recheck = _advance_recheck(recheck, day, batch_stop, today)
+            assert recheck is not None
+            _capture(
+                repository,
+                warehouse,
+                bounded,
+                state,
+                owner,
+                _expanded(warehouse, subject_key, _day_windows(day, batch_stop)),
+                replace(
+                    current,
+                    last_daily_run=today if recheck.cursor == recheck.stop else None,
+                    recheck=recheck,
+                ),
+                summary,
+            )
+            remaining -= (batch_stop - day).days
+        if recheck is not None and recheck.cursor < recheck.stop:
             summary.status = "deferred"
         return summary
     except _BudgetExceeded:

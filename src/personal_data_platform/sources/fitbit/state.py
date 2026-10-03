@@ -14,12 +14,27 @@ from .models import Window, object_dict, parse_time, string
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalRecheck:
+    first: date
+    stop: date
+    expires: date
+    cursor: date
+    checked_on: date
+    sync_time: str
+
+    def __post_init__(self) -> None:
+        if not self.first < self.stop or not self.first <= self.cursor <= self.stop:
+            raise ValueError("invalid Fitbit historical recheck range")
+
+
+@dataclass(frozen=True, slots=True)
 class DailyState:
     subject_key: str
     completed_through: date | None = None
     sync_covered_through: date | None = None
     last_sync_time: SyncTime | None = None
     last_daily_run: date | None = None
+    recheck: HistoricalRecheck | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +63,20 @@ def _window(value: object) -> Window:
 
 def _date(value: object) -> date | None:
     return date.fromisoformat(string(value)) if value is not None else None
+
+
+def _recheck(value: object) -> HistoricalRecheck | None:
+    if value is None:
+        return None
+    data = object_dict(value)
+    return HistoricalRecheck(
+        date.fromisoformat(string(data["first"])),
+        date.fromisoformat(string(data["stop"])),
+        date.fromisoformat(string(data["expires"])),
+        date.fromisoformat(string(data["cursor"])),
+        date.fromisoformat(string(data["checked_on"])),
+        string(data["sync_time"]),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +132,7 @@ class PendingBatch:
                 if progress["last_sync_time"] is not None
                 else None,
                 _date(progress["last_daily_run"]),
+                _recheck(progress.get("recheck")),
             ),
             tuple(string(value) for value in cast(list[object], supersedes)),
         )
@@ -114,19 +144,20 @@ class DailyStateStore:
 
     def read(self) -> DailyState:
         rows = self.warehouse.query_rows(
-            "SELECT completed_through, sync_covered_through, last_sync_time, last_daily_run "
+            "SELECT completed_through, sync_covered_through, last_sync_time, last_daily_run, recheck_json "
             "FROM ops.fitbit_daily_state WHERE subject_key=?",
             [self.subject_key],
         )
         if not rows:
             return DailyState(self.subject_key)
-        through, sync_through, sync_time, run_day = rows[0]
+        through, sync_through, sync_time, run_day, recheck_json = rows[0]
         return DailyState(
             self.subject_key,
             through,
             sync_through,
             SyncTime.parse(sync_time) if sync_time else None,
             run_day,
+            _recheck(json.loads(recheck_json)) if recheck_json else None,
         )
 
     def pending(self) -> tuple[PendingBatch, ...]:
@@ -187,18 +218,23 @@ class DailyStateStore:
                 ),
                 default=None,
             )
+            recheck = progress.recheck if progress.completed_through is not None else prior.recheck
             connection.execute(
-                "INSERT INTO ops.fitbit_daily_state VALUES (?,?,?,?,?) "
+                "INSERT INTO ops.fitbit_daily_state VALUES (?,?,?,?,?,?) "
                 "ON CONFLICT (subject_key) DO UPDATE SET "
                 "completed_through=excluded.completed_through, "
                 "sync_covered_through=excluded.sync_covered_through, "
-                "last_sync_time=excluded.last_sync_time, last_daily_run=excluded.last_daily_run",
+                "last_sync_time=excluded.last_sync_time, last_daily_run=excluded.last_daily_run, "
+                "recheck_json=excluded.recheck_json",
                 [
                     self.subject_key,
                     newest(prior.completed_through, progress.completed_through),
                     newest(prior.sync_covered_through, progress.sync_covered_through),
                     sync_time.text if sync_time else None,
                     newest(prior.last_daily_run, progress.last_daily_run),
+                    json.dumps(asdict(recheck), default=_default, sort_keys=True)
+                    if recheck
+                    else None,
                 ],
             )
             for item in skipped:

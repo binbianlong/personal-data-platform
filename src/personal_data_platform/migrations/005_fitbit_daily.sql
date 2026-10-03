@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS ops.fitbit_daily_state (
     completed_through DATE,
     sync_covered_through DATE,
     last_sync_time VARCHAR,
-    last_daily_run DATE
+    last_daily_run DATE,
+    recheck_json VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS ops.fitbit_batch_intent (

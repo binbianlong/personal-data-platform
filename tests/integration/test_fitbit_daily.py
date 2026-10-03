@@ -8,6 +8,7 @@ from personal_data_platform.sources.fitbit.api import SyncTime
 from personal_data_platform.sources.fitbit.daily import collect_daily, collect_range
 from personal_data_platform.sources.fitbit.models import DATA_TYPES, Record, Snapshot, Window
 from personal_data_platform.sources.fitbit.raw import encode_snapshot
+from personal_data_platform.sources.fitbit.state import DailyStateStore
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConnectionError
 
 NOW = datetime(2026, 10, 3, 4, tzinfo=UTC)
@@ -118,6 +119,110 @@ def test_slow_daily_defers_before_its_shared_lease_can_expire(setup, monkeypatch
     assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     monkeypatch.setattr(api, "fetch", original_fetch)
     assert run(setup).status == "succeeded"
+
+
+@pytest.mark.parametrize("tracker_advances", [False, True])
+def test_delayed_historical_points_are_rechecked_after_backfill(setup, tracker_advances):
+    warehouse, repository, api = setup
+    first = NOW - timedelta(days=30)
+    api.sync_at, api.value = first, None
+    assert (
+        collect_daily(repository, warehouse, client=api, subject_key="self", now=first).status
+        == "succeeded"
+    )
+    api.sync_at = NOW
+    assert run(setup).status == "succeeded"
+    before = len(api.calls)
+    api.value = 12.0
+    if tracker_advances:
+        api.sync_at = NOW + timedelta(days=1)
+    assert (
+        collect_daily(
+            repository, warehouse, client=api, subject_key="self", now=NOW + timedelta(days=1)
+        ).status
+        == "succeeded"
+    )
+    assert any(window.start < NOW - timedelta(days=20) for window in api.calls[before:])
+    assert warehouse.query_value("SELECT sum(value) FROM base.fitbit_steps") > 7 * 12
+
+
+def test_historical_recheck_resumes_under_the_combined_ninety_day_budget(setup):
+    warehouse, repository, api = setup
+    first = NOW - timedelta(days=120)
+    api.sync_at, api.value = first, None
+    assert (
+        collect_daily(repository, warehouse, client=api, subject_key="self", now=first).status
+        == "succeeded"
+    )
+    api.sync_at = NOW
+    assert run(setup).status == "deferred"
+    assert run(setup).status == "succeeded"
+    api.value = 12.0
+    tomorrow = NOW + timedelta(days=1)
+
+    def check():
+        before = len(api.calls)
+        result = collect_daily(repository, warehouse, client=api, subject_key="self", now=tomorrow)
+        assert len(api.calls) - before <= 90 * len(DATA_TYPES)
+        return result
+
+    assert check().status == "deferred"
+    assert check().status == "succeeded"
+    assert warehouse.query_value("SELECT sum(value) FROM base.fitbit_steps") > 100 * 12
+
+
+def test_unchanged_historical_rechecks_skip_raw_and_expire_after_seven_days(setup):
+    warehouse, repository, api = setup
+    first = NOW - timedelta(days=30)
+    api.sync_at, api.value = first, None
+    collect_daily(repository, warehouse, client=api, subject_key="self", now=first)
+    api.sync_at = NOW
+    run(setup)
+    active = DailyStateStore(warehouse, "self").read().recheck
+    assert active is not None
+
+    def check(days):
+        before = len(api.calls)
+        result = collect_daily(
+            repository, warehouse, client=api, subject_key="self", now=NOW + timedelta(days=days)
+        )
+        return result, len(api.calls) - before
+
+    summary, count = check(1)
+    assert count > 35 and summary.raw_saved == 1
+    assert repository.heads == repository.reads == 0
+    check(7)
+    summary, count = check(8)
+    assert count == 35 and summary.status == "succeeded"
+    assert DailyStateStore(warehouse, "self").read().recheck is None
+
+
+def test_interrupted_historical_recheck_retains_its_scope_and_manual_sync_preserves_it(setup):
+    warehouse, repository, api = setup
+    first = NOW - timedelta(days=30)
+    api.sync_at, api.value = first, None
+    collect_daily(repository, warehouse, client=api, subject_key="self", now=first)
+    api.sync_at = NOW
+    run(setup)
+    expected = DailyStateStore(warehouse, "self").read().recheck
+    collect_range(
+        repository,
+        warehouse,
+        client=api,
+        subject_key="self",
+        windows=(Window("steps", NOW - timedelta(days=1), NOW),),
+    )
+    assert DailyStateStore(warehouse, "self").read().recheck == expected
+    api.value, repository.interruption = 12.0, "after"
+    tomorrow = NOW + timedelta(days=1)
+    with pytest.raises(OSError):
+        collect_daily(repository, warehouse, client=api, subject_key="self", now=tomorrow)
+    assert (
+        collect_daily(repository, warehouse, client=api, subject_key="self", now=tomorrow).status
+        == "succeeded"
+    )
+    assert warehouse.query_value("SELECT sum(value) FROM base.fitbit_steps") > 7 * 12
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_batch_intent") == 0
 
 
 def test_daily_bundles_seven_completed_days_once_without_gcs_reads(setup):

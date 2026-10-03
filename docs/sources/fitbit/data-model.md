@@ -18,7 +18,10 @@ subjectは安定した疑似識別子を使い、OAuthのIDやtokenをkeyに含�
 両形式のRawはGCS作成から90日保持する。新しい受付・checkpointファイルはGCSに作らない。
 残っている旧受付と旧control JSONにも90日の削除条件を設定する。
 
-`ops.fitbit_daily_state`は利用者ごとの完了日、補完済み同期日、最後に完了した同期時刻、成功した日次実行日を持つ。
+`ops.fitbit_daily_state`は利用者ごとの完了日、補完済み同期日、最後に取得した同期時刻、成功した日次実行日を持つ。
+`recheck_json`には通常の7日より古い補完範囲、観測した同期時刻、7日後の再確認期限、
+未完了cursorと直前の巡回日を保持する。初回取得だけで過去範囲を解消せず、
+新しい同期期間を統合しながら日数・時間上限内で再確認する。
 `ops.fitbit_batch_intent`はRaw key、取得予定範囲、変更なしで省いた範囲のhash・確認時刻、確定予定の進捗を持つ。
 保存予定をDBへ先に確定してからGCSへ保存する。Rawの分析反映は共通Warehouseのtransactionで確定し、
 確認時刻・進捗・保存予定の解消を次のDB transactionで確定する。
