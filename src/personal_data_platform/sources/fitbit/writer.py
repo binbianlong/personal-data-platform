@@ -87,6 +87,27 @@ def clear_intents_for_loaded_raw(connection: DuckDBPyConnection, raw: RawObject)
         )
 
 
+@dataclass(frozen=True, slots=True)
+class FitbitBundleBatch:
+    snapshots: tuple[Snapshot, ...]
+
+    @property
+    def parser_version(self) -> str:
+        return PARSER_VERSION
+
+    @property
+    def record_count(self) -> int:
+        return sum(len(snapshot.records) for snapshot in self.snapshots)
+
+    def write(
+        self, connection: DuckDBPyConnection, raw: RawObject, *, byte_size: int, loaded_at: datetime
+    ) -> None:
+        for snapshot in self.snapshots:
+            FitbitBatch(snapshot).write_snapshot(
+                connection, source_key=raw.key, loaded_at=loaded_at
+            )
+
+
 def _accepted_ranges(
     snapshot: Snapshot, source_key: str, coverage: list[_Coverage]
 ) -> list[tuple[datetime, datetime]]:

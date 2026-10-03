@@ -265,6 +265,51 @@ def test_get_raw_disables_gcs_content_transcoding() -> None:
     ]
 
 
+def test_put_raw_object_uses_upload_metadata_without_reload(monkeypatch) -> None:
+    from personal_data_platform.sources.fitbit.adapter import FitbitSource
+    from personal_data_platform.sources.fitbit.models import Snapshot, Window
+    from personal_data_platform.sources.fitbit.raw import encode_snapshot
+    from personal_data_platform.storage.gcs import GCSRawRepository
+
+    now = datetime(2026, 10, 2, tzinfo=UTC)
+    key, compressed = encode_snapshot(
+        Snapshot("self", Window("steps", now, now.replace(day=3)), now, ())
+    )
+    client = FakeGCSClient()
+    monkeypatch.setattr(_Blob, "time_created", now, raising=False)
+
+    def forbidden_reload(self):
+        raise AssertionError("successful upload already returned metadata")
+
+    monkeypatch.setattr(_Blob, "reload", forbidden_reload, raising=False)
+    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=FitbitSource())
+    raw = repository.put_raw_object(key, compressed)
+    assert raw.storage_created_at == now and raw.storage_generation == 1
+    assert len(client.bucket_ref.upload_calls) == 1
+    assert client.bucket_ref.download_calls == [] and client.list_calls == []
+
+
+def test_duplicate_put_recovers_existing_generation_once(monkeypatch) -> None:
+
+    now = datetime(2026, 10, 2, tzinfo=UTC)
+    identity = _identity(now)
+    client = FakeGCSClient()
+    client.bucket_ref.upload_error = PreconditionFailed("already exists")
+    monkeypatch.setattr(_Blob, "time_created", now, raising=False)
+    lookups = []
+
+    def get_blob(self, key):
+        lookups.append(key)
+        return _Blob(self, key, 123)
+
+    monkeypatch.setattr(_Bucket, "get_blob", get_blob, raising=False)
+    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    raw = repository.put_raw_object(identity.object_key, b"compressed")
+    assert raw.storage_generation == 123
+    assert lookups == [identity.object_key]
+    assert client.bucket_ref.download_calls == [] and client.list_calls == []
+
+
 def test_list_raw_follows_pages_ignores_other_objects_and_sorts_replay_order() -> None:
     client = FakeGCSClient()
     earlier = _identity(datetime(2026, 8, 27, 1, tzinfo=UTC), "a")

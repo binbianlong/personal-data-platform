@@ -10,15 +10,15 @@ from personal_data_platform.sources.contracts import RawRepository, SourceHealth
 from personal_data_platform.storage.gcs import GCSRawRepository
 
 from .models import PARSER_VERSION, TABLES, Snapshot
-from .raw import PREFIX, parse_raw_key
-from .writer import FitbitBatch
+from .raw import BUNDLE_PREFIX, PREFIX, SnapshotBundle, parse_raw_key
+from .writer import FitbitBatch, FitbitBundleBatch
 
 
 class FitbitSource:
     source_id = "fitbit"
     stream = "health"
-    schema_versions: tuple[int, ...] = (1,)
-    raw_prefixes: tuple[str, ...] = (PREFIX,)
+    schema_versions: tuple[int, ...] = (1, 2)
+    raw_prefixes: tuple[str, ...] = (PREFIX, BUNDLE_PREFIX)
     raw_suffixes: tuple[str, ...] = (".json.gz",)
     retention_days = 90
     lifecycle_grace_days = 3
@@ -46,7 +46,16 @@ class FitbitSource:
             key, storage_created_at=storage_created_at, storage_generation=storage_generation
         )
 
-    def decode(self, raw: RawObject, payload: bytes) -> FitbitBatch:
+    def decode(self, raw: RawObject, payload: bytes) -> FitbitBatch | FitbitBundleBatch:
+        if raw.schema_version == 2:
+            bundle = SnapshotBundle.from_bytes(payload)
+            if (bundle.subject_key, bundle.fetched_at, raw.logical_key) != (
+                raw.subject_key,
+                raw.observed_at,
+                "batch",
+            ):
+                raise ValueError("Fitbit Raw bundle does not match its identity")
+            return FitbitBundleBatch(bundle.snapshots)
         snapshot = Snapshot.from_bytes(payload)
         if (
             snapshot.subject_key,

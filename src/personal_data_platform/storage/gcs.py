@@ -16,7 +16,7 @@ from personal_data_platform.config import GCSConfig
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import RawCodec, selected_prefixes
 
-from .gcs_types import GCSBucket, GCSClient
+from .gcs_types import GCSBlob, GCSBucket, GCSClient
 
 
 @dataclass(frozen=True)
@@ -89,6 +89,9 @@ class GCSRawRepository:
 
     def put_compressed_raw(self, key: str, compressed_bytes: bytes) -> None:
         """Create immutable pre-compressed Raw without any read or list request."""
+        self._upload_raw(key, compressed_bytes)
+
+    def _upload_raw(self, key: str, compressed_bytes: bytes) -> GCSBlob | None:
         self._source.validate_raw_key(key)
         blob = self._bucket.blob(key)
         blob.content_encoding = "gzip"
@@ -108,13 +111,17 @@ class GCSRawRepository:
         except PreconditionFailed:
             # The durable retry uses the same content-derived identity. The loader
             # verifies the uncompressed checksum of the stored generation again.
-            return
+            return None
+        return blob
 
     def put_raw_object(self, key: str, compressed_bytes: bytes) -> RawObject:
         """Save one immutable observation and obtain its exact storage generation."""
-        self.put_compressed_raw(key, compressed_bytes)
-        blob = self._bucket.blob(key)
-        blob.reload()
+        blob = self._upload_raw(key, compressed_bytes)
+        if blob is None:
+            existing = self.head_raw(key)
+            if existing is None:
+                raise RuntimeError("immutable Raw disappeared after a duplicate upload")
+            return existing
         if blob.time_created is None or blob.generation is None:
             raise RuntimeError("GCS omitted immutable object metadata")
         return self._source.parse_raw_key(
