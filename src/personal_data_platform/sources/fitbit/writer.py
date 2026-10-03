@@ -106,6 +106,23 @@ class FitbitBundleBatch:
             FitbitBatch(snapshot).write_snapshot(
                 connection, source_key=raw.key, loaded_at=loaded_at
             )
+            scope = (
+                "subject_key=? AND data_type=? AND range_start >= ? "
+                "AND range_end <= ? AND fetched_at <= ?"
+            )
+            parameters = [
+                snapshot.subject_key,
+                snapshot.window.data_type,
+                snapshot.window.start,
+                snapshot.window.end,
+                snapshot.fetched_at,
+            ]
+            connection.execute(
+                "DELETE FROM ops.ingestion_metadata WHERE status='failed' AND object_key IN "
+                f"(SELECT raw_key FROM ops.fitbit_raw_intent WHERE {scope})",
+                parameters,
+            )
+            connection.execute(f"DELETE FROM ops.fitbit_raw_intent WHERE {scope}", parameters)
 
 
 def _accepted_ranges(
