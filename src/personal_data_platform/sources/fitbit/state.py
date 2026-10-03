@@ -237,20 +237,25 @@ class DailyStateStore:
                     else None,
                 ],
             )
-            for item in skipped:
+            if skipped:
                 connection.execute(
-                    "UPDATE ops.fitbit_coverage SET fetched_at=? WHERE subject_key=? "
-                    "AND data_type=? AND range_start=? AND range_end=? "
-                    "AND source_sha256=? AND fetched_at < ?",
-                    [
-                        item.fetched_at,
-                        self.subject_key,
-                        item.window.data_type,
-                        item.window.start,
-                        item.window.end,
-                        item.source_sha256,
-                        item.fetched_at,
-                    ],
+                    """
+                    WITH checked AS (
+                        SELECT item.window.data_type AS data_type,
+                               item.window.start AS range_start, item.window.end AS range_end,
+                               item.source_sha256 AS source_sha256, max(item.fetched_at) AS fetched_at
+                        FROM unnest(?) checks(item)
+                        GROUP BY ALL
+                    )
+                    UPDATE ops.fitbit_coverage AS coverage SET fetched_at=checked.fetched_at
+                    FROM checked
+                    WHERE coverage.subject_key=? AND coverage.data_type=checked.data_type
+                      AND coverage.range_start=checked.range_start
+                      AND coverage.range_end=checked.range_end
+                      AND coverage.source_sha256=checked.source_sha256
+                      AND coverage.fetched_at < checked.fetched_at
+                    """,
+                    [[asdict(item) for item in skipped], self.subject_key],
                 )
             for key in retired_keys:
                 connection.execute(

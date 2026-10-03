@@ -25,6 +25,8 @@ OAuth refresh tokenからaccess tokenを得て、Google Health v4のreconcileを
 
 歩数とアクティブゾーン時間は分境界と既存区間の重なりへ取得範囲を広げる。
 同一の完全取得範囲・元API項目を含む内容hash・未解決の保存予定を確認して、変更のないRawを省く。
+完全取得範囲と未解決の保存予定は7日分のバッチごとにまとめて照合し、API内容は1範囲ずつ処理する。
+変更なし範囲の確認時刻は日次進捗と同じtransactionで一括更新し、範囲・hashの一致と時刻の前進を条件にする。
 変更のある複数種別・日付のSnapshotを1つのgzip Rawにまとめ、保存直後のbytesを共通Loaderへ渡す。
 通常の日次取得ではGCSの一覧取得、受付記録、checkpoint JSON、Rawの再ダウンロードを行わない。
 障害復旧と手動監査・再構築では必要なGCS読み取りを行う。

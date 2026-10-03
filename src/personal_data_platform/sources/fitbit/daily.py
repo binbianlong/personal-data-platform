@@ -22,7 +22,7 @@ from .api import SyncTime
 from .models import DATA_TYPES, DATE_TYPES, Snapshot, Window, date_cursor
 from .raw import SnapshotBundle, SnapshotRepository, encode_bundle
 from .state import CheckedWindow, DailyState, DailyStateStore, HistoricalRecheck, PendingBatch
-from .writer import can_skip_snapshot, expand_window
+from .writer import expand_window, snapshot_skip_candidates
 
 LOGGER = logging.getLogger(__name__)
 LOOKBACK_DAYS = BUNDLE_DAYS = 7
@@ -207,6 +207,8 @@ def _capture(
 ) -> None:
     changed: list[Snapshot] = []
     skipped: list[CheckedWindow] = []
+    # The caller holds the shared loader lease; this batch writes coverage only after fetching.
+    candidates = snapshot_skip_candidates(warehouse, state.subject_key, windows)
     for window in windows:
         snapshot = client.fetch(window, subject_key=state.subject_key)
         if snapshot.subject_key != state.subject_key or snapshot.window != window:
@@ -214,8 +216,9 @@ def _capture(
         if minimum_fetched_at is not None and snapshot.fetched_at <= minimum_fetched_at:
             raise RuntimeError("recovery acquisition must be newer than its unresolved Raw")
         summary.fetched_windows += 1
-        if can_skip_snapshot(warehouse, snapshot):
-            skipped.append(CheckedWindow(window, snapshot.fetched_at, snapshot.source_sha256()))
+        candidate = candidates.get(window)
+        if candidate is not None and candidate == (snapshot.origin, snapshot.source_sha256()):
+            skipped.append(CheckedWindow(window, snapshot.fetched_at, candidate[1]))
         else:
             changed.append(snapshot)
     summary.raw_skipped += len(skipped)

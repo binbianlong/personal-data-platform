@@ -10,6 +10,7 @@ from personal_data_platform.sources.fitbit.models import DATA_TYPES, Record, Sna
 from personal_data_platform.sources.fitbit.raw import encode_snapshot
 from personal_data_platform.sources.fitbit.state import DailyStateStore
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConnectionError
+from tests.sql_helpers import TracedConnection
 
 NOW = datetime(2026, 10, 3, 4, tzinfo=UTC)
 
@@ -336,6 +337,48 @@ def test_next_day_refetches_recent_days_and_saves_only_new_complete_day(setup):
     assert summary.raw_saved == 1 and summary.raw_skipped == 30
     assert repository.puts == 2 and repository.heads == repository.reads == 0
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 40
+
+
+def test_seven_day_recheck_batches_skip_queries_and_timestamp_updates(setup):
+    warehouse, repository, api = setup
+    run(setup)
+    connection = TracedConnection(warehouse.connection)
+    warehouse.connection = connection
+
+    summary = collect_daily(
+        repository, warehouse, client=api, subject_key="self", now=NOW + timedelta(days=1)
+    )
+
+    assert summary.status == "succeeded" and summary.raw_saved == 1 and summary.raw_skipped == 30
+    assert repository.puts == 2 and repository.heads == repository.reads == 0
+    assert warehouse.query_value("SELECT sum(value) FROM base.fitbit_steps") == 96
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM ops.fitbit_coverage WHERE fetched_at > ?",
+            [NOW + timedelta(seconds=35)],
+        )
+        == 35
+    )
+    skip_queries = [
+        sql
+        for sql in connection.statements
+        if sql.startswith("SELECT")
+        and (
+            sql.startswith("SELECT count(*) FROM ops.fitbit_raw_intent")
+            or (
+                "ops.fitbit_coverage" in sql
+                and "source_sha256" in sql
+                and "content_sha256" not in sql
+            )
+        )
+    ]
+    updates = [
+        sql
+        for sql in connection.statements
+        if "UPDATE ops.fitbit_coverage" in sql and "SET fetched_at" in sql
+    ]
+    assert len(skip_queries) == 1
+    assert len(updates) == 1
 
 
 def test_tracker_sync_catches_up_data_older_than_lookback_in_bounded_bundles(setup):

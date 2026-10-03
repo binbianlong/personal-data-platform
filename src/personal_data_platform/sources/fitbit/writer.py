@@ -44,21 +44,40 @@ class _Coverage:
     source_sha256: str
 
 
+def snapshot_skip_candidates(
+    warehouse: Warehouse, subject_key: str, windows: tuple[Window, ...]
+) -> dict[Window, tuple[str, str]]:
+    """Read exact loaded scopes and their source digests in one batch."""
+    windows = tuple(dict.fromkeys(windows))
+    if not windows:
+        return {}
+    rows = warehouse.query_rows(
+        """
+        SELECT scope.data_type, scope.start, scope.end,
+               min(coverage.origin), min(coverage.source_sha256)
+        FROM unnest(?) requested(scope)
+        JOIN ops.fitbit_coverage coverage
+          ON coverage.subject_key=? AND coverage.data_type=scope.data_type
+         AND coverage.range_start < scope.end AND coverage.range_end > scope.start
+        WHERE NOT EXISTS (
+            SELECT 1 FROM ops.fitbit_raw_intent intent
+            WHERE intent.subject_key=coverage.subject_key AND intent.data_type=coverage.data_type
+        )
+        GROUP BY scope.data_type, scope.start, scope.end
+        HAVING count(*)=1 AND min(coverage.range_start)=scope.start
+                         AND max(coverage.range_end)=scope.end
+        """,
+        [[asdict(window) for window in windows], subject_key],
+    )
+    return {Window(kind, start, end): (origin, digest) for kind, start, end, origin, digest in rows}
+
+
 def can_skip_snapshot(warehouse: Warehouse, snapshot: Snapshot) -> bool:
     """Omit Raw only for one exact, fully loaded, unchanged acquisition scope."""
-    window = snapshot.window
-    if warehouse.query_value(
-        "SELECT count(*) FROM ops.fitbit_raw_intent WHERE subject_key=? AND data_type=?",
-        [snapshot.subject_key, window.data_type],
-    ):
-        return False
-    rows = warehouse.query_rows(
-        "SELECT range_start, range_end, origin, source_sha256 "
-        "FROM ops.fitbit_coverage WHERE subject_key=? AND data_type=? "
-        "AND range_start < ? AND range_end > ?",
-        [snapshot.subject_key, window.data_type, window.end, window.start],
+    candidate = snapshot_skip_candidates(warehouse, snapshot.subject_key, (snapshot.window,)).get(
+        snapshot.window
     )
-    return rows == [(window.start, window.end, snapshot.origin, snapshot.source_sha256())]
+    return candidate is not None and candidate == (snapshot.origin, snapshot.source_sha256())
 
 
 def clear_intents_for_loaded_raw(connection: DuckDBPyConnection, raw: RawObject) -> None:
