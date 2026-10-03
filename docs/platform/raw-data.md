@@ -16,8 +16,8 @@ Raw objectは次の性質を持つ。
 
 取得処理の稼働確認用control objectはsourceが所有し、再構築の入力には使わない。Screen TimeではRaw prefix内の
 予約済み`_control/`へstream別のmutableなdevice別scan receiptとactive-device manifestを置く。controlのkey、本文、更新権限と
-稼働監査はsourceのデータモデル・運用で定義し、共通Raw repositoryには要求しない。Fitbitの端末同期checkpointも
-`raw/fitbit/v1/_control/`に置き、Rawとは別のmutable JSONとして90日Lifecycleの対象から外す。
+稼働監査はsourceのデータモデル・運用で定義し、共通Raw repositoryには要求しない。
+Fitbitの日次checkpointと保存予定はMotherDuckに保持し、新しいcontrol JSONは作らない。
 
 GCS bucketの公開範囲、暗号化、credentialは[`security.md`](security.md)に従う。
 
@@ -29,8 +29,8 @@ production bucketは`us-central1`のStandardを使う。source / streamごとに
 Object Versioningは無効にするため、Lifecycle action後のobjectは復元できない。
 
 両Screen Time streamは`raw/screen_time/v1/`または`raw/screen_time/v2/`配下の`.segb.gz`だけを`age=90`のDelete対象とし、control JSONを除外する。
-Fitbitは`raw/fitbit/v1/`配下の`.json.gz`と`receipts/fitbit/v1/`配下の受付を`age=90`のDelete対象とし、
-`raw/fitbit/v1/_control/`配下のcheckpoint JSONを除外する。
+Fitbitは`raw/fitbit/v1/`と`raw/fitbit/v2/`配下の`.json.gz`を`age=90`のDelete対象とする。
+残っている旧`receipts/fitbit/v1/`の受付と`raw/fitbit/v1/_control/`のJSONも90日で削除する。
 追加pipelineはRaw namespaceとsuffixを指定する。control objectへ削除条件を重ねず、他streamとRaw領域を共有する場合は保持日数を一致させる。
 複数schema版を保持する場合は、再生に対応する全prefixをadapterとTerraformの両方へ含める。
 
@@ -52,7 +52,8 @@ Lifecycle設定をqueryするものではなく、実適用の確認はTerraform
 
 Raw objectは「contentそのもの」ではなく、あるlogical scopeをある時点で観測した事実を表す。
 `observed_at`はsourceが定義する観測順位のUTC時刻で、object keyへ含める。
-Screen Timeは取得完了時点、Fitbitは全ページ取得の開始時点を使う。
+Screen Timeは取得完了時点を使う。Fitbitは全ページ取得の開始時点を使い、
+複数Snapshotのバッチでは最も新しい取得開始時刻を共通identityに使う。
 
 重複排除は、同じlogical scopeで直前に保存を完了した観測と比較して行う。Fitbitは取得範囲の現在の
 完全なcoverageと元API項目を含む内容を照合し、未解決のRaw保存予定がない場合だけ省略する。
@@ -71,7 +72,7 @@ logical scopeはsource / streamとsubject / logical keyで分離する。Raw sch
 区別し、対応schema版の判定とkeyの復元はadapterが行う。共通保存形式はgzipとし、元のbytes、logical scope、
 object keyは各sourceのデータモデルで定義する。
 Screen Timeは[`data-model.md`](../sources/screen-time/data-model.md)を正本とする。
-Fitbitのenvelope・受付記録・範囲更新は[`data-model.md`](../sources/fitbit/data-model.md)を正本とする。
+Fitbitのバッチenvelope・日次状態・範囲更新は[`data-model.md`](../sources/fitbit/data-model.md)を正本とする。
 
 ## 永続化境界
 
@@ -83,8 +84,9 @@ Screen Time Collectorはlocal stateへ永続化した同じkeyとgzip bytesを
 再送する。write-only credentialを使うため、upload前にGCSの既存objectをreadして比較することはない。
 異なる内容を同じkeyへ保存してはならず、取込時のSHA-256不一致はLoaderで検出して成功取込を拒否する。
 
-Fitbitは取得予定範囲を受付記録へ先に保存し、Raw保存予定をDBへ確定してからGCSへcreate-onlyで書く。
-Rawのkey/generationを確定してからLoaderへ渡す。障害時は保存予定とGCS・取込台帳を照合する。
+Fitbitは取得済みSnapshotをまとめ、取得予定範囲とRaw keyをDBへ確定してからGCSへcreate-onlyで書く。
+upload応答のmetadataと取得済みbytesを共通Loaderへ渡し、通常はGCSを読み直さない。
+障害時は保存予定とGCS・取込台帳を照合する。
 変更なしと確認してRawを省略した期間は、元のRawが期限切れになればRawだけでは完全再構築できない。
 
 ## 検証と再生

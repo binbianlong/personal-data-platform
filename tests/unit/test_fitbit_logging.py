@@ -8,40 +8,32 @@ import sys
 import pytest
 
 PROBE = r"""
-import json
 import logging
 import os
 import sys
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
-import uvicorn
-from personal_data_platform.sources.fitbit import api, runtime, service
+import duckdb
+from personal_data_platform.sources.fitbit import api, daily, runtime
+from personal_data_platform.storage.motherduck import Warehouse
 
 if sys.argv[2] == "root":
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-runtime._stores = lambda: (
-    SimpleNamespace(create=lambda receipt: SimpleNamespace(receipt=receipt)), object()
-)
-runtime.required = lambda name: "test"
-runtime._queue = lambda: object()
-runtime._worker = lambda *args: SimpleNamespace(run=lambda key: True)
-runtime.GoogleHealthAuthenticator = lambda **kwargs: object()
-runtime.GoogleTaskIdentity = lambda **kwargs: object()
-runtime.TinkSignatures = lambda: object()
-runtime.create_app = lambda **kwargs: object()
-runtime.uvicorn.run = lambda app, **kwargs: uvicorn.Config(app, **kwargs)
+os.environ["PDP_FITBIT_PROCESSING_PAUSED"] = "false"
+os.environ["PDP_FITBIT_SUBJECT_KEY"] = "test"
+runtime._repository = lambda: object()
+runtime._client = lambda: object()
+runtime._warehouse = lambda: Warehouse(duckdb.connect(":memory:"))
+runtime.collect_daily = lambda *args, **kwargs: daily.DailySummary()
+runtime.collect_range = lambda *args, **kwargs: daily.DailySummary()
 command = sys.argv[1]
-if command == "serve":
-    runtime.run_serve_from_env()
-elif command == "sync":
+if command == "sync":
     now = datetime(2026, 9, 28, tzinfo=UTC)
     runtime.run_sync_from_env(start=now, end=now + timedelta(days=1), data_types=("steps",))
 else:
-    os.environ["PDP_FITBIT_REPAIR_ENABLED"] = "false"
-    runtime.run_repair_from_env()
-    runtime.run_repair_from_env()
+    runtime.run_daily_from_env()
+    runtime.run_daily_from_env()
 api.LOGGER.info("api probe")
-service.LOGGER.info("acquisition probe")
+daily.LOGGER.info("acquisition probe")
 runtime.LOGGER.error("failure probe\nsecond line")
 print("ready")
 """
@@ -61,7 +53,7 @@ def _probe(command, root="default", *, level=None):
     )
 
 
-@pytest.mark.parametrize("command", ["serve", "sync", "repair"])
+@pytest.mark.parametrize("command", ["daily", "sync"])
 @pytest.mark.parametrize("root", ["default", "root"])
 def test_entrypoint_enables_json_app_logs_without_duplicates(command, root):
     result = _probe(command, root)
@@ -76,13 +68,13 @@ def test_entrypoint_enables_json_app_logs_without_duplicates(command, root):
     errors = [entry for entry in entries if entry["severity"] == "ERROR"]
     assert len(errors) == 1
     assert errors[0]["message"] == "failure probe\nsecond line"
-    if command == "repair":
-        events = [entry for entry in entries if entry.get("event") == "fitbit_repair"]
+    if command == "daily":
+        events = [entry for entry in entries if entry.get("event") == "fitbit_daily"]
         assert len(events) == 2
-        assert all(entry["status"] == "disabled" for entry in events)
+        assert all(entry["status"] == "succeeded" for entry in events)
 
 
-@pytest.mark.parametrize("command", ["serve", "sync", "repair"])
+@pytest.mark.parametrize("command", ["daily", "sync"])
 def test_entrypoint_respects_log_level(command):
     result = _probe(command, level="WARNING")
     assert result.returncode == 0, result.stderr

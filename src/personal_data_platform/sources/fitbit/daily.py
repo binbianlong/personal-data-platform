@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from math import ceil
+from time import monotonic
 from typing import Literal, Protocol
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -26,6 +27,7 @@ from .writer import can_skip_snapshot, expand_window
 LOGGER = logging.getLogger(__name__)
 LOOKBACK_DAYS = BUNDLE_DAYS = 7
 MAX_DAILY_DAYS = 90
+RUN_BUDGET_SECONDS = 90 * 60
 TOKYO = ZoneInfo("Asia/Tokyo")
 
 
@@ -38,9 +40,33 @@ class Client(Protocol):
     def latest_tracker_sync(self) -> SyncTime | None: ...
 
 
+class _BudgetExceeded(Exception):
+    pass
+
+
+class _BudgetClient:
+    """Leave room for the final bounded API call and DB commit before lease expiry."""
+
+    def __init__(self, client: Client) -> None:
+        self.client = client
+        self.deadline = monotonic() + RUN_BUDGET_SECONDS
+
+    def check(self) -> None:
+        if monotonic() >= self.deadline:
+            raise _BudgetExceeded
+
+    def fetch(self, window: Window, *, subject_key: str) -> Snapshot:
+        self.check()
+        return self.client.fetch(window, subject_key=subject_key)
+
+    def latest_tracker_sync(self) -> SyncTime | None:
+        self.check()
+        return self.client.latest_tracker_sync()
+
+
 @dataclass(slots=True)
 class DailySummary:
-    status: Literal["succeeded", "paused", "deferred"] = "succeeded"
+    status: Literal["succeeded", "paused", "deferred", "failed"] = "succeeded"
     fetched_windows: int = 0
     raw_saved: int = 0
     raw_skipped: int = 0
@@ -178,13 +204,14 @@ def _capture(
 def _recover(
     repository: Store,
     warehouse: Warehouse,
-    client: Client,
+    client: _BudgetClient,
     state: DailyStateStore,
     owner: str,
     summary: DailySummary,
 ) -> None:
     source = FitbitSource()
     for pending in state.pending():
+        client.check()
         rows = warehouse.query_rows(
             "SELECT storage_created_at, storage_generation FROM ops.ingestion_metadata "
             "WHERE object_key=? AND status='succeeded' AND parser_version=? "
@@ -239,6 +266,7 @@ def _recover(
         "FROM ops.fitbit_raw_intent WHERE subject_key=? ORDER BY fetched_at, raw_key LIMIT 90",
         [state.subject_key],
     ):
+        client.check()
         raw = repository.head_raw(key)
         if raw is not None:
             _load(warehouse, owner, raw, repository.get_raw(key, generation=raw.storage_generation))
@@ -275,12 +303,13 @@ def collect_daily(
         return DailySummary(status="deferred")
     summary = DailySummary()
     state = DailyStateStore(warehouse, subject_key)
+    bounded = _BudgetClient(client)
     try:
-        _recover(repository, warehouse, client, state, owner, summary)
+        _recover(repository, warehouse, bounded, state, owner, summary)
         prior = state.read()
         if prior.last_daily_run is not None and prior.last_daily_run >= today:
             return summary
-        latest = client.latest_tracker_sync()
+        latest = bounded.latest_tracker_sync()
         if latest is None:
             raise RuntimeError("no paired tracker sync time is available")
         if latest > SyncTime.from_datetime(started + timedelta(minutes=5)):
@@ -305,7 +334,7 @@ def collect_daily(
             _capture(
                 repository,
                 warehouse,
-                client,
+                bounded,
                 state,
                 owner,
                 _expanded(warehouse, subject_key, _day_windows(day, batch_stop)),
@@ -315,6 +344,9 @@ def collect_daily(
             day = batch_stop
         if stop < today:
             summary.status = "deferred"
+        return summary
+    except _BudgetExceeded:
+        summary.status = "deferred"
         return summary
     finally:
         if warehouse.connection_usable:
@@ -337,19 +369,23 @@ def collect_range(
         return DailySummary(status="deferred")
     summary = DailySummary()
     state = DailyStateStore(warehouse, subject_key)
+    bounded = _BudgetClient(client)
     try:
-        _recover(repository, warehouse, client, state, owner, summary)
+        _recover(repository, warehouse, bounded, state, owner, summary)
         for batch in _range_batches(windows):
             _capture(
                 repository,
                 warehouse,
-                client,
+                bounded,
                 state,
                 owner,
                 _expanded(warehouse, subject_key, batch),
                 DailyState(subject_key),
                 summary,
             )
+        return summary
+    except _BudgetExceeded:
+        summary.status = "deferred"
         return summary
     finally:
         if warehouse.connection_usable:

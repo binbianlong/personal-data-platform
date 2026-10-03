@@ -630,7 +630,7 @@ def test_daily_job_repairs_both_streams_with_one_inventory_and_refreshes_next_ru
                 )
 
     monkeypatch.setenv("PDP_RECONCILIATION_MONITORING_MODE", "cloud_monitoring")
-    monkeypatch.setenv("PDP_FITBIT_REPAIR_ENABLED", "false")
+    monkeypatch.setenv("PDP_FITBIT_DAILY_ENABLED", "false")
     monkeypatch.delenv("RECONCILIATION_HEARTBEAT_URL", raising=False)
     monkeypatch.setattr(job.WarehouseConfig, "from_env", lambda: WarehouseConfig(":memory:"))
     monkeypatch.setattr(job, "Warehouse", AuditWarehouse)

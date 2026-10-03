@@ -1,4 +1,4 @@
-"""Explicit schema and webhook-runtime command boundaries."""
+"""Explicit schema, daily collection and manual range command boundaries."""
 
 from __future__ import annotations
 
@@ -23,8 +23,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
     sync.add_argument("--from", dest="start", required=True)
     sync.add_argument("--to", dest="end", required=True)
     sync.add_argument("--data-type", action="append", choices=DATA_TYPES)
-    commands.add_parser("serve", help="start the webhook and authenticated worker service")
-    commands.add_parser("repair", help="recover pending receipts and Raw when repair is enabled")
+    commands.add_parser("daily", help="collect completed days and recover interrupted batches")
 
 
 def _database(value: str | None) -> Warehouse:
@@ -50,18 +49,17 @@ def run(args: argparse.Namespace) -> int:
         finally:
             migration_warehouse.close()
         return 0
-    from .runtime import run_repair_from_env, run_serve_from_env, run_sync_from_env
+    from .runtime import run_daily_from_env, run_sync_from_env
 
-    if command == "serve":
-        return run_serve_from_env()
-    if command == "sync":
-        return run_sync_from_env(
+    if command == "daily":
+        result = run_daily_from_env()
+    elif command == "sync":
+        result = run_sync_from_env(
             start=_physical(args.start),
             end=_physical(args.end),
             data_types=tuple(args.data_type or DATA_TYPES),
         )
-    if command == "repair":
-        repaired = run_repair_from_env()
-        print(json.dumps(asdict(repaired), sort_keys=True))
-        return int(bool(repaired.failed_count or repaired.at_risk_count))
-    raise ValueError("unsupported Fitbit command")
+    else:
+        raise ValueError("unsupported Fitbit command")
+    print(json.dumps(asdict(result), sort_keys=True))
+    return int(result.status == "failed")

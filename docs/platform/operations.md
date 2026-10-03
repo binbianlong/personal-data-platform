@@ -115,7 +115,7 @@ Job自体が起動しない場合は、Cloud Runの`completed_execution_count`�
 Cloud MonitoringのPromQLで5分ごとに検出する。時系列自体がない場合も0として扱う。
 通常のmetric-absenceには23.5時間の上限があるため、48時間のsystem metric queryはGoogleの長期間query機能
 （Preview）を使う。適用後は当該projectでのquery評価、完了metric、通知先、発報と回復を確認する。
-Job失敗は別の失敗alertで検出する。Fitbitの完全な補修巡回の監視は[Fitbit運用](../sources/fitbit/operations.md#クラウド構成と定期補修)に従う。
+Job失敗は別の失敗alertで検出する。Fitbitの完全な日次取得の監視は[Fitbit運用](../sources/fitbit/operations.md#クラウド構成と監視)に従う。
 
 新しいsource eventがないことだけを障害とみなさない。scan完了、GCS listing、取込状態、query成功を
 組み合わせて判定する。
@@ -208,10 +208,9 @@ pdp rebuild --dry-run
 pdp rebuild --target-db <scratch-db> --allow-partial-history
 ```
 
-## Fitbit Webhook
+## Fitbit日次取得
 
-Fitbitは専用Cloud Run ServiceとCloud Tasks queueで処理する。
+Fitbitは既存Screen Time Reconciliation Jobから1日1回取得する。
 `enable_fitbit_runtime`は既定でfalse、`fitbit_processing_paused`はtrue。
-有効化した場合だけ既存Screen Time reconciliation Jobに受付回復・日次照合を接続する。
-追加Schedulerと通知単位のCloud Run Jobは作らない。
-導入前の隔離検証・使用量測定・購読登録は[Fitbit運用](../sources/fitbit/operations.md)を参照する。
+有効化した場合だけOAuthとRaw作成権限を共通Jobへ追加し、同じDB接続で取得・復旧を行う。
+切替と実使用量の確認は[Fitbit運用](../sources/fitbit/operations.md)を参照する。

@@ -97,6 +97,29 @@ def run(setup, **kwargs):
     return collect_daily(repository, warehouse, client=api, subject_key="self", now=NOW, **kwargs)
 
 
+def test_slow_daily_defers_before_its_shared_lease_can_expire(setup, monkeypatch):
+    from personal_data_platform.sources.fitbit import daily
+
+    warehouse, repository, api = setup
+    elapsed = [0.0]
+    original_fetch = api.fetch
+
+    def slow_fetch(*args, **kwargs):
+        result = original_fetch(*args, **kwargs)
+        elapsed[0] += 10 * 60
+        return result
+
+    monkeypatch.setattr(daily, "monotonic", lambda: elapsed[0], raising=False)
+    monkeypatch.setattr(api, "fetch", slow_fetch)
+    result = run(setup)
+    assert result.status == "deferred" and result.fetched_windows == 9
+    assert repository.puts == 0
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_daily_state") == 0
+    assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+    monkeypatch.setattr(api, "fetch", original_fetch)
+    assert run(setup).status == "succeeded"
+
+
 def test_daily_bundles_seven_completed_days_once_without_gcs_reads(setup):
     warehouse, repository, api = setup
     summary = run(setup)

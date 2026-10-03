@@ -13,12 +13,7 @@ dependencies = [
   "duckdb==1.5.5",
   "google-auth>=2.40,<3",
   "google-cloud-storage>=3.13.1,<4",
-  "google-cloud-tasks>=2.20,<3",
   "google-crc32c>=1.6,<2",
-  "fastapi>=0.115,<1",
-  "httpx>=0.28,<1",
-  "tink>=1.12,<2",
-  "uvicorn>=0.34,<1",
   "pytz>=2025.2,<2026",
 ]
 
@@ -58,5 +53,5 @@ strict = true
 # These dependencies do not publish a py.typed marker. Their values are
 # constrained by the transport and parser protocols at the application boundary.
 [[tool.mypy.overrides]]
-module = ["google.cloud", "google.cloud.storage.*", "google.cloud.tasks_v2.*", "tink", "tink.*", "ccl_segb", "ccl_segb.*"]
+module = ["google.cloud", "google.cloud.storage.*", "ccl_segb", "ccl_segb.*"]
 ignore_missing_imports = true

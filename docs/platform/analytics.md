@@ -36,8 +36,8 @@ commit後の再実行は既存の成功判定でskipする。commitの応答が�
 
 Loaderはsource横断JOIN、interval生成、日次集計を行わない。これらはdbt Viewで行う。
 
-FitbitのWebhook workerは指定key/generationだけを`run_loader_objects`へ渡す。
-共通Loaderと同じ取込台帳・transaction・leaseを使い、通知ごとの一覧取得とmigrationを省く。
+Fitbitの日次Collectorは保存したバッチのkey/generationと取得済みbytesを`run_loader_objects`へ渡す。
+共通Loaderと同じ取込台帳・transaction・leaseを使い、通常の一覧取得と再ダウンロードを省く。
 完全取得範囲の置換・削除・順位管理は[`Fitbitデータモデル`](../sources/fitbit/data-model.md)に従う。
 
 ## Ops schema
@@ -91,6 +91,7 @@ migrationのchecksumが変わっていた場合は停止し、既存migrationを
 `001_initial.sql`で初期スキーマを作成する。`002_screen_time_app_usage_platform.sql`で
 streamから`ios`/`macos`を決めるmacroへ更新する。
 `003_fitbit.sql`でFitbitの7 base table、範囲台帳、削除IDの順位台帳を追加する。
+`004_fitbit_acquisition.sql`で内容hashと旧Raw保存予定、`005_fitbit_daily.sql`で日次進捗とバッチ保存予定を追加する。
 各SQLと適用履歴は同じtransactionで確定し、失敗時はそのSQLの変更と履歴をrollbackする。
 SQLの正本はPython package内の`src/personal_data_platform/migrations/`に置き、wheelにも同梱する。
 

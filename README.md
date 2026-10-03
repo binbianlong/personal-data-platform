@@ -3,7 +3,7 @@
 個人データの取得、Raw保存、MotherDuckへの取込、dbt分析を行うPythonプロジェクト。
 
 Loader、監査、再構築はsourceとstreamを選んで実行する。Screen TimeはiPhoneの`App.InFocus`と
-Macの`ScreenTime.AppUsage`を扱う。FitbitはGoogle Health Webhook経由の取り込みを実装し、本番導入は準備段階である。共通処理とsourceの分離・追加手順は
+Macの`ScreenTime.AppUsage`を扱う。Fitbitは共通の日次JobからGoogle Health APIを1日1回取得する。日次方式の本番適用は別途行う。共通処理とsourceの分離・追加手順は
 [`アーキテクチャ`](docs/platform/architecture.md)を参照する。
 
 ## 開発環境
@@ -38,9 +38,8 @@ pdp reconciliation
 pdp rebuild --dry-run
 pdp rebuild --target-db <scratch-database> --allow-partial-history
 pdp preflight
-pdp fitbit serve
+pdp fitbit daily
 pdp fitbit sync --from 2026-09-20 --to 2026-09-27
-pdp fitbit repair
 ```
 
 `loader`、`reconciliation`、`rebuild`は指定を省略すると既存iPhoneの`screen_time / app-in-focus`を対象にする。

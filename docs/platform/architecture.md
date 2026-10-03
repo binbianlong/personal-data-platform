@@ -5,7 +5,7 @@
 ```text
 Source固有の取得処理
   -> GCS Raw（source固有のkey、schema version、保持期限）
-  -> source / stream別Loader（Cloud Run JobまたはWebhook worker）
+  -> source / stream別Loader（Cloud Run Jobまたは日次Collector）
   -> MotherDuckの型付きbase
   -> dbt View
   -> MotherDuck Remote MCP（read-only）
@@ -19,8 +19,9 @@ source / stream別Cloud Run Reconciliation Job
 実データの取得まで実装しているのは、Macへ同期されたiPhoneの`App.InFocus`と
 Mac自身の`ScreenTime.AppUsage`である。両方とも[`Screen Time`](../sources/screen-time/)に属し、
 `source_id=screen_time`、`stream=app-in-focus`または`app-usage`でRaw schema v1/v2を扱う。
-Fitbitは`fitbit / health`としてWebhook受信・API取得・Raw保存・取込・分析を実装し、
-本番導入は準備段階である。専用Service/queueで即時処理し、定期補修は既存reconciliationを使う。
+Fitbitは`fitbit / health`としてAPI取得・Raw保存・取込・分析を実装する。
+既存reconciliation Jobで1日1回取得し、Screen Timeと同じGCSリポジトリ・Loader・DB接続を使う。
+通常は複数種別の変更を1つのgzip Rawへまとめ、進捗と未完了保存はMotherDuckで管理する。
 複数source、同じsource内の別stream、複数schema versionを扱う共通処理はsynthetic fixtureで検証する。
 
 単一GCP project内で本番と検証を運用する。本番とは別のRawを使う検証ではGCS bucket、MotherDuck database、

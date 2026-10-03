@@ -29,6 +29,8 @@ class FitbitSource:
         "ops.fitbit_coverage",
         "ops.fitbit_deleted_record",
         "ops.fitbit_raw_intent",
+        "ops.fitbit_daily_state",
+        "ops.fitbit_batch_intent",
         "marts.daily_fitbit_health",
         "marts.fitbit_steps_time_series",
         "marts.fitbit_heart_rate_time_series",

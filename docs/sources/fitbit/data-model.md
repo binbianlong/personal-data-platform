@@ -1,30 +1,38 @@
 # Fitbitデータモデル
 
-## API Rawと受付記録
+## バッチRawとDB状態
 
 ```text
-raw/fitbit/v1/<subject_key>/health/<data-type>/<YYYYMMDDTHHMMSSffffffZ>/<sha256>.json.gz
-receipts/fitbit/v1/<YYYY-MM-DD>/<受付ID>.json
-raw/fitbit/v1/_control/device-sync/<subject_key>.json
+raw/fitbit/v2/<subject_key>/health/batch/<YYYYMMDDTHHMMSSffffffZ>/<sha256>.json.gz
 ```
 
-subjectは個人を表す安定した疑似識別子を使う。OAuthのIDやtokenをkeyに含めない。
-Rawはschema version 1のJSON envelopeで、subject、data type、取得した半開区間、取得開始時刻、
-`complete=true`、正規化行、元API data pointの全フィールドを保持する。SHA-256はgzip前のenvelopeに対して計算する。
+通常は7日分の変更を1つのschema version 2 envelopeへまとめる。
+subject、バッチの最終取得開始時刻、種別・範囲ごとのschema version 1 Snapshotを持つ。
+各Snapshotは取得した半開区間、取得開始時刻、`complete=true`、正規化行、元API pointの全フィールドを保持する。
+同じ種別で範囲が重なるSnapshotは同一バッチに入れない。SHA-256はgzip前のenvelopeに対して計算する。
 JSONのwire表記自体は保存せず、未知フィールドを含むpoint内容を保持する。gzipは決定的で、Rawはcreate-only。
-Rawは90日保持する。端末同期checkpointは世代条件付きで更新する小さなcontrol JSONで、Rawの削除対象から外す。
-共通`observed_at`にはこのsourceでは取得開始時刻を使い、遅れて完了した古い取得による上書きを防ぐ。
+subjectは安定した疑似識別子を使い、OAuthのIDやtokenをkeyに含めない。
 
-受付記録は取得予定区間、保存済みRawのkey/generation、区間ごとの完了状態を持つ。
-変更なしで保存を省いた区間は取得時刻・内容hashと完了を記録し、旧形式の受付も読み取る。
-generationの条件付き更新を使い、全通知履歴を毎回複製しない。Raw保存予定はDBに先に確定する。
-受付とRawの作成は別操作なので、Raw保存後・参照保存前の障害では未参照Rawが残り得る。
-再試行時は保存予定、GCS、取込台帳を照合し、存在しない予定Rawは元の拡張範囲をより新しい時刻で再取得する。
-Raw参照を保存済みなら同じgenerationを使う。
+バッチの共通`observed_at`は最も新しいSnapshotの取得開始時刻とし、置換順位は各Snapshot自身の時刻を使う。
+既存の`raw/fitbit/v1/<subject>/health/<data-type>/.../*.json.gz`も共通Loader・再構築から読み取れる。
+両形式のRawはGCS作成から90日保持する。新しい受付・checkpointファイルはGCSに作らない。
+残っている旧受付と旧control JSONにも90日の削除条件を設定する。
+
+`ops.fitbit_daily_state`は利用者ごとの完了日、補完済み同期日、最後に完了した同期時刻、成功した日次実行日を持つ。
+`ops.fitbit_batch_intent`はRaw key、取得予定範囲、変更なしで省いた範囲のhash・確認時刻、確定予定の進捗を持つ。
+保存予定をDBへ先に確定してからGCSへ保存する。Rawの分析反映は共通Warehouseのtransactionで確定し、
+確認時刻・進捗・保存予定の解消を次のDB transactionで確定する。
+
+障害後はまず取込台帳を確認する。反映済みならGCSを読まずに進捗を確定する。
+未反映なら対象keyだけを確認し、存在するRawは同じgenerationで読み取る。
+Rawが存在しない場合は保存予定の範囲をより新しい時刻で再取得する。
+旧`ops.fitbit_raw_intent`も対象keyで復旧し、新しい完全取得が覆う古い保存予定を解消する。
+GCSの旧受付自体を新方式の進捗には使わないため、切替前に未完了受付を処理するか、その期間を手動取得する。
 
 ## テーブルと単位
 
-Fitbitの初期スキーマは`003_fitbit.sql`、内容hashとRaw保存予定の拡張は追記migrationとする。
+Fitbitの初期スキーマは`003_fitbit.sql`、内容hashと旧Raw保存予定は`004_fitbit_acquisition.sql`、
+日次進捗とバッチ保存予定は`005_fitbit_daily.sql`で追加する。
 適用済みmigrationは変更しない。
 
 | base table | 行とvalueの単位 |
@@ -66,7 +74,7 @@ Rawには取得時の並びをそのまま残す。
 分析行と台帳を同じtransactionでcommitする。
 commit結果不明・rollback失敗では接続を破棄し、再接続後の台帳で判定する。
 Rawを省いた期間は元のRawが90日後に消えるとRawだけでの完全再構築を保証しない。
-これはScreen Timeと同じ復旧範囲であり、必要ならAPI再取得で補う。
+保持中のRawに元データが含まれる範囲だけ再構築でき、必要ならAPI再取得で補う。
 
 ## 分析ビュー
 
