@@ -697,59 +697,48 @@ def test_reconciliation_rejects_heartbeat_url_with_cloud_monitoring(monkeypatch)
 
 
 def test_all_streams_reconciliation_attempts_mac_after_iphone_failure(monkeypatch) -> None:
-    from types import SimpleNamespace
+    import duckdb
 
     from personal_data_platform.reconciliation import job
+    from personal_data_platform.storage.motherduck import Warehouse
 
     monkeypatch.setenv("PDP_RECONCILIATION_MONITORING_MODE", "cloud_monitoring")
     monkeypatch.delenv("RECONCILIATION_HEARTBEAT_URL", raising=False)
-    sources = [
-        SimpleNamespace(
-            source_id="screen_time", stream=stream, repository_from_env=lambda: object()
-        )
-        for stream in ("app-in-focus", "app-usage")
-    ]
+    sources = [get_source("screen_time", stream) for stream in ("app-in-focus", "app-usage")]
     seen = []
 
-    class FakeWarehouse:
-        connection_usable = True
+    warehouse = Warehouse(duckdb.connect())
+    warehouse.migrate()
+    for relation in REQUIRED_RELATIONS:
+        if relation != "base.screen_time_event":
+            warehouse.connection.execute(f"CREATE OR REPLACE VIEW {relation} AS SELECT 1 AS value")
+    original_close = warehouse.close
+    monkeypatch.setattr(warehouse, "close", lambda: None)
 
-        def __init__(self, _connection):
-            self.locked = False
+    def repository(source):
+        def create():
+            seen.append(
+                (source.stream, warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 1)
+            )
+            if source.stream == "app-in-focus":
+                raise RuntimeError("synthetic iPhone failure")
+            return _Repository([], receipt_at=datetime.now(UTC), manifest_at=datetime.now(UTC))
 
-        def migrate(self):
-            pass
+        return create
 
-        def acquire_job_lock(self, *_args, **_kwargs):
-            self.locked = True
-            return True
-
-        def release_job_lock(self, *_args):
-            self.locked = False
-
-        def close(self):
-            pass
-
-    def fake_reconcile(_repository, warehouse, *, source, **_kwargs):
-        seen.append((source.stream, warehouse.locked))
-        if source.stream == "app-in-focus":
-            raise RuntimeError("synthetic iPhone failure")
-        return SimpleNamespace(
-            ok=True,
-            status="succeeded",
-            raw_object_count=0,
-            loaded_object_count=0,
-            missing_object_count=0,
-            failed_object_count=0,
-            orphaned_loaded_object_count=0,
-        )
+    for source in sources:
+        monkeypatch.setattr(source, "repository_from_env", repository(source))
 
     monkeypatch.setattr(job, "get_sources", lambda *_args, **_kwargs: tuple(sources))
     monkeypatch.setattr(job, "validate_runtime_policy", lambda _source: None)
-    monkeypatch.setattr(job, "Warehouse", FakeWarehouse)
+    monkeypatch.setattr(job, "Warehouse", lambda _connection: warehouse)
     monkeypatch.setattr(job, "connect", lambda _config: object())
     monkeypatch.setattr(job.WarehouseConfig, "from_env", lambda: object())
-    monkeypatch.setattr(job, "run_reconciliation", fake_reconcile)
 
-    assert run_reconciliation_from_env(source_id="screen_time", all_streams=True) == 1
-    assert seen == [("app-in-focus", True), ("app-usage", True)]
+    try:
+        assert run_reconciliation_from_env(source_id="screen_time", all_streams=True) == 1
+        assert seen == [("app-in-focus", True), ("app-usage", True)]
+        assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == 1
+        assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+    finally:
+        original_close()

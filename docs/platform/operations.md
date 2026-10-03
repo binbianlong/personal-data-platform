@@ -89,11 +89,14 @@ Screen Timeの取込・監査は既存の`reconciliation` Jobで両streamを処�
    空のmanifestは明示的な休止、Raw・receipt・manifestが全てないMacは初回有効化前として扱う。
    manifestから外れたdeviceの残存Rawや古いreceiptはactive Collectorの異常に数えない。他sourceへ同じcontrol形式を要求しない。
 6. 未取込・`failed` ingestionがないことを確認する。
-7. 必須base / Viewの存在と各relationの代表`count(*)` queryを確認する。
+7. 選択した全streamの修復・取得状態監査が終わってから、必須base / Viewの存在と各relationの代表`count(*)` queryを確認する。
+   同じrelationはJob内で1回だけ検証し、欠損・query失敗はそのrelationを必要とする全streamの監査結果へ反映する。
 8. 対象scopeの全監査項目と再処理が成功した後、監査記録とMotherDuck内の成功heartbeatを保存する。追加sourceがHTTP監視を使う場合だけ、そのscope専用URLへ成功heartbeatを送る。
 
 Jobの開始、retry開始、Loaderへの引き渡しだけでは成功heartbeatを記録しない。監査結果を構築できた失敗では、
 失敗object、欠損relation、stale receiptなどの構造化した結果を記録し、Jobをnon-zeroで終了する。
+共有検証を待つ構築済みの結果は`running`（既に異常があれば`failed`）で保存し、後続streamの障害でも記録を残す。
+共通relationの一覧取得に失敗した場合、DB接続が使える間は全ての構築済み結果を原因付きの`failed`へ更新する。
 GCS listingやDB接続など結果構築前の失敗では監査行が残らない場合がある。この場合も成功heartbeatは記録せず、
 Jobの失敗とlogで原因を確認する。
 DB更新と外部通知の順序、および配送後のcommit失敗に関する制約は[`analytics.md`](analytics.md)に従う。

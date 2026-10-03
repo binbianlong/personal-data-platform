@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 
@@ -32,6 +32,15 @@ from .models import ReconciliationResult
 
 LOGGER = logging.getLogger(__name__)
 RECONCILIATION_LEASE_SECONDS = 155 * 60
+
+
+@dataclass(frozen=True)
+class _PreparedReconciliation:
+    source: SourceAdapter
+    result: ReconciliationResult
+    expired_states: tuple[IngestionState, ...]
+    checked_at: datetime
+    existing_expired_count: int
 
 
 def _no_external_heartbeat(_payload: dict[str, object]) -> None:
@@ -83,17 +92,16 @@ def _list_raw_by_key(
     return {value.key: value for value in list_source_raw(repository, source, prefix)}
 
 
-def run_reconciliation(
+def _prepare_reconciliation(
     repository: RawRepository,
     warehouse: Warehouse,
     *,
-    heartbeat: HeartbeatPublisher,
     source: SourceAdapter | None = None,
     prefix: str | None = None,
     repair_missing: bool = True,
     now: datetime | None = None,
-) -> ReconciliationResult:
-    """Audit raw/warehouse parity, repair missing loads, and publish success."""
+) -> _PreparedReconciliation:
+    """Repair and audit one stream before checking shared warehouse relations."""
 
     source = source or get_source()
     if selected_prefixes(source, prefix) != source.raw_prefixes:
@@ -178,11 +186,6 @@ def run_reconciliation(
     inventory_counts = warehouse.retention_inventory_counts(
         source_id=source.source_id, stream=source.stream
     )
-    available_relations = _relation_names(warehouse)
-    missing_relations = tuple(sorted(set(source.required_relations) - available_relations))
-    failed_relation_queries = _failed_relation_queries(
-        warehouse, available_relations, source.required_relations
-    )
     succeeded = (
         source_health.ok
         and not missing
@@ -192,8 +195,6 @@ def run_reconciliation(
         and not overdue_deletion
         and failed == 0
         and loading == 0
-        and not missing_relations
-        and not failed_relation_queries
     )
     completed_at = datetime.now(UTC)
     existing_expired_count = inventory_counts["expired_object_count"]
@@ -219,8 +220,6 @@ def run_reconciliation(
         "live_unloaded_object_count": len(missing),
         "active_loading_object_count": loading,
         "orphaned_loaded_object_count": len(unexpected_absent_succeeded),
-        "missing_relations": list(missing_relations),
-        "failed_relation_queries": list(failed_relation_queries),
     }
     result = ReconciliationResult(
         run_id=run_id,
@@ -232,8 +231,63 @@ def run_reconciliation(
         missing_object_count=len(missing),
         failed_object_count=failed,
         orphaned_loaded_object_count=len(unexpected_absent_succeeded),
+        details=details,
+    )
+    prepared = _PreparedReconciliation(
+        source,
+        result,
+        tuple(states[key] for key in sorted(expected_expired)),
+        checked_at,
+        existing_expired_count,
+    )
+    # Preserve this audit if a later repair leaves the shared connection unusable.
+    warehouse.record_reconciliation(_pending_reconciliation_result(prepared))
+    return prepared
+
+
+def _pending_reconciliation_result(prepared: _PreparedReconciliation) -> ReconciliationResult:
+    return replace(
+        prepared.result,
+        status="running" if prepared.result.ok else "failed",
+        details={
+            **prepared.result.details,
+            "expired_object_count": prepared.existing_expired_count,
+            "newly_expired_object_count": 0,
+        },
+    )
+
+
+def _complete_reconciliation(
+    prepared: _PreparedReconciliation,
+    warehouse: Warehouse,
+    *,
+    heartbeat: HeartbeatPublisher,
+    available_relations: set[str],
+    failed_relations: tuple[str, ...],
+) -> ReconciliationResult:
+    """Publish a stream's result only after every shared relation has been checked."""
+    source = prepared.source
+    missing_relations = tuple(sorted(set(source.required_relations) - available_relations))
+    failed_queries = tuple(
+        relation for relation in source.required_relations if relation in failed_relations
+    )
+    succeeded = prepared.result.ok and not missing_relations and not failed_queries
+    details = {
+        **prepared.result.details,
+        "missing_relations": list(missing_relations),
+        "failed_relation_queries": list(failed_queries),
+    }
+    if not succeeded:
+        details.update(
+            expired_object_count=prepared.existing_expired_count,
+            newly_expired_object_count=0,
+        )
+    result = replace(
+        prepared.result,
+        status="succeeded" if succeeded else "failed",
+        completed_at=datetime.now(UTC),
         missing_relations=missing_relations,
-        failed_relation_queries=failed_relation_queries,
+        failed_relation_queries=failed_queries,
         details=details,
     )
     if not result.ok:
@@ -249,16 +303,15 @@ def run_reconciliation(
         "loaded_object_count": result.loaded_object_count,
         "expired_object_count": details["expired_object_count"],
     }
-    warehouse.record_reconciliation(replace(result, status="running"))
     warehouse.connection.execute("BEGIN TRANSACTION")
     stage = "warehouse_heartbeat"
     try:
         stage = "retention_expiry"
         marked_expired = warehouse.mark_retention_expired(
-            (states[key] for key in expected_expired),
-            expired_at=checked_at,
+            prepared.expired_states,
+            expired_at=prepared.checked_at,
         )
-        if marked_expired != expected_expired:
+        if marked_expired != {state.object_key for state in prepared.expired_states}:
             raise RuntimeError("retention state changed during reconciliation; retry the audit")
         stage = "warehouse_heartbeat"
         warehouse.publish_heartbeat(source.monitor_name, result.run_id, heartbeat_payload)
@@ -274,13 +327,40 @@ def run_reconciliation(
             status="failed",
             details={
                 **result.details,
-                "expired_object_count": existing_expired_count,
+                "expired_object_count": prepared.existing_expired_count,
                 "newly_expired_object_count": 0,
                 f"{stage}_error": str(error),
             },
         )
         warehouse.record_reconciliation(result)
     return result
+
+
+def run_reconciliation(
+    repository: RawRepository,
+    warehouse: Warehouse,
+    *,
+    heartbeat: HeartbeatPublisher,
+    source: SourceAdapter | None = None,
+    prefix: str | None = None,
+    repair_missing: bool = True,
+    now: datetime | None = None,
+) -> ReconciliationResult:
+    """Audit raw/warehouse parity, repair missing loads, and publish success."""
+    prepared = _prepare_reconciliation(
+        repository, warehouse, source=source, prefix=prefix, repair_missing=repair_missing, now=now
+    )
+    available_relations = _relation_names(warehouse)
+    failed_relations = _failed_relation_queries(
+        warehouse, available_relations, prepared.source.required_relations
+    )
+    return _complete_reconciliation(
+        prepared,
+        warehouse,
+        heartbeat=heartbeat,
+        available_relations=available_relations,
+        failed_relations=failed_relations,
+    )
 
 
 def run_reconciliation_from_env(
@@ -318,6 +398,7 @@ def run_reconciliation_from_env(
         try:
             failed = False
             raw_inventory = GCSRawInventory()
+            prepared: list[_PreparedReconciliation] = []
             for source in sources:
                 try:
                     selected_repository = (
@@ -327,11 +408,8 @@ def run_reconciliation_from_env(
                         raise RuntimeError("reconciliation repository is unavailable")
                     if isinstance(selected_repository, GCSRawRepository):
                         selected_repository.use_raw_inventory(raw_inventory)
-                    result = run_reconciliation(
-                        selected_repository,
-                        warehouse,
-                        heartbeat=heartbeat,
-                        source=source,
+                    prepared.append(
+                        _prepare_reconciliation(selected_repository, warehouse, source=source)
                     )
                 except Exception:
                     if not all_streams:
@@ -343,19 +421,86 @@ def run_reconciliation_from_env(
                     if not warehouse.connection_usable:
                         break
                     continue
-                LOGGER.info(
-                    "reconciliation status=%s raw=%d loaded=%d missing=%d failed=%d "
-                    "orphaned=%d source=%s stream=%s",
-                    result.status,
-                    result.raw_object_count,
-                    result.loaded_object_count,
-                    result.missing_object_count,
-                    result.failed_object_count,
-                    result.orphaned_loaded_object_count,
-                    source.source_id,
-                    source.stream,
-                )
-                failed = failed or not result.ok
+            if prepared and warehouse.connection_usable:
+                # All repairs precede validation: a later stream can change a shared View.
+                try:
+                    available_relations = _relation_names(warehouse)
+                    required_relations = tuple(
+                        sorted(
+                            {
+                                relation
+                                for item in prepared
+                                for relation in item.source.required_relations
+                            }
+                        )
+                    )
+                    failed_relations = _failed_relation_queries(
+                        warehouse, available_relations, required_relations
+                    )
+                except Exception as error:
+                    if warehouse.connection_usable:
+                        for item in prepared:
+                            pending = _pending_reconciliation_result(item)
+                            try:
+                                warehouse.record_reconciliation(
+                                    replace(
+                                        pending,
+                                        status="failed",
+                                        completed_at=datetime.now(UTC),
+                                        details={
+                                            **pending.details,
+                                            "relation_checks_error": str(error),
+                                        },
+                                    )
+                                )
+                            except Exception:
+                                LOGGER.exception(
+                                    "failed to record reconciliation source=%s stream=%s",
+                                    item.source.source_id,
+                                    item.source.stream,
+                                )
+                                if not warehouse.connection_usable:
+                                    break
+                    if not all_streams:
+                        raise
+                    LOGGER.exception("shared reconciliation relation checks failed")
+                    failed = True
+                else:
+                    for item in prepared:
+                        source = item.source
+                        try:
+                            result = _complete_reconciliation(
+                                item,
+                                warehouse,
+                                heartbeat=heartbeat,
+                                available_relations=available_relations,
+                                failed_relations=failed_relations,
+                            )
+                        except Exception:
+                            if not all_streams:
+                                raise
+                            LOGGER.exception(
+                                "reconciliation failed source=%s stream=%s",
+                                source.source_id,
+                                source.stream,
+                            )
+                            failed = True
+                            if not warehouse.connection_usable:
+                                break
+                            continue
+                        LOGGER.info(
+                            "reconciliation status=%s raw=%d loaded=%d missing=%d failed=%d "
+                            "orphaned=%d source=%s stream=%s",
+                            result.status,
+                            result.raw_object_count,
+                            result.loaded_object_count,
+                            result.missing_object_count,
+                            result.failed_object_count,
+                            result.orphaned_loaded_object_count,
+                            source.source_id,
+                            source.stream,
+                        )
+                        failed = failed or not result.ok
         finally:
             if warehouse.connection_usable:
                 warehouse.release_job_lock("reconciliation", owner_id)

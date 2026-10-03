@@ -12,6 +12,219 @@ from personal_data_platform.sources.registry import get_source
 from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from tests.sql_helpers import TracedConnection
+
+
+@pytest.fixture
+def scheduled_warehouse(monkeypatch):
+    from personal_data_platform.reconciliation import job
+
+    warehouse = _warehouse()
+    connection = TracedConnection(warehouse.connection)
+    warehouse.connection = connection
+    monkeypatch.setenv("PDP_RECONCILIATION_MONITORING_MODE", "cloud_monitoring")
+    monkeypatch.delenv("RECONCILIATION_HEARTBEAT_URL", raising=False)
+    monkeypatch.delenv("PDP_FITBIT_DAILY_ENABLED", raising=False)
+    monkeypatch.setenv("MOTHERDUCK_DATABASE", ":memory:")
+    monkeypatch.setattr(job, "connect", lambda _config: connection)
+    monkeypatch.setattr(job, "Warehouse", lambda _connection: warehouse)
+    monkeypatch.setattr(warehouse, "close", lambda: None)
+    yield warehouse, connection
+    connection.close()
+
+
+def test_scheduled_screen_time_checks_each_shared_relation_once(scheduled_warehouse, monkeypatch):
+    from personal_data_platform.reconciliation import job
+    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+
+    warehouse, connection = scheduled_warehouse
+    monkeypatch.setattr(ScreenTimeSource, "repository_from_env", lambda _source: _Repository())
+
+    assert job.run_reconciliation_from_env(source_id="screen_time", all_streams=True) == 0
+    assert warehouse.query_value("SELECT count(*) FROM ops.reconciliation_run") == 2
+    assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == 2
+    for relation in get_source().required_relations:
+        assert connection.statements.count(f"SELECT count(*) FROM {relation}") == 1
+
+
+def test_missing_shared_view_blocks_both_stream_heartbeats(scheduled_warehouse, monkeypatch):
+    import json
+
+    from personal_data_platform.reconciliation import job
+    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+
+    warehouse, _ = scheduled_warehouse
+    warehouse.connection.execute("DROP VIEW marts.daily_screen_time_total")
+    monkeypatch.setattr(ScreenTimeSource, "repository_from_env", lambda _source: _Repository())
+
+    assert job.run_reconciliation_from_env(source_id="screen_time", all_streams=True) == 1
+    assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == 0
+    results = warehouse.query_rows("SELECT status, details FROM ops.reconciliation_run")
+    assert len(results) == 2
+    for status, details in results:
+        assert status == "failed"
+        assert json.loads(details)["missing_relations"] == ["marts.daily_screen_time_total"]
+
+
+@pytest.mark.parametrize("initially_healthy", [True, False])
+def test_prepared_audit_survives_a_later_unusable_connection(
+    scheduled_warehouse, monkeypatch, initially_healthy
+):
+    import gzip
+    import json
+
+    from personal_data_platform.reconciliation import job
+    from personal_data_platform.storage.motherduck import WarehouseConnectionError
+
+    warehouse, _ = scheduled_warehouse
+    expired = _synthetic_raw("synthetic", "first", 1, datetime.now(UTC) - timedelta(days=8))
+    pending = _synthetic_raw("synthetic", "second", 1, datetime.now(UTC))
+    warehouse.load_object(expired, byte_size=0, batch=_EmptyBatch())
+
+    class Source(_SyntheticSource):
+        def repository_from_env(self):
+            observations = [] if self.stream == "first" else [pending]
+
+            class Repository:
+                def list_raw(self, prefix):
+                    return [raw for raw in observations if raw.key.startswith(prefix)]
+
+                def get_raw(self, key, *, generation):
+                    return gzip.compress(b"payload")
+
+            return Repository()
+
+        def audit(self, repository, observations, now):
+            return SourceHealth(
+                ok=initially_healthy, details={"collector_fresh": initially_healthy}
+            )
+
+    sources = (Source("synthetic", "first", [expired]), Source("synthetic", "second", [pending]))
+    monkeypatch.setattr(job, "get_sources", lambda *_args, **_kwargs: sources)
+
+    def fail_commit(raw, *, byte_size, batch):
+        warehouse.connection_usable = False
+        raise WarehouseConnectionError("commit outcome unknown; reopen warehouse")
+
+    monkeypatch.setattr(warehouse, "load_object", fail_commit)
+
+    assert job.run_reconciliation_from_env(source_id="synthetic", all_streams=True) == 1
+    assert not warehouse.connection_usable
+    assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == 0
+    results = warehouse.query_rows("SELECT status, details FROM ops.reconciliation_run")
+    assert len(results) == 1
+    status, details = results[0]
+    assert status == ("running" if initially_healthy else "failed")
+    details = json.loads(details)
+    assert details["stream"] == "first"
+    assert details["expired_object_count"] == details["newly_expired_object_count"] == 0
+    assert details["expected_expiry_candidate_count"] == 1
+    assert (
+        warehouse.query_value(
+            "SELECT retention_expired_at FROM ops.ingestion_metadata WHERE object_key = ?",
+            [expired.key],
+        )
+        is None
+    )
+
+
+def test_shared_inventory_error_records_failed_audits(scheduled_warehouse, monkeypatch):
+    import json
+
+    from personal_data_platform.reconciliation import job
+    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+
+    warehouse, _ = scheduled_warehouse
+    monkeypatch.setattr(ScreenTimeSource, "repository_from_env", lambda _source: _Repository())
+    query_rows = warehouse.query_rows
+
+    def fail_inventory(sql, parameters=None):
+        if "information_schema.tables" in sql:
+            raise OSError("relation inventory temporarily unavailable")
+        return query_rows(sql, parameters)
+
+    monkeypatch.setattr(warehouse, "query_rows", fail_inventory)
+
+    assert job.run_reconciliation_from_env(source_id="screen_time", all_streams=True) == 1
+    assert warehouse.connection_usable
+    assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == 0
+    results = warehouse.query_rows("SELECT status, details FROM ops.reconciliation_run")
+    assert len(results) == 2
+    for status, details in results:
+        assert status == "failed"
+        assert (
+            json.loads(details)["relation_checks_error"]
+            == "relation inventory temporarily unavailable"
+        )
+
+
+@pytest.mark.parametrize("second_value", ["2", "invalid"])
+def test_shared_relation_checks_observe_both_repairs_before_success(
+    scheduled_warehouse, monkeypatch, second_value
+):
+    import gzip
+
+    from personal_data_platform.reconciliation import job
+
+    warehouse, connection = scheduled_warehouse
+    connection.execute("CREATE TABLE ops.reconciliation_probe (value VARCHAR)")
+    connection.execute(
+        "CREATE VIEW marts.shared_probe AS SELECT value FROM ops.reconciliation_probe "
+        "WHERE CAST(value AS INTEGER) > 0"
+    )
+
+    class ProbeBatch(_EmptyBatch):
+        def __init__(self, value):
+            self.value = value
+
+        def write(self, connection, raw, *, byte_size, loaded_at):
+            connection.execute("INSERT INTO ops.reconciliation_probe VALUES (?)", [self.value])
+
+    class Source(_SyntheticSource):
+        required_relations = ("marts.shared_probe",)
+
+        def __init__(self, stream, value):
+            self.raw = _synthetic_raw("synthetic", stream, 1, datetime.now(UTC))
+            super().__init__("synthetic", stream, [self.raw])
+            self.value = value
+
+        def repository_from_env(self):
+            raw = self.raw
+
+            class Repository:
+                def list_raw(self, prefix):
+                    return [raw] if raw.key.startswith(prefix) else []
+
+                def get_raw(self, key, *, generation):
+                    return gzip.compress(b"payload")
+
+            return Repository()
+
+        def decode(self, raw, payload):
+            return ProbeBatch(self.value)
+
+    sources = (Source("first", "1"), Source("second", second_value))
+    monkeypatch.setattr(job, "get_sources", lambda *_args, **_kwargs: sources)
+
+    failed = second_value == "invalid"
+    assert job.run_reconciliation_from_env(source_id="synthetic", all_streams=True) == int(failed)
+    assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 2
+    assert warehouse.query_rows("SELECT status FROM ops.reconciliation_run") == [
+        ("failed" if failed else "succeeded",),
+        ("failed" if failed else "succeeded",),
+    ]
+    assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == (0 if failed else 2)
+    checks = [
+        index
+        for index, sql in enumerate(connection.statements)
+        if sql == "SELECT count(*) FROM marts.shared_probe"
+    ]
+    repairs = [
+        index
+        for index, sql in enumerate(connection.statements)
+        if sql == "INSERT INTO ops.reconciliation_probe VALUES (?)"
+    ]
+    assert len(checks) == 1 and checks[0] > max(repairs)
 
 
 class _Repository:
