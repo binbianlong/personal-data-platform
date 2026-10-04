@@ -4,6 +4,8 @@
 - 状態: 設計案。アプリケーション・Terraform・本番環境への反映は未実施。
 - 移行元: `main` の `adc527a8fb25de1c93eca454aab2f39b0dec4e7c`
 
+実装と切替の順序は[移行計画](../plans/2026-10-05-pubsub-gcs-migration-plan.md)に記載する。
+
 ## 目的と採用する構成
 
 Screen TimeとFitbitを継続収集し、取得したRawを90日保存しながら、GCSのClass A操作と実行回数を抑える。個人利用の無料枠内での運用を目標にする。無料枠は請求先アカウント内の他用途とも共有されるため、移行後の実測で判定する。
@@ -135,7 +137,7 @@ APIが完全に取得できて結果が空なら、その範囲の削除を反�
 
 毎時・日次・手動処理はすべて共通の`loader` leaseを使う。Jobの`taskCount=1`や`parallelism=1`だけでは、別実行との競合を防げない。
 
-現在のleaseは125分固定で更新されないため、初期移行ではすべての書き込みJobを最大100分以内に制限する。API・DB呼び出しにもtimeoutを設け、終了・commit確認の余裕を残す。lease所有者を確認してから書き込み、所有権が不明・喪失した場合は続行しない。125分を超える処理が必要になった場合は、所有者を確認する更新と古い実行による書き込みを防ぐ仕組みを先に導入する。
+現在の`loader` leaseは125分固定で更新されない。移行元の日次監査には別名の`reconciliation` leaseが155分あり、手動dbtにも共通leaseがないため、既存経路をそのまま併用しても全writerを排他できない。初期移行では全writerを共通`loader` leaseへ揃え、すべての書き込みJobを最大100分以内に制限する。API・DB呼び出しにもtimeoutを設け、終了・commit確認の余裕を残す。lease所有者を確認してから書き込み、所有権が不明・喪失した場合は続行しない。125分を超える処理が必要になった場合は、所有者を確認する更新と古い実行による書き込みを防ぐ仕組みを先に導入する。
 
 ## GCS Rawの契約と操作削減
 
@@ -177,7 +179,24 @@ APIが返す心拍の集約値は平均・最小・最大で、元サンプル�
 
 ## リージョン移行
 
-GCPは受信Service、Job、GCS、Artifact Registryを`us-west1`へ揃える。Pub/Subのメッセージ保存・通信も同地域に制限する。MotherDuckはAWS `us-west-2`の新しい組織に移す。MotherDuckの組織リージョンは作成後に変更できない。[MotherDuckリージョン](https://motherduck.com/docs/about-motherduck/cloud-regions)
+地域を選べるGCPの実行・保存リソースは、Rawだけでなく検証用・管理用も`us-west1`へ揃える。
+
+| 対象 | 移行先・設定 |
+| --- | --- |
+| Cloud Run Serviceと全Job | `us-west1`。preflight・dbtも対象 |
+| Cloud Scheduler | `us-west1`。実行時刻は`Asia/Tokyo`を維持 |
+| GCS Raw・preflight・Terraform state | `us-west1`の別bucket。stateは独立したbackend移行 |
+| Artifact Registry | `us-west1`のrepository |
+| Pub/Sub | global resourceのメッセージ保存先を`us-west1`に制限し、`enforceInTransit=true`と`pubsub.us-west1.rep.googleapis.com`を使う |
+| Secret Manager | global secretにuser-managedの単一`us-west1` replicaを指定 |
+| 通常のCloud Logging | `us-west1`のlog bucketへ`_Default` sinkを切り替える |
+| IAM・Service Accounts・WIF・API有効化・Monitoring | global resourceとして維持。監視の地域・Job filterを更新 |
+
+Secret Managerの既存auto replicationは場所を変更できないため新secretを作る。Cloud Runのnative secret injectionはregional secretsに対応しないので、global secretのreplica指定で現在の注入方式を維持する。[replication policy](https://docs.cloud.google.com/secret-manager/docs/choosing-replication)、[Cloud Run secrets](https://docs.cloud.google.com/run/docs/configuring/services/secrets)
+
+既存の`_Required`監査log bucket/sinkは移動できないため例外として残す。通常logの過去分も旧bucketで期限まで保持し、新旧sinkの重複保存を避ける。これは実行・保存場所を揃える方針であり、全管理メタデータの地域限定を保証するものではない。[Logging地域化](https://docs.cloud.google.com/logging/docs/regionalized-logs)、[Pub/Sub endpoints](https://docs.cloud.google.com/pubsub/docs/reference/service_apis_overview)
+
+MotherDuckはAWS `us-west-2`の新しい組織に移す。組織リージョンは作成後に変更できない。[MotherDuckリージョン](https://motherduck.com/docs/about-motherduck/cloud-regions)
 
 GCPとAWSは同じOregonでも別クラウドなので、通信が無料になるとは仮定しない。GCPの外向き転送とMotherDuckの取り込み量を計測する。Terraform stateの移行はRaw bucketの移行と分け、stateの保管先・バックアップ・ロックを確認する。
 
