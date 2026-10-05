@@ -456,3 +456,35 @@ def test_task_acknowledges_pause_but_retries_failure_and_preserves_receipt(pause
         device_client=Devices(),
     )
     assert stored.receipt.key in queue.keys
+
+
+def test_receiver_requires_all_publishes_before_204():
+    from personal_data_platform.sources.fitbit.service import create_pubsub_app
+    from personal_data_platform.sources.fitbit.webhook import Verification, VerifiedNotification
+
+    class Auth:
+        def authenticate(self, **kwargs):
+            if kwargs["body"] == b'{"type":"verification"}':
+                return Verification()
+            return VerifiedNotification("self", (WINDOW,), groups=((WINDOW,), (WINDOW,)))
+
+    class Publisher:
+        def __init__(self):
+            self.calls = 0
+            self.fail = True
+
+        def publish(self, notification):
+            self.calls += 1
+            if self.fail and self.calls == 2:
+                raise TimeoutError("unknown publish result")
+            return "message"
+
+    publisher = Publisher()
+    client = TestClient(create_pubsub_app(authenticator=Auth(), notifications=publisher))
+    assert client.post("/webhooks/fitbit", content="{}").status_code == 503
+    assert publisher.calls == 2
+    publisher.fail = False
+    assert client.post("/webhooks/fitbit", content="{}").status_code == 204
+    assert client.post("/webhooks/fitbit", content='{"type":"verification"}').status_code == 200
+    assert publisher.calls == 4
+    assert client.post("/internal/tasks/fitbit", content="{}").status_code == 404

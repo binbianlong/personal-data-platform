@@ -62,6 +62,26 @@ def client(transport, **kwargs):
     return HealthClient(access_token=lambda: "synthetic-token", transport=transport, **kwargs)
 
 
+def test_paired_device_pages_use_remaining_job_budget():
+    remaining = [0.25]
+    transport = FakeTransport(
+        [{"nextPageToken": "next"}, {}],
+        before_request=lambda: remaining.__setitem__(0, 0),
+    )
+    health = client(transport)
+
+    def guard():
+        if remaining[0] <= 0:
+            raise TimeoutError("job deadline")
+        return remaining[0]
+
+    health.request_guard = guard
+    with pytest.raises(TimeoutError, match="deadline"):
+        health.latest_tracker_sync()
+    assert len(transport.calls) == 1
+    assert transport.calls[0][-1] == 0.25
+
+
 def test_latest_tracker_sync_reads_every_page_and_preserves_nanosecond_order():
     transport = FakeTransport(
         [

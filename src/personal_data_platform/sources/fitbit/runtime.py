@@ -6,9 +6,10 @@ import hashlib
 import json
 import logging
 import os
+import time as monotonic_time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -16,7 +17,8 @@ import google.cloud.storage as storage
 import uvicorn
 from google.cloud import tasks_v2
 
-from personal_data_platform.config import GCSConfig
+from personal_data_platform.config import GCSConfig, schema_profile, secret_config
+from personal_data_platform.loader.deadline import interrupt_after
 from personal_data_platform.loader.job import JobAlreadyRunning
 from personal_data_platform.reconciliation.job import (
     RECONCILIATION_LEASE_SECONDS,
@@ -38,10 +40,14 @@ from .receipts import (
     ReceiptRepository,
     validate_receipt_key,
 )
-from .service import Queue, ReceiptWorker, create_app
+from .service import Queue, ReceiptWorker, create_app, create_pubsub_app
 from .signatures import GoogleTaskIdentity, TinkSignatures
 from .sync_state import GCSFitbitSyncState, StoredSyncState
 from .webhook import GoogleHealthAuthenticator
+
+if TYPE_CHECKING:
+    from .acquisition import AcquisitionRunner, AcquisitionSummary
+    from .acquisition_state import RepairCursor
 
 LOGGER = logging.getLogger(__name__)
 
@@ -125,24 +131,82 @@ def _worker(receipts: GCSReceiptRepository, repository: GCSRawRepository) -> Rec
     )
 
 
+def delivery_mode() -> Literal["legacy", "pubsub"]:
+    mode = os.environ.get(
+        "PDP_FITBIT_DELIVERY_MODE", "pubsub" if schema_profile() == "west" else "legacy"
+    )
+    if mode not in ("legacy", "pubsub"):
+        raise ValueError("PDP_FITBIT_DELIVERY_MODE must be legacy or pubsub")
+    return "pubsub" if mode == "pubsub" else "legacy"
+
+
+def _acquisition_runner() -> AcquisitionRunner:
+    from .acquisition import AcquisitionRunner
+
+    values = dict(os.environ)
+    values["PDP_FITBIT_DELIVERY_MODE"] = "pubsub"
+    oauth = GoogleOAuth.from_env(values)
+    return AcquisitionRunner(
+        repository=GCSRawRepository.from_env(source=FitbitSource(version=2)),
+        client=HealthClient(access_token=oauth),
+        warehouse_factory=_warehouse,
+        subject_key=required("PDP_FITBIT_SUBJECT_KEY"),
+        paused=enabled("PDP_FITBIT_PROCESSING_PAUSED"),
+    )
+
+
+def run_notification_job(
+    *, max_messages: int = 500, collect_seconds: int = 120, timeout_seconds: int = 3000
+) -> AcquisitionSummary:
+    from .notifications import PubSubNotifications
+
+    configure_logging()
+    if delivery_mode() != "pubsub":
+        raise ValueError("ingest-notifications requires pubsub delivery mode")
+    return _acquisition_runner().ingest(
+        PubSubNotifications.from_env(),
+        max_messages=max_messages,
+        collect_seconds=collect_seconds,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def run_serve_from_env() -> int:
     configure_logging()
-    receipts, repository = _stores()
-    app = create_app(
-        authenticator=GoogleHealthAuthenticator(
-            authorization=required("PDP_FITBIT_WEBHOOK_AUTHORIZATION"),
-            health_user_id=required("PDP_FITBIT_HEALTH_USER_ID"),
-            subject_key=required("PDP_FITBIT_SUBJECT_KEY"),
-            signatures=TinkSignatures(),
-        ),
-        identity=GoogleTaskIdentity(
-            audience=required("PDP_FITBIT_SERVICE_URL").rstrip("/"),
-            service_account=required("PDP_FITBIT_TASK_SERVICE_ACCOUNT"),
-        ),
-        receipts=receipts,
-        queue=_queue(),
-        worker=_worker(receipts, repository),
-    )
+    if delivery_mode() == "pubsub":
+        from .notifications import PubSubNotifications
+
+        if os.environ.get("PDP_FITBIT_WEBHOOK_AUTHORIZATION") or os.environ.get(
+            "PDP_FITBIT_HEALTH_USER_ID"
+        ):
+            raise ValueError("legacy webhook settings conflict with pubsub configuration")
+        config = secret_config("PDP_FITBIT_WEBHOOK_CONFIG", ("authorization", "health_user_id"))
+        app = create_pubsub_app(
+            authenticator=GoogleHealthAuthenticator(
+                authorization=config["authorization"],
+                health_user_id=config["health_user_id"],
+                subject_key=required("PDP_FITBIT_SUBJECT_KEY"),
+                signatures=TinkSignatures(),
+            ),
+            notifications=PubSubNotifications.from_env(),
+        )
+    else:
+        receipts, repository = _stores()
+        app = create_app(
+            authenticator=GoogleHealthAuthenticator(
+                authorization=required("PDP_FITBIT_WEBHOOK_AUTHORIZATION"),
+                health_user_id=required("PDP_FITBIT_HEALTH_USER_ID"),
+                subject_key=required("PDP_FITBIT_SUBJECT_KEY"),
+                signatures=TinkSignatures(),
+            ),
+            identity=GoogleTaskIdentity(
+                audience=required("PDP_FITBIT_SERVICE_URL").rstrip("/"),
+                service_account=required("PDP_FITBIT_TASK_SERVICE_ACCOUNT"),
+            ),
+            receipts=receipts,
+            queue=_queue(),
+            worker=_worker(receipts, repository),
+        )
     uvicorn.run(
         app,
         host="0.0.0.0",
@@ -169,9 +233,19 @@ def sync_windows(start: datetime, end: datetime, data_types: tuple[str, ...]) ->
 
 
 def run_sync_from_env(
-    *, start: datetime, end: datetime, data_types: tuple[str, ...] = DATA_TYPES
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    data_types: tuple[str, ...] = DATA_TYPES,
+    resume_id: str | None = None,
 ) -> int:
     configure_logging()
+    from personal_data_platform.config import schema_profile
+
+    if schema_profile() == "west" or os.environ.get("PDP_FITBIT_DELIVERY_MODE") == "pubsub":
+        return _run_cursor_sync(start=start, end=end, data_types=data_types, resume_id=resume_id)
+    if start is None or end is None or resume_id is not None:
+        raise ValueError("legacy sync requires --from and --to and does not support --resume-id")
     receipts, repository = _stores()
     receipt = Receipt.create(
         required("PDP_FITBIT_SUBJECT_KEY"),
@@ -184,6 +258,173 @@ def run_sync_from_env(
     while not worker.run(stored.receipt.key):
         pass
     return 0
+
+
+def _run_cursor_sync(
+    *,
+    start: datetime | None,
+    end: datetime | None,
+    data_types: tuple[str, ...],
+    resume_id: str | None,
+) -> int:
+    from personal_data_platform.config import schema_profile
+    from personal_data_platform.loader.job import LOADER_LEASE_SECONDS
+
+    from .acquisition_state import RepairCursors
+
+    if (start is None) != (end is None) or (start is None and not resume_id):
+        raise ValueError("sync requires --from and --to, or --resume-id")
+    if start is not None and end is not None and start >= end:
+        raise ValueError("sync range must be increasing")
+    if resume_id is not None and (not resume_id.strip() or ":" in resume_id):
+        raise ValueError("resume id must be nonempty and contain no colon")
+    root_id = resume_id or str(uuid4())
+    owner = str(uuid4())
+    warehouse = _warehouse()
+    acquired = False
+    try:
+        warehouse.migrate(profile=schema_profile())
+        acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=LOADER_LEASE_SECONDS)
+        if not acquired:
+            raise JobAlreadyRunning("loader already has an unexpired job lease")
+        runner = _acquisition_runner()
+        store = RepairCursors(warehouse)
+        if start is not None and end is not None:
+            cursors = store.initialize(
+                root_id, runner.subject_key, sync_windows(start, end, data_types)
+            )
+        else:
+            cursors = store.read(root_id, runner.subject_key)
+            if not cursors:
+                raise ValueError("resume id has no persistent cursor")
+        LOGGER.info("fitbit sync cursor=%s", root_id)
+        result = _run_cursors(
+            runner, warehouse, cursors, lease_owner=owner, timeout_seconds=50 * 60
+        )
+        print(json.dumps({"resume_id": root_id, **asdict(result)}, sort_keys=True))
+        return 0 if result.ok else 1
+    finally:
+        if acquired and warehouse.connection_usable:
+            warehouse.release_job_lock("loader", owner)
+        warehouse.close()
+
+
+def _run_cursors(
+    runner: AcquisitionRunner,
+    warehouse: Warehouse,
+    cursors: tuple["RepairCursor", ...],
+    *,
+    lease_owner: str,
+    timeout_seconds: int,
+) -> AcquisitionSummary:
+    from .acquisition import AcquisitionSummary
+    from .acquisition_state import RepairCursors
+
+    limit = int(os.environ.get("PDP_FITBIT_MAX_SCOPES", "100"))
+    if not 1 <= limit <= 1000:
+        raise ValueError("PDP_FITBIT_MAX_SCOPES must be between 1 and 1000")
+    deadline = monotonic_time.monotonic() + timeout_seconds
+    store = RepairCursors(warehouse)
+    completed = 0
+    pending = sum(cursor.next_start < cursor.range_end for cursor in cursors)
+    for cursor in cursors:
+        while cursor.next_start < cursor.range_end:
+            seconds = int(deadline - monotonic_time.monotonic())
+            if seconds <= 0 or completed >= limit:
+                return AcquisitionSummary(completed, 0, max(1, pending))
+            warehouse.require_job_lock(lease_owner, remaining_seconds=seconds)
+            if cursor.data_type in DATE_TYPES:
+                stop = min(cursor.range_end, cursor.next_start + timedelta(days=1))
+            else:
+                day = cursor.next_start.astimezone(ZoneInfo("Asia/Tokyo")).date()
+                stop = min(cursor.range_end, _tokyo_start(day + timedelta(days=1)))
+            result = runner.run_windows(
+                (Window(cursor.data_type, cursor.next_start, stop),),
+                warehouse=warehouse,
+                lease_owner=lease_owner,
+                timeout_seconds=seconds,
+            )
+            if monotonic_time.monotonic() >= deadline:
+                return AcquisitionSummary(completed, 0, max(1, pending))
+            if not result.ok or result.completed_scopes != 1:
+                return AcquisitionSummary(
+                    completed,
+                    result.failed_scopes,
+                    max(result.deferred_scopes, int(not result.failed_scopes)),
+                )
+            warehouse.require_job_lock(lease_owner)
+            # run_windows returns only after the Raw and data transaction commits.
+            store.advance(cursor, stop)
+            cursor = replace(cursor, next_start=stop)
+            completed += 1
+        pending -= 1
+    return AcquisitionSummary(completed, 0, 0)
+
+
+def run_daily_repair(
+    *,
+    now: datetime,
+    lease_owner: str,
+    timeout_seconds: int,
+) -> AcquisitionSummary:
+    from .acquisition import AcquisitionSummary
+    from .acquisition_state import RepairCursors
+
+    if now.tzinfo is None:
+        raise ValueError("daily repair time must be timezone-aware")
+    if enabled("PDP_FITBIT_PROCESSING_PAUSED"):
+        return AcquisitionSummary(0, 0, 1)
+    deadline = monotonic_time.monotonic() + timeout_seconds
+    warehouse = _warehouse()
+    timer = interrupt_after(warehouse, timeout_seconds)
+
+    def remaining() -> float:
+        seconds = deadline - monotonic_time.monotonic()
+        if seconds <= 0:
+            raise TimeoutError("daily repair deadline exceeded")
+        warehouse.require_job_lock(lease_owner, remaining_seconds=max(1, int(seconds)))
+        return seconds
+
+    try:
+        remaining()
+        runner = _acquisition_runner()
+        if isinstance(runner.client, HealthClient):
+            runner.client.request_guard = remaining
+        latest = cast(DeviceClient, runner.client).latest_tracker_sync()
+        if latest is None or latest > SyncTime.from_datetime(now):
+            return AcquisitionSummary(0, 1, 0)
+        previous = warehouse.query_rows(
+            "SELECT last_sync_time FROM ops.fitbit_device_sync WHERE subject_key=? AND device_id='tracker'",
+            [runner.subject_key],
+        )
+        stop = _tokyo_start(now.astimezone(ZoneInfo("Asia/Tokyo")).date())
+        start = stop - timedelta(days=7)
+        if previous and latest > SyncTime.parse(previous[0][0]):
+            start = min(start, _tokyo_start(SyncTime.parse(previous[0][0]).tokyo_date()))
+        remaining()
+        store = RepairCursors(warehouse)
+        store.initialize(
+            "daily:" + runner.subject_key,
+            runner.subject_key,
+            sync_windows(start, stop, DATA_TYPES),
+            daily=True,
+        )
+        warehouse.connection.execute(
+            "INSERT INTO ops.fitbit_device_sync VALUES (?, 'tracker', ?, ?) "
+            "ON CONFLICT(subject_key,device_id) DO UPDATE SET last_sync_time=excluded.last_sync_time, "
+            "observed_at=excluded.observed_at",
+            [runner.subject_key, latest.text, now],
+        )
+        return _run_cursors(
+            runner,
+            warehouse,
+            store.pending(runner.subject_key),
+            lease_owner=lease_owner,
+            timeout_seconds=int(remaining()),
+        )
+    finally:
+        timer.cancel()
+        warehouse.close()
 
 
 RepairPhase = Literal["scheduled_receipts", "receipt_inventory", "raw_audit", "orphan_recovery"]
@@ -548,6 +789,34 @@ def _defer_repair(summary: RepairSummary, phase: RepairPhase) -> RepairSummary:
 def run_repair_from_env() -> RepairSummary:
     configure_logging()
     try:
+        from personal_data_platform.config import schema_profile
+
+        if schema_profile() == "west" or os.environ.get("PDP_FITBIT_DELIVERY_MODE") == "pubsub":
+            from personal_data_platform.loader.job import LOADER_LEASE_SECONDS
+
+            warehouse = _warehouse()
+            owner = str(uuid4())
+            acquired = False
+            try:
+                warehouse.migrate(profile=schema_profile())
+                acquired = warehouse.acquire_job_lock(
+                    "loader", owner, lease_seconds=LOADER_LEASE_SECONDS
+                )
+                if not acquired:
+                    return _report_repair(RepairSummary(deferred_phases=("raw_audit",)))
+                result = run_daily_repair(
+                    now=datetime.now(UTC), lease_owner=owner, timeout_seconds=100 * 60
+                )
+                return _report_repair(
+                    RepairSummary(
+                        failed_count=result.failed_scopes,
+                        deferred_phases=("raw_audit",) if result.deferred_scopes else (),
+                    )
+                )
+            finally:
+                if acquired and warehouse.connection_usable:
+                    warehouse.release_job_lock("loader", owner)
+                warehouse.close()
         return _run_repair_from_env()
     except Exception as error:
         LOGGER.error(

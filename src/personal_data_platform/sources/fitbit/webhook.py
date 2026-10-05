@@ -35,6 +35,7 @@ class Verification:
 class VerifiedNotification:
     subject_key: str
     windows: tuple[Window, ...]
+    groups: tuple[tuple[Window, ...], ...] = ()
 
 
 def merge_windows(windows: tuple[Window, ...]) -> tuple[Window, ...]:
@@ -182,6 +183,7 @@ class GoogleHealthAuthenticator:
         if not 1 <= len(notifications) <= 99:
             raise PayloadError("webhook requires between one and 99 notifications")
         windows: list[Window] = []
+        groups: list[tuple[Window, ...]] = []
         try:
             for notification in notifications:
                 data = object_dict(object_dict(notification)["data"])
@@ -195,9 +197,11 @@ class GoogleHealthAuthenticator:
                 intervals = data["intervals"]
                 if not isinstance(intervals, list) or not intervals:
                     raise ValueError("webhook intervals must be nonempty")
-                windows.extend(_window(kind, interval) for interval in intervals)
+                group = merge_windows(tuple(_window(kind, interval) for interval in intervals))
+                groups.append(group)
+                windows.extend(group)
         except AuthenticationError:
             raise
         except (ValueError, KeyError, TypeError, OverflowError) as error:
             raise PayloadError("invalid notification batch") from error
-        return VerifiedNotification(self._subject, merge_windows(tuple(windows)))
+        return VerifiedNotification(self._subject, merge_windows(tuple(windows)), tuple(groups))

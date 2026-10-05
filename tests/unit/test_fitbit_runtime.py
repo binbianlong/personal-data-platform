@@ -350,3 +350,41 @@ def test_weekly_receipts_have_distinct_keys_when_first_check_is_tuesday():
     )
     assert second.key != first.key
     assert state.read("self").state.weekly_pending == "2026-W42"
+
+
+def test_pubsub_receiver_uses_only_webhook_config(monkeypatch):
+    import personal_data_platform.sources.fitbit.runtime as runtime
+
+    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
+    monkeypatch.setenv("PDP_FITBIT_SUBJECT_KEY", "self")
+    monkeypatch.setenv(
+        "PDP_FITBIT_WEBHOOK_CONFIG", '{"authorization":"header","health_user_id":"owner"}'
+    )
+    monkeypatch.setenv("PDP_FITBIT_PUBSUB_TOPIC", "projects/test/topics/fitbit")
+    monkeypatch.setattr(
+        runtime,
+        "_stores",
+        lambda: (_ for _ in ()).throw(AssertionError("receiver may not construct Raw store")),
+    )
+    monkeypatch.setattr(
+        runtime.GoogleOAuth,
+        "from_env",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("receiver may not construct OAuth")
+        ),
+    )
+    apps = []
+    monkeypatch.setattr(runtime.uvicorn, "run", lambda app, **kwargs: apps.append(app))
+    assert runtime.run_serve_from_env() == 0
+    assert len(apps) == 1
+    assert "/internal/tasks/fitbit" not in {route.path for route in apps[0].routes}
+
+
+def test_delivery_mode_rejects_invalid_configuration(monkeypatch):
+    import pytest
+
+    import personal_data_platform.sources.fitbit.runtime as runtime
+
+    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "unsupported")
+    with pytest.raises(ValueError, match="PDP_FITBIT_DELIVERY_MODE"):
+        runtime.delivery_mode()

@@ -23,7 +23,7 @@ from personal_data_platform.sources.contracts import RawRepository
 from personal_data_platform.storage.motherduck import Warehouse
 
 from .adapter import FitbitSource
-from .models import Snapshot, Window, object_dict, string
+from .models import Notification, Snapshot, Window, object_dict, string
 from .raw import SnapshotRepository, encode_snapshot
 from .receipts import (
     Receipt,
@@ -405,6 +405,50 @@ def create_app(
             return Response(status_code=503)
         except Exception as error:
             LOGGER.error("fitbit task failed: %s", type(error).__name__)
+            return Response(status_code=503)
+
+    return app
+
+
+class NotificationPublisher(Protocol):
+    def publish(self, notification: Notification) -> str: ...
+
+
+def create_pubsub_app(
+    *, authenticator: GoogleHealthAuthenticator, notifications: NotificationPublisher
+) -> FastAPI:
+    """Keep the receiver independent of warehouse, Raw storage and OAuth access."""
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.get("/healthz")
+    def health() -> Response:
+        return Response(status_code=200)
+
+    @app.post("/webhooks/fitbit")
+    async def webhook(request: Request) -> Response:
+        try:
+            payload = await run_in_threadpool(
+                authenticator.authenticate,
+                authorization=request.headers.get("authorization"),
+                signature_header=request.headers.get("google-health-api-signature"),
+                content_type=request.headers.get("content-type"),
+                body=await _body(request),
+            )
+            if isinstance(payload, Verification):
+                return Response(status_code=200)
+            received_at = datetime.now(UTC)
+            for windows in payload.groups or (payload.windows,):
+                notification = Notification(
+                    uuid.uuid4().hex, payload.subject_key, windows, received_at
+                )
+                await run_in_threadpool(notifications.publish, notification)
+            return Response(status_code=204)
+        except AuthenticationError:
+            return Response(status_code=401)
+        except PayloadError:
+            return Response(status_code=400)
+        except Exception as error:
+            LOGGER.error("fitbit webhook publish failed: %s", type(error).__name__)
             return Response(status_code=503)
 
     return app

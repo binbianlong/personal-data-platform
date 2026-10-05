@@ -237,7 +237,11 @@ class HealthClient:
         self._timeout = timeout
         self._clock = clock
         self._max_pages = max_pages
-        self.request_guard: Callable[[], None] | None = None
+        self.request_guard: Callable[[], float | None] | None = None
+
+    def _request_timeout(self) -> float:
+        remaining = self.request_guard() if self.request_guard is not None else None
+        return self._timeout if remaining is None else min(self._timeout, remaining)
 
     def latest_tracker_sync(self) -> SyncTime | None:
         """Read every paired-device page and take the newest tracker sync."""
@@ -245,6 +249,8 @@ class HealthClient:
         page_token = ""
         seen_tokens: set[str] = set()
         for _ in range(self._max_pages):
+            if self.request_guard is not None:
+                self.request_guard()
             token = self._access_token()
             if not isinstance(token, str) or not token.strip():
                 raise AuthenticationError("Google Health access token is missing")
@@ -257,7 +263,7 @@ class HealthClient:
                 "GET",
                 f"https://health.googleapis.com/v4/users/me/pairedDevices?{urlencode(query)}",
                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                timeout=self._timeout,
+                timeout=self._request_timeout(),
             )
             devices = page.get("pairedDevices", [])
             if not isinstance(devices, list):
@@ -455,7 +461,7 @@ class HealthClient:
                 "Content-Type": "application/json",
             },
             body=json.dumps(body, separators=(",", ":")).encode(),
-            timeout=self._timeout,
+            timeout=self._request_timeout(),
         )
 
     def _page(self, window: Window, page_token: str) -> dict[str, object]:
@@ -481,7 +487,7 @@ class HealthClient:
             f"https://health.googleapis.com/v4/users/me/dataTypes/{window.data_type}"
             f"/dataPoints:reconcile?{urlencode(query)}",
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-            timeout=self._timeout,
+            timeout=self._request_timeout(),
         )
 
 
