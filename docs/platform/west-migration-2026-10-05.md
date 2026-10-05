@@ -86,3 +86,16 @@ var/west-migration/python/bin/python scripts/migrate_west_warehouse.py --export 
 次は西部MotherDuckのproduction/preflight接続を分離し、空DBへbaselineを適用する。残り3 secretの数値versionを登録して新Jobを停止状態でdeployし、実cloud import・限定Fitbit取得・dbt・両stream監査・rollbackを確認する。その後に最終差分、旧URLからのPub/Sub発行、collector/分析/MCPの切替、2 scheduleの有効化、Logging routing、警報の発火/復旧を確認する。
 
 現時点のactive secret versionは新旧併存で9個。新imageだけで約180 MiB、コピーRawは約6.8 MBであり、これだけでは定常無料枠の目標達成を判断できない。コピー/検証のGET・LIST・書込操作、転送、旧資産、MotherDuck容量/CUhを含む総額は未確定である。受入とrollbackの確認後に旧資産を整理し、切替後7日・30日の実測を記録する。
+
+## MotherDuck向け通信の料金と移行前計測
+
+2026-10-05にCloud Billing Catalog APIでCloud Run専用のインターネット転送SKUを確認した。米国から東京への大陸間通信は最初から$0.12/GiB（SKU `DBAA-7594-B9FA`）、北米内の通信は月1GiBまで無料、その後は$0.105/GiB（SKU `DDFD-AE42-E219`）。いずれも最初の有料帯のUSD単価であり、北米内でも同じOregonだから無制限に無料とは扱わない。[Cloud Run料金](https://cloud.google.com/run/pricing)、[大陸間転送SKU](https://cloud.google.com/skus?currency=USD&filter=DBAA-7594-B9FA)、[北米内転送SKU](https://cloud.google.com/skus?currency=USD&filter=DDFD-AE42-E219)
+
+同projectの`run.googleapis.com/container/network/sent_bytes_count`を`kind=internet`で集計した。JobとServiceを含むCloud Run全体の監視値であり、MotherDuckだけの通信量や請求明細ではない。
+
+| 計測期間（JST） | 外向きインターネット送信 | 全量を東京向けと仮定した概算 |
+| --- | ---: | ---: |
+| 2026-09-01 00:00〜2026-10-01 00:00 | 418,676,667 bytes（0.390 GiB） | 約$0.047 |
+| 2026-10-01 00:00〜2026-10-05 20:56 | 144,666,580 bytes（0.135 GiB） | 約$0.016 |
+
+9月は旧構成の計測で、新Fitbitの定常処理を含まない。10月は停止中の処理と検証実行を含むため、通常月の通信量へ外挿しない。監視値からの概算を実際の課金額として記録せず、運用再開後の送信量と請求SKUを同じ期間で照合する。MotherDuck自体の保存・計算無料枠に収まっていても、Cloud Runから東京へ送る料金は別に発生し得る。

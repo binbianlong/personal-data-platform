@@ -244,7 +244,7 @@ Secret Managerは移行元の5つのFitbit関連secretと基盤用secretをそ�
 
 FitbitのRaw bundleが1日1個なら31個/月、毎時1個なら744個/月になる。ただし変更したデータ量による分割、Screen Timeのsegment、control、inventory LISTは別に加算する。通知ごとの保存を外すだけでClass A全体が無料枠に収まるとは断定しない。
 
-移行前と切替後の7日・30日の実測を比較する。最低限、GCSの容量とClass A/B、ソース別Raw作成数・圧縮サイズ、Pub/Subの送受信量・再配信・最古未ack、Cloud Runの課金対象秒・CPU/memory・外向き転送、MotherDuckの保存容量・CUhを記録する。Cloud Runからのインターネット転送の無料枠は北米から1GiB/月で、GCSの転送無料枠とは別である。[Cloud Run料金](https://cloud.google.com/run/pricing)
+移行前と切替後の7日・30日の実測を比較する。最低限、GCSの容量とClass A/B、ソース別Raw作成数・圧縮サイズ、Pub/Subの送受信量・再配信・最古未ack、Cloud Runの課金対象秒・CPU/memory・外向き転送、MotherDuckの保存容量・CUhを記録する。Cloud Runのインターネット転送無料枠は北米内の通信で1GiB/月であり、米国から東京への通信には適用しない。GCSの転送無料枠とは別で、同じOregonのGCPとAWS間もインターネット転送として計測する。[Cloud Run料金](https://cloud.google.com/run/pricing)
 
 無料枠から余裕を残すため、通常月の容量・操作・実行量の目標を各枠の70%以下とする。Scheduler数とsecret version数は無料枠内に収める。まず重複処理・空実行・保存単位・image/secretの保持を調整し、通知の集約間隔や補修頻度を変える場合は鮮度と復旧範囲への影響を確認する。
 
