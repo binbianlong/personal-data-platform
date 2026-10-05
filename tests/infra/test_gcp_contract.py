@@ -681,6 +681,15 @@ WEST_SECRET_VERSIONS = {
     [
         ("false", {}, True),
         ("true", WEST_SECRET_VERSIONS, True),
+        (
+            "true",
+            {
+                key: value
+                for key, value in WEST_SECRET_VERSIONS.items()
+                if key != "motherduck_preflight_token"
+            },
+            True,
+        ),
         ("true", {}, False),
         ("true", {"motherduck_token": "7"}, False),
         ("true", {**WEST_SECRET_VERSIONS, "unknown_secret": "19"}, False),

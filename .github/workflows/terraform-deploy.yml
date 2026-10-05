@@ -78,10 +78,11 @@ jobs:
           if [[ "${WEST_ENABLED}" == "true" ]]; then
             jq -e '
               type == "object" and
-              keys == ["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_preflight_token", "motherduck_token"] and
+              (["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_token"] - keys | length == 0) and
+              (keys - ["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_preflight_token", "motherduck_token"] | length == 0) and
               all(.[]; type == "string" and test("^[1-9][0-9]*\\z"))
             ' <<< "${TF_VAR_west_secret_versions}" > /dev/null || {
-              echo "Enabled west deployment requires all five numeric secret version pins in PDP_WEST_SECRET_VERSIONS." >&2
+              echo "Enabled west deployment requires four runtime numeric secret version pins in PDP_WEST_SECRET_VERSIONS." >&2
               exit 1
             }
           fi

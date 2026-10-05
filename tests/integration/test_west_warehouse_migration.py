@@ -90,7 +90,7 @@ def test_export_import_preserves_screen_time_and_maps_raw_without_old_fitbit_sta
 
 
 def test_final_delta_applies_updates_and_deletions_preserving_new_fitbit(tmp_path):
-    from scripts.migrate_west_warehouse import export_snapshot, final_delta, import_snapshot
+    from scripts.migrate_west_warehouse import export_snapshot, import_snapshot
 
     source, target = duckdb.connect(), duckdb.connect()
     raw_path = tmp_path / "raw.json"
@@ -105,7 +105,8 @@ def test_final_delta_applies_updates_and_deletions_preserving_new_fitbit(tmp_pat
     target.execute(
         "INSERT INTO ops.fitbit_coverage VALUES ('new','steps', '2026-10-01'::TIMESTAMPTZ, '2026-10-02'::TIMESTAMPTZ, now(), 'api', 'new-key', 'hash', 'source-hash')"
     )
-    final_delta(source, target, snapshot, raw_path)
+    export_snapshot(source, snapshot)
+    import_snapshot(target, snapshot, raw_path)
     assert target.execute("SELECT bundle_id, is_active FROM base.screen_time_event").fetchall() == [
         ("corrected.app", False)
     ]
@@ -191,6 +192,30 @@ def test_source_connection_enforces_read_only_and_export_is_private(tmp_path):
     snapshot = tmp_path / "private.duckdb"
     assert main(["--export", "--source-db", str(source_path), "--snapshot", str(snapshot)]) == 0
     assert snapshot.stat().st_mode & 0o777 == 0o600
+
+
+def test_cli_rejects_combined_cloud_credentials_before_connect(monkeypatch, tmp_path):
+    from scripts import migrate_west_warehouse as migration
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("combined migration may not open either credential")
+
+    monkeypatch.setattr(migration, "_source_connection", unexpected)
+    with pytest.raises(SystemExit) as error:
+        migration.main(
+            [
+                "--final-delta",
+                "--source-db",
+                "source",
+                "--target-db",
+                "target",
+                "--snapshot",
+                str(tmp_path / "private.duckdb"),
+                "--raw-manifest",
+                str(tmp_path / "raw.json"),
+            ]
+        )
+    assert error.value.code == 2
 
 
 def test_scripts_support_direct_python_invocation():

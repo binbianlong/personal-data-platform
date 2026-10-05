@@ -289,12 +289,6 @@ def import_snapshot(target_connection, local_path: Path, raw_manifest: Path) -> 
         warehouse.release_job_lock("loader", owner)
 
 
-def final_delta(source_connection, target_connection, local_path: Path, raw_manifest: Path) -> dict:
-    """Take a fresh source snapshot and apply its Screen Time updates and deletions."""
-    export_snapshot(source_connection, local_path)
-    return import_snapshot(target_connection, local_path, raw_manifest)
-
-
 def _source_connection(database: str, *, source_writers_stopped: bool = False):
     if database.endswith((".duckdb", ".db")):
         return duckdb.connect(database, read_only=True)
@@ -330,7 +324,7 @@ def _source_connection(database: str, *, source_writers_stopped: bool = False):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_mutually_exclusive_group(required=True)
-    for action in ("export", "import", "verify", "final-delta"):
+    for action in ("export", "import", "verify"):
         actions.add_argument(f"--{action}", action="store_true", dest=action.replace("-", "_"))
     parser.add_argument("--source-db")
     parser.add_argument(
@@ -342,17 +336,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--raw-manifest", type=Path)
     args = parser.parse_args(argv)
-    if (args.export or args.final_delta) and not args.source_db:
+    if args.export and not args.source_db:
         parser.error("source action requires --source-db")
     if not args.export and (not args.target_db or args.raw_manifest is None):
         parser.error("target action requires --target-db and --raw-manifest")
     if args.source_db == args.target_db:
         parser.error("source and target must be different databases")
-    if args.source_writers_stopped and not (args.export or args.final_delta):
-        parser.error("--source-writers-stopped requires --export or --final-delta")
+    if args.source_writers_stopped and not args.export:
+        parser.error("--source-writers-stopped requires --export")
     source = (
         _source_connection(args.source_db, source_writers_stopped=args.source_writers_stopped)
-        if args.export or args.final_delta
+        if args.export
         else None
     )
     target = None
@@ -368,11 +362,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = verify_snapshot(target, args.snapshot, args.raw_manifest)
             else:
                 Warehouse(target).migrate(profile="west")
-                result = (
-                    final_delta(source, target, args.snapshot, args.raw_manifest)
-                    if args.final_delta
-                    else import_snapshot(target, args.snapshot, args.raw_manifest)
-                )
+                result = import_snapshot(target, args.snapshot, args.raw_manifest)
         print(json.dumps(result, sort_keys=True))
         return 0
     finally:
