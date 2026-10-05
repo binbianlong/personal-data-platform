@@ -1,5 +1,7 @@
 import gzip
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from personal_data_platform.sources.screen_time.state import CollectorState, SuccessfulScan
 
@@ -89,3 +91,49 @@ def test_pending_recovery_keeps_original_v1_and_v2_identities(tmp_path) -> None:
         first.compressed_payload,
         second.compressed_payload,
     ]
+
+
+@pytest.mark.parametrize("stream", ["app-in-focus", "app-usage"])
+@pytest.mark.parametrize("control_kind", ["receipt", "manifest"])
+def test_control_is_due_at_24_hours_and_on_destination_change(
+    tmp_path, stream, control_kind
+) -> None:
+    path = tmp_path / "collector.db"
+    state = CollectorState(path)
+    control = dict(
+        stream=stream,
+        device_key="a" * 64 if control_kind == "receipt" else "",
+        destination="old-bucket",
+        config_digest="active-config",
+        control_kind=control_kind,
+    )
+    assert state.control_due(**control, now=NOW)
+    state.mark_control_published(**control, published_at=NOW)
+    restarted = CollectorState(path)
+    assert not restarted.control_due(**control, now=NOW + timedelta(hours=23, minutes=59))
+    assert restarted.control_due(**control, now=NOW + timedelta(hours=24))
+    changed = control | {"destination": "new-bucket"}
+    assert restarted.control_due(**changed, now=NOW + timedelta(minutes=30))
+    restarted.mark_control_published(**changed, published_at=NOW + timedelta(minutes=30))
+    # Returning to an earlier destination also needs a fresh publication.
+    assert restarted.control_due(**control, now=NOW + timedelta(hours=1))
+
+
+def test_configuration_change_invalidates_both_controls_without_losing_pending(tmp_path) -> None:
+    state = CollectorState(tmp_path / "collector.db")
+    pending = _prepare(state, b"durable")
+    common = dict(stream="app-in-focus", destination="bucket", config_digest="active")
+    receipt = dict(device_key="a" * 64, control_kind="receipt")
+    manifest = dict(device_key="", control_kind="manifest")
+    for kind in (receipt, manifest):
+        state.mark_control_published(**common, **kind, published_at=NOW)
+    assert not state.control_due(**common, **receipt, now=NOW)
+
+    inactive = common | {"config_digest": "inactive"}
+    assert state.control_due(**inactive, **manifest, now=NOW)
+    state.mark_control_published(**inactive, **manifest, published_at=NOW)
+    restarted = CollectorState(state.path)
+    assert restarted.control_due(**common, **receipt, now=NOW)
+    assert restarted.control_due(**common, **manifest, now=NOW)
+    assert restarted.pending()[0].identity == pending.identity
+    assert restarted.pending()[0].compressed_payload == pending.compressed_payload

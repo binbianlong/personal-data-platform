@@ -13,7 +13,7 @@ from personal_data_platform.sources.screen_time.raw import (
     CollectorScanReceipt,
 )
 
-COLLECTOR_FRESHNESS = timedelta(hours=24)
+COLLECTOR_FRESHNESS = timedelta(hours=48)
 MAX_CLOCK_SKEW = timedelta(minutes=10)
 
 

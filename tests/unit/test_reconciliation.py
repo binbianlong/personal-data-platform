@@ -289,7 +289,7 @@ def test_stale_collector_receipt_blocks_success() -> None:
     published: list[dict[str, object]] = []
 
     result = run_reconciliation(
-        _Repository([_key("one")], receipt_at=NOW - timedelta(hours=25)),
+        _Repository([_key("one")], receipt_at=NOW - timedelta(hours=49)),
         warehouse,  # type: ignore[arg-type]
         heartbeat=published.append,
         repair_missing=False,

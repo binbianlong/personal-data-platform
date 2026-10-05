@@ -7,7 +7,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -255,6 +255,7 @@ def _run_collect(*, watch: bool) -> int:
                 uploader=uploader,
                 pseudonym_key=config.pseudonym_key,
                 allowed_device_keys=config.device_allowlist,
+                destination=config.gcs.bucket,
             )
         )
     if config.mac_device_key:
@@ -265,6 +266,7 @@ def _run_collect(*, watch: bool) -> int:
                 uploader=uploader,
                 pseudonym_key=config.pseudonym_key,
                 allowed_device_keys=frozenset({config.mac_device_key}),
+                destination=config.gcs.bucket,
             )
         )
     inactive_streams = tuple(
@@ -277,7 +279,13 @@ def _run_collect(*, watch: bool) -> int:
     )
     if not watch:
         _print_collection_stats(
-            _collect_all(collectors, inactive_streams=inactive_streams, inactive_uploader=uploader)
+            _collect_all(
+                collectors,
+                inactive_streams=inactive_streams,
+                inactive_uploader=uploader,
+                inactive_state=state,
+                destination=config.gcs.bucket,
+            )
         )
         return 0
 
@@ -286,10 +294,13 @@ def _run_collect(*, watch: bool) -> int:
         while True:
             _print_collection_stats(
                 _collect_all(
-                    collectors, inactive_streams=inactive_streams, inactive_uploader=uploader
+                    collectors,
+                    inactive_streams=inactive_streams,
+                    inactive_uploader=uploader,
+                    inactive_state=state,
+                    destination=config.gcs.bucket,
                 )
             )
-            inactive_streams = ()
             time.sleep(interval)
     except KeyboardInterrupt:
         return 0
@@ -364,6 +375,9 @@ def _collect_all(
     *,
     inactive_streams: Sequence[str] = (),
     inactive_uploader: CompressedRawUploader | None = None,
+    inactive_state: CollectorState | None = None,
+    destination: str | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> CollectionStats:
     """Attempt each configured stream and report failure after all attempts."""
     results: list[CollectionStats] = []
@@ -373,13 +387,36 @@ def _collect_all(
             results.append(collector.collect_once())
         except Exception as error:
             failures.append(RuntimeError(f"{collector.stream}: {error}"))
-    if inactive_streams and inactive_uploader is None:
-        raise ValueError("inactive_uploader is required for inactive streams")
+    if inactive_streams and (
+        inactive_uploader is None or inactive_state is None or destination is None
+    ):
+        raise ValueError("inactive streams require uploader, state, and destination")
+    now = clock or (lambda: datetime.now(UTC))
     for stream in inactive_streams:
         assert inactive_uploader is not None
+        assert inactive_state is not None
+        assert destination is not None
         try:
+            completed_at = now()
+            if not inactive_state.control_due(
+                stream=stream,
+                device_key="",
+                destination=destination,
+                config_digest="inactive",
+                control_kind="manifest",
+                now=completed_at,
+            ):
+                continue
             inactive_uploader.put_device_manifest(
-                CollectorDeviceManifest((), datetime.now(UTC), stream=stream)
+                CollectorDeviceManifest((), completed_at, stream=stream)
+            )
+            inactive_state.mark_control_published(
+                stream=stream,
+                device_key="",
+                destination=destination,
+                config_digest="inactive",
+                control_kind="manifest",
+                published_at=now(),
             )
         except Exception as error:
             failures.append(RuntimeError(f"{stream} deactivation: {error}"))
