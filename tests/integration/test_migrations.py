@@ -34,6 +34,7 @@ def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
         ("004_fitbit_acquisition.sql",),
         ("005_fitbit_acquisition_work.sql",),
         ("006_fitbit_heart_rate_minute.sql",),
+        ("007_raw_retention_origin.sql",),
     ]
     assert warehouse.query_rows(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'base' "
@@ -194,6 +195,10 @@ def test_failed_migration_rolls_back_schema_data_and_ledger(warehouse, tmp_path,
 
 def test_forward_migration_keeps_iphone_rows_and_sets_mac_platform(warehouse, tmp_path):
     shutil.copyfile(DEFAULT_MIGRATIONS / "001_initial.sql", tmp_path / "001_initial.sql")
+    shutil.copyfile(
+        DEFAULT_MIGRATIONS / "007_raw_retention_origin.sql",
+        tmp_path / "007_raw_retention_origin.sql",
+    )
     warehouse.migrate(tmp_path)
     iphone_raw = _raw()
     warehouse.load_object(iphone_raw, byte_size=10, batch=ScreenTimeBatch([_record(iphone_raw)]))

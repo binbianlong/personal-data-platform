@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,17 @@ from personal_data_platform.sources.registry import get_source
 from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 from tests.screen_time_helpers import Repository, event, mac_usage_event, segb
+
+
+def test_rebuild_inventory_preserves_original_retention_dates():
+    repository = Repository()
+    raw = repository.add("100", segb(event("synthetic.app"))[0])
+    origin = raw.storage_created_at - timedelta(days=80)
+    copied = replace(raw, retention_started_at=origin)
+    inventory = rebuild_inventory([copied])
+    assert inventory["first_retention_started_at"] == origin.isoformat()
+    assert inventory["last_retention_started_at"] == origin.isoformat()
+    assert inventory["first_storage_created_at"] == raw.storage_created_at.isoformat()
 
 
 def test_all_streams_rebuilds_one_scratch_database_and_shared_daily_views(

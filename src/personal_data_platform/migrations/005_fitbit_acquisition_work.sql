@@ -36,7 +36,7 @@ CREATE TABLE ops.fitbit_scope_success (
 );
 CREATE TABLE ops.fitbit_bundle (
     bundle_id VARCHAR PRIMARY KEY,
-    status VARCHAR NOT NULL CHECK (status IN ('pending', 'succeeded'))
+    status VARCHAR NOT NULL CHECK (status IN ('pending', 'succeeded', 'superseded'))
 );
 CREATE TABLE ops.fitbit_bundle_attempt (
     bundle_id VARCHAR NOT NULL,

@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.models import ReconciliationResult
@@ -45,6 +45,7 @@ class IngestionState:
     storage_created_at: datetime | None
     storage_generation: int | None
     retention_expired_at: datetime | None
+    retention_started_at: datetime | None = None
 
 
 def connect(config: WarehouseConfig) -> DuckDBPyConnection:
@@ -90,20 +91,66 @@ class Warehouse:
     def close(self) -> None:
         self.connection.close()
 
-    def migrate(self, migrations: Path = DEFAULT_MIGRATIONS) -> None:
+    def migrate(
+        self, migrations: Path | None = None, *, profile: Literal["legacy", "west"] = "legacy"
+    ) -> None:
+        if profile not in ("legacy", "west"):
+            raise ValueError("migration profile must be legacy or west")
+        migrations = migrations or (
+            DEFAULT_MIGRATIONS / "west" if profile == "west" else DEFAULT_MIGRATIONS
+        )
+        paths = sorted(migrations.glob("*.sql"))
+        if not paths:
+            raise ValueError(f"no migrations found: {migrations}")
+        migration_ids = {path.name for path in paths}
+        if (profile == "legacy" and "003_fitbit_baseline.sql" in migration_ids) or (
+            profile == "west"
+            and migration_ids.intersection({"003_fitbit.sql", "004_fitbit_acquisition.sql"})
+        ):
+            raise RuntimeError("migration path does not match the selected profile")
+        columns = self.connection.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='ops' AND table_name='schema_migration'"
+        ).fetchall()
+        if columns:
+            if ("schema_profile",) in columns:
+                profiles = {
+                    row[0]
+                    for row in self.connection.execute(
+                        "SELECT DISTINCT schema_profile FROM ops.schema_migration"
+                    ).fetchall()
+                }
+            else:
+                profiles = {"legacy"}
+            if profiles and profiles != {profile}:
+                raise RuntimeError(f"migration profile mismatch: requested {profile}")
+        # Validate all applied checksums before executing any new SQL.
+        prepared = [(path, path.read_text(encoding="utf-8")) for path in paths]
+        checksums = {path.name: hashlib.sha256(sql.encode()).hexdigest() for path, sql in prepared}
+        if columns:
+            for migration_id, checksum in self.connection.execute(
+                "SELECT migration_id, checksum FROM ops.schema_migration"
+            ).fetchall():
+                if migration_id in checksums and checksums[migration_id] != checksum:
+                    raise RuntimeError(f"applied migration changed: {migration_id}")
         self.connection.execute("CREATE SCHEMA IF NOT EXISTS ops")
         self.connection.execute(
             """
             CREATE TABLE IF NOT EXISTS ops.schema_migration (
                 migration_id VARCHAR PRIMARY KEY,
                 checksum VARCHAR NOT NULL,
-                applied_at TIMESTAMPTZ NOT NULL
+                applied_at TIMESTAMPTZ NOT NULL,
+                schema_profile VARCHAR NOT NULL DEFAULT 'legacy'
             )
             """
         )
-        for path in sorted(migrations.glob("*.sql")):
-            sql = path.read_text(encoding="utf-8")
-            checksum = hashlib.sha256(sql.encode()).hexdigest()
+        if columns and ("schema_profile",) not in columns:
+            self.connection.execute(
+                "ALTER TABLE ops.schema_migration ADD COLUMN schema_profile "
+                "VARCHAR DEFAULT 'legacy'"
+            )
+        for path, sql in prepared:
+            checksum = checksums[path.name]
             existing = self.connection.execute(
                 "SELECT checksum FROM ops.schema_migration WHERE migration_id = ?", [path.name]
             ).fetchone()
@@ -115,8 +162,9 @@ class Warehouse:
             try:
                 self.connection.execute(sql)
                 self.connection.execute(
-                    "INSERT INTO ops.schema_migration VALUES (?, ?, ?)",
-                    [path.name, checksum, datetime.now(UTC)],
+                    "INSERT INTO ops.schema_migration "
+                    "(migration_id, checksum, applied_at, schema_profile) VALUES (?, ?, ?, ?)",
+                    [path.name, checksum, datetime.now(UTC), profile],
                 )
                 self.connection.execute("COMMIT")
             except Exception:
@@ -188,7 +236,7 @@ class Warehouse:
         rows = self.connection.execute(
             """
             SELECT object_key, status, storage_created_at, storage_generation,
-                   retention_expired_at
+                   retention_expired_at, retention_started_at
             FROM ops.ingestion_metadata
             WHERE source_id = ? AND source_stream = ? AND retention_expired_at IS NULL
             """,
@@ -201,6 +249,7 @@ class Warehouse:
                 storage_created_at=row[2],
                 storage_generation=row[3],
                 retention_expired_at=row[4],
+                retention_started_at=row[5],
             )
             for row in rows
         }
@@ -239,6 +288,7 @@ class Warehouse:
               AND retention_expired_at IS NULL
               AND storage_created_at IS NOT DISTINCT FROM ?
               AND storage_generation IS NOT DISTINCT FROM ?
+              AND retention_started_at IS NOT DISTINCT FROM ?
             RETURNING object_key
                 """,
                 [
@@ -246,6 +296,7 @@ class Warehouse:
                     state.object_key,
                     state.storage_created_at,
                     state.storage_generation,
+                    state.retention_started_at,
                 ],
             ).fetchone()
             if row is not None:
@@ -273,6 +324,7 @@ class Warehouse:
         *,
         byte_size: int,
         batch: DecodedBatch,
+        _in_transaction: bool = False,
     ) -> int:
         """Commit source records and their success state in one transaction."""
 
@@ -280,7 +332,8 @@ class Warehouse:
             raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
         now = datetime.now(UTC)
         try:
-            self.connection.execute("BEGIN TRANSACTION")
+            if not _in_transaction:
+                self.connection.execute("BEGIN TRANSACTION")
         except Exception as error:
             self.connection_usable = False
             raise WarehouseConnectionError("cannot begin transaction; reopen warehouse") from error
@@ -293,7 +346,8 @@ class Warehouse:
                 and current[3] == raw.storage_generation
                 and current[10] == batch.parser_version
             ):
-                self.connection.execute("ROLLBACK")
+                if not _in_transaction:
+                    self.connection.execute("ROLLBACK")
                 return 0
 
             self.connection.execute(
@@ -303,9 +357,9 @@ class Warehouse:
                     logical_key, observed_at, content_sha256, byte_size, status,
                     parser_version, record_count, started_at, completed_at, error_type,
                     error_message, retry_count, storage_created_at, storage_generation,
-                    retention_expired_at
+                    retention_expired_at, retention_started_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'loading', ?, NULL, ?, NULL,
-                          NULL, NULL, 0, ?, ?, NULL)
+                          NULL, NULL, 0, ?, ?, NULL, ?)
                 ON CONFLICT (object_key) DO UPDATE SET
                     status = 'loading', parser_version = excluded.parser_version,
                     subject_key = excluded.subject_key, logical_key = excluded.logical_key,
@@ -313,6 +367,7 @@ class Warehouse:
                     error_type = NULL, error_message = NULL,
                     storage_created_at = excluded.storage_created_at,
                     storage_generation = excluded.storage_generation,
+                    retention_started_at = excluded.retention_started_at,
                     retention_expired_at = NULL,
                     retry_count = ops.ingestion_metadata.retry_count + 1
                 """,
@@ -330,6 +385,7 @@ class Warehouse:
                     now,
                     raw.storage_created_at,
                     raw.storage_generation,
+                    raw.retention_started_at,
                 ],
             )
             batch.write(self.connection, raw, byte_size=byte_size, loaded_at=now)
@@ -342,6 +398,8 @@ class Warehouse:
                 [batch.record_count, now, raw.key],
             )
         except Exception:
+            if _in_transaction:
+                raise
             try:
                 self.connection.execute("ROLLBACK")
             except Exception as rollback_error:
@@ -351,13 +409,38 @@ class Warehouse:
                 ) from rollback_error
             raise
         try:
-            self.connection.execute("COMMIT")
+            if not _in_transaction:
+                self.connection.execute("COMMIT")
         except Exception as error:
             # Never write a failed receipt or process another Raw on an uncertain connection.
             # A new connection decides from the persisted success receipt.
             self.connection_usable = False
             raise WarehouseConnectionError("commit outcome unknown; reopen warehouse") from error
         return batch.record_count
+
+    def load_objects(self, objects: Iterable[tuple[RawObject, int, DecodedBatch]]) -> int:
+        """Commit a validated group of observations and source writes atomically."""
+        if not self.connection_usable:
+            raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
+        self.connection.execute("BEGIN TRANSACTION")
+        try:
+            count = sum(
+                self.load_object(raw, byte_size=size, batch=batch, _in_transaction=True)
+                for raw, size, batch in objects
+            )
+        except Exception:
+            try:
+                self.connection.execute("ROLLBACK")
+            except Exception as error:
+                self.connection_usable = False
+                raise WarehouseConnectionError("rollback failed; reopen warehouse") from error
+            raise
+        try:
+            self.connection.execute("COMMIT")
+        except Exception as error:
+            self.connection_usable = False
+            raise WarehouseConnectionError("commit outcome unknown; reopen warehouse") from error
+        return count
 
     def mark_failed(
         self,
@@ -378,15 +461,17 @@ class Warehouse:
                     object_key, source_id, schema_version, subject_key, source_stream, logical_key,
                     observed_at, content_sha256, byte_size, status, parser_version, record_count,
                     started_at, completed_at, error_type, error_message, retry_count,
-                    storage_created_at, storage_generation, retention_expired_at
+                    storage_created_at, storage_generation, retention_expired_at,
+                    retention_started_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'failed', NULL, NULL, ?, ?, ?, ?,
-                          0, ?, ?, NULL)
+                          0, ?, ?, NULL, ?)
                 ON CONFLICT (object_key) DO UPDATE SET
                     status = 'failed', completed_at = excluded.completed_at,
                     subject_key = excluded.subject_key, logical_key = excluded.logical_key,
                     error_type = excluded.error_type, error_message = excluded.error_message,
                     storage_created_at = excluded.storage_created_at,
                     storage_generation = excluded.storage_generation,
+                    retention_started_at = excluded.retention_started_at,
                     retention_expired_at = NULL,
                     retry_count = ops.ingestion_metadata.retry_count + 1
                 """,
@@ -406,6 +491,7 @@ class Warehouse:
                     str(error)[:4000],
                     raw.storage_created_at,
                     raw.storage_generation,
+                    raw.retention_started_at,
                 ],
             )
             self.connection.execute("COMMIT")
@@ -452,6 +538,18 @@ class Warehouse:
         self.connection.execute(
             "DELETE FROM ops.job_lock WHERE job_name = ? AND owner_id = ?", [job_name, owner_id]
         )
+
+    def require_job_lock(self, owner_id: str, *, remaining_seconds: int = 1) -> None:
+        """Stop before writing if the common loader lease is lost or nearly expired."""
+        row = self.connection.execute(
+            "SELECT owner_id, expires_at FROM ops.job_lock WHERE job_name='loader'"
+        ).fetchone()
+        if (
+            row is None
+            or row[0] != owner_id
+            or row[1] <= datetime.now(UTC) + timedelta(seconds=remaining_seconds)
+        ):
+            raise RuntimeError("loader lease ownership lost or insufficient time remains")
 
     def finish_job(self, run_id: str, *, succeeded: bool, details: dict[str, object]) -> None:
         self.connection.execute(

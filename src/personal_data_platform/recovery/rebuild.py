@@ -9,7 +9,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from personal_data_platform.config import RebuildADCConfig
+from personal_data_platform.config import RebuildADCConfig, schema_profile
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.loader.job import run_loader, run_loader_all
 from personal_data_platform.raw.models import RawObject
@@ -50,6 +50,7 @@ def rebuild_inventory(
         key=lambda value: (value.observed_at, value.key),
     )
     creation_times = sorted(value.storage_created_at for value in materialized)
+    retention_times = sorted(value.retention_origin for value in materialized)
     return {
         **source.inventory(materialized),
         "source_id": source.source_id,
@@ -64,6 +65,8 @@ def rebuild_inventory(
         "last_observed_at": (materialized[-1].observed_at.isoformat() if materialized else None),
         "first_storage_created_at": creation_times[0].isoformat() if creation_times else None,
         "last_storage_created_at": creation_times[-1].isoformat() if creation_times else None,
+        "first_retention_started_at": retention_times[0].isoformat() if retention_times else None,
+        "last_retention_started_at": retention_times[-1].isoformat() if retention_times else None,
         "retention_days": source.retention_days,
         "full_history_rebuild_guaranteed": False,
     }
@@ -119,7 +122,7 @@ def run_rebuild(
     warehouse = Warehouse(connect(WarehouseConfig(database=target_db, token=token)))
     try:
         require_empty_rebuild_target(warehouse)
-        warehouse.migrate()
+        warehouse.migrate(profile=schema_profile())
         summary = run_loader(
             _SnapshotRawRepository(repository=repository, observations=snapshot),
             warehouse,
@@ -162,7 +165,7 @@ def run_rebuild_all(
     warehouse = Warehouse(connect(WarehouseConfig(database=target_db, token=token)))
     try:
         require_empty_rebuild_target(warehouse)
-        warehouse.migrate()
+        warehouse.migrate(profile=schema_profile())
         summary = run_loader_all(
             (source for source, _, _ in inventories),
             warehouse=warehouse,

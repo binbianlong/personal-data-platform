@@ -13,6 +13,7 @@ dependencies = [
   "duckdb==1.5.5",
   "google-auth>=2.40,<3",
   "google-cloud-storage>=3.13.1,<4",
+  "google-cloud-pubsub>=2,<3",
   "google-cloud-tasks>=2.20,<3",
   "google-crc32c>=1.6,<2",
   "fastapi>=0.115,<1",
@@ -36,7 +37,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-personal_data_platform = ["migrations/*.sql"]
+personal_data_platform = ["migrations/*.sql", "migrations/west/*.sql"]
 
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers"]
@@ -58,5 +59,5 @@ strict = true
 # These dependencies do not publish a py.typed marker. Their values are
 # constrained by the transport and parser protocols at the application boundary.
 [[tool.mypy.overrides]]
-module = ["google.cloud", "google.cloud.storage.*", "google.cloud.tasks_v2.*", "tink", "tink.*", "ccl_segb", "ccl_segb.*"]
+module = ["google.cloud", "google.cloud.storage.*", "google.cloud.tasks_v2.*", "google.cloud.pubsub_v1.*", "tink", "tink.*", "ccl_segb", "ccl_segb.*"]
 ignore_missing_imports = true

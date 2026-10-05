@@ -133,6 +133,8 @@ class _Blob:
         self.name = name
         self.generation = generation
         self.content_encoding: str | None = None
+        self.time_created = None
+        self.custom_time = None
 
     def upload_from_string(self, data: bytes, **kwargs: Any) -> None:
         self._bucket.upload_calls.append(
@@ -146,8 +148,12 @@ class _Blob:
         if self._bucket.upload_error is not None:
             raise self._bucket.upload_error
         self.generation = self._bucket.next_generation
+        self.time_created = datetime(2026, 10, 5, tzinfo=UTC)
         self._bucket.next_generation += 1
         self._bucket.objects[self.name] = data
+
+    def reload(self):
+        raise AssertionError("new upload must return metadata without a HEAD")
 
     def download_as_bytes(self, **kwargs: Any) -> bytes:
         self._bucket.download_calls.append(
@@ -229,6 +235,24 @@ def test_store_raw_is_create_only_and_marks_precompressed_gzip() -> None:
         google_crc32c.Checksum(call["data"]).digest()
     ).decode("ascii")
     assert call["retry"] is not None
+    assert client.list_calls == []
+
+
+def test_put_raw_object_uses_upload_generation_without_get_or_list():
+    client = FakeGCSClient()
+    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    raw = b"synthetic-segb"
+    identity = ScreenTimeRawIdentity(
+        device_key="1" * 64,
+        stream="app-in-focus",
+        segment_key="2" * 64,
+        observed_at=datetime(2026, 8, 27, tzinfo=UTC),
+        sha256=sha256_hex(raw),
+    )
+    stored = repository.put_raw_object(identity.object_key, gzip.compress(raw, mtime=0))
+    assert stored.storage_generation == 1
+    assert stored.storage_created_at == datetime(2026, 10, 5, tzinfo=UTC)
+    assert client.bucket_ref.download_calls == []
     assert client.list_calls == []
 
 
