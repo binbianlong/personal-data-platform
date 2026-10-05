@@ -39,7 +39,9 @@ pdp rebuild --dry-run
 pdp rebuild --target-db <scratch-database> --allow-partial-history
 pdp preflight
 pdp fitbit serve
+pdp fitbit ingest-notifications
 pdp fitbit sync --from 2026-09-20 --to 2026-09-27
+pdp fitbit sync --resume-id <cursor-id>
 pdp fitbit repair
 ```
 
@@ -49,6 +51,8 @@ pdp fitbit repair
 未登録の組合せは拒否する。`pdp dbt`は指定なしでは全model、source / stream指定時は対応するmodelとtestを実行する。
 
 Fitbitの設定・スキーマ準備・復旧手順は[`Fitbit運用`](docs/sources/fitbit/operations.md)を参照する。
+西部リージョンのPub/Sub構成、データ移行、切替・rollbackの順序は
+[`移行計画`](docs/superpowers/plans/2026-10-05-pubsub-gcs-migration-plan.md)に記録する。
 ZIP取り込み機能はアプリに含めない。
 
 `pdp screen-time inspect-mac`はMac自身の`App.InFocus/local`にある完成済みsegmentを読み取り専用で
@@ -101,9 +105,11 @@ raw/screen_time/v2/<device_key>/<app-in-focus または app-usage>/<segment_key>
 
 local SQLite stateはupload前に同じobject keyと決定的gzip bytesを`pending`として保存し、GCS upload成功後だけ`uploaded`へ更新する。再起動時は現在のallowlistから削除済みのdeviceも含め、GCSのread/list権限を使わずに同じkeyとbytesでpending uploadを再試行する。連続する同一segmentはskipするが、`A → B → A`の観測は3件とも保持する。
 
-`--watch`はdefaultで1800秒（30分）ごとにcomplete scanを行う。間隔は`PDP_COLLECTOR_POLL_SECONDS`で変更できる。成功時は
+`--watch`はdefaultで1800秒（30分）ごとにcomplete scanを行う。間隔は`PDP_COLLECTOR_POLL_SECONDS`で変更できる。controlは
 iPhoneの`raw/screen_time/v1/_control/collector/latest/`と`_control/collector/active.json`、Macの
-`_control/collector/app-usage/latest/`と`_control/collector/app-usage/active.json`を別々に更新する。
+`_control/collector/app-usage/latest/`と`_control/collector/app-usage/active.json`を別々に公開する。
+成功から24時間で再公開し、送信先・端末設定・休止状態が変わった場合は次のscanで公開する。
+失敗したcontrolは次のscanで再試行する。Rawの変更は各scanで保存し、最新の未完了segmentは後続segmentが現れるまで保留する。
 端末の正式なdecommissionはallowlistまたはMac keyから削除した後、次のcomplete scanがmanifest更新まで
 成功した時点とする。対象が0台になったstreamは空のmanifestで休止を示す。
 

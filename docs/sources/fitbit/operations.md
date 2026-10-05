@@ -14,9 +14,61 @@
 - 2026-09-28: 取得・保存の見直し後にRuff・strict mypy・pytest 537件、Terraform fmt/validate/mock test 11件を確認した。
 - 2026-09-30: 受付の限定再読込、補修の延期・失敗、起動時のJSONログをPython 3.13で検証した。
   Terraformの3ルートでfmt/validate/mock test計14件とwheelビルドを確認した。通知の発火・復旧は未検証。
-- コンテナ実行は未確認。2026-09-27の検証時はDocker Engineが起動していなかった。
+- 2026-09-27はDocker Engineが停止しておりコンテナ未確認だった。2026-10-05の西部移行実装ではlinux/amd64のbuildと12件の起動確認が成功した。
 
 CI、クラウド動作、実CUはこのローカル検証の対象外。
+
+## 西部Pub/Sub構成の準備
+
+2026-10-05の移行実装は、旧構成と並行して準備する。切替・本番データコピー・旧資産削除は未実施。
+旧構成の既定値は維持し、新DBだけに`PDP_SCHEMA_PROFILE=west`、新実行系に
+`PDP_FITBIT_DELIVERY_MODE=pubsub`を設定する。移行順序と検証結果は
+[`移行計画`](../../superpowers/plans/2026-10-05-pubsub-gcs-migration-plan.md)を参照する。
+
+| 設定 | 新構成での用途 |
+|---|---|
+| `PDP_FITBIT_WEBHOOK_CONFIG` | JSONの`authorization`・`health_user_id`。受信Serviceだけに渡す |
+| `PDP_FITBIT_OAUTH_CONFIG` | JSONの`client_id`・`client_secret`・`refresh_token`・`health_user_id`。取得Jobだけに渡す |
+| `PDP_FITBIT_PUBSUB_TOPIC` / `PDP_FITBIT_PUBSUB_SUBSCRIPTION` | 完全なPub/Sub resource名 |
+| `PDP_FITBIT_PUBSUB_ENDPOINT` | `pubsub.us-west1.rep.googleapis.com` |
+| `PDP_HEARTBEAT_CONFIG` | JSONの`daily`・`app-in-focus`・`app-usage`にHTTPSの成功通知URLを設定する |
+| `PDP_FITBIT_MAX_SCOPES` | 手動・日次補修の1実行の範囲数。既定100、上限1000 |
+
+SecretのJSONに旧個別OAuth・Webhook環境変数を併用しない。
+Terraformの`west_secret_versions`には5つのSecretの数値versionを指定する。
+`latest`を使わず、rotationとrollbackではimageとversion指定を対応させる。
+新Scheduler・alertは準備段階では停止する。日次の欠測はHealthchecks側で48時間の間隔・猶予を設定し、実通知を確認してから有効化する。
+
+空のscratch DBを初期化する例:
+
+```bash
+pdp fitbit migrate --database /private/path/west-scratch.duckdb --profile west
+```
+
+legacyのmigration履歴があるDBにwest集合を適用すると停止する。
+旧Fitbitデータと進捗はimportせず、期間指定syncでAPIから取得する。
+両Screen Time streamと対象共通台帳は`scripts/migrate_west_raw.py`・
+`scripts/migrate_west_warehouse.py`で移し、元保持起点とコピー先generationを照合する。
+各scriptの`--help`でinventory/export/import/verify/final-deltaの引数を確認する。
+
+新実行系のCLI:
+
+```bash
+pdp fitbit ingest-notifications --max-messages 500 --collect-seconds 120 --timeout-seconds 3000
+pdp fitbit sync --from 2026-09-28 --to 2026-10-05 --resume-id initial
+pdp fitbit sync --resume-id initial
+pdp reconciliation --source screen_time --all-streams
+```
+
+通知は全必須範囲のRaw・データ・attempt成功が同じDB transactionで確定してからackする。
+変更がない範囲も新規取得後に成功を記録し、古い成功だけで新通知を完了しない。
+日次は共通loader leaseの下で取り込み、7完了日と未完了cursorの補修、dbt、両stream監査を実行し、全phase成功後にheartbeatを送る。
+50分/100分の期限で未完了範囲を残し、`--resume-id`または日次補修で再開する。
+心拍はAPIの完全なUTC分を保存し、sample countはNULL、日次平均は観測された分平均の平均とする。
+
+旧資産の限定削除scriptは`scripts/cleanup_fitbit_legacy.py`に分離している。
+本番の受入・rollback確認後、旧writerを停止し、旧DB/bucket/queueのinventoryを確認してから使う。
+新取得台帳、v2 Raw、Pub/Sub、Screen Time、共通migration履歴は削除対象に含めない。
 
 ## CLI
 

@@ -86,11 +86,11 @@ flowchart LR
 
 `prepare_bundle(bundle_id: str, attempt_ids: tuple[str, ...], chunks: tuple[tuple[str, str, int], ...]) -> None`はchunkのkey・圧縮SHA-256・圧縮sizeを保存する。`finish_attempt(attempt_id: str, *, source_sha256: str, raw_keys: tuple[str, ...]) -> None`は呼び出し側の取り込みtransaction内でのみ実行し、自身ではcommitしない。unchangedの成功もこの関数で記録する。
 
-- [ ] `test_old_success_does_not_complete_new_notification`を追加する。既存success後に登録した通知について`assert state.ackable_ids((new_id,)) == frozenset()`。同じ取得へ対応できるのは開始前に受信済みの通知だけとする。
-- [ ] 複数scope・部分commit・結果不明commit・再配信のテストを追加し、`python -m pytest tests/integration/test_fitbit_acquisition_state.py -q`で新機能がないためFAILすることを確認する。
-- [ ] notification/scope/attempt、bundle/chunk intent、成功台帳、補修cursorのtableを追加する。通知対応をAPI取得前、intentをGCS保存前に確定する。成功確認とデータ反映は同じDB transactionで行い、未知commitを新しい接続で確認する。
-- [ ] 上記テストと`python -m pytest tests/integration/test_migrations.py tests/integration/test_fitbit_writer.py -q`を実行し、全件PASS、legacy集合の001〜004のchecksum維持、再migrationでデータ保持を確認する。
-- [ ] commit: `feat: Fitbit通知と取得attemptの永続状態を追加`
+- [x] `test_old_success_does_not_complete_new_notification`を追加する。既存success後に登録した通知について`assert state.ackable_ids((new_id,)) == frozenset()`。同じ取得へ対応できるのは開始前に受信済みの通知だけとする。
+- [x] 複数scope・部分commit・結果不明commit・再配信のテストを追加し、`python -m pytest tests/integration/test_fitbit_acquisition_state.py -q`で新機能がないためFAILすることを確認する。
+- [x] notification/scope/attempt、bundle/chunk intent、成功台帳、補修cursorのtableを追加する。通知対応をAPI取得前、intentをGCS保存前に確定する。成功確認とデータ反映は同じDB transactionで行い、未知commitを新しい接続で確認する。
+- [x] 上記テストと`python -m pytest tests/integration/test_migrations.py tests/integration/test_fitbit_writer.py -q`を実行し、全件PASS、legacy集合の001〜004のchecksum維持、再migrationでデータ保持を確認する。
+- [x] commit: `feat: Fitbit通知と取得attemptの永続状態を追加`
 
 ### 2. 心拍rollUpと分単位モデル
 
@@ -98,11 +98,11 @@ flowchart LR
 
 **Interfaces:** `HeartRateMinute`は窓start/end、avg/min/max、data source family、`sample_count: int | None`、origin、aggregation versionを持つ。`HealthClient.fetch_heart_rate_minutes(window: Window, *, subject_key: str) -> HeartRateMinuteSnapshot`を追加する。snapshotはsubject/window、`minutes: tuple[HeartRateMinute, ...]`、`pages: tuple[dict[str, object], ...]`、取得開始時刻を持つ。旧`HealthClient.fetch(window: Window, *, subject_key: str) -> Snapshot`の非心拍利用は維持し、心拍の呼び出し元を新APIへ移す。旧秒心拍モデルを新DBに作らない。
 
-- [ ] `test_rollup_uses_complete_utc_minutes_and_all_pages`と`test_rollup_missing_is_not_zero`を追加する。`assert request_window_size == "60s"`、`assert api_row.sample_count is None`、当日末尾の未完了分と非着用窓を除外する。
-- [ ] `test_minute_daily_average_has_observed_minute_semantics`を追加する。元サンプル数が異なる2分の平均が60・100なら`assert mean_minute_heart_rate == 80`、`assert observed_heart_rate_minutes == 2`。該当テストを実行し、既存scalar実装ではFAILすることを確認する。
-- [ ] 14日分割・全page検証・未知項目保持・窓の重複/範囲不整合検証を実装する。新tableは`base.fitbit_heart_rate_minute`とし、provider sample IDを捏造しない。新view/指標で意味を明示する。新DBのdbtは旧秒心拍table/viewに依存しない構成にする。
-- [ ] `python -m pytest tests/unit/test_fitbit_api.py tests/integration/test_fitbit_analytics.py tests/integration/test_fitbit_writer.py -q`で全件PASS。完全な空結果は削除、途中page失敗は取得済みの新データを保持し、旧心拍tableがなくてもdbtが動くことを確認する。
-- [ ] commit: `feat: Google Healthの1分心拍集約と分析モデルを追加`
+- [x] `test_rollup_uses_complete_utc_minutes_and_all_pages`と`test_rollup_missing_is_not_zero`を追加する。`assert request_window_size == "60s"`、`assert api_row.sample_count is None`、当日末尾の未完了分と非着用窓を除外する。
+- [x] `test_minute_daily_average_has_observed_minute_semantics`を追加する。元サンプル数が異なる2分の平均が60・100なら`assert mean_minute_heart_rate == 80`、`assert observed_heart_rate_minutes == 2`。該当テストを実行し、既存scalar実装ではFAILすることを確認する。
+- [x] 14日分割・全page検証・未知項目保持・窓の重複/範囲不整合検証を実装する。新tableは`base.fitbit_heart_rate_minute`とし、provider sample IDを捏造しない。新view/指標で意味を明示する。新DBのdbtは旧秒心拍table/viewに依存しない構成にする。
+- [x] `python -m pytest tests/unit/test_fitbit_api.py tests/integration/test_fitbit_analytics.py tests/integration/test_fitbit_writer.py -q`で全件PASS。完全な空結果は削除、途中page失敗は取得済みの新データを保持し、旧心拍tableがなくてもdbtが動くことを確認する。
+- [x] commit: `feat: Google Healthの1分心拍集約と分析モデルを追加`
 
 ### 3. v2 bundleとbuffer Loaderへの切替
 
@@ -112,11 +112,11 @@ flowchart LR
 
 既存`run_loader_objects(repository, warehouse, observations, *, source, _lease_owner=None)`へ`buffered_payloads: Mapping[str, bytes] | None = None`を追加し、既存の検証経路で展開後hashを確認する。v2複数chunkはbundle単位で全payloadを検証・再構成し、取得範囲のデータ・全Raw台帳・`finish_attempt`を同じtransactionで反映する。Screen Timeは既存のobject単位処理を維持する。新DBでは旧Fitbit v1を取り込み対象にしない。
 
-- [ ] `test_bundle_preserves_unknown_page_fields_and_chunks`、`test_buffered_load_has_no_storage_read`を追加する。`assert get_calls == 0`、`assert list_calls == 0`、`assert max(map(len, compressed_chunks)) <= 16 * 1024 * 1024`。新API用の全page取得とScreen Timeの既存取り込みを区別する。
-- [ ] page順/分割だけの変化、A→B→A、途中chunkだけの取り込み、未知項目の変化をテストし、新仕様が未実装でFAILすることを確認する。
-- [ ] `raw/fitbit/v2/`にbundleを追加し、`FitbitSource`をv2取り込みへ切り替える。旧Fitbit v1の復元互換は新構成の要件にしない。圧縮hash/sizeと展開後`RawObject.sha256`を区別する。intentから必要な全chunkを復旧し、scopeの一部だけで削除・成功確定をしない。
-- [ ] `python -m pytest tests/unit/test_fitbit_bundle.py tests/integration/test_fitbit_loader.py tests/integration/test_fitbit_service.py tests/integration/test_loader_job.py -q`で全件PASS。通常時GET/LISTなし、保存後停止はgeneration固定Rawから復旧、旧Fitbit v1を誤取り込みせず、両Screen Time streamが維持されることを確認する。
-- [ ] commit: `feat: Fitbit Rawをbundle保存とbuffer取り込みに対応`
+- [x] `test_bundle_preserves_unknown_page_fields_and_chunks`、`test_buffered_load_has_no_storage_read`を追加する。`assert get_calls == 0`、`assert list_calls == 0`、`assert max(map(len, compressed_chunks)) <= 16 * 1024 * 1024`。新API用の全page取得とScreen Timeの既存取り込みを区別する。
+- [x] page順/分割だけの変化、A→B→A、途中chunkだけの取り込み、未知項目の変化をテストし、新仕様が未実装でFAILすることを確認する。
+- [x] `raw/fitbit/v2/`にbundleを追加し、`FitbitSource`をv2取り込みへ切り替える。旧Fitbit v1の復元互換は新構成の要件にしない。圧縮hash/sizeと展開後`RawObject.sha256`を区別する。intentから必要な全chunkを復旧し、scopeの一部だけで削除・成功確定をしない。
+- [x] `python -m pytest tests/unit/test_fitbit_bundle.py tests/integration/test_fitbit_loader.py tests/integration/test_fitbit_service.py tests/integration/test_loader_job.py -q`で全件PASS。通常時GET/LISTなし、保存後停止はgeneration固定Rawから復旧、旧Fitbit v1を誤取り込みせず、両Screen Time streamが維持されることを確認する。
+- [x] commit: `feat: Fitbit Rawをbundle保存とbuffer取り込みに対応`
 
 ### 4. Pub/Sub受信と毎時Job
 
@@ -126,11 +126,11 @@ flowchart LR
 
 `AcquisitionSummary`は完了/失敗/延期scope数、ackした通知数、全対象完了を表す`ok: bool`を持つ。`PDP_FITBIT_DELIVERY_MODE=legacy|pubsub`を設定し、移行期間はlegacyを既定とする。新modeのOAuthは`PDP_FITBIT_OAUTH_CONFIG`のJSON（client_id/client_secret/refresh_token/health_user_id）、受信は`PDP_FITBIT_WEBHOOK_CONFIG`のJSON（authorization/health_user_id）から読み、受信側へOAuth設定を渡さない。
 
-- [ ] `test_receiver_requires_all_publishes_before_204`、`test_empty_pull_opens_no_warehouse`を追加する。発行結果不明はnon-2xx、検証handshakeは200、`assert warehouse_connections == 0`。既存Authorization・Tink・ユーザー/5種別・サイズ・civil範囲テストを維持する。
-- [ ] `test_late_notification_needs_new_attempt`、`test_ack_waits_for_every_scope`、`test_collect_extends_all_pending_deliveries`を追加し、`python -m pytest tests/unit/test_fitbit_notifications.py tests/integration/test_fitbit_acquisition.py -q`でFAILを確認する。
-- [ ] `google-cloud-pubsub>=2,<3`を追加し、Python 3.13で依存解決を確認する。SDKをregional endpointへ接続し、同一scopeをまとめて取得する。lease競合は期限0で再配信、処理中は全ack IDを600秒以内で延長する。各phaseに時間/件数上限を設ける。secret JSONの欠落・競合・不正値を検証し、例外に秘密情報を含めない。
-- [ ] 同じテストで全件PASS。API成功→GCS→DB→ackの各停止位置とcommit応答消失を障害注入し、再配信後のDB結果と完了判定を照合する。旧Cloud Tasks受信/workerは切替前だけlegacy modeに残す。旧未処理データの排出は移行条件にせず、切替時は旧投入を止めて新Pub/Subへ揃える。
-- [ ] commit: `feat: Fitbit WebhookをPub/Sub受信と毎時集約処理に対応`
+- [x] `test_receiver_requires_all_publishes_before_204`、`test_empty_pull_opens_no_warehouse`を追加する。発行結果不明はnon-2xx、検証handshakeは200、`assert warehouse_connections == 0`。既存Authorization・Tink・ユーザー/5種別・サイズ・civil範囲テストを維持する。
+- [x] `test_old_success_and_late_notification_need_new_attempt`、`test_ack_waits_for_every_scope`、`test_collect_extends_all_pending_deliveries`を追加し、`python -m pytest tests/unit/test_fitbit_notifications.py tests/integration/test_fitbit_acquisition.py -q`でFAILを確認する。
+- [x] `google-cloud-pubsub>=2,<3`を追加し、Python 3.13で依存解決を確認する。SDKをregional endpointへ接続し、同一scopeをまとめて取得する。lease競合は期限0で再配信、処理中は全ack IDを600秒以内で延長する。各phaseに時間/件数上限を設ける。secret JSONの欠落・競合・不正値を検証し、例外に秘密情報を含めない。
+- [x] 同じテストで全件PASS。API成功→GCS→DB→ackの各停止位置とcommit応答消失を障害注入し、再配信後のDB結果と完了判定を照合する。旧Cloud Tasks受信/workerは切替前だけlegacy modeに残す。旧未処理データの排出は移行条件にせず、切替時は旧投入を止めて新Pub/Subへ揃える。
+- [x] commit: `feat: Fitbit WebhookをPub/Sub受信と毎時集約処理に対応`
 
 ### 5. Screen Time controlの24時間公開
 
@@ -138,11 +138,11 @@ flowchart LR
 
 **Interfaces:** `CollectorState.control_due(*, stream: str, device_key: str, destination: str, config_digest: str, control_kind: str, now: datetime) -> bool`、`mark_control_published(*, stream: str, device_key: str, destination: str, config_digest: str, control_kind: str, published_at: datetime) -> None`。SQLiteでreceipt/manifestごとの成功時刻とinactive/reactivationを保持する。
 
-- [ ] `test_control_is_due_at_24_hours_and_on_destination_change`を追加する。`assert not due_at_23h59m`、`assert due_at_24h`、`assert due_after_bucket_change`。Rawの変更uploadがcontrol間隔で遅れないことも確認する。
-- [ ] 片方のcontrol失敗、再起動、sleep、allowlist変更、新端末、inactive/reactivationをテストしてFAILを確認する。
-- [ ] controlだけを24時間間隔にし、未成功のcontrolは次scanで再試行する。監査鮮度を48時間へ変更する。30分scan、未完了segmentの保留、ローカルpending payload、両streamのRaw形式を維持する。
-- [ ] `python -m pytest tests/unit/test_collector_state.py tests/contract/test_screen_time_collector_contract.py tests/contract/test_mac_app_usage_collector.py tests/integration/test_reconciliation_job.py -q`で全件PASS。`test_waits_through_updates_and_restart_until_successor_exists`とpending復旧の既存テストもPASSすることを確認する。
-- [ ] commit: `feat: Screen Time controlの24時間公開と永続状態を追加`
+- [x] `test_control_is_due_at_24_hours_and_on_destination_change`を追加する。`assert not due_at_23h59m`、`assert due_at_24h`、`assert due_after_bucket_change`。Rawの変更uploadがcontrol間隔で遅れないことも確認する。
+- [x] 片方のcontrol失敗、再起動、sleep、allowlist変更、新端末、inactive/reactivationをテストしてFAILを確認する。
+- [x] controlだけを24時間間隔にし、未成功のcontrolは次scanで再試行する。監査鮮度を48時間へ変更する。30分scan、未完了segmentの保留、ローカルpending payload、両streamのRaw形式を維持する。
+- [x] `python -m pytest tests/unit/test_collector_state.py tests/contract/test_screen_time_collector_contract.py tests/contract/test_mac_app_usage_collector.py tests/integration/test_reconciliation_job.py -q`で全件PASS。`test_waits_through_updates_and_restart_until_successor_exists`とpending復旧の既存テストもPASSすることを確認する。
+- [x] commit: `feat: Screen Time controlの24時間公開と永続状態を追加`
 
 ### 6. 共通lease・日次処理・補修
 
@@ -150,11 +150,11 @@ flowchart LR
 
 **Interfaces:** 日次`run_reconciliation_from_env()`を共通leaseの外側ownerにする。内部Loaderは既存`_lease_owner`、`run_dbt_from_env(*, source_id: str | None = None, stream: str | None = None, lease_owner: str | None = None) -> int`は同じownerを引き継ぐ。`run_daily_repair(*, now: datetime, lease_owner: str, timeout_seconds: int) -> AcquisitionSummary`を追加する。期間指定は既存`pdp fitbit sync --from START --to END`を新取得経路へ接続し、`--resume-id`で永続cursorから再開する。日次/streamのheartbeat URLは`PDP_HEARTBEAT_CONFIG`のJSONから読み、legacy modeは既存設定を維持する。
 
-- [ ] `test_daily_failure_does_not_advance_success_heartbeat`、`test_all_writers_share_loader_lease`を追加する。Fitbit・dbt・片方streamの失敗で`assert heartbeat_successes == 0`、競合で他ownerのleaseを解放しない。
-- [ ] 7日超の停止、古い通知、広いbackfill、部分失敗cursor、paused/deferredと実失敗をテストしてFAILを確認する。
-- [ ] 取り込み→Fitbitの7完了日/未完了cursor補修→dbt→両stream監査の順にし、required phaseが全完了してから日次heartbeatを確定する。pairedDevicesのlastSyncはnanosecondを維持してMotherDuckへ保存する。新側のcursorはAPI再取得で初期化し、旧GCS checkpointの成功範囲をそのまま成功扱いにしない。対象範囲のcommit前にcursorを進めない。streamごとのinventoryをLoaderと監査で共用する。155分の独立reconciliation leaseと手動dbtの無排他経路を新modeで使わない。
-- [ ] `python -m pytest tests/integration/test_reconciliation_job.py tests/integration/test_fitbit_repair_runtime.py tests/integration/test_loader_job.py tests/unit/test_fitbit_cli.py tests/unit/test_dbt_runner.py -q`で全件PASS。50/100分の終了上限、125分lease、所有権喪失時の停止、DB/API timeoutを確認する。手動sync/dbtも対象にし、補修上限に達したcursorを成功完了として進めない。
-- [ ] commit: `feat: 収集処理を共通leaseと日次再照合へ統合`
+- [x] `test_daily_failure_does_not_advance_success_heartbeat`、`test_all_writers_share_loader_lease`を追加する。Fitbit・dbt・片方streamの失敗で`assert heartbeat_successes == 0`、競合で他ownerのleaseを解放しない。
+- [x] 7日超の停止、古い通知、広いbackfill、部分失敗cursor、paused/deferredと実失敗をテストしてFAILを確認する。
+- [x] 取り込み→Fitbitの7完了日/未完了cursor補修→dbt→両stream監査の順にし、required phaseが全完了してから日次heartbeatを確定する。pairedDevicesのlastSyncはnanosecondを維持してMotherDuckへ保存する。新側のcursorはAPI再取得で初期化し、旧GCS checkpointの成功範囲をそのまま成功扱いにしない。対象範囲のcommit前にcursorを進めない。streamごとのinventoryをLoaderと監査で共用する。155分の独立reconciliation leaseと手動dbtの無排他経路を新modeで使わない。
+- [x] `python -m pytest tests/integration/test_reconciliation_job.py tests/integration/test_fitbit_repair_runtime.py tests/integration/test_loader_job.py tests/unit/test_fitbit_cli.py tests/unit/test_dbt_runner.py -q`で全件PASS。50/100分の終了上限、125分lease、所有権喪失時の停止、DB/API timeoutを確認する。手動sync/dbtも対象にし、補修上限に達したcursorを成功完了として進めない。
+- [x] commit: `feat: 収集処理を共通leaseと日次再照合へ統合`
 
 ### 7. Screen Timeの保持起点・コピーとFitbit初期化
 
@@ -164,12 +164,12 @@ flowchart LR
 
 warehouse scriptは旧組織の読み取り、新組織の書き込みを別接続にし、local DuckDBを経由してScreen Timeと移行対象の共通データを移す。`--export`・`--import`・`--verify`・`--final-delta`を提供する。table・共通台帳のsource別allowlistを固定し、Fitbit専用table・`ops.schema_migration`・active leaseをimportしない。新DBは作業9のbaselineで初期化する。最終差分はScreen Timeの更新・削除とRaw参照mappingを反映し、新側のFitbit tableを旧snapshotで上書きしない。viewはdbtで再作成する。
 
-- [ ] `test_copy_preserves_retention_origin_and_changes_generation`を追加する。`assert retention_started_at == original_created_at`、コピー先の実作成日時・generationは新値とし、90日/93日監査が元期限で動くことを確認する。
-- [ ] inventoryからgenerationが消える、hash不一致、コピー途中停止、再実行、Fitbit旧台帳の混入、API再取得の部分失敗をテストしてFAILを確認する。
-- [ ] Screen Timeの旧bucketからgeneration固定で読み、圧縮hash/sizeと元保持起点を検証してcreate-onlyでコピーする。mappingを台帳へ反映し、未完了取り込みも対象にする。Fitbitは作業6の期間指定syncで直近の代表期間を取得し、新Raw・分心拍・進捗を新規に作る。通常取り込みと同じlease・時間上限を使う。過去のbackfillを行う場合は永続cursorで日を分割する。
+- [x] `test_copy_preserves_retention_origin_and_changes_generation`を追加する。`assert retention_started_at == original_created_at`、コピー先の実作成日時・generationは新値とし、90日/93日監査が元期限で動くことを確認する。
+- [x] inventoryからgenerationが消える、hash不一致、コピー途中停止、再実行、Fitbit旧台帳の混入、API再取得の部分失敗をテストしてFAILを確認する。
+- [x] Screen Timeの旧bucketからgeneration固定で読み、圧縮hash/sizeと元保持起点を検証してcreate-onlyでコピーする。mappingを台帳へ反映し、未完了取り込みも対象にする。Fitbitは作業6の期間指定syncで直近の代表期間を取得し、新Raw・分心拍・進捗を新規に作る。通常取り込みと同じlease・時間上限を使う。過去のbackfillを行う場合は永続cursorで日を分割する。
 - [ ] 直近の全種別の取得完了範囲、重複、歩数/睡眠などの代表集計、心拍の観測分数を確認する。分心拍はAPI由来として元sample countをNULLにし、旧履歴との件数一致を移行条件にしない。
-- [ ] `python -m pytest tests/unit/test_west_raw_migration.py tests/integration/test_west_warehouse_migration.py tests/unit/test_gcs_repository.py tests/unit/test_rebuild.py tests/integration/test_fitbit_analytics.py -q`で全件PASS。再実行で既存コピーを再保存せず、Screen Timeを保持し、Fitbitは旧データ/進捗なしでも新規取得できることを確認する。任意backfillの未取得範囲は定常処理の失敗と区別し、未実装のTakeout取り込みを復旧手段に数えない。
-- [ ] commit: `feat: Rawの保持起点と西部移行の復旧・照合処理を追加`
+- [x] `python -m pytest tests/unit/test_west_raw_migration.py tests/integration/test_west_warehouse_migration.py tests/unit/test_gcs_repository.py tests/unit/test_rebuild.py tests/integration/test_fitbit_analytics.py -q`で全件PASS。再実行で既存コピーを再保存せず、Screen Timeを保持し、Fitbitは旧データ/進捗なしでも新規取得できることを確認する。任意backfillの未取得範囲は定常処理の失敗と区別し、未実装のTakeout取り込みを復旧手段に数えない。
+- [x] commit: `feat: Rawの保持起点と西部DB用baselineを追加`と`feat: Screen Timeの西部コピーと照合処理を追加`
 
 ### 8. 西部インフラとCIの並行構成
 
@@ -177,11 +177,11 @@ warehouse scriptは旧組織の読み取り、新組織の書き込みを別接�
 
 **Interfaces:** 旧addressを維持し、新規に`google_storage_bucket.terraform_state_west`・`raw_west`・`preflight_west`、`google_artifact_registry_repository.runtime_west`、Cloud Run/ Schedulerの`west` resourceを追加する。region指定は`us-west1`。出力で新bucket、repository、Job、Service、secret、Pub/Subを識別する。CIのstate参照は既存`TF_STATE_BUCKET`を使い、backend prefixは維持する。
 
-- [ ] mock Terraform testsに西部location、旧資産destroyなし、Raw/preflight/stateの別bucket、Pub/Subの保存/通信制限、権限分離、secretの単一replica、停止した新Schedulerを追加する。旧固定regionテストを新旧並行契約へ変更してFAILを確認する。
-- [ ] `test_deploy_protects_job_and_service_images_during_migration`を追加する。旧Jobだけでなく受信Serviceのrevision、rollback用digestも保護する。旧regionのimageを新region用fallbackとして誤利用しない。
-- [ ] bootstrapとruntimeに西部resourceを追加する。受信Serviceはtopic publisher、Jobはsubscription subscriberと対象Rawの読み書きだけを持ち、v2 prefixもbucket IAMへ追加する。Secret Managerはglobal resource＋user-managed単一replicaの新IDとし、payloadはTerraform stateへ入れない。通常logは西部bucketへ`_Default` sinkを切り替え、`_Required`は維持する。deploy identityへ必要なPub/Sub管理権限を追加し、WIFのmain限定とread-only plan identityを維持する。
-- [ ] CIのimage path、describeするJob、preflight/dbt対象、地域・Jobを含む監視filterを揃える。準備段階で新production Jobやdbtを自動実行しない。`terraform fmt -check -recursive infra`、各rootの`init -backend=false -lockfile=readonly`→`validate`→`test`、`python -m pytest tests/infra/test_gcp_contract.py -q`で全件PASSを確認する。
-- [ ] commitは`feat: 西部GCPリソースの並行構成を追加`と`ci: 西部リージョン切替とimage保護に対応`に分ける。
+- [x] mock Terraform testsに西部location、旧資産destroyなし、Raw/preflight/stateの別bucket、Pub/Subの保存/通信制限、権限分離、secretの単一replica、停止した新Schedulerを追加する。旧固定regionテストを新旧並行契約へ変更してFAILを確認する。
+- [x] `test_deploy_protects_job_and_service_images_during_migration`を追加する。旧Jobだけでなく受信Serviceのrevision、rollback用digestも保護する。旧regionのimageを新region用fallbackとして誤利用しない。
+- [x] bootstrapとruntimeに西部resourceを追加する。受信Serviceはtopic publisher、Jobはsubscription subscriberと対象Rawの読み書きだけを持ち、v2 prefixもbucket IAMへ追加する。Secret Managerはglobal resource＋user-managed単一replicaの新IDとし、payloadはTerraform stateへ入れない。通常logは西部bucketへ`_Default` sinkを切り替え、`_Required`は維持する。deploy identityへ必要なPub/Sub管理権限を追加し、WIFのmain限定とread-only plan identityを維持する。
+- [x] CIのimage path、describeするJob、preflight/dbt対象、地域・Jobを含む監視filterを揃える。準備段階で新production Jobやdbtを自動実行しない。`terraform fmt -check -recursive infra`、各rootの`init -backend=false -lockfile=readonly`→`validate`→`test`、`python -m pytest tests/infra/test_gcp_contract.py -q`で全件PASSを確認する。
+- [x] commitは`feat: 西部GCPリソースの並行構成を追加`と`ci: 西部リージョン切替とimage保護に対応`に分ける。
 
 ### 9. 新DB用Fitbit baselineとマイグレーション整理
 
@@ -193,14 +193,14 @@ warehouse scriptは旧組織の読み取り、新組織の書き込みを別接�
 
 `cleanup_fitbit_legacy.py --inventory-only`は旧DB/bucket/queue ID、対象table/行/objectとgenerationをmanifestへ出し、`--apply MANIFEST`は同じ旧対象だけを削除する。DBの`base.fitbit_*`・`ops.fitbit_*`はinventoryで確定したtable名、共有`ops.ingestion_metadata`は`source_id='fitbit'`の行、GCSは旧bucketの`raw/fitbit/v1/`（device-sync controlを含む）と`receipts/fitbit/v1/`、Cloud Tasksは旧Fitbit queueに限定する。secret/tokenと共通migration台帳はデータ削除に含めず、新DB/bucket/queue IDを拒否する。
 
-- [ ] `test_west_baseline_creates_only_final_fitbit_schema`を追加する。空DBに通知/attempt/bundle/cursor、最終的な非心拍table、`base.fitbit_heart_rate_minute`が作られ、旧秒心拍table・旧receipt向けintentが作られないことを確認する。
-- [ ] `test_west_baseline_rejects_legacy_database`、`test_west_migration_reapply_preserves_screen_time_and_fitbit`を追加する。legacyのmigration履歴があるDBには適用せず、同じwest集合の再適用ではデータ・台帳が変わらないことを確認する。該当テストを実行し、未実装のためFAILすることを確認する。
-- [ ] `001`・`002`は既存SQLとbyte単位で同一に保つ。`003_fitbit.sql`・`004_fitbit_acquisition.sql`・作業1/2のDDLを最終定義の`003_fitbit_baseline.sql`へまとめ、不要な旧tableや途中のALTERを外す。共通保持起点は`004_raw_retention_origin.sql`へ分ける。新DBの`ops.schema_migration`はこの集合を実際に適用して作り、旧台帳をコピーしたりchecksumを手で更新したりしない。
+- [x] `test_west_baseline_creates_only_final_fitbit_schema`を追加する。空DBに通知/attempt/bundle/cursor、最終的な非心拍table、`base.fitbit_heart_rate_minute`が作られ、旧秒心拍table・旧receipt向けintentが作られないことを確認する。
+- [x] `test_west_baseline_rejects_legacy_database`、`test_west_migration_reapply_preserves_screen_time_and_fitbit`を追加する。legacyのmigration履歴があるDBには適用せず、同じwest集合の再適用ではデータ・台帳が変わらないことを確認する。該当テストを実行し、未実装のためFAILすることを確認する。
+- [x] `001`・`002`は既存SQLとbyte単位で同一に保つ。`003_fitbit.sql`・`004_fitbit_acquisition.sql`・作業1/2のDDLを最終定義の`003_fitbit_baseline.sql`へまとめ、不要な旧tableや途中のALTERを外す。共通保持起点は`004_raw_retention_origin.sql`へ分ける。新DBの`ops.schema_migration`はこの集合を実際に適用して作り、旧台帳をコピーしたりchecksumを手で更新したりしない。
 - [ ] 既存rootのSQLは旧環境の停止まで変更せず残す。移行scriptのScreen Time importとbaselineを組み合わせ、旧FitbitデータなしでAPI再取得できることをscratch DBで確認する。API取得失敗でScreen Timeや共通台帳をclearしない。
 - [ ] DBを戻すrollbackも別の空DBをbaselineで初期化して検証する。旧DBにwest集合を直接適用せず、Screen Timeのbackup/切替後差分を取り込み、Fitbitの新規取得を確認する。
-- [ ] `test_legacy_cleanup_preserves_screen_time_and_schema_migrations`、`test_legacy_cleanup_rejects_new_resources`を追加する。Fitbit/Screen Timeが混在するfixtureでFitbitだけが消え、新Pub/Sub・v2 Raw・取得状態が維持されること、inventory-onlyで削除が起きないこと、再実行が安全なことを確認する。停止した旧writerだけを削除対象にし、GCS削除はgenerationを照合する。
-- [ ] `python -m pytest tests/integration/test_migrations.py tests/integration/test_west_migration_baseline.py tests/integration/test_west_warehouse_migration.py tests/integration/test_fitbit_legacy_cleanup.py -q`で全件PASS。作業1〜7の到達スキーマとbaselineの必要table/column/constraintを比較し、package buildにwest SQLが含まれること、再構築途中停止とresumeを確認する。
-- [ ] commitを`refactor: Fitbitマイグレーションを新DB用baselineへ整理`と`feat: 旧Fitbitデータの限定削除を追加`へ分ける。
+- [x] `test_legacy_cleanup_preserves_screen_time_and_schema_migrations`、`test_legacy_cleanup_rejects_new_resources`を追加する。Fitbit/Screen Timeが混在するfixtureでFitbitだけが消え、新Pub/Sub・v2 Raw・取得状態が維持されること、inventory-onlyで削除が起きないこと、再実行が安全なことを確認する。停止した旧writerだけを削除対象にし、GCS削除はgenerationを照合する。
+- [x] `python -m pytest tests/integration/test_migrations.py tests/integration/test_west_migration_baseline.py tests/integration/test_west_warehouse_migration.py tests/integration/test_fitbit_legacy_cleanup.py -q`で全件PASS。作業1〜7の到達スキーマとbaselineの必要table/column/constraintを比較し、package buildにwest SQLが含まれること、再構築途中停止とresumeを確認する。
+- [x] baselineを`feat: Rawの保持起点と西部DB用baselineを追加`、削除scriptを`feat: 旧Fitbitデータの限定削除を追加`へ分けた。
 
 ### 10. 切替後のコード・設定・文書の整理とリファクタリング
 
@@ -221,8 +221,8 @@ warehouse scriptは旧組織の読み取り、新組織の書き込みを別接�
 
 ## 実装後のローカル検証と切替・rollback release
 
-- [ ] `ruff check src tests`、`ruff format --check src tests`、`mypy src`、`python -m pytest -q`、`git diff --check`を実行し全件PASSを記録する。
-- [ ] `.github/workflows/ci.yml`と同じpackage build・container build/helpを確認する。新`fitbit ingest-notifications`と期間指定のhelpも追加する。
+- [x] `ruff check src tests`、`ruff format --check src tests`、`mypy src`、`python -m pytest -q`、`git diff --check`を実行し全件PASSを記録する。
+- [x] `.github/workflows/ci.yml`と同じpackage build・container build/helpを確認する。新`fitbit ingest-notifications`と期間指定のhelpも追加する。
 - [ ] v2 Raw、分心拍、Screen Timeの保持起点を扱えるreleaseを確定し、commit SHA・image digest・schema versionを記録する。rollbackで同じ新Fitbitモデルを利用できる経路を検証する。旧Fitbit v1/秒心拍の読み取り維持は必要条件にしない。
 - [ ] 本番を参照しないscratch DBとpreflight bucketで障害注入、baseline初期化、Screen Time移行、Fitbit再構築、dbt、両stream監査、rollback rehearsalを行う。ローカルPASSを本番成功として扱わない。
 
@@ -294,4 +294,19 @@ terraform -chdir=infra/terraform init -migrate-state \
 
 ## 現在の検証状態
 
-この計画の作成時点では文書と現行コードの照合のみ。上記の新機能テスト、schema適用、クラウド作成、データコピー、切替、無料枠の実測は未実施。
+2026-10-05に作業1〜9のコード実装とローカル検証を完了した。実装は`feat/fitbit-pubsub-gcs-migration`に機能別でcommitしている。実環境のAPI取得・preflight・切替を含む項目は未完了のままとする。
+
+| 検証 | 結果 |
+|---|---|
+| Python 3.13.7で開発依存の解決・全pytest | 777 passed。第三者ライブラリのdeprecation warning 1件 |
+| Ruff check / format（src・tests・scripts）、strict mypy | PASS。mypyは59 source files |
+| Terraform 1.15.9の全root | fmt、backendなしinit、validate、mock testがPASS。bootstrap 2・github 1・runtime 27 |
+| wheel build | PASS。westのSQL 4件がsourceとbyte単位で一致 |
+| linux/amd64 container build・起動確認 | PASS。12件のhelp/import/dbt asset/west baseline確認 |
+| 障害注入 | 通知登録途中、保存応答消失、chunk欠落、bundle内書込失敗、commit前後の応答消失、ack失敗、所有権喪失、DB deadline、補修再開を確認 |
+| レビュー後の回帰 | 日付を跨ぐstable IDの修正、古いlastSyncでの補修前進、取得済みprefixを期限前にcommitすることを確認 |
+| legacy migration001〜004 | `29ceb28`とbyte単位で同一 |
+
+実装release候補のcode SHAは`467a82b`。local imageは`personal-data-platform:pubsub-west-local`（linux/amd64）、digestは`sha256:66a090090771d8ac96ee1066f1a222f0b2b9633b9595bdacde6edc0f700c47b5`。これはローカルartifactであり、registryへの登録・本番deployは未実施。westのschema集合は001〜004、legacyの追加集合は005〜007で、実DBへの適用はscratchだけで確認した。
+
+本番手順A〜G、実Google Health APIでの全種別照合、preflight bucketでの復旧・rollback rehearsal、監視の発火/復旧、無料枠の実測は残っている。作業10の旧経路撤去と整理は本番Gの受入・復旧確認後に実施する。
