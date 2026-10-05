@@ -1,13 +1,24 @@
 """Scheduled Fitbit checks use a durable cursor and bounded daily receipts."""
 
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from personal_data_platform.sources.fitbit.api import SyncTime
 from personal_data_platform.sources.fitbit.models import Window
 from personal_data_platform.sources.fitbit.receipts import GCSReceiptRepository, Receipt
 from personal_data_platform.sources.fitbit.sync_state import GCSFitbitSyncState, SyncState
 from tests.unit.test_fitbit_receipts import Client
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime_logger(monkeypatch):
+    logger = logging.getLogger("personal_data_platform.sources.fitbit")
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "level", logger.level)
+    monkeypatch.setattr(logger, "propagate", logger.propagate)
 
 
 class Queue:
