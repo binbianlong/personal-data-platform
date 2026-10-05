@@ -72,3 +72,22 @@ models:
         data_tests: [not_null]
       - name: inferred_interval_parts
         data_tests: [not_null]
+
+  - name: fitbit_heart_rate_minute_time_series
+    description: Complete observed UTC minutes from Google wearable rollups. Missing or nonwear minutes are absent; API sample_count is unknown.
+    columns:
+      - name: start_at
+        data_tests: [not_null]
+      - name: mean_minute_heart_rate
+        description: Provider mean within this minute, independent of unknown original sample count.
+        data_tests: [not_null]
+
+  - name: daily_fitbit_heart_rate_minute
+    description: Heart rate per Asia/Tokyo date. Each observed minute has equal weight; this is not an average weighted by original samples.
+    columns:
+      - name: mean_minute_heart_rate
+        description: Arithmetic mean of the observed minute means.
+        data_tests: [not_null]
+      - name: observed_heart_rate_minutes
+        description: Count of minutes with heart rate values; missing and nonwear windows are excluded.
+        data_tests: [not_null]

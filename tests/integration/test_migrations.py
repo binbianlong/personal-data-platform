@@ -33,6 +33,7 @@ def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
         ("003_fitbit.sql",),
         ("004_fitbit_acquisition.sql",),
         ("005_fitbit_acquisition_work.sql",),
+        ("006_fitbit_heart_rate_minute.sql",),
     ]
     assert warehouse.query_rows(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'base' "
@@ -42,6 +43,7 @@ def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
         for name in (
             "fitbit_active_zone",
             "fitbit_heart_rate",
+            "fitbit_heart_rate_minute",
             "fitbit_resting_heart_rate",
             "fitbit_sleep",
             "fitbit_sleep_stage",
@@ -74,6 +76,7 @@ def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
             "fitbit_coverage",
             "fitbit_deleted_record",
             "fitbit_device_sync",
+            "fitbit_minute_coverage",
             "fitbit_notification",
             "fitbit_notification_scope",
             "fitbit_raw_intent",

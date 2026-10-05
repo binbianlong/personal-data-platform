@@ -630,3 +630,230 @@ def test_revoked_refresh_token_is_classified_without_exposing_provider_error_bod
     with pytest.raises(AuthenticationError) as caught:
         oauth()
     assert "synthetic-secret" not in str(caught.value)
+
+
+def rollup(start=START, *, average=60, minimum=55, maximum=65):
+    return {
+        "startTime": start.isoformat(),
+        "endTime": (start + timedelta(minutes=1)).isoformat(),
+        "heartRate": {
+            "beatsPerMinuteAvg": average,
+            "beatsPerMinuteMin": minimum,
+            "beatsPerMinuteMax": maximum,
+        },
+    }
+
+
+def test_rollup_uses_complete_utc_minutes_and_all_pages():
+    first = {"rollupDataPoints": [rollup()], "nextPageToken": "next", "future": {"x": 1}}
+    second = {"rollupDataPoints": [rollup(START + timedelta(minutes=1))]}
+    transport = FakeTransport([first, second])
+    result = client(
+        transport, clock=lambda: START + timedelta(minutes=2, seconds=30)
+    ).fetch_heart_rate_minutes(
+        Window("heart-rate", START, START + timedelta(days=1)), subject_key="owner"
+    )
+    assert result.window.end == START + timedelta(minutes=2)
+    assert len(result.minutes) == 2
+    assert result.minutes[0].sample_count is None
+    assert result.pages == (first, second)
+    request = json.loads(transport.calls[0][3])
+    assert transport.calls[0][0] == "POST"
+    assert transport.calls[0][1].endswith("/dataPoints:rollUp")
+    assert request["windowSize"] == "60s"
+    assert request["dataSourceFamily"].endswith("/google-wearables")
+    assert request["range"] == {
+        "startTime": "2026-09-01T00:00:00Z",
+        "endTime": "2026-09-01T00:02:00Z",
+    }
+    assert json.loads(transport.calls[1][3])["pageToken"] == "next"
+
+
+def test_rollup_missing_is_not_zero():
+    missing = {
+        "startTime": START.isoformat(),
+        "endTime": (START + timedelta(minutes=1)).isoformat(),
+    }
+    observed = rollup(START + timedelta(minutes=1), average=0, minimum=0, maximum=0)
+    result = client(
+        FakeTransport([{"rollupDataPoints": [missing, observed]}]),
+        clock=lambda: START + timedelta(days=1),
+    ).fetch_heart_rate_minutes(
+        Window("heart-rate", START, START + timedelta(minutes=2)), subject_key="owner"
+    )
+    assert len(result.minutes) == 1
+    assert result.minutes[0].start == START + timedelta(minutes=1)
+    assert result.minutes[0].average == 0
+
+
+def test_rollup_splits_requests_at_fourteen_days_and_ceil_start():
+    transport = FakeTransport([{}, {}])
+    result = client(transport, clock=lambda: START + timedelta(days=20)).fetch_heart_rate_minutes(
+        Window("heart-rate", START + timedelta(seconds=30), START + timedelta(days=15, seconds=30)),
+        subject_key="owner",
+    )
+    assert result.window.start == START + timedelta(minutes=1)
+    assert result.window.end == START + timedelta(days=15)
+    ranges = [json.loads(call[3])["range"] for call in transport.calls]
+    assert datetime.fromisoformat(ranges[0]["endTime"]) - datetime.fromisoformat(
+        ranges[0]["startTime"]
+    ) == timedelta(days=14)
+    assert ranges[0]["endTime"] == ranges[1]["startTime"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "duplicate",
+        "outside",
+        "unaligned",
+        "short",
+        "nan",
+        "inconsistent",
+        "missing-average",
+        "loop",
+        "wrong-union",
+    ],
+)
+def test_rollup_invalid_pages_never_produce_a_complete_snapshot(mutation):
+    from personal_data_platform.sources.fitbit.api import InvalidResponseError
+
+    point = rollup()
+    page = {"rollupDataPoints": [point]}
+    pages = [page]
+    if mutation == "duplicate":
+        page["rollupDataPoints"].append(rollup())
+    elif mutation == "outside":
+        page["rollupDataPoints"] = [rollup(START + timedelta(days=2))]
+    elif mutation == "unaligned":
+        page["rollupDataPoints"] = [rollup(START + timedelta(seconds=1))]
+    elif mutation == "short":
+        point["endTime"] = (START + timedelta(seconds=30)).isoformat()
+    elif mutation == "nan":
+        point["heartRate"]["beatsPerMinuteAvg"] = float("nan")
+    elif mutation == "inconsistent":
+        point["heartRate"]["beatsPerMinuteMin"] = 70
+    elif mutation == "missing-average":
+        del point["heartRate"]["beatsPerMinuteAvg"]
+    elif mutation == "wrong-union":
+        point["steps"] = {"countSum": "0"}
+    else:
+        page["nextPageToken"] = "loop"
+        pages.append({"nextPageToken": "loop"})
+    with pytest.raises(InvalidResponseError):
+        client(
+            FakeTransport(pages), clock=lambda: START + timedelta(days=3)
+        ).fetch_heart_rate_minutes(
+            Window("heart-rate", START, START + timedelta(days=1)), subject_key="owner"
+        )
+
+
+def test_rollup_snapshot_roundtrip_and_digest_ignore_order_pagination_and_observation_time():
+    from personal_data_platform.sources.fitbit.models import HeartRateMinuteSnapshot
+
+    points = [rollup(), rollup(START + timedelta(minutes=1))]
+    window = Window("heart-rate", START, START + timedelta(days=1))
+    first = client(
+        FakeTransport([{"rollupDataPoints": points, "future": 1}]),
+        clock=lambda: START + timedelta(days=2),
+    ).fetch_heart_rate_minutes(window, subject_key="owner")
+    second = client(
+        FakeTransport(
+            [
+                {"rollupDataPoints": [points[1]], "nextPageToken": "next", "future": 1},
+                {"rollupDataPoints": [points[0]], "future": 1},
+            ]
+        ),
+        clock=lambda: START + timedelta(days=3),
+    ).fetch_heart_rate_minutes(window, subject_key="owner")
+    assert HeartRateMinuteSnapshot.from_bytes(first.to_bytes()) == first
+    assert first.source_sha256() == second.source_sha256()
+    changed = client(
+        FakeTransport([{"rollupDataPoints": points, "future": 2}]),
+        clock=lambda: START + timedelta(days=2),
+    ).fetch_heart_rate_minutes(window, subject_key="owner")
+    assert first.source_sha256() != changed.source_sha256()
+
+
+def test_captured_scalar_pages_preserve_unknown_fields_and_digest_pagination_independence():
+    window = Window("steps", START, START + timedelta(days=1))
+    points = [steps(), steps(start="2026-09-01T00:01:00Z", end="2026-09-01T00:02:00Z")]
+    first = client(FakeTransport([{"dataPoints": points, "future": 1}])).fetch_captured(
+        window, subject_key="owner"
+    )
+    second = client(
+        FakeTransport(
+            [
+                {"dataPoints": [points[1]], "nextPageToken": "next", "future": 1},
+                {"dataPoints": [points[0]], "future": 1},
+            ]
+        )
+    ).fetch_captured(window, subject_key="owner")
+    assert first.pages[0]["future"] == 1
+    assert first.source_sha256() == second.source_sha256()
+    third = client(FakeTransport([{"dataPoints": points, "future": 2}])).fetch_captured(
+        window, subject_key="owner"
+    )
+    assert first.source_sha256() != third.source_sha256()
+
+
+@pytest.mark.parametrize(
+    "response", [(503, {"error": "synthetic-health"}, {}), TimeoutError("synthetic-health")]
+)
+def test_rollup_later_page_failure_never_returns_a_partial_snapshot(response):
+    from personal_data_platform.sources.fitbit.api import TransientError
+
+    transport = FakeTransport([{"rollupDataPoints": [rollup()], "nextPageToken": "next"}, response])
+    with pytest.raises(TransientError) as caught:
+        client(transport, clock=lambda: START + timedelta(days=2)).fetch_heart_rate_minutes(
+            Window("heart-rate", START, START + timedelta(days=1)), subject_key="owner"
+        )
+    assert "synthetic-health" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "response", [{"rollupDataPoints": {}}, {"nextPageToken": 1}, {"rollupDataPoints": [True]}]
+)
+def test_rollup_malformed_page_is_not_a_successful_empty_acquisition(response):
+    from personal_data_platform.sources.fitbit.api import InvalidResponseError
+
+    with pytest.raises(InvalidResponseError):
+        client(
+            FakeTransport([response]), clock=lambda: START + timedelta(days=2)
+        ).fetch_heart_rate_minutes(
+            Window("heart-rate", START, START + timedelta(days=1)), subject_key="owner"
+        )
+
+
+def test_rollup_page_limit_prevents_unbounded_acquisition():
+    from personal_data_platform.sources.fitbit.api import InvalidResponseError
+
+    transport = FakeTransport([{"nextPageToken": "next"}])
+    with pytest.raises(InvalidResponseError, match="limit"):
+        client(
+            transport, max_pages=1, clock=lambda: START + timedelta(days=2)
+        ).fetch_heart_rate_minutes(
+            Window("heart-rate", START, START + timedelta(days=1)), subject_key="owner"
+        )
+
+
+def test_rollup_no_complete_minute_is_deferred_without_an_api_request():
+    transport = FakeTransport([])
+    with pytest.raises(ValueError, match="complete minute"):
+        client(transport, clock=lambda: START + timedelta(seconds=30)).fetch_heart_rate_minutes(
+            Window("heart-rate", START, START + timedelta(minutes=1)), subject_key="owner"
+        )
+    assert transport.calls == []
+
+
+def test_captured_snapshot_roundtrip_preserves_unknown_page_and_point_fields():
+    from personal_data_platform.sources.fitbit.models import CapturedSnapshot
+
+    point = steps()
+    point["futurePoint"] = {"value": [1, 2]}
+    page = {"dataPoints": [point], "futurePage": {"value": True}}
+    result = client(FakeTransport([page])).fetch_captured(
+        Window("steps", START, START + timedelta(days=1)), subject_key="owner"
+    )
+    assert CapturedSnapshot.from_bytes(result.to_bytes()) == result
+    assert result.pages == (page,)
