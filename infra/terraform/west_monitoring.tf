@@ -7,7 +7,7 @@ resource "google_monitoring_alert_policy" "west_job_failed" {
   conditions {
     display_name = "Failed hourly or daily execution"
     condition_threshold {
-      filter          = "resource.type = \"cloud_run_job\" AND resource.labels.location = \"${var.west_region}\" AND resource.labels.project_id = \"${var.project_id}\" AND (resource.labels.job_name = \"${local.west_jobs.hourly.name}\" OR resource.labels.job_name = \"${local.west_jobs.daily.name}\") AND metric.type = \"run.googleapis.com/job/completed_execution_count\" AND metric.labels.result != \"succeeded\""
+      filter          = "resource.type = \"cloud_run_job\" AND resource.labels.location = \"${var.west_region}\" AND resource.labels.project_id = \"${var.project_id}\" AND resource.labels.job_name = one_of(\"${local.west_jobs.hourly.name}\", \"${local.west_jobs.daily.name}\") AND metric.type = \"run.googleapis.com/job/completed_execution_count\" AND metric.labels.result != \"succeeded\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
