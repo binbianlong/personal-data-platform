@@ -1,7 +1,7 @@
 # Pub/Sub・GCS西部リージョン移行計画
 
 - 作成日: 2026-10-05
-- 状態: 未着手の実装・移行計画。チェック項目は実行結果を記録してから完了にする。
+- 状態: 作業1〜9を実装済み。本番のbackup・backend移行・西部資産の一部作成まで実施し、MotherDuck組織の準備と接続先切替は未完了。[移行記録](../../platform/west-migration-2026-10-05.md)に実施結果を記載する。
 - 実装ブランチ: `feat/fitbit-pubsub-gcs-migration`
 - 移行元: `main`の`adc527a`。他ブランチの機能が適用済みであるとは扱わない。
 
@@ -230,31 +230,31 @@ warehouse scriptは旧組織の読み取り、新組織の書き込みを別接�
 
 ### A. Inventoryと費用の確認
 
-- [ ] GCP resourceの実location、bucket/secret/version、Scheduler、実行中Job、Cloud Tasks/GCS receipt残件、MotherDuck組織・DB・table/view、全期間の件数をread-onlyで採取する。
-- [ ] Screen TimeのRaw/分析データと必要な共有台帳のbackupを確保し、復元できることを検証する。MotherDuckは読み取り接続から移行対象をlocal DuckDBへ保存し、別接続で新組織へ取り込む。Fitbitの旧データ・Rawのbackupは必須にしない。bootstrapのlocal state、runtime remote state、PC SQLiteは別々に保全する。
+- [x] GCP resourceの実location、bucket/secret/version、Scheduler、実行中Job、Cloud Tasks/GCS receipt残件、MotherDuck組織・DB・table/view、全期間の件数をread-onlyで採取する。
+- [x] Screen TimeのRaw/分析データと必要な共有台帳のbackupを確保し、復元できることを検証する。MotherDuckは読み取り接続から移行対象をlocal DuckDBへ保存し、別接続で新組織へ取り込む。Fitbitの旧データ・Rawのbackupは必須にしない。bootstrapのlocal state、runtime remote state、PC SQLiteは別々に保全する。初回backupと全件のローカル復元は完了し、新組織へのimport・最終差分はC/Dで確認する。
 - [ ] Fitbitの再収集開始時刻を決め、旧データ・Raw・通知/取得状態の全消去対象をinventoryする。source/prefix/table/queueのallowlistを固定し、Screen Timeと共通migration台帳を含めない。直近の代表期間を取得し、完全な空結果と取得失敗を区別する。
 - [ ] Screen Time移行コピー、Fitbit初回取得と任意backfill、image/secret併存の費用・API rate limit・所要時間を見積もる。backfillを無料枠/実行時間内で分割し、通知保持期限を圧迫しない順序にする。定常無料枠と移行時費用を分ける。
 - [ ] 新旧のresource ID、接続先、backup、cutover時刻、照合結果を移行記録に残す。秘密情報・健康データ本体・stateの内容をGitへ入れない。
 
 ### B. BootstrapとTerraform backend
 
-- [ ] 旧ASIA state bucketを保護したまま、別名・別addressで西部state bucketとrepositoryを作る。stateはversioning・UBLA・public access preventionを維持し、Rawのsoft-delete/versioning設定を流用しない。
-- [ ] backendを使うCIとTerraform操作を一時停止する。旧stateを安全な場所へ退避し、plan/deploy identityの新bucket権限を確認する。
-- [ ] 現在のbackendを初期化済みのcheckoutで、以下を実行する。変数は移行記録の新bucket名を使う。
+- [x] 旧ASIA state bucketを保護したまま、別名・別addressで西部state bucketとrepositoryを作る。stateはversioning・UBLA・public access preventionを維持し、Rawのsoft-delete/versioning設定を流用しない。
+- [x] backendを使うCIとTerraform操作を一時停止する。旧stateを安全な場所へ退避し、plan/deploy identityの新bucket権限を確認する。
+- [x] 現在のbackendを初期化済みのcheckoutで、以下を実行する。変数は移行記録の新bucket名を使う。
 
 ```bash
 terraform -chdir=infra/terraform init -migrate-state \
   -backend-config="bucket=$PDP_WEST_STATE_BUCKET"
 ```
 
-- [ ] prefix`personal-data-platform/runtime`、state lineage、serial、resource ID一覧、旧資産をdestroyしないplanを照合してから`TF_STATE_BUCKET`を切り替える。`-reconfigure`だけではstateのコピーにならない。[Terraform init](https://developer.hashicorp.com/terraform/cli/commands/init)
+- [x] prefix`personal-data-platform/runtime`、state lineage、serial、resource ID一覧、旧資産をdestroyしないplanを照合してから`TF_STATE_BUCKET`を切り替える。`-reconfigure`だけではstateのコピーにならない。[Terraform init](https://developer.hashicorp.com/terraform/cli/commands/init)
 - [ ] bootstrapのlocal stateはruntime backendと別管理であることを確認する。移行済みstateを旧backendから再度書き込むCIがないことを確認してCIを再開する。
 
 ### C. 停止状態で新環境を準備
 
 - [ ] MotherDuckの`us-west-2`組織、productionとpreflightの別接続先を準備し、作業9のbaselineで空DBを初期化する。組織・ユーザー・token・MCPの権限を確認し、`SELECT region FROM md_user_info();`で接続先の地域を照合する。[MotherDuckリージョン](https://motherduck.com/docs/about-motherduck/cloud-regions)
 - [ ] 西部Raw/preflight bucket、secret、Pub/Sub、Service、Jobを作る。新Schedulerは停止し、新Jobを起動しない。旧リソースの`prevent_destroy`を維持する。
-- [ ] Pub/Subを`pubsub.us-west1.rep.googleapis.com`へ接続し、保存先`["us-west1"]`、`enforceInTransit=true`、7日保持、自動期限切れなしを確認する。[Pub/Sub endpoints](https://docs.cloud.google.com/pubsub/docs/reference/service_apis_overview)
+- [x] Pub/Subを`pubsub.us-west1.rep.googleapis.com`へ接続し、保存先`["us-west1"]`、`enforceInTransit=true`、7日保持、自動期限切れなしを確認する。[Pub/Sub endpoints](https://docs.cloud.google.com/pubsub/docs/reference/service_apis_overview)
 - [ ] secretは数値versionを固定して注入する。auto replicationは変更できないため新IDへ移す。Cloud Run互換のglobal secret＋単一西部replicaを使う。[Secret Manager](https://docs.cloud.google.com/secret-manager/docs/choosing-replication)、[Cloud Run secrets](https://docs.cloud.google.com/run/docs/configuring/services/secrets)
 - [ ] Screen Timeの初回データと90日内Rawをコピーし、hash/size、保持起点、新generation、件数・主キー・期間・代表集計を照合する。旧migration台帳と実行中leaseを新側へimportしない。
 - [ ] 本番Schedulerと通知pullを停止したまま、限定した手動syncを共通leaseで実行する。Fitbitの全種別・分心拍・Raw・取得状態を新規に作り、代表集計を確認する。旧Fitbit Raw/台帳をコピーしない。過去履歴の全期間backfillは切替条件にせず、必要なら切替後に分割して実施する。
@@ -298,7 +298,7 @@ terraform -chdir=infra/terraform init -migrate-state \
 
 | 検証 | 結果 |
 |---|---|
-| Python 3.13.7で開発依存の解決・全pytest | 777 passed。第三者ライブラリのdeprecation warning 1件 |
+| Python 3.13.7で開発依存の解決・全pytest | 779 passed。第三者ライブラリのdeprecation warning 1件 |
 | Ruff check / format（src・tests・scripts）、strict mypy | PASS。mypyは59 source files |
 | Terraform 1.15.9の全root | fmt、backendなしinit、validate、mock testがPASS。bootstrap 2・github 1・runtime 27 |
 | wheel build | PASS。westのSQL 4件がsourceとbyte単位で一致 |
@@ -307,6 +307,6 @@ terraform -chdir=infra/terraform init -migrate-state \
 | レビュー後の回帰 | 日付を跨ぐstable IDの修正、古いlastSyncでの補修前進、取得済みprefixを期限前にcommitすることを確認 |
 | legacy migration001〜004 | `29ceb28`とbyte単位で同一 |
 
-実装release候補のcode SHAは`467a82b`。local imageは`personal-data-platform:pubsub-west-local`（linux/amd64）、digestは`sha256:66a090090771d8ac96ee1066f1a222f0b2b9633b9595bdacde6edc0f700c47b5`。これはローカルartifactであり、registryへの登録・本番deployは未実施。westのschema集合は001〜004、legacyの追加集合は005〜007で、実DBへの適用はscratchだけで確認した。
+実装release候補のcode SHAは`467a82b`。imageはlinux/amd64、digestは`sha256:66a090090771d8ac96ee1066f1a222f0b2b9633b9595bdacde6edc0f700c47b5`。西部registryへ登録し、西部受信Serviceへdeployした。providerの送信先は旧URLのままで、新Jobは未作成。westのschema集合は001〜004、legacyの追加集合は005〜007で、西部baselineの適用はローカル復元先で確認した。西部MotherDuckにはまだ適用していない。
 
-本番手順A〜G、実Google Health APIでの全種別照合、preflight bucketでの復旧・rollback rehearsal、監視の発火/復旧、無料枠の実測は残っている。作業10の旧経路撤去と整理は本番Gの受入・復旧確認後に実施する。
+本番A/B/Cの実施済み部分は[移行記録](../../platform/west-migration-2026-10-05.md)を参照する。西部MotherDuckの準備、実Google Health APIでの全種別照合、preflight bucketでの復旧・rollback rehearsal、接続先切替、監視の発火/復旧、無料枠の実測は残っている。作業10の旧経路撤去と整理は本番Gの受入・復旧確認後に実施する。
