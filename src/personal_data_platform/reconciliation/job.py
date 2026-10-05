@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 
-from personal_data_platform.loader.job import run_loader
+from personal_data_platform.config import schema_profile
+from personal_data_platform.loader.deadline import interrupt_after
+from personal_data_platform.loader.job import (
+    LOADER_LEASE_SECONDS,
+    JobAlreadyRunning,
+    run_loader,
+    run_loader_objects,
+)
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import (
     RawRepository,
@@ -26,7 +34,7 @@ from personal_data_platform.storage.motherduck import (
     connect,
 )
 
-from .heartbeat import HeartbeatPublisher, publish_http_heartbeat
+from .heartbeat import HeartbeatPublisher, daily_heartbeat_urls, publish_http_heartbeat
 from .models import ReconciliationResult
 
 LOGGER = logging.getLogger(__name__)
@@ -89,6 +97,9 @@ def run_reconciliation(
     prefix: str | None = None,
     repair_missing: bool = True,
     now: datetime | None = None,
+    raw_objects: tuple[RawObject, ...] | None = None,
+    _lease_owner: str | None = None,
+    publish_success: bool = True,
 ) -> ReconciliationResult:
     """Audit raw/warehouse parity, repair missing loads, and publish success."""
 
@@ -101,15 +112,27 @@ def run_reconciliation(
     if started_at is None:
         raise ValueError("reconciliation time must be timezone-aware")
     run_id = str(uuid.uuid4())
-    raw_by_key = _list_raw_by_key(repository, source, prefix)
-    raw_objects = list(raw_by_key.values())
+    supplied_inventory = raw_objects is not None
+    if _lease_owner is not None:
+        warehouse.require_job_lock(_lease_owner)
+    raw_by_key = (
+        {value.key: value for value in raw_objects}
+        if raw_objects is not None
+        else _list_raw_by_key(repository, source, prefix)
+    )
+    raw_refs = list(raw_by_key.values())
     raw_keys = set(raw_by_key)
     parser_version = source.parser_version
-    loaded_keys = warehouse.succeeded_keys_for(raw_objects, parser_version=parser_version)
+    loaded_keys = warehouse.succeeded_keys_for(raw_refs, parser_version=parser_version)
     missing_before_repair = raw_keys - loaded_keys
     repair_summary: dict[str, int] | None = None
     if missing_before_repair and repair_missing:
-        summary = run_loader(repository, warehouse, source=source, prefix=prefix)
+        if _lease_owner is None:
+            summary = run_loader(repository, warehouse, source=source, prefix=prefix)
+        else:
+            summary = run_loader(
+                repository, warehouse, source=source, prefix=prefix, _lease_owner=_lease_owner
+            )
         repair_summary = {
             "discovered": summary.discovered,
             "skipped": summary.skipped,
@@ -120,17 +143,17 @@ def run_reconciliation(
     states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
     # A repair or concurrent loader can commit keys newer than the initial listing.
     # Refresh before classifying any active warehouse key as absent from GCS.
-    if set(states) - raw_keys:
+    if not supplied_inventory and set(states) - raw_keys:
         latest_raw_by_key = _list_raw_by_key(repository, source, prefix)
         for key in set(states):
             if key in latest_raw_by_key:
                 raw_by_key[key] = latest_raw_by_key[key]
-        raw_objects = list(raw_by_key.values())
+        raw_refs = list(raw_by_key.values())
         raw_keys = set(raw_by_key)
         states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
 
     checked_at = started_at if now is not None else datetime.now(UTC)
-    succeeded_keys = warehouse.succeeded_keys_for(raw_objects, parser_version=parser_version)
+    succeeded_keys = warehouse.succeeded_keys_for(raw_refs, parser_version=parser_version)
     failed_keys = _active_status_keys(states, "failed")
     loading_keys = _active_status_keys(states, "loading")
     live_loaded_keys = raw_keys & succeeded_keys
@@ -141,7 +164,7 @@ def run_reconciliation(
     unrecoverable_uningested: set[str] = set()
     unknown_creation_time: set[str] = set()
     for key, state in states.items():
-        created_at = _aware_utc(state.storage_created_at)
+        created_at = _aware_utc(state.retention_started_at or state.storage_created_at)
         if key in raw_keys:
             if created_at is None:
                 unknown_creation_time.add(key)
@@ -158,7 +181,7 @@ def run_reconciliation(
     lifecycle_lag: set[str] = set()
     overdue_deletion: set[str] = set()
     for key, value in raw_by_key.items():
-        created_at = _aware_utc(getattr(value, "storage_created_at", None))
+        created_at = _aware_utc(value.retention_origin)
         if created_at is None:
             unknown_creation_time.add(key)
         elif created_at <= checked_at - lifecycle_overdue:
@@ -166,7 +189,7 @@ def run_reconciliation(
         elif created_at <= checked_at - raw_retention:
             lifecycle_lag.add(key)
 
-    source_health = source.audit(repository, raw_objects, checked_at)
+    source_health = source.audit(repository, raw_refs, checked_at)
     unexpected_absent_succeeded = premature_missing | (
         (unknown_creation_time & succeeded_keys) - raw_keys
     )
@@ -250,6 +273,8 @@ def run_reconciliation(
     warehouse.connection.execute("BEGIN TRANSACTION")
     stage = "warehouse_heartbeat"
     try:
+        if _lease_owner is not None:
+            warehouse.require_job_lock(_lease_owner)
         stage = "retention_expiry"
         marked_expired = warehouse.mark_retention_expired(
             (states[key] for key in expected_expired),
@@ -258,9 +283,11 @@ def run_reconciliation(
         if marked_expired != expected_expired:
             raise RuntimeError("retention state changed during reconciliation; retry the audit")
         stage = "warehouse_heartbeat"
-        warehouse.publish_heartbeat(source.monitor_name, result.run_id, heartbeat_payload)
+        if publish_success:
+            warehouse.publish_heartbeat(source.monitor_name, result.run_id, heartbeat_payload)
         stage = "heartbeat"
-        heartbeat(heartbeat_payload)
+        if publish_success:
+            heartbeat(heartbeat_payload)
         stage = "completion"
         warehouse.record_reconciliation(result)
         warehouse.connection.execute("COMMIT")
@@ -283,6 +310,8 @@ def run_reconciliation(
 def run_reconciliation_from_env(
     *, source_id: str | None = None, stream: str | None = None, all_streams: bool = False
 ) -> int:
+    if schema_profile() == "west" or os.environ.get("PDP_FITBIT_DELIVERY_MODE") == "pubsub":
+        return _run_daily_reconciliation()
     status = _run_reconciliation_sources(
         source_id=source_id, stream=stream, all_streams=all_streams
     )
@@ -292,6 +321,112 @@ def run_reconciliation_from_env(
         result = run_repair_from_env()
         status = max(status, int(bool(result.failed_count or result.at_risk_count)))
     return status
+
+
+def _run_daily_reconciliation() -> int:
+    from personal_data_platform.dbt_runner import run_dbt_from_env
+    from personal_data_platform.sources.fitbit.logging import configure_logging
+    from personal_data_platform.sources.fitbit.runtime import run_daily_repair
+
+    configure_logging("personal_data_platform.reconciliation")
+    urls = daily_heartbeat_urls()
+    sources = get_sources("screen_time", all_streams=True)
+    for source in sources:
+        validate_runtime_policy(source)
+    warehouse = Warehouse(connect(WarehouseConfig.from_env()))
+    owner = str(uuid.uuid4())
+    deadline = time.monotonic() + 100 * 60
+    acquired = False
+    timer = None
+
+    def remaining() -> int:
+        seconds = int(deadline - time.monotonic())
+        if seconds <= 0:
+            raise TimeoutError("daily reconciliation deadline exceeded")
+        warehouse.require_job_lock(owner, remaining_seconds=seconds)
+        return seconds
+
+    try:
+        warehouse.migrate(profile=schema_profile())
+        acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=LOADER_LEASE_SECONDS)
+        if not acquired:
+            raise JobAlreadyRunning("loader already has an unexpired job lease")
+        timer = interrupt_after(warehouse, remaining())
+        inventories = []
+        for source in sources:
+            remaining()
+            repository = source.repository_from_env()
+            refs = tuple(list_source_raw(repository, source))
+            inventories.append((source, repository, refs))
+            if not run_loader_objects(
+                repository, warehouse, refs, source=source, _lease_owner=owner, _deadline=deadline
+            ).ok:
+                return 1
+        repair = run_daily_repair(
+            now=datetime.now(UTC), lease_owner=owner, timeout_seconds=remaining()
+        )
+        if not repair.ok:
+            return 1
+        if run_dbt_from_env(lease_owner=owner, timeout_seconds=remaining()):
+            return 1
+        for source, repository, refs in inventories:
+            remaining()
+            result = run_reconciliation(
+                repository,
+                warehouse,
+                source=source,
+                raw_objects=refs,
+                repair_missing=False,
+                heartbeat=_no_external_heartbeat,
+                _lease_owner=owner,
+                publish_success=False,
+            )
+            if not result.ok:
+                return 1
+        remaining()
+        payload: dict[str, object] = {
+            "run_id": owner,
+            "completed_at": datetime.now(UTC).isoformat(),
+            "job_name": "daily-reconciliation-west",
+            "status": "succeeded",
+        }
+        # All required phases have succeeded before any external success ping.
+        for name, url in urls.items():
+            remaining()
+            publish_http_heartbeat(url, {**payload, "monitor": name})
+        warehouse.connection.execute("BEGIN TRANSACTION")
+        try:
+            for name in urls:
+                warehouse.publish_heartbeat(name, owner, payload)
+            warehouse.connection.execute("COMMIT")
+        except Exception:
+            warehouse.connection.execute("ROLLBACK")
+            raise
+        LOGGER.info(
+            "daily reconciliation succeeded",
+            extra={
+                "event": "reconciliation",
+                "status": "succeeded",
+                "job_name": "daily-reconciliation-west",
+            },
+        )
+        return 0
+    except Exception:
+        LOGGER.exception(
+            "daily reconciliation failed",
+            extra={
+                "event": "reconciliation",
+                "status": "failed",
+                "job_name": "daily-reconciliation-west",
+            },
+        )
+        return 1
+    finally:
+        if timer is not None:
+            timer.cancel()
+        if acquired and warehouse.connection_usable:
+            warehouse.release_job_lock("loader", owner)
+        warehouse.close()
 
 
 def _run_reconciliation_sources(

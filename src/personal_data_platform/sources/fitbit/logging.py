@@ -15,7 +15,7 @@ class _JSONFormatter(logging.Formatter):
             "message": record.getMessage(),
             "logger": record.name,
         }
-        for key in ("event", "status", "summary"):
+        for key in ("event", "status", "summary", "job_name"):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
         if record.exc_info:
@@ -23,13 +23,13 @@ class _JSONFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
-def configure_logging() -> None:
-    """Configure only the Fitbit namespace, once, without changing other jobs."""
+def configure_logging(namespace: str = "personal_data_platform.sources.fitbit") -> None:
+    """Configure one application namespace once, leaving the root logger unchanged."""
     name = os.environ.get("LOG_LEVEL", "INFO").upper()
     level = logging.getLevelNamesMapping().get(name)
     if level is None:
         raise ValueError("LOG_LEVEL must be a standard logging level")
-    logger = logging.getLogger("personal_data_platform.sources.fitbit")
+    logger = logging.getLogger(namespace)
     handler = next(
         (
             item
