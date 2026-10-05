@@ -44,6 +44,29 @@ def test_old_success_does_not_complete_new_notification(warehouse):
         state.bind_attempt(("new",), scope, attempt)
 
 
+def test_interrupted_notification_registration_rolls_back_all_scopes(warehouse, monkeypatch):
+    state, Notification, window, when = setup_state(warehouse)
+    other = type(window)("sleep", window.start, window.end)
+    notification = Notification("retry", "self", (window, other), when)
+    original = state._ensure_scope
+    calls = []
+
+    def interrupted(scope):
+        calls.append(scope)
+        if len(calls) == 2:
+            raise RuntimeError("registration interrupted")
+        original(scope)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(state, "_ensure_scope", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted"):
+            state.register_notifications((notification,))
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_notification") == 0
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_notification_scope") == 0
+    assert len(state.register_notifications((notification,))["retry"]) == 2
+    assert len(state.register_notifications((notification,))["retry"]) == 2
+
+
 def test_ack_waits_for_all_scopes_and_commit(warehouse):
     from personal_data_platform.sources.fitbit.models import Window
 
@@ -110,3 +133,29 @@ def test_notification_identity_cannot_change_its_required_scope(warehouse):
         state.register_notifications(
             (Notification("n", "self", (Window("sleep", window.start, window.end),), when),)
         )
+
+
+def test_incomplete_intent_retires_only_after_all_scopes_are_refetched(warehouse):
+    from personal_data_platform.sources.fitbit.models import Window
+
+    state, Notification, window, when = setup_state(warehouse)
+    scopes = state.register_notifications(
+        (Notification("n", "self", (window, Window("sleep", window.start, window.end)), when),)
+    )["n"]
+    old_attempts = tuple(state.start_attempt(scope, started_at=when) for scope in scopes)
+    state.prepare_bundle("incomplete", old_attempts, (("raw/fitbit/v2/missing", "a" * 64, 100),))
+    state.retire_superseded_bundles()
+    assert len(state.pending_bundles()) == 1
+    for index, scope in enumerate(scopes):
+        newer = state.start_attempt(scope, started_at=when + timedelta(hours=1))
+        finish(warehouse, state, newer, keys=("raw/new",))
+        state.retire_superseded_bundles()
+        assert len(state.pending_bundles()) == (1 if index == 0 else 0)
+    assert (
+        warehouse.query_value("SELECT status FROM ops.fitbit_bundle WHERE bundle_id='incomplete'")
+        == "superseded"
+    )
+    assert (
+        warehouse.query_value("SELECT count(*) FROM ops.fitbit_attempt WHERE status='succeeded'")
+        == 2
+    )

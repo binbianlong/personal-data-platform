@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from personal_data_platform.storage.motherduck import Warehouse
+from personal_data_platform.storage.motherduck import Warehouse, WarehouseConnectionError
 
 from .models import AcquisitionScope, Notification, Window, aware
 
@@ -28,12 +28,111 @@ class BundleIntent:
     chunks: tuple[tuple[str, str, int], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RepairCursor:
+    cursor_id: str
+    subject_key: str
+    next_start: datetime
+    range_end: datetime
+    data_type: str
+
+
+class RepairCursors:
+    """One cursor per data type advances only after its committed acquisition."""
+
+    def __init__(self, warehouse: Warehouse) -> None:
+        self.connection = warehouse.connection
+
+    def read(self, root_id: str, subject_key: str) -> tuple[RepairCursor, ...]:
+        rows = self.connection.execute(
+            "SELECT cursor_id, subject_key, next_start, range_end, data_types "
+            "FROM ops.fitbit_repair_cursor WHERE starts_with(cursor_id, ?) ORDER BY cursor_id",
+            [root_id + ":"],
+        ).fetchall()
+        if any(row[1] != subject_key or len(row[4]) != 1 for row in rows):
+            raise ValueError("repair cursor subject or data types differ")
+        return tuple(RepairCursor(row[0], row[1], row[2], row[3], row[4][0]) for row in rows)
+
+    def pending(self, subject_key: str) -> tuple[RepairCursor, ...]:
+        rows = self.connection.execute(
+            "SELECT cursor_id, subject_key, next_start, range_end, data_types "
+            "FROM ops.fitbit_repair_cursor WHERE subject_key=? AND next_start < range_end "
+            "ORDER BY next_start, cursor_id",
+            [subject_key],
+        ).fetchall()
+        if any(len(row[4]) != 1 for row in rows):
+            raise ValueError("repair cursor requires one data type")
+        return tuple(RepairCursor(row[0], row[1], row[2], row[3], row[4][0]) for row in rows)
+
+    def initialize(
+        self, root_id: str, subject_key: str, windows: tuple[Window, ...], *, daily: bool = False
+    ) -> tuple[RepairCursor, ...]:
+        existing = {cursor.data_type: cursor for cursor in self.read(root_id, subject_key)}
+        for window in windows:
+            cursor = existing.get(window.data_type)
+            if cursor is not None and not daily:
+                if cursor.range_end != window.end or window.start > cursor.next_start:
+                    raise ValueError("repair cursor range differs")
+                continue
+            # Complete pending work before opening another rolling repair cycle.
+            start = (
+                cursor.next_start
+                if cursor is not None and cursor.next_start < cursor.range_end
+                else window.start
+            )
+            self.connection.execute(
+                "INSERT INTO ops.fitbit_repair_cursor VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(cursor_id) DO UPDATE SET next_start=excluded.next_start, "
+                "range_end=excluded.range_end, updated_at=excluded.updated_at",
+                [
+                    root_id + ":" + window.data_type,
+                    subject_key,
+                    start,
+                    window.end,
+                    [window.data_type],
+                    datetime.now(UTC),
+                ],
+            )
+        return self.read(root_id, subject_key)
+
+    def advance(self, cursor: RepairCursor, end: datetime) -> None:
+        if not cursor.next_start < end <= cursor.range_end:
+            raise ValueError("invalid repair cursor advancement")
+        self.connection.execute(
+            "UPDATE ops.fitbit_repair_cursor SET next_start=?, updated_at=? "
+            "WHERE cursor_id=? AND next_start=?",
+            [end, datetime.now(UTC), cursor.cursor_id, cursor.next_start],
+        )
+
+
 class AcquisitionState:
     def __init__(self, warehouse: Warehouse) -> None:
         self.warehouse = warehouse
         self.connection = warehouse.connection
 
     def register_notifications(
+        self, notifications: tuple[Notification, ...]
+    ) -> Mapping[str, tuple[AcquisitionScope, ...]]:
+        self.connection.execute("BEGIN TRANSACTION")
+        try:
+            result = self._register_notifications(notifications)
+        except Exception:
+            try:
+                self.connection.execute("ROLLBACK")
+            except Exception:
+                self.warehouse.connection_usable = False
+                raise WarehouseConnectionError(
+                    "notification registration rollback failed"
+                ) from None
+            raise
+        try:
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.warehouse.connection_usable = False
+            raise WarehouseConnectionError("notification registration outcome unknown") from None
+        return result
+
+    def _register_notifications(
         self, notifications: tuple[Notification, ...]
     ) -> Mapping[str, tuple[AcquisitionScope, ...]]:
         result: dict[str, tuple[AcquisitionScope, ...]] = {}
@@ -267,3 +366,30 @@ class AcquisitionState:
         if row is None:
             raise ValueError("unknown acquisition attempt")
         return AcquisitionScope(row[0], Window(row[1], row[2], row[3]), row[4])
+
+    def restore_attempt(
+        self, attempt_id: str, scope: AcquisitionScope, *, started_at: datetime
+    ) -> None:
+        """Recover a complete Raw into an empty final schema without old delivery state."""
+        row = self.connection.execute(
+            "SELECT scope_key FROM ops.fitbit_attempt WHERE attempt_id=?", [attempt_id]
+        ).fetchone()
+        if row:
+            if row[0] != scope.key:
+                raise ValueError("bundle attempt scope differs from persistent intent")
+            return
+        self._ensure_scope(scope)
+        self.connection.execute(
+            "INSERT INTO ops.fitbit_attempt VALUES (?, ?, ?, 'pending', NULL, NULL, NULL)",
+            [attempt_id, scope.key, aware(started_at)],
+        )
+
+    def retire_superseded_bundles(self) -> None:
+        """Retire unusable intents only after every scope has a newer durable success."""
+        self.connection.execute("""UPDATE ops.fitbit_bundle SET status='superseded'
+            WHERE status='pending' AND NOT EXISTS (
+                SELECT 1 FROM ops.fitbit_bundle_attempt ba JOIN ops.fitbit_attempt a USING(attempt_id)
+                LEFT JOIN ops.fitbit_scope_success s USING(scope_key)
+                WHERE ba.bundle_id=fitbit_bundle.bundle_id AND
+                    (s.attempt_id IS NULL OR s.attempt_id=a.attempt_id OR s.started_at <= a.started_at)
+            )""")

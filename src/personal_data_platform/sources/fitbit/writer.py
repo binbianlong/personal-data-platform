@@ -306,6 +306,19 @@ class FitbitBatch:
                 " WHERE range_start <= previous.cursor_at AND range_end > previous.cursor_at)",
                 [snapshot.subject_key, window.data_type, sorted(moved_cursors)],
             )
+            has_scope_success = connection.execute(
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_schema='ops' AND table_name='fitbit_scope_success'"
+            ).fetchone()
+            if has_scope_success is not None and has_scope_success[0]:
+                connection.execute(
+                    "UPDATE ops.fitbit_scope_success SET source_sha256='' "
+                    "WHERE scope_key IN (SELECT scope_key FROM ops.fitbit_scope "
+                    "WHERE subject_key=? AND data_type=? AND EXISTS "
+                    "(SELECT 1 FROM unnest(?::TIMESTAMPTZ[]) previous(cursor_at) "
+                    "WHERE range_start <= previous.cursor_at AND range_end > previous.cursor_at))",
+                    [snapshot.subject_key, window.data_type, sorted(moved_cursors)],
+                )
         return protected_ids
 
     def _update_deletions(

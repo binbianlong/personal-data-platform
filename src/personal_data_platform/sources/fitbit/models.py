@@ -543,3 +543,56 @@ class HeartRateMinuteSnapshot:
             string(data["origin"]),
             string(data["aggregation_version"]),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class BundleEntry:
+    attempt_id: str
+    acquisition: CapturedSnapshot | HeartRateMinuteSnapshot
+    requested_scope: AcquisitionScope | None = None
+
+    def __post_init__(self) -> None:
+        if self.requested_scope is None:
+            object.__setattr__(
+                self,
+                "requested_scope",
+                AcquisitionScope(
+                    self.acquisition.subject_key,
+                    self.acquisition.window,
+                    self.acquisition.aggregation_version,
+                ),
+            )
+        if not self.attempt_id:
+            raise ValueError("bundle entry requires an attempt")
+        if self.requested_scope is not None and (
+            self.requested_scope.subject_key != self.acquisition.subject_key
+            or self.requested_scope.window.data_type != self.acquisition.window.data_type
+            or self.requested_scope.aggregation_version != self.acquisition.aggregation_version
+            or not self.requested_scope.window.start
+            <= self.acquisition.window.start
+            < self.acquisition.window.end
+            <= self.requested_scope.window.end
+        ):
+            raise ValueError("bundle acquisition does not match requested scope")
+
+    @property
+    def scope(self) -> AcquisitionScope:
+        return self.requested_scope or AcquisitionScope(
+            self.acquisition.subject_key,
+            self.acquisition.window,
+            self.acquisition.aggregation_version,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class FitbitBundle:
+    bundle_id: str
+    entries: tuple[BundleEntry, ...]
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.bundle_id) is None or not self.entries:
+            raise ValueError("invalid bundle identity or empty entries")
+        if len({entry.attempt_id for entry in self.entries}) != len(self.entries):
+            raise ValueError("bundle has duplicate attempts")
+        if len({entry.acquisition.subject_key for entry in self.entries}) != 1:
+            raise ValueError("bundle must have one subject")
