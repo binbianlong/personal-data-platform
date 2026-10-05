@@ -21,6 +21,8 @@ Screen TimeとFitbitを継続収集し、取得したRawを90日保存しなが�
 
 通知の待ち行列はPub/Sub、取り込みに関する永続状態はMotherDuckに置く。Firestoreの導入は初期構成に含めない。
 
+移行時の既存Fitbitデータは全消去可能とする。分析table、旧Raw、receipt、checkpoint、通知・取得状態を新環境へ引き継ぐ必要はなく、最終スキーマで新規取得を始める。過去履歴のbackfillは必要な期間だけ任意に行い、全期間復元を切替条件にしない。Screen TimeのRaw・分析履歴と共通基盤の状態は維持する。
+
 ```mermaid
 flowchart TD
     health[Google Health API / Fitbit] -->|Webhook| receiver[Cloud Run 受信Service]
@@ -54,7 +56,7 @@ flowchart TD
 | Screen Time | 定期Loaderとcollector control | 日次Loader、24時間間隔のcontrol公開 |
 | リージョン | GCP `us-central1`、既存MotherDuck組織 | GCP `us-west1`、新しいMotherDuck西部組織 |
 
-既存のGCS receipt、Cloud Tasks、GCS上のFitbit checkpointは、未処理分と移行状態を確認してから段階的に廃止する。
+既存のGCS receipt、Cloud Tasks、GCS上のFitbit checkpointは、旧writer停止と新経路の動作を確認して廃止する。再収集開始前の未処理分は廃棄可能とし、開始以降の通知は新Pub/Subで保持する。
 
 ## 受信と通知処理
 
@@ -106,7 +108,7 @@ Pub/Subメッセージには、schema version、対象ユーザー、データ�
 
 ### MotherDuckの状態
 
-既存の`ops`取り込み台帳・Raw intentを基礎として、以下の状態を前方互換のmigrationで追加する。適用済みmigrationは書き換えない。
+以下の状態を新DB用Fitbit baselineへ定義する。共通取り込み台帳は利用するが、旧Fitbit intent・成功状態は引き継がない。旧環境向けの追加migrationとbaselineは移行中だけ分け、既存DBの適用済みmigrationは書き換えない。
 
 | 状態 | 保存する内容 |
 | --- | --- |
@@ -149,9 +151,9 @@ Fitbit Rawは新しいschema version・prefixのbundleにする。bundle内に�
 
 一実行の変更範囲を可能な範囲でまとめて保存する。APIで完全に取得できた範囲だけをbundleに含め、1object最大16MiBの圧縮サイズを初期上限として分割する。一範囲が上限を超える場合は同じattemptのchunkとして分割し、全chunkの保存・検証・取り込みが終わるまで範囲を完了にしない。保存後は保持しているバイト列をそのままLoaderへ渡し、直後のGCS GET・LISTを省く。再実行で必要なときはintentのobject keyから読む。
 
-通知受付・処理状態はGCSへ保存せず、Rawごとのsidecarも追加しない。旧Raw schemaは90日の保持期間とlifecycleの削除遅延を考慮して読み取りを維持する。
+通知受付・処理状態はGCSへ保存せず、Rawごとのsidecarも追加しない。旧Fitbit Rawは移行入力・保存要件から外し、v1 decoderの維持や90日の満了待ちを必須にしない。新規Rawの90日保持とScreen Timeの既存形式は維持する。
 
-RawはAPIで実際に取得できた時点の状態を保存する。通知後、次の取得までに追加・削除された中間状態は残らない。変更がない日のRawを毎日複製することもない。90日RawだけでMotherDuckの全期間・全データを復元できるとは限らないため、長期履歴のバックアップは別途維持する。
+RawはAPIで実際に取得できた時点の状態を保存する。通知後、次の取得までに追加・削除された中間状態は残らない。変更がない日のRawを毎日複製することもない。FitbitはAPIから現在取得できる内容で再収集できればよく、過去の取得レスポンスや中間状態の再現は要件にしない。Screen Timeは90日Rawだけで全期間を復元できるとは限らないため、長期履歴のバックアップを別途維持する。
 
 ## Screen Time
 
@@ -173,9 +175,15 @@ APIが返す心拍の集約値は平均・最小・最大で、元サンプル�
 
 日次モデルは、分平均の平均を「観測分の平均心拍」、分最小の最小値を最小心拍、分最大の最大値を最大心拍とする。観測分数も提供する。観測分平均は、従来の全サンプルを重みとする平均とは意味が異なるため、新しい指標名と説明を追加する。
 
-既存の秒単位履歴は、MotherDuckに残っている全期間を分単位へ集約する。ローカル集約では元サンプル数を保存できるが、APIのrollUpと平均の意味が同じとは仮定せず、取得元・集約versionを区別する。切替境界を定め、重なる範囲では新しいAPI取得を優先して二重計上を防ぐ。90日Rawだけを履歴移行の入力にしない。
+既存の秒単位心拍tableは廃止し、新DBには作らない。旧履歴の分集約・sample countの移行は行わず、APIの60秒集約から新しい分モデルを作る。新規取得と利用先切替を確認して旧tableを削除する。削除後もMotherDuckのfailsafe期間中は容量がすぐに減らない可能性がある。[storage lifecycle](https://motherduck.com/docs/concepts/storage-lifecycle)
 
-新tableと分析モデルを検証して利用先を切り替えた後、旧心拍tableの保持・削除を決める。旧tableを先に削除しない。削除後もMotherDuckのfailsafe期間中は容量がすぐに減らない可能性がある。[storage lifecycle](https://motherduck.com/docs/concepts/storage-lifecycle)
+## マイグレーションと移行後の整理
+
+西部の新DBは最終定義のFitbit baselineで初期化する。旧`003_fitbit.sql`・`004_fitbit_acquisition.sql`と新しい取得状態・分心拍DDLを統合し、旧秒心拍tableやreceipt向けintent、途中のALTERを含めない。共通基盤とScreen TimeのSQLは維持し、保持起点の変更は別migrationにする。
+
+既存DBの適用済みSQL/checksumを変更して適用を通す方法は使わない。新DBへ旧`ops.schema_migration`をコピーせず、baselineを実際に適用して台帳を作る。移行期間のみ新旧migration集合を分け、旧環境の廃止後は新集合を通常運用の正本とする。その後のschema変更は追加migrationにし、適用済みbaselineを繰り返し書き換えない。
+
+切替・復旧確認後、Cloud Tasks、旧receipt/checkpoint、旧mode、v1 decoder、秒心拍モデルと不要な依存を撤去する。取得、配送、永続状態、Raw形式、データ反映、runtimeの設定構築を責務ごとに整理する。共通Jobのlease・期限・結果処理、Terraform/CIの旧region参照、secret/env、tests、運用docsも見直す。廃止作業と挙動を保つリファクタリングは別commitにし、通知の完了条件・Screen Timeの安全な保留・分析指標・監査を維持する。
 
 ## リージョン移行
 
@@ -200,16 +208,16 @@ MotherDuckはAWS `us-west-2`の新しい組織に移す。組織リージョン�
 
 GCPとAWSは同じOregonでも別クラウドなので、通信が無料になるとは仮定しない。GCPの外向き転送とMotherDuckの取り込み量を計測する。Terraform stateの移行はRaw bucketの移行と分け、stateの保管先・バックアップ・ロックを確認する。
 
-1. 新旧のRaw schemaと心拍モデルを両方読み込める互換releaseを用意し、rollback先として検証する。新しいbucket・組織・受信Service・Job・Pub/Subを作る。既存の保護されたbucketをregion変数の変更で置き換えない。
-2. 旧MotherDuckのバックアップを確保し、新組織にschema・データ・view・進捗を移す。新旧の件数・期間・主キー・代表集計を照合する。
-3. 90日内のRawと取り込み参照を移す。コピー時に元のGCS作成日時を`Custom-Time`へ設定し、Raw prefixに`daysSinceCustomTime=90`の削除ruleを追加する。新規Rawの`age=90`と併用して元の期限を維持する。保持起点・コピー先の実作成日時・新generationを分けて台帳に保存し、90日/削除猶予3日の監査も保持起点を使うよう更新する。hash・sizeを検証する。[lifecycle条件](https://docs.cloud.google.com/storage/docs/lifecycle#conditions)
-4. Webhookの新規通知・旧URLへの再送を新Pub/Subへ発行する受信経路へ切り替える。この時点では新Jobを動かさない。旧queueの通知を排出または移送してから、旧実行系とPC collectorを停止する。実行中の書き込みが終わったこととローカルpendingを確認し、MotherDuckとGCSの最終差分をコピー・検証する。通知の保持期限を超える場合は永続記録と補修範囲を確保する。
+1. v2 Raw・分心拍・Screen Timeの保持起点を扱うreleaseを用意し、rollback先として検証する。新しいbucket・組織・受信Service・Job・Pub/Subを作る。既存の保護されたbucketをregion変数の変更で置き換えない。
+2. Screen Timeと必要な共有台帳のバックアップを確保し、新組織のDBをbaselineで初期化して移す。件数・期間・主キー・代表集計を照合する。旧Fitbit table・取得状態・migration台帳・active leaseをimportしない。Fitbitは直近の限定取得で新モデルを確認し、過去のbackfillは任意とする。
+3. Screen Timeの90日内Rawと取り込み参照を移す。コピー時に元のGCS作成日時を`Custom-Time`へ設定し、Raw prefixに`daysSinceCustomTime=90`の削除ruleを追加する。新規Rawの`age=90`と併用して元の期限を維持する。保持起点・コピー先の実作成日時・新generationを分けて台帳に保存し、90日/削除猶予3日の監査も保持起点を使うよう更新する。hash・sizeを検証する。[lifecycle条件](https://docs.cloud.google.com/storage/docs/lifecycle#conditions)
+4. Webhookの新規通知・旧URLへの再送を新Pub/Subへ発行する受信経路へ切り替える。この時点では新定期Jobを動かさない。旧実行系とPC collectorを停止し、実行中の書き込みが終わったこととローカルpendingを確認する。再収集開始前のFitbit queue・receipt・intentは廃棄可能とし、開始以降の通知を新Pub/Subに保持する。Screen Timeの最終差分をコピー・検証し、Fitbitは初回取得後の範囲をAPI再照合する。通知の保持期限を超える場合は永続記録と補修範囲を確保する。
 5. Webhook URL、collectorの送信先、Jobの参照先・秘密情報、分析/MCPの接続先を切り替える。collectorは新bucketのcontrolを初回として強制公開して再開する。旧bucketで成功したsegmentはSQLiteで再送対象にならないため、最終コピーと再開の間に旧bucketへ書き込みが入らない境界を守る。API再照合と両streamの監査で欠損を確認する。
-6. 旧SchedulerとCloud Tasksの新規投入を停止し、残件がないことを確認する。再実行・rollbackのための旧Rawとバックアップを残し、不要な実行系から廃止する。
+6. 旧SchedulerとCloud Tasksの新規投入を停止し、新経路を確認する。旧Fitbit table/Raw/receipt/checkpoint/取得状態はsource・prefix・tableで範囲を限定して削除し、Screen Timeと共通基盤を保護する。新Pub/Subと新取得台帳を旧資産の削除に含めない。復旧確認後に旧実行系・互換処理を撤去し、コード・設定・tests・docsを整理する。
 
-移行用の複製・旧新の併存・履歴変換には通常運用とは別の操作・容量・実行時間が必要になる。無料枠の定常目標と移行時の費用を分けて見積もる。
+Screen Timeの移行コピー・旧新の併存・Fitbitの初回取得と任意backfillには通常運用とは別の操作・容量・実行時間が必要になる。無料枠の定常目標と移行時の費用を分けて見積もる。
 
-rollbackでは新writerとcollectorを止め、切替後に新側へ入ったRaw・通知・commit差分を旧側へ移してから、検証済みの互換releaseで旧側を再開する。コピー時は同様に保持起点とgenerationを更新し、controlも再公開する。移行元`main`のv1 parserと秒心拍モデルだけでは新bundle・分心拍を扱えないため、そのままの旧releaseへ戻さない。接続先だけを戻して切替後のデータを失わないようにする。
+rollbackでは新writerとcollectorを止める。西部warehouseが正常なら維持して実行系だけ戻し、DBも戻す場合は別の空DBをbaselineで初期化してScreen Timeのbackup・切替後差分を取り込む。旧DBへ新baselineを直接適用しない。Rawの保持起点とgenerationを更新し、controlも再公開する。Fitbitは通知を引き継ぎ、空の最終スキーマからAPI再取得で再開できればよく、旧履歴の復元は必要条件にしない。再収集開始時刻と補修範囲を記録する。移行元`main`のv1 parserと秒心拍モデルだけでは新bundle・分心拍を扱えないため、新モデルに対応する検証済みreleaseを使う。
 
 ## 無料枠と計測
 
@@ -253,9 +261,10 @@ API認証失敗、GCS保存失敗、Pub/Subの最古未ackが12時間を超え�
 - 一通知の複数範囲、bundleの部分失敗、A→B→A、完全な空結果による削除を正しく扱う。
 - 毎時・日次・手動実行の競合と終了時間上限を検証し、古いwriterが書き込みを続けない。
 - 7日を超える停止・古い修正通知・広いbackfillが、カーソルから再開できる。
-- 心拍の全ページ、分境界、欠測、非着用、平均の定義、既存履歴との重複を検証する。
+- 心拍の全ページ、分境界、欠測、非着用、平均の定義、旧秒心拍tableなしでの分析を検証する。
 - Screen Time両streamで未完了segmentの保留、24時間control、sleep、片方のcontrol失敗、48時間監査を検証する。
-- 新旧リージョンのRaw・分析データを照合し、切替後の差分を含むrollback手順を確認する。
+- 新旧リージョンのScreen Time Raw・分析データを照合し、切替後の差分を含むrollback手順を確認する。Fitbitは旧データなしで新規取得でき、旧資産の削除がScreen Timeや新Fitbit状態を巻き込まないことを確認する。
+- 新DB用baselineの初期化・再適用・適用先検証と、整理後のコード/設定/docsの整合を確認する。
 - 7日・30日の通常運用の使用量で無料枠の目標を評価する。超過見込みは金額と原因を記録する。
 
 文書だけの段階では、これらの動作・費用・本番反映を検証済みとは扱わない。実装・運用開始時に、現在のソース別仕様と運用手順へ確定した内容を反映する。
