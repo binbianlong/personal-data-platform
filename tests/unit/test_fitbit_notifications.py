@@ -123,3 +123,18 @@ def test_malformed_delivery_is_released_without_blocking_valid_delivery():
         }
     ]
     assert value.invalid_count == 1
+
+
+@pytest.mark.parametrize("wide", [False, True])
+def test_consumer_rejects_more_than_one_day_or_one_window(wide):
+    from personal_data_platform.sources.fitbit.notifications import decode_notification
+
+    publisher = Publisher()
+    transport(publisher=publisher).publish(notification())
+    data = json.loads(publisher.published[0][1])
+    if wide:
+        data["windows"][0]["end"] = "2026-10-03T00:00:00+00:00"
+    else:
+        data["windows"].append({**data["windows"][0], "data_type": "heart-rate"})
+    with pytest.raises(ValueError):
+        decode_notification(json.dumps(data).encode())

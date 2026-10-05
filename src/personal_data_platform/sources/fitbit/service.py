@@ -34,7 +34,13 @@ from .receipts import (
     validate_receipt_key,
 )
 from .signatures import GoogleTaskIdentity
-from .webhook import AuthenticationError, GoogleHealthAuthenticator, PayloadError, Verification
+from .webhook import (
+    AuthenticationError,
+    GoogleHealthAuthenticator,
+    PayloadError,
+    Verification,
+    split_notifications,
+)
 from .writer import can_skip_snapshot, expand_window
 
 LOGGER = logging.getLogger(__name__)
@@ -437,15 +443,19 @@ def create_pubsub_app(
             if isinstance(payload, Verification):
                 return Response(status_code=200)
             received_at = datetime.now(UTC)
+            work = []
             for windows in payload.groups or (payload.windows,):
                 notification = Notification(
                     uuid.uuid4().hex, payload.subject_key, windows, received_at
                 )
+                work.extend(split_notifications(notification, max_units=1000 - len(work)))
+            for notification in work:
                 await run_in_threadpool(notifications.publish, notification)
             return Response(status_code=204)
         except AuthenticationError:
             return Response(status_code=401)
         except PayloadError:
+            LOGGER.warning("fitbit webhook payload rejected; manual range sync may be required")
             return Response(status_code=400)
         except Exception as error:
             LOGGER.error("fitbit webhook publish failed: %s", type(error).__name__)

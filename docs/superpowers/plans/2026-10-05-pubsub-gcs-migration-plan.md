@@ -46,20 +46,20 @@
 
 旧2 Schedulerは停止中、西部Jobは0件、provider URLとMac collectorと分析/MCPは旧接続先のまま。データ削除・最終切替は未実施。初回backupを最終差分として扱わない。
 
-## 1. 通知を小さい処理単位へ分割する
+## Task 1: 通知を小さい処理単位へ分割する
 
 **変更:** `src/personal_data_platform/sources/fitbit/webhook.py`、`src/personal_data_platform/sources/fitbit/service.py`、`src/personal_data_platform/sources/fitbit/notifications.py`、`src/personal_data_platform/sources/fitbit/models.py`。
 **テスト:** `tests/unit/test_fitbit_webhook.py`、`tests/unit/test_fitbit_notifications.py`、`tests/integration/test_fitbit_service.py`。
 
 **インターフェース:** `split_notifications(notification: Notification, *, max_units: int = 1000) -> tuple[Notification, ...]`をwebhook.pyへ追加する。出力は既存Notification型、`windows`が1要素・1日以内。子IDは元IDと日付/種別から得たhashで128文字以内。receiverは全groupsを展開し、総数上限を検証してから発行する。
 
-- [ ] **失敗するテストを書く。** `test_notification_splits_across_tokyo_days`はUTC 2026-10-01 14:00〜10-02 16:00の歩数通知がTokyoの3日に分かれることを確認する。睡眠のcivil日境界、時差なし通知、物理時刻で完全に未来の日、128文字の元IDも同じhelperで検証する。
-- [ ] **発行契約のテストを書く。** `test_receiver_rejects_expansion_before_publishing`は1,001単位で400・発行0件。`test_partial_publish_returns_503_and_retry_preserves_units`は途中失敗後の再送で全単位が発行され、重複を許容する。認証・署名・ユーザー・5種別・handshakeの既存テストを残す。
-- [ ] `python -m pytest tests/unit/test_fitbit_webhook.py tests/unit/test_fitbit_notifications.py tests/integration/test_fitbit_service.py -q`で新しい期待に対するFAILを確認する。
-- [ ] helperとreceiverを実装し、consumerに1単位のenvelope検証を追加する。既存のAPI取得はreceiverへ入れない。全展開の前にbodyを検証し、成功発行の完了後だけ204。
-- [ ] 同じテストをPASSにし、commit `refactor: Fitbit通知を日付と種別の処理単位へ整理`。
+- [x] **失敗するテストを書く。** `test_notification_splits_across_tokyo_days`はUTC 2026-10-01 14:00〜10-02 16:00の歩数通知がTokyoの3日に分かれることを確認する。睡眠のcivil日境界、時差なし通知、物理時刻で完全に未来の日、128文字の元IDも同じhelperで検証する。
+- [x] **発行契約のテストを書く。** `test_receiver_rejects_expansion_before_publishing`は1,001単位で400・発行0件。`test_partial_publish_returns_503_and_retry_preserves_units`は途中失敗後の再送で全単位が発行され、重複を許容する。認証・署名・ユーザー・5種別・handshakeの既存テストを残す。
+- [x] `python -m pytest tests/unit/test_fitbit_webhook.py tests/unit/test_fitbit_notifications.py tests/integration/test_fitbit_service.py -q`で新しい期待に対するFAILを確認する。
+- [x] helperとreceiverを実装し、consumerに1単位のenvelope検証を追加する。既存のAPI取得はreceiverへ入れない。全展開の前にbodyを検証し、成功発行の完了後だけ204。
+- [x] 同じテストをPASSにし、commit `refactor: Fitbit通知を日付と種別の処理単位へ整理`。
 
-## 2. 取得・Raw・DB反映を共通Loader中心にする
+## Task 2: 取得・Raw・DB反映を共通Loader中心にする
 
 **変更:** `src/personal_data_platform/sources/fitbit/acquisition.py`、`src/personal_data_platform/sources/fitbit/models.py`、`src/personal_data_platform/sources/fitbit/raw.py`、`src/personal_data_platform/sources/fitbit/adapter.py`、`src/personal_data_platform/sources/fitbit/writer.py`、`src/personal_data_platform/sources/fitbit/runtime.py`。
 **追加:** `src/personal_data_platform/migrations/west/005_minimal_fitbit_processing.sql`。
@@ -78,7 +78,7 @@
 - [ ] 005で10表を削除する。削除前に対象の状態が空、profileがwest、writerなしを確認する。001〜004を変更しない。`test_minimal_migration_preserves_applied_checksums_and_screen_time`で既存データ・台帳・coverageが残り、10表だけ消えること、再適用が安全なことを確認する。
 - [ ] テストをPASSにし、commit `refactor: Fitbit取得を再取得とRaw取り込みへ簡素化`。
 
-## 3. 2つのJobと1つの欠損監視に絞る
+## Task 3: 2つのJobと1つの欠損監視に絞る
 
 **変更:** `src/personal_data_platform/sources/fitbit/runtime.py`、`src/personal_data_platform/cli.py`、`src/personal_data_platform/reconciliation/job.py`、`src/personal_data_platform/reconciliation/heartbeat.py`、`src/personal_data_platform/dbt_runner.py`、`infra/terraform/west.tf`、`infra/terraform/west_monitoring.tf`、`infra/terraform/variables.tf`、`infra/terraform/secrets.tf`、`infra/terraform/tests/west.tftest.hcl`、`docs/sources/fitbit/operations.md`、`docs/platform/operations.md`。
 **テスト:** `tests/integration/test_reconciliation_job.py`、`tests/unit/test_fitbit_runtime.py`、`tests/unit/test_fitbit_cli.py`、Terraform west contract。
@@ -94,7 +94,7 @@
 - [ ] native監視は2 Job失敗をまとめる1 policy、24時間のPub/Sub滞留1 policy、receiver ERROR log 1 policyにする。重複したJob ERROR metric/alertと日次成功metricを撤去する。Healthchecksは既定の未使用チェックを日次1件へ設定し、24h＋24h・自分のemail通知を確認する。
 - [ ] Python/Terraform testをPASSにし、commit `refactor: 西部Jobと日次監視を最小構成へ統合`。
 
-## 4. 最小releaseを検証し、停止状態で準備する
+## Task 4: 最小releaseを検証し、停止状態で準備する
 
 **変更:** 必要なCI/package設定、`scripts/migrate_west_warehouse.py`、`scripts/migrate_west_raw.py`、`docs/platform/west-migration-2026-10-05.md`。
 **成果:** Raw v3対応image、source/targetを分離した移行経路、復元結果、pausedの2 Job。
@@ -107,7 +107,7 @@
 - [ ] Healthchecksの短い試験周期で欠損→通知→成功による復旧を確認し、24h＋24hへ戻す。native警報も発火/復旧を確認する。メールの到達を未確認なら明記する。
 - [ ] commit `fix: 最小構成の移行と復元を検証可能にする`。cloud検証の結果は状態・時刻・件数だけ記録する。
 
-## 5. 最終差分・切替・旧経路の整理
+## Task 5: 最終差分・切替・旧経路の整理
 
 **変更:** 旧receiverの一時設定、collector plist/runtime、Terraform/CIの定常参照、`src/personal_data_platform/sources/fitbit/service.py`、`src/personal_data_platform/sources/fitbit/runtime.py`、`src/personal_data_platform/sources/fitbit/receipts.py`、`src/personal_data_platform/sources/fitbit/sync_state.py`と旧依存/fixture/docs、`scripts/cleanup_fitbit_legacy.py`。
 **成果:** 最小経路だけで収集・分析でき、旧writerは停止、旧Fitbit資産は範囲限定で整理される。

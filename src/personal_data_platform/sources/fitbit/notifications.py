@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from dataclasses import asdict, dataclass
+from datetime import timedelta
 from typing import Protocol, cast
 
 import google.cloud.pubsub_v1 as pubsub_v1
@@ -66,9 +67,9 @@ def decode_notification(payload: bytes) -> Notification:
     if type(data.get("schema_version")) is not int or data["schema_version"] != 1:
         raise ValueError("unsupported notification schema")
     windows = data["windows"]
-    if not isinstance(windows, list) or not 1 <= len(windows) <= 1000:
+    if not isinstance(windows, list) or len(windows) != 1:
         raise ValueError("invalid notification windows")
-    return Notification(
+    notification = Notification(
         string(data["notification_id"]),
         string(data["subject_key"]),
         tuple(
@@ -81,6 +82,9 @@ def decode_notification(payload: bytes) -> Notification:
         ),
         parse_time(string(data["received_at"])),
     )
+    if notification.windows[0].end - notification.windows[0].start > timedelta(days=1):
+        raise ValueError("notification exceeds one day")
+    return notification
 
 
 class PubSubNotifications:

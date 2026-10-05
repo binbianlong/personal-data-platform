@@ -156,3 +156,68 @@ def test_invalid_notifications_fail_before_returning_a_batch(change: str) -> Non
         value["data"][change] = "unknown"
     with pytest.raises(PayloadError):
         authenticate([notification(), value])
+
+
+def test_notification_splits_across_tokyo_days():
+    from personal_data_platform.sources.fitbit import webhook
+    from personal_data_platform.sources.fitbit.models import Notification
+
+    assert hasattr(webhook, "split_notifications")
+    parent = Notification(
+        "n" * 128,
+        "self",
+        (Window("steps", time("2026-10-01T14:00:00"), time("2026-10-02T16:00:00")),),
+        time("2026-10-04T00:00:00"),
+    )
+    units = webhook.split_notifications(parent)
+    assert [unit.windows for unit in units] == [
+        (Window("steps", time("2026-10-01T14:00:00"), time("2026-10-01T15:00:00")),),
+        (Window("steps", time("2026-10-01T15:00:00"), time("2026-10-02T15:00:00")),),
+        (Window("steps", time("2026-10-02T15:00:00"), time("2026-10-02T16:00:00")),),
+    ]
+    assert units == webhook.split_notifications(parent)
+    assert len({unit.notification_id for unit in units}) == 3
+    assert all(len(unit.notification_id) <= 128 for unit in units)
+
+
+def test_split_sleep_uses_provider_dates_and_conservative_physical_excludes_future_days():
+    from personal_data_platform.sources.fitbit import webhook
+    from personal_data_platform.sources.fitbit.models import Notification
+
+    assert hasattr(webhook, "split_notifications")
+    sleep = Notification(
+        "s",
+        "self",
+        (Window("sleep", time("2026-09-26T00:00:00"), time("2026-09-28T00:00:00")),),
+        time("2026-09-29T00:00:00"),
+    )
+    assert [u.windows[0] for u in webhook.split_notifications(sleep)] == [
+        Window("sleep", time("2026-09-26T00:00:00"), time("2026-09-27T00:00:00")),
+        Window("sleep", time("2026-09-27T00:00:00"), time("2026-09-28T00:00:00")),
+    ]
+    value = notification()
+    del value["data"]["intervals"][0]["physicalTimeInterval"]
+    verified = authenticate(value)
+    units = webhook.split_notifications(
+        Notification("c", "subject", verified.windows, time("2026-09-27T00:00:00"))
+    )
+    assert [u.windows[0] for u in units] == [
+        Window("steps", time("2026-09-26T05:00:00"), time("2026-09-26T15:00:00")),
+        Window("steps", time("2026-09-26T15:00:00"), time("2026-09-27T15:00:00")),
+    ]
+
+
+def test_split_rejects_future_only_physical_notification():
+    from personal_data_platform.sources.fitbit import webhook
+    from personal_data_platform.sources.fitbit.models import Notification
+
+    assert hasattr(webhook, "split_notifications")
+    with pytest.raises(PayloadError):
+        webhook.split_notifications(
+            Notification(
+                "f",
+                "self",
+                (Window("steps", time("2026-10-02T00:00:00"), time("2026-10-03T00:00:00")),),
+                time("2026-10-01T00:00:00"),
+            )
+        )
