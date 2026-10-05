@@ -1,6 +1,6 @@
 # 西部リージョン移行記録
 
-2026-10-05時点で初回backup、Terraform backend移行、西部GCP資産の一部作成、Screen Time Rawコピーを実施した。本番の接続先切替は未実施であり、西部MotherDuck組織の登録が次の前提条件となる。作業順序と受入条件は[移行計画](../superpowers/plans/2026-10-05-pubsub-gcs-migration-plan.md)を参照する。
+2026-10-06更新。初回backup、Terraform backend移行、西部GCP資産の一部作成、Screen Time Rawコピー、西部MotherDuckの独立DB作成まで完了した。本番の接続先切替は未実施である。定常構成はWebhook＋Pub/Sub＋毎時/日次の2 Jobへ改訂し、追加deployと切替は最小構成の実装・検証後に行う。構成は[設計書](../superpowers/specs/2026-10-05-pubsub-gcs-migration-design.md)、作業順序と受入条件は[移行計画](../superpowers/plans/2026-10-05-pubsub-gcs-migration-plan.md)を参照する。
 
 ## 接続先と適用済み資産
 
@@ -15,7 +15,8 @@ GCP projectは`health-data-pipeline-503813`。地域を選べる新資産は`us-
 | 通知 | Cloud Tasks `pdp-fitbit` | Pub/Sub topic `pdp-fitbit-west`、subscription `pdp-fitbit-west-pull`を作成済み。providerの送信先は旧URLのまま |
 | 受信Service | `pdp-fitbit`（us-central1） | `pdp-fitbit-west`（us-west1）をdeploy済み。認証付き検証リクエストは200、認証なしは401 |
 | Logging | 既存の`_Default` | `pdp-west` bucketを30日保持で作成済み。通常logのroutingは未変更 |
-| MotherDuck | `ap-northeast-1`をSDKで確認済み | `us-west-2`の新組織を準備中。DB・token・Remote MCPは未切替 |
+| MotherDuck | `ap-northeast-1`をSDKで確認済み | `us-west-2`の新組織にproduction/preflight DBと専用service accountsを作成済み。データimport・通常writer・Remote MCPは未切替 |
+| 欠損監視 | 既存の内部Job/stream監査 | Healthchecksのaccountとproject管理APIキーを準備済み。日次1件への設定・runtimeのpingは未実施 |
 
 bootstrapは6 create、runtimeは依存資産11 createと受信Service関連6 createを段階適用した。いずれも既存資産の変更・削除は0件。新Jobと新Schedulerは未作成であり、新側のDB writerは動いていない。
 
@@ -23,11 +24,28 @@ stateのprefixは`personal-data-platform/runtime`、lineageは`90a02072-fcdc-db7
 
 GitHubの`TF_STATE_BUCKET`は西部へ変更済み。Terraform Plan/Deploy workflowは停止中である。remoteのTerraform/workflowが西部構成に未対応のため、対応するrevisionの反映と安全なplan確認を終えてから再開する。bootstrapのlocal stateとruntime remote stateは別々に保全した。
 
-登録imageは`us-west1-docker.pkg.dev/health-data-pipeline-503813/personal-data-platform/personal-data-platform:deployed-west-467a82b`。digestは`sha256:66a090090771d8ac96ee1066f1a222f0b2b9633b9595bdacde6edc0f700c47b5`、linux/amd64で約180 MiB。`deployed-`タグでcleanupから保護している。v2 Raw・分心拍・Screen Time保持起点を扱うreleaseだが、実APIを含むrollbackの確認はまだ終えていない。
+登録imageは`us-west1-docker.pkg.dev/health-data-pipeline-503813/personal-data-platform/personal-data-platform:deployed-west-467a82b`。digestは`sha256:66a090090771d8ac96ee1066f1a222f0b2b9633b9595bdacde6edc0f700c47b5`、linux/amd64で約180 MiB。`deployed-`タグでcleanupから保護している。旧設計のv2 Raw・分心拍・Screen Time保持起点を扱うreleaseであり、最小構成で使うRaw v3には対応しない。切替とrollbackには、最小構成の新imageを検証して使う。
 
 Pub/Subは保存先`["us-west1"]`、`enforceInTransit=true`、subscription保持604800秒、自動期限切れなしを実設定で確認した。受信側のendpointは`pubsub.us-west1.rep.googleapis.com`を指定している。
 
 Secret Managerは単一US-WEST1 replicaの新IDを5個作成した。`pdp-west-fitbit-oauth-config`と`pdp-west-fitbit-webhook-config`は数値version `1`を登録済みで、受信ServiceにはWebhook用だけを注入した。MotherDuck production/preflight tokenとheartbeat configの3個はまだ空である。secret payloadはstateとGitに保存しない。
+
+## MotherDuckと欠損監視の準備
+
+西部組織の登録を完了し、以下を別々のowner資格情報で作成した。2026-10-06にSDKで各DBのregionを`us-west-2`と確認した。
+
+| 用途 | Database | Owner service account |
+| --- | --- | --- |
+| 本番 | `personal_data_platform_west` | `pdp_west_prod` |
+| 手動preflight | `personal_data_platform_west_preflight` | `pdp_west_preflight` |
+
+両service accountの読み書きinstanceはPulse、read-scalingはPulse・flock 1に設定した。各DBにwest migration 001〜004を適用済みであり、再照合ではmigration台帳4行以外の`base`/`ops`行数はそれぞれ0件だった。productionとpreflightを互いのtokenでATTACHできないことも確認した。旧東京DBへのmigration適用・データ削除は行っていない。
+
+移行用の1日tokenと、production/preflightそれぞれのtokenは非公開ファイルへ保存した。通常runtimeのSecret Managerへは未登録である。MotherDuck接続は資格情報ごとに別processで行い、1 process内での異なるtokenの切替に依存しない。分析/MCP用のrestricted read-only shareは未作成であり、本番ownerのtokenを分析用途へ流用しない。
+
+Healthchecksはproject管理APIキーを非公開ファイルへ保存した。2026-10-06のAPI確認では既定の`My First Check`が`new`、ping 0件であり、設定変更・試験通知は未実施である。最小構成ではこれを日次1チェックへ変更し、Period 24時間＋Grace 24時間とする。管理キーをCloud Runへ渡さず、日次の成功ping URLだけをruntime secretへ保存する。
+
+未実装のwest migration 005で、通知・attempt・bundle・cursor等の10表を撤去する。適用済み001〜004のSQL/checksumと、Screen Time・共通表・coverageは維持する。西部のFitbit v2 Rawはまだ存在せず、Raw v3への切替で本番データのformat変換は必要ない。
 
 ## Backupと照合
 
@@ -52,7 +70,7 @@ private artifactはGit対象外の`var/west-migration/2026-10-05/`に保存し�
 | `ops.job_run` | 299 |
 | 合計 | 243,898 |
 
-全243,898行のローカル復元は成功した。Fitbitの旧table/行、migration台帳、leaseはimport対象に含めず、復元先のFitbit行とactive leaseは0件だった。これはローカル復元の証拠であり、西部MotherDuckへのimport、Cloud Run preflight、実API取得、切替後rollbackの成功を示すものではない。
+全243,898行のローカル復元は成功した。Fitbitの旧table/行、migration台帳、leaseはimport対象に含めず、復元先のFitbit行とactive leaseは0件だった。これはローカル復元の証拠であり、西部MotherDuckへのimport、手動preflight、実API取得、切替後rollbackの成功を示すものではない。
 
 collectorは旧bucketへ送信を続けているため、このbackupは最終差分ではない。旧writerとcollectorを止めた後にRawとwarehouseを再exportし、最終manifestのgenerationを照合する。
 
@@ -77,15 +95,17 @@ var/west-migration/python/bin/python scripts/migrate_west_warehouse.py --export 
 
 `SOURCE_MOTHERDUCK_TOKEN`は実行環境から渡す。`--source-writers-stopped`はwriterを停止する操作ではない。停止確認済みの`.rw`接続を`read_only=True`で開くための選択肢であり、active leaseが残れば拒否する。import側の共通lease・期限・全table transactionと、失敗時のrollbackは維持している。
 
-変更後の検証はpytest 779件、Ruff check/format、strict mypy 59 source filesがPASS。実sourceからのCLI exportと全件ローカル復元も確認した。
+上記scriptの変更時点ではpytest 779件、Ruff check/format、strict mypy 59 source filesがPASS。実sourceからのCLI exportと全件ローカル復元も確認した。これは最小構成の改修前の結果である。
+
+source exportとtarget importは別processで実行する。既存の`--final-delta`は異なるMotherDuck tokenを同じprocessで開くため、最小構成の移行では分離実行へ修正するか廃止する。cloudの最終差分転送がこの引数で成功したとは記録しない。
 
 ## 残る切替と費用確認
 
-旧Scheduler 2個は停止中で、実行中の旧JobとCloud Tasks残件は0件。旧受信Serviceはprocessing pausedの状態を維持し、旧Fitbitデータ・Raw・receiptの削除はまだ行っていない。
+2026-10-06の再確認でも旧Scheduler 2個は停止中、西部Jobは0件だった。準備時の停止確認では実行中の旧JobとCloud Tasks残件も0件である。旧受信Serviceはprocessing pausedを維持し、旧Fitbitデータ・Raw・receiptの削除はまだ行っていない。provider URL、Mac collector、分析/MCPは旧接続先のままである。
 
-次は西部MotherDuckのproduction/preflight接続を分離し、空DBへbaselineを適用する。残り3 secretの数値versionを登録して新Jobを停止状態でdeployし、実cloud import・限定Fitbit取得・dbt・両stream監査・rollbackを確認する。その後に最終差分、旧URLからのPub/Sub発行、collector/分析/MCPの切替、2 scheduleの有効化、Logging routing、警報の発火/復旧を確認する。
+次は通知の単位分割、Raw v3と共通Loaderへの改修、005適用、2 Job/1外部heartbeatへの整理を行う。新releaseで手動preflight・実cloud import・限定5種別の取得・dbt・両stream監査・復元を確認し、本番tokenと日次heartbeatの数値versionを登録して新2 Jobを停止状態でdeployする。preflight tokenの空containerを埋めるためだけにversionや常設Jobを追加しない。その後に最終差分、旧URLからのPub/Sub発行、collector/分析/MCPの切替、2 scheduleの有効化、Logging routing、警報の発火/復旧を確認する。
 
-現時点のactive secret versionは新旧併存で9個。新imageだけで約180 MiB、コピーRawは約6.8 MBであり、これだけでは定常無料枠の目標達成を判断できない。コピー/検証のGET・LIST・書込操作、転送、旧資産、MotherDuck容量/CUhを含む総額は未確定である。受入とrollbackの確認後に旧資産を整理し、切替後7日・30日の実測を記録する。
+2026-10-05のGCP準備時点ではactive secret versionは新旧併存で9個だった。新imageだけで約180 MiB、コピーRawは約6.8 MBであり、これだけでは定常無料枠の目標達成を判断できない。コピー/検証のGET・LIST・書込操作、転送、旧資産、MotherDuck容量/CUhを含む総額は未確定である。受入とrollbackの確認後に旧資産を整理し、切替後7日・30日の実測を記録する。
 
 ## MotherDuck向け通信の料金と移行前計測
 
