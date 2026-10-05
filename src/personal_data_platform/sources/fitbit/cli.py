@@ -21,9 +21,8 @@ def configure(parser: argparse.ArgumentParser) -> None:
     sync = commands.add_parser(
         "sync", help="repair a half-open physical range; dates use Asia/Tokyo"
     )
-    sync.add_argument("--from", dest="start")
-    sync.add_argument("--to", dest="end")
-    sync.add_argument("--resume-id", help="resume a persistent acquisition cursor")
+    sync.add_argument("--from", dest="start", required=True)
+    sync.add_argument("--to", dest="end", required=True)
     sync.add_argument("--data-type", action="append", choices=DATA_TYPES)
     ingest = commands.add_parser(
         "ingest-notifications", help="pull, acquire and commit notifications before ack"
@@ -70,16 +69,15 @@ def run(args: argparse.Namespace) -> int:
             collect_seconds=args.collect_seconds,
             timeout_seconds=args.timeout_seconds,
         )
-        print(json.dumps(asdict(result), sort_keys=True))
-        return int(not result.ok)
+        print(json.dumps(asdict(result), sort_keys=True, default=str))
+        return int(bool(result.failed_scopes))
     if command == "serve":
         return run_serve_from_env()
     if command == "sync":
         return run_sync_from_env(
-            start=_physical(args.start) if args.start else None,
-            end=_physical(args.end) if args.end else None,
+            start=_physical(args.start),
+            end=_physical(args.end),
             data_types=tuple(args.data_type or DATA_TYPES),
-            resume_id=args.resume_id,
         )
     if command == "repair":
         repaired = run_repair_from_env()

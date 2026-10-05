@@ -32,5 +32,5 @@ resource "google_pubsub_subscription_iam_member" "west_hourly" {
   project      = var.project_id
   subscription = google_pubsub_subscription.west[0].name
   role         = "roles/pubsub.subscriber"
-  member       = "serviceAccount:${google_service_account.west["hourly"].email}"
+  member       = "serviceAccount:${google_service_account.west[0].email}"
 }

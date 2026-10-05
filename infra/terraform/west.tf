@@ -31,26 +31,10 @@ locals {
       environment = merge(local.west_common_environment, { PDP_FITBIT_REPAIR_ENABLED = "true", PDP_RECONCILIATION_MONITORING_MODE = "healthchecks" })
       secrets     = { MOTHERDUCK_TOKEN = "motherduck_token", PDP_FITBIT_OAUTH_CONFIG = "fitbit_oauth_config", PDP_HEARTBEAT_CONFIG = "heartbeat_config" }
     }
-    preflight = {
-      name        = "platform-preflight-west"
-      args        = ["preflight"]
-      timeout     = "600s"
-      environment = { APP_ENV = "production", GOOGLE_CLOUD_PROJECT = var.project_id, PDP_SCHEMA_PROFILE = "west", GCS_BUCKET = local.west_raw_bucket_name, GCS_PREFLIGHT_BUCKET = local.west_preflight_bucket_name, MOTHERDUCK_DATABASE = var.west_motherduck_database, PREFLIGHT_MOTHERDUCK_DATABASE = var.west_preflight_motherduck_database }
-      secrets     = { MOTHERDUCK_TOKEN = "motherduck_preflight_token" }
-    }
-    dbt = {
-      name        = "dbt-runner-west"
-      args        = ["dbt"]
-      timeout     = "6000s"
-      environment = { APP_ENV = "production", PDP_SCHEMA_PROFILE = "west", MOTHERDUCK_DATABASE = var.west_motherduck_database }
-      secrets     = { MOTHERDUCK_TOKEN = "motherduck_token" }
-    }
   } : {}
-  west_job_secret_access = merge([for job_key, job in local.west_jobs : {
-    for secret_key in toset(values(job.secrets)) : "${job_key}:${secret_key}" => { job_key = job_key, secret_key = secret_key }
-  }]...)
-  west_scheduled_jobs = var.enable_west_runtime ? { hourly = "15 * * * *", daily = "30 4 * * *" } : {}
-  west_raw_scopes     = { screen_time = { prefixes = ["raw/screen_time/v1/", "raw/screen_time/v2/"], suffixes = [".segb.gz"] }, fitbit = { prefixes = ["raw/fitbit/v2/"], suffixes = [".json.gz"] } }
+  west_job_secret_access = { for key in toset(flatten([for job in values(local.west_jobs) : values(job.secrets)])) : key => key }
+  west_scheduled_jobs    = var.enable_west_runtime ? { hourly = "15 * * * *", daily = "10 4 * * *" } : {}
+  west_raw_scopes        = { screen_time = { prefixes = ["raw/screen_time/v1/", "raw/screen_time/v2/"], suffixes = [".segb.gz"] }, fitbit = { prefixes = ["raw/fitbit/v3/"], suffixes = [".json.gz"] } }
 }
 
 resource "google_storage_bucket" "raw_west" {
@@ -106,24 +90,24 @@ resource "google_storage_bucket" "preflight_west" {
   depends_on = [google_project_service.runtime]
 }
 resource "google_service_account" "west" {
-  for_each     = local.west_jobs
+  count        = var.enable_west_runtime ? 1 : 0
   project      = var.project_id
-  account_id   = each.value.name
-  display_name = "PDP west ${each.key}"
+  account_id   = "pdp-runtime-west"
+  display_name = "PDP west processing"
   depends_on   = [google_project_service.runtime]
 }
 resource "google_service_account_iam_member" "west_deployer" {
-  for_each           = local.west_jobs
-  service_account_id = google_service_account.west[each.key].name
+  count              = var.enable_west_runtime ? 1 : 0
+  service_account_id = google_service_account.west[0].name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${var.deployer_service_account_email}"
 }
 resource "google_secret_manager_secret_iam_member" "west_job" {
   for_each  = local.west_job_secret_access
   project   = var.project_id
-  secret_id = google_secret_manager_secret.west[each.value.secret_key].secret_id
+  secret_id = google_secret_manager_secret.west[each.key].secret_id
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.west[each.value.job_key].email}"
+  member    = "serviceAccount:${google_service_account.west[0].email}"
 }
 resource "google_cloud_run_v2_job" "west" {
   for_each            = local.west_jobs
@@ -136,7 +120,7 @@ resource "google_cloud_run_v2_job" "west" {
     parallelism = 1
     task_count  = 1
     template {
-      service_account = google_service_account.west[each.key].email
+      service_account = google_service_account.west[0].email
       timeout         = each.value.timeout
       max_retries     = 0
       containers {
@@ -297,23 +281,20 @@ data "google_iam_policy" "raw_west" {
     role    = "roles/storage.admin"
     members = [var.collector_impersonator_member]
   }
-  dynamic "binding" {
-    for_each = { hourly = ["raw/fitbit/v2/"], daily = ["raw/fitbit/v2/", "raw/screen_time/v1/", "raw/screen_time/v2/"] }
-    content {
-      role    = "roles/storage.objectViewer"
-      members = ["serviceAccount:${google_service_account.west[binding.key].email}"]
-      condition {
-        title      = "${binding.key}_raw_read"
-        expression = "resource.name == 'projects/_/buckets/${local.west_raw_bucket_name}' || (${join(" || ", [for prefix in binding.value : "resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/${prefix}')"])})"
-      }
+  binding {
+    role    = "roles/storage.objectViewer"
+    members = ["serviceAccount:${google_service_account.west[0].email}"]
+    condition {
+      title      = "runtime_raw_read"
+      expression = "resource.name == 'projects/_/buckets/${local.west_raw_bucket_name}' || resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/fitbit/v3/') || resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/screen_time/v1/') || resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/screen_time/v2/')"
     }
   }
   binding {
     role    = local.storage_roles.collector_raw_creator
-    members = [for key in ["hourly", "daily"] : "serviceAccount:${google_service_account.west[key].email}"]
+    members = ["serviceAccount:${google_service_account.west[0].email}"]
     condition {
       title      = "fitbit_bundle_create_only"
-      expression = "resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/fitbit/v2/') && resource.name.endsWith('.json.gz')"
+      expression = "resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/fitbit/v3/') && resource.name.endsWith('.json.gz')"
     }
   }
   binding {
@@ -348,14 +329,7 @@ data "google_iam_policy" "preflight_west" {
     role    = "roles/storage.admin"
     members = [var.collector_impersonator_member]
   }
-  binding {
-    role    = local.storage_roles.preflight_object_operator
-    members = ["serviceAccount:${google_service_account.west["preflight"].email}"]
-    condition {
-      title      = "isolated_preflight_objects"
-      expression = "resource.name == 'projects/_/buckets/${local.west_preflight_bucket_name}' || resource.name.startsWith('projects/_/buckets/${local.west_preflight_bucket_name}/objects/test/preflight/')"
-    }
-  }
+
 }
 resource "google_storage_bucket_iam_policy" "preflight_west" {
   count       = var.enable_west_runtime ? 1 : 0

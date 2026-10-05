@@ -17,6 +17,7 @@ from personal_data_platform.sources.fitbit.models import Snapshot, Window
 from personal_data_platform.sources.fitbit.receipts import Receipt, ReceiptReadConflict
 from personal_data_platform.sources.fitbit.service import ReceiptWorker, create_app
 from personal_data_platform.storage.motherduck import Warehouse
+from tests.integration.test_fitbit_acquisition import setup
 from tests.unit.test_fitbit_runtime import Devices, Queue, _stores
 
 NOW = datetime(2026, 9, 28, 3, tzinfo=UTC)
@@ -252,206 +253,113 @@ def test_worker_lease_contention_retries_without_failure_alert(repair_env, caplo
 
 
 @pytest.fixture
-def cursor_env(monkeypatch, tmp_path):
-    database = str(tmp_path / "cursor.duckdb")
-    warehouse = Warehouse(duckdb.connect(database))
-    warehouse.migrate()
-    warehouse.close()
+def manual_env(monkeypatch, tmp_path):
+    runner, store, api, factory, _ = setup(tmp_path, states=("A",))
+    fetch = api.fetch_captured
+
+    def daily_records(window, **kwargs):
+        captured = fetch(window, **kwargs)
+        return replace(
+            captured,
+            snapshot=replace(
+                captured.snapshot,
+                records=tuple(
+                    replace(record, record_id=window.start.isoformat())
+                    for record in captured.snapshot.records
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(api, "fetch_captured", daily_records)
+    monkeypatch.setenv("PDP_SCHEMA_PROFILE", "west")
     monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
     monkeypatch.setenv("PDP_FITBIT_SUBJECT_KEY", "self")
     monkeypatch.setenv("PDP_FITBIT_PROCESSING_PAUSED", "false")
-    monkeypatch.setattr(runtime, "_warehouse", lambda: Warehouse(duckdb.connect(database)))
-    calls = []
-    outcomes = []
-
-    class Runner:
-        subject_key = "self"
-        client = Devices(runtime.SyncTime.parse("2026-09-28T01:02:03.123456789Z"))
-
-        def run_windows(self, windows, *, warehouse, lease_owner, timeout_seconds):
-            warehouse.require_job_lock(lease_owner)
-            calls.extend(windows)
-            return (
-                outcomes.pop(0)
-                if outcomes
-                else SimpleNamespace(
-                    ok=True, completed_scopes=1, failed_scopes=0, deferred_scopes=0
-                )
-            )
-
-    monkeypatch.setattr(runtime, "_acquisition_runner", Runner, raising=False)
-    yield SimpleNamespace(database=database, calls=calls, outcomes=outcomes)
-
-
-def test_partial_failure_cursor_resumes_after_committed_day_type(cursor_env, monkeypatch):
-    cursor_env.outcomes.extend(
-        [
-            SimpleNamespace(ok=True, completed_scopes=1, failed_scopes=0, deferred_scopes=0),
-            SimpleNamespace(ok=False, completed_scopes=0, failed_scopes=1, deferred_scopes=0),
-        ]
-    )
-    start = NOW.replace(day=1, hour=0)
-    end = NOW.replace(day=4, hour=0)
-    assert (
-        runtime.run_sync_from_env(
-            start=start, end=end, data_types=("heart-rate",), resume_id="backfill"
-        )
-        == 1
-    )
-    with duckdb.connect(cursor_env.database) as connection:
-        assert (
-            connection.execute("SELECT next_start FROM ops.fitbit_repair_cursor").fetchone()[0]
-            > start
-        )
-    resumed_at = cursor_env.calls[-1].start
-    cursor_env.calls.clear()
-    assert runtime.run_sync_from_env(start=None, end=None, resume_id="backfill") == 0
-    assert cursor_env.calls[0].start == resumed_at
-
-
-def test_wide_backfill_stops_at_scope_limit_without_completing_cursor(cursor_env, monkeypatch):
-    monkeypatch.setenv("PDP_FITBIT_MAX_SCOPES", "2")
-    assert (
-        runtime.run_sync_from_env(
-            start=NOW.replace(day=1), end=NOW, data_types=("heart-rate",), resume_id="wide"
-        )
-        == 1
-    )
-    assert len(cursor_env.calls) == 2
-    with duckdb.connect(cursor_env.database) as connection:
-        next_start, end = connection.execute(
-            "SELECT next_start, range_end FROM ops.fitbit_repair_cursor"
-        ).fetchone()
-        assert next_start < end
-
-
-def test_daily_repair_preserves_older_gap_and_nanosecond_sync(cursor_env):
-    warehouse = Warehouse(duckdb.connect(cursor_env.database))
-    warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
-    warehouse.connection.execute(
-        "INSERT INTO ops.fitbit_repair_cursor VALUES "
-        "('daily:self:heart-rate','self',?, ?, ['heart-rate'],?)",
-        [NOW.replace(day=1), NOW.replace(day=2), NOW],
-    )
-    warehouse.close()
-    summary = runtime.run_daily_repair(now=NOW, lease_owner="daily", timeout_seconds=6000)
-    assert summary.ok
-    assert min(window.start for window in cursor_env.calls) == NOW.replace(day=1)
-    with duckdb.connect(cursor_env.database) as connection:
-        assert connection.execute("SELECT last_sync_time FROM ops.fitbit_device_sync").fetchone()[
-            0
-        ] == ("2026-09-28T01:02:03.123456789Z")
-
-
-@pytest.mark.parametrize("outcome", ["paused", "deferred", "failed"])
-def test_daily_incomplete_repair_does_not_advance_cursor(cursor_env, monkeypatch, outcome):
-    warehouse = Warehouse(duckdb.connect(cursor_env.database))
-    warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
-    warehouse.close()
-    if outcome == "paused":
-        monkeypatch.setenv("PDP_FITBIT_PROCESSING_PAUSED", "true")
-    else:
-        cursor_env.outcomes.append(
-            SimpleNamespace(
-                ok=False,
-                completed_scopes=0,
-                failed_scopes=int(outcome == "failed"),
-                deferred_scopes=int(outcome == "deferred"),
-            )
-        )
-    summary = runtime.run_daily_repair(now=NOW, lease_owner="daily", timeout_seconds=6000)
-    assert not summary.ok
-    assert summary.failed_scopes == int(outcome == "failed")
-    if outcome != "paused":
-        with duckdb.connect(cursor_env.database) as connection:
-            first = cursor_env.calls[0]
-            assert (
-                connection.execute(
-                    "SELECT next_start FROM ops.fitbit_repair_cursor "
-                    "WHERE list_contains(data_types, ?)",
-                    [first.data_type],
-                ).fetchone()[0]
-                == first.start
-            )
-
-
-def test_sync_deadline_does_not_advance_committed_cursor_after_budget(cursor_env, monkeypatch):
-    points = iter([0, 0, 3001])
-    monkeypatch.setattr(runtime.monotonic_time, "monotonic", lambda: next(points))
-    assert (
-        runtime.run_sync_from_env(
-            start=NOW.replace(day=1),
-            end=NOW.replace(day=3),
-            data_types=("heart-rate",),
-            resume_id="deadline",
-        )
-        == 1
-    )
-    with duckdb.connect(cursor_env.database) as connection:
-        assert connection.execute("SELECT next_start FROM ops.fitbit_repair_cursor").fetchone()[
-            0
-        ] == NOW.replace(day=1)
-
-
-def test_daily_repair_resumes_unfinished_manual_backfill(cursor_env):
-    warehouse = Warehouse(duckdb.connect(cursor_env.database))
-    warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
-    warehouse.connection.execute(
-        "INSERT INTO ops.fitbit_repair_cursor VALUES "
-        "('manual:heart-rate','self',?, ?, ['heart-rate'],?)",
-        [NOW.replace(day=1), NOW.replace(day=3), NOW],
-    )
-    warehouse.close()
-    summary = runtime.run_daily_repair(now=NOW, lease_owner="daily", timeout_seconds=6000)
-    assert summary.ok
-    with duckdb.connect(cursor_env.database) as connection:
-        assert connection.execute(
-            "SELECT next_start=range_end FROM ops.fitbit_repair_cursor "
-            "WHERE cursor_id='manual:heart-rate'"
-        ).fetchone()[0]
-
-
-def test_daily_repair_includes_device_lookup_in_budget(cursor_env, monkeypatch):
-    from personal_data_platform.sources.fitbit.acquisition import AcquisitionSummary
-
-    warehouse = Warehouse(duckdb.connect(cursor_env.database))
-    warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
-    warehouse.close()
-    elapsed = [0]
-    budgets = []
-    runner = runtime._acquisition_runner()
-
-    def devices():
-        elapsed[0] = 20
-        return runtime.SyncTime.from_datetime(NOW)
-
-    monkeypatch.setattr(runtime.monotonic_time, "monotonic", lambda: elapsed[0])
-    monkeypatch.setattr(runner.client, "latest_tracker_sync", devices)
+    monkeypatch.setattr(runtime, "_warehouse", factory)
     monkeypatch.setattr(runtime, "_acquisition_runner", lambda: runner)
+    logger = logging.getLogger("personal_data_platform.sources.fitbit")
+    previous = (logger.level, logger.propagate, logger.handlers[:])
+    yield SimpleNamespace(runner=runner, store=store, api=api, warehouse=factory)
+    for handler in logger.handlers[:]:
+        if handler not in previous[2]:
+            logger.removeHandler(handler)
+            handler.close()
+    logger.setLevel(previous[0])
+    logger.propagate = previous[1]
 
-    def cursors(*args, timeout_seconds, **kwargs):
-        budgets.append(timeout_seconds)
-        return AcquisitionSummary()
 
-    monkeypatch.setattr(runtime, "_run_cursors", cursors)
-    assert runtime.run_daily_repair(now=NOW, lease_owner="daily", timeout_seconds=100).ok
-    assert budgets == [80]
+def test_manual_retry_records_first_unfinished_day_and_preserves_committed_data(
+    manual_env, monkeypatch, capsys
+):
+    start = datetime(2026, 10, 1, 15, tzinfo=UTC)
+    end = start + timedelta(days=3)
+    failed_day = start + timedelta(days=1)
+    fetch = manual_env.api.fetch_captured
 
+    def partial(window, **kwargs):
+        if window.start == failed_day:
+            raise TimeoutError("temporary API failure")
+        return fetch(window, **kwargs)
 
-def test_daily_repair_makes_progress_with_unchanged_stale_device_sync(cursor_env, monkeypatch):
-    warehouse = Warehouse(duckdb.connect(cursor_env.database))
-    warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
+    monkeypatch.setattr(manual_env.api, "fetch_captured", partial)
+    assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 1
+    first = json.loads(capsys.readouterr().out)
+    assert first["completed_scopes"] == 2 and first["failed_scopes"] == 1
+    assert first["first_incomplete"]["start"] == str(failed_day)
+    warehouse = manual_env.warehouse()
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 2
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_steps") > 0
     warehouse.close()
-    runner = runtime._acquisition_runner()
-    monkeypatch.setattr(
-        runner.client, "latest_tracker_sync", lambda: runtime.SyncTime.parse("2026-08-01T00:00:00Z")
-    )
-    monkeypatch.setattr(runtime, "_acquisition_runner", lambda: runner)
-    monkeypatch.setenv("PDP_FITBIT_MAX_SCOPES", "2")
-    first = runtime.run_daily_repair(now=NOW, lease_owner="daily", timeout_seconds=6000)
-    first_windows = tuple(cursor_env.calls)
-    cursor_env.calls.clear()
-    second = runtime.run_daily_repair(now=NOW, lease_owner="daily", timeout_seconds=6000)
-    assert not first.ok and not second.ok
-    assert set(first_windows).isdisjoint(cursor_env.calls)
-    assert min(window.start for window in cursor_env.calls) >= NOW - timedelta(days=8)
+
+    monkeypatch.setattr(manual_env.api, "fetch_captured", fetch)
+    assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 0
+    retry = json.loads(capsys.readouterr().out)
+    assert retry["completed_scopes"] == 3 and retry["first_incomplete"] is None
+    warehouse = manual_env.warehouse()
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 3
+    warehouse.close()
+    saved = manual_env.store.puts
+    assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 0
+    assert manual_env.store.puts == saved
+
+
+def test_manual_old_narrow_range_keeps_exact_bounds(manual_env, capsys):
+    start = datetime(2020, 1, 2, 1, 23, tzinfo=UTC)
+    end = start + timedelta(minutes=2)
+    assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 0
+    assert manual_env.api.calls == [Window("steps", start, end)]
+    warehouse = manual_env.warehouse()
+    assert warehouse.query_rows("SELECT range_start,range_end FROM ops.fitbit_coverage") == [
+        (start, end)
+    ]
+    assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+    warehouse.close()
+
+
+def test_daily_paused_leaves_existing_data_and_shared_owner(manual_env, monkeypatch):
+    monkeypatch.setenv("PDP_FITBIT_PROCESSING_PAUSED", "true")
+    warehouse = manual_env.warehouse()
+    assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
+    try:
+        result = runtime.run_daily_repair(
+            now=NOW, warehouse=warehouse, lease_owner="daily", timeout_seconds=6000
+        )
+        assert not result.ok and result.deferred_scopes == 1
+        assert manual_env.api.calls == [] and manual_env.store.puts == 0
+        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
+    finally:
+        warehouse.close()
+
+
+def test_manual_busy_does_not_release_competing_owner(manual_env):
+    from personal_data_platform.loader.job import JobAlreadyRunning
+
+    warehouse = manual_env.warehouse()
+    assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
+    warehouse.close()
+    with pytest.raises(JobAlreadyRunning):
+        runtime.run_sync_from_env(start=NOW, end=NOW + timedelta(hours=1), data_types=("steps",))
+    assert manual_env.api.calls == []
+    warehouse = manual_env.warehouse()
+    assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "other"
+    warehouse.close()

@@ -16,7 +16,7 @@ GCP projectは`health-data-pipeline-503813`。地域を選べる新資産は`us-
 | 受信Service | `pdp-fitbit`（us-central1） | `pdp-fitbit-west`（us-west1）をdeploy済み。認証付き検証リクエストは200、認証なしは401 |
 | Logging | 既存の`_Default` | `pdp-west` bucketを30日保持で作成済み。通常logのroutingは未変更 |
 | MotherDuck | `ap-northeast-1`をSDKで確認済み | `us-west-2`の新組織にproduction/preflight DBと専用service accountsを作成済み。データimport・通常writer・Remote MCPは未切替 |
-| 欠損監視 | 既存の内部Job/stream監査 | Healthchecksのaccountとproject管理APIキーを準備済み。日次1件への設定・runtimeのpingは未実施 |
+| 欠損監視 | 既存の内部Job/stream監査 | Healthchecksの日次1件を24h＋24h、自分のemail integrationで設定済み。runtimeのping・発火/復旧試験は未実施 |
 
 bootstrapは6 create、runtimeは依存資産11 createと受信Service関連6 createを段階適用した。いずれも既存資産の変更・削除は0件。新Jobと新Schedulerは未作成であり、新側のDB writerは動いていない。
 
@@ -43,7 +43,7 @@ Secret Managerは単一US-WEST1 replicaの新IDを5個作成した。`pdp-west-f
 
 移行用の1日tokenと、production/preflightそれぞれのtokenは非公開ファイルへ保存した。通常runtimeのSecret Managerへは未登録である。MotherDuck接続は資格情報ごとに別processで行い、1 process内での異なるtokenの切替に依存しない。分析/MCP用のrestricted read-only shareは未作成であり、本番ownerのtokenを分析用途へ流用しない。
 
-Healthchecksはproject管理APIキーを非公開ファイルへ保存した。2026-10-06のAPI確認では既定の`My First Check`が`new`、ping 0件であり、設定変更・試験通知は未実施である。最小構成ではこれを日次1チェックへ変更し、Period 24時間＋Grace 24時間とする。管理キーをCloud Runへ渡さず、日次の成功ping URLだけをruntime secretへ保存する。
+Healthchecksはproject管理APIキーを非公開ファイルへ保存した。2026-10-06に既定の未使用チェックを`pdp-daily`へ更新し、Period 24時間＋Grace 24時間、POSTのみ、自分のemail integration 1件を設定した。確認時点では`new`、ping 0件であり、発火/復旧試験は未実施である。管理キーをCloud Runへ渡さず、日次の成功ping URLだけをruntime secretへ保存する。
 
 未実装のwest migration 005で、通知・attempt・bundle・cursor等の10表を撤去する。適用済み001〜004のSQL/checksumと、Screen Time・共通表・coverageは維持する。西部のFitbit v2 Rawはまだ存在せず、Raw v3への切替で本番データのformat変換は必要ない。
 

@@ -821,13 +821,3 @@ def test_plan_west_fallback_rejects_legacy_repository(tmp_path: Path, fallback_r
     else:
         assert result.returncode == 0, result.stderr
         assert output.read_text() == f"TF_VAR_west_image_uri={fallback}\n"
-
-
-def test_west_monitoring_does_not_use_daily_metric_absence() -> None:
-    monitoring = _read("infra/terraform/west_monitoring.tf")
-    assert 'resource "google_logging_metric" "west_daily_success"' in monitoring
-    assert "condition_absent" not in monitoring
-    assert 'jsonPayload.event=\\"reconciliation\\"' in monitoring
-    assert "var.west_schedulers_enabled" in monitoring
-    assert "43200" in monitoring
-    assert "48時間" in _read("infra/terraform/README.md")

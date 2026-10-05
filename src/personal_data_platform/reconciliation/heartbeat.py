@@ -10,7 +10,7 @@ from personal_data_platform.config import secret_config
 
 
 def daily_heartbeat_urls() -> dict[str, str]:
-    urls = secret_config("PDP_HEARTBEAT_CONFIG", ("daily", "app-in-focus", "app-usage"))
+    urls = secret_config("PDP_HEARTBEAT_CONFIG", ("daily",))
     if any(not url.startswith("https://") for url in urls.values()):
         raise ValueError("PDP_HEARTBEAT_CONFIG URLs must use HTTPS")
     return urls

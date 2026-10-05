@@ -375,7 +375,8 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
 
 
 @pytest.mark.parametrize(
-    "failure", ["loader", "fitbit", "dbt", "app-in-focus", "app-usage", "none"]
+    "failure",
+    ["loader", "fitbit", "dbt", "app-in-focus", "app-usage", "none", "gap", "busy", "marker"],
 )
 def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, failure):
     from personal_data_platform import dbt_runner
@@ -394,9 +395,7 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "test")
     monkeypatch.setenv(
         "PDP_HEARTBEAT_CONFIG",
-        '{"daily":"https://example.test/daily",'
-        '"app-in-focus":"https://example.test/focus",'
-        '"app-usage":"https://example.test/usage"}',
+        '{"daily":"https://example.test/daily"}',
     )
     monkeypatch.setattr(job, "connect", lambda _: warehouse.connection)
     monkeypatch.setattr(job, "Warehouse", lambda _: warehouse)
@@ -437,13 +436,35 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
         return phase(source.stream, kwargs)
 
     monkeypatch.setattr(job, "run_reconciliation", audit)
-    try:
-        assert job.run_reconciliation_from_env(all_streams=True) == int(failure != "none")
-        assert len(successes) == (3 if failure == "none" else 0)
-        assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == (
-            3 if failure == "none" else 0
+    if failure == "busy":
+        warehouse.acquire_job_lock("loader", "competitor", lease_seconds=7500)
+    if failure == "marker":
+
+        def broken_marker(*args, **kwargs):
+            raise RuntimeError("marker write failed")
+
+        monkeypatch.setattr(warehouse, "publish_heartbeat", broken_marker)
+    if failure == "gap":
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 10, 6, 12, tzinfo=UTC)
+
+        monkeypatch.setattr(job, "datetime", Clock)
+        warehouse.begin_job("daily-reconciliation-west", "previous")
+        warehouse.finish_job(
+            "previous", succeeded=True, details={"last_completed_target_date": "2026-09-01"}
         )
-        if failure == "none":
+    try:
+        assert job.run_reconciliation_from_env(all_streams=True) == int(
+            failure not in ("none", "gap", "busy")
+        )
+        assert len(successes) == (1 if failure in ("none", "gap") else 0)
+        assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == (
+            3 if failure in ("none", "gap") else 0
+        )
+        if failure in ("none", "gap"):
             assert phases == ["loader", "loader", "fitbit", "dbt", "app-in-focus", "app-usage"]
             entries = [json.loads(line) for line in capfd.readouterr().err.splitlines()]
             assert any(
@@ -452,6 +473,21 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
                 and entry.get("job_name") == "daily-reconciliation-west"
                 for entry in entries
             )
-        assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+        if failure == "gap":
+            details = json.loads(
+                warehouse.query_value(
+                    "SELECT details FROM ops.job_run WHERE run_id!='previous' AND job_name='daily-reconciliation-west'"
+                )
+            )
+            assert details["manual_repair_required"] == {
+                "from": "2026-09-02",
+                "through": "2026-09-28",
+            }
+            assert details["last_completed_target_date"] == "2026-10-05"
+        if failure == "busy":
+            assert phases == []
+            assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "competitor"
+        else:
+            assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     finally:
         warehouse.connection.close()

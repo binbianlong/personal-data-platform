@@ -1,4 +1,9 @@
-mock_provider "google" { override_during = plan }
+mock_provider "google" {
+  override_during = plan
+  mock_data "google_iam_policy" {
+    defaults = { policy_data = "{\"version\":3,\"bindings\":[]}" }
+  }
+}
 variables {
   project_id                     = "example-project"
   deployer_service_account_email = "github-tf-deploy@example-project.iam.gserviceaccount.com"
@@ -116,7 +121,7 @@ run "west_parallel_contract" {
     error_message = "Legacy storage must remain in place while west uses distinct buckets."
   }
   assert {
-    condition     = length(google_cloud_run_v2_job.runtime) == 4 && length(google_cloud_run_v2_job.west) == 4 && length(google_cloud_scheduler_job.west) == 2 && alltrue([for scheduler in google_cloud_scheduler_job.west : scheduler.paused && scheduler.region == "us-west1" && scheduler.time_zone == "Asia/Tokyo"])
+    condition     = length(google_cloud_run_v2_job.runtime) == 4 && length(google_cloud_run_v2_job.west) == 2 && length(google_cloud_scheduler_job.west) == 2 && alltrue([for scheduler in google_cloud_scheduler_job.west : scheduler.paused && scheduler.region == "us-west1" && scheduler.time_zone == "Asia/Tokyo"])
     error_message = "Preparation adds separate west jobs and exactly two paused schedules."
   }
   assert {
@@ -135,8 +140,6 @@ run "west_parallel_contract" {
     condition = alltrue([for job_key, expected in {
       hourly    = { MOTHERDUCK_TOKEN = "7", PDP_FITBIT_OAUTH_CONFIG = "11" }
       daily     = { MOTHERDUCK_TOKEN = "7", PDP_FITBIT_OAUTH_CONFIG = "11", PDP_HEARTBEAT_CONFIG = "17" }
-      preflight = { MOTHERDUCK_TOKEN = "3" }
-      dbt       = { MOTHERDUCK_TOKEN = "7" }
       } : tomap({
         for env in google_cloud_run_v2_job.west[job_key].template[0].template[0].containers[0].env : env.name => env.value_source[0].secret_key_ref[0].version if length(env.value_source) > 0
     }) == tomap(expected)])
@@ -147,7 +150,7 @@ run "west_parallel_contract" {
     error_message = "The west receiver must inject the specified numeric webhook secret version."
   }
   assert {
-    condition     = google_pubsub_topic_iam_member.west_receiver[0].role == "roles/pubsub.publisher" && google_pubsub_subscription_iam_member.west_hourly[0].role == "roles/pubsub.subscriber" && toset(keys(local.west_jobs.hourly.secrets)) == toset(["MOTHERDUCK_TOKEN", "PDP_FITBIT_OAUTH_CONFIG"]) && length(google_secret_manager_secret_iam_member.west_receiver) == 1 && !contains(keys(local.west_job_secret_access), "daily:fitbit_webhook_config")
+    condition     = google_pubsub_topic_iam_member.west_receiver[0].role == "roles/pubsub.publisher" && google_pubsub_subscription_iam_member.west_hourly[0].role == "roles/pubsub.subscriber" && toset(keys(local.west_jobs.hourly.secrets)) == toset(["MOTHERDUCK_TOKEN", "PDP_FITBIT_OAUTH_CONFIG"]) && length(google_secret_manager_secret_iam_member.west_receiver) == 1 && !contains(keys(local.west_job_secret_access), "fitbit_webhook_config")
     error_message = "Receiver credentials and publisher access must be isolated from acquisition OAuth and subscriber access."
   }
   assert {
@@ -180,27 +183,11 @@ run "west_storage_and_monitoring_are_separate" {
     }
   }
   override_resource {
-    target          = google_service_account.west["hourly"]
+    target = google_service_account.west[0]
     override_during = plan
     values = {
-      email = "hourly@example-project.iam.gserviceaccount.com"
-      name  = "projects/example-project/serviceAccounts/hourly@example-project.iam.gserviceaccount.com"
-    }
-  }
-  override_resource {
-    target          = google_service_account.west["daily"]
-    override_during = plan
-    values = {
-      email = "west-daily@example-project.iam.gserviceaccount.com"
-      name  = "projects/example-project/serviceAccounts/west-daily@example-project.iam.gserviceaccount.com"
-    }
-  }
-  override_resource {
-    target          = google_service_account.west["preflight"]
-    override_during = plan
-    values = {
-      email = "preflight@example-project.iam.gserviceaccount.com"
-      name  = "projects/example-project/serviceAccounts/preflight@example-project.iam.gserviceaccount.com"
+      email = "runtime@example-project.iam.gserviceaccount.com"
+      name = "projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com"
     }
   }
   override_resource {
@@ -218,11 +205,31 @@ run "west_storage_and_monitoring_are_separate" {
   }
   variables { west_logging_enabled = true }
   assert {
-    condition     = !anytrue([for binding in data.google_iam_policy.raw_west[0].binding : contains(binding.members, "serviceAccount:${google_service_account.west_receiver[0].email}")]) && !anytrue([for binding in data.google_iam_policy.preflight_west[0].binding : contains(binding.members, "serviceAccount:${google_service_account.west["hourly"].email}")])
+    condition     = !anytrue([for binding in data.google_iam_policy.raw_west[0].binding : contains(binding.members, "serviceAccount:${google_service_account.west_receiver[0].email}")]) && !anytrue([for binding in data.google_iam_policy.preflight_west[0].binding : contains(binding.members, "serviceAccount:${google_service_account.west[0].email}")])
     error_message = "Receiver must not access Raw; acquisition must not access preflight storage."
   }
   assert {
     condition     = google_logging_project_sink.default_west[0].name == "_Default" && strcontains(google_logging_project_sink.default_west[0].destination, google_logging_project_bucket_config.west[0].id) && google_logging_project_bucket_config.west[0].location == "us-west1" && !google_monitoring_alert_policy.west_pubsub_backlog[0].enabled && alltrue([for policy in google_monitoring_alert_policy.west_job_failed : !policy.enabled])
     error_message = "Ordinary logs must have one west route and paused preparation must not send missing-work alerts."
   }
+}
+
+run "west_only_runtime_pins_and_shared_identity" {
+ command = plan
+ override_resource {
+  target = google_service_account.west[0]
+  override_during = plan
+  values = { email="runtime@example-project.iam.gserviceaccount.com", name="projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com" }
+ }
+ variables {
+  west_secret_versions = { motherduck_token="7",fitbit_oauth_config="11",fitbit_webhook_config="13",heartbeat_config="17" }
+ }
+ assert {
+  condition = length(google_service_account.west)==1 && google_cloud_run_v2_job.west["hourly"].template[0].template[0].service_account == google_cloud_run_v2_job.west["daily"].template[0].template[0].service_account && google_cloud_scheduler_job.west["daily"].schedule=="10 4 * * *"
+  error_message = "Only two processing jobs with one runtime identity and non-overlapping daily schedule are required."
+ }
+ assert {
+  condition = length(google_monitoring_alert_policy.west_job_failed)==1 && google_monitoring_alert_policy.west_pubsub_backlog[0].conditions[0].condition_threshold[0].threshold_value==86400
+  error_message = "Failure and24h backlog policies must be consolidated."
+ }
 }

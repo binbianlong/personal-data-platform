@@ -8,7 +8,7 @@
 
 **設計:** [最小構成の設計書](../specs/2026-10-05-pubsub-gcs-migration-design.md)
 
-**状態:** 2026-10-06改訂。通知分割・Raw v3・台帳なし取得を実装済み。Job/日次処理の改修と本番切替は未完了。旧計画の実装完了は、この計画の完了を意味しない。
+**状態:** 2026-10-06改訂。通知分割・Raw v3・台帳なし取得を実装済み。2 Job/日次処理/1外部heartbeatへの改修をローカル検証済み。本番切替は未完了。旧計画の実装完了は、この計画の完了を意味しない。
 
 ## 共通条件
 
@@ -80,19 +80,19 @@
 
 ## Task 3: 2つのJobと1つの欠損監視に絞る
 
-**変更:** `src/personal_data_platform/sources/fitbit/runtime.py`、`src/personal_data_platform/cli.py`、`src/personal_data_platform/reconciliation/job.py`、`src/personal_data_platform/reconciliation/heartbeat.py`、`src/personal_data_platform/dbt_runner.py`、`infra/terraform/west.tf`、`infra/terraform/west_monitoring.tf`、`infra/terraform/variables.tf`、`infra/terraform/secrets.tf`、`infra/terraform/tests/west.tftest.hcl`、`docs/sources/fitbit/operations.md`、`docs/platform/operations.md`。
+**変更:** `src/personal_data_platform/sources/fitbit/runtime.py`、`src/personal_data_platform/sources/fitbit/cli.py`、`src/personal_data_platform/reconciliation/job.py`、`src/personal_data_platform/reconciliation/heartbeat.py`、`src/personal_data_platform/dbt_runner.py`、`infra/terraform/west.tf`、`infra/terraform/pubsub.tf`、`infra/terraform/west_monitoring.tf`、`infra/terraform/variables.tf`、`infra/terraform/secrets.tf`、`infra/terraform/tests/west.tftest.hcl`、`docs/sources/fitbit/operations.md`、`docs/platform/operations.md`。
 **テスト:** `tests/integration/test_reconciliation_job.py`、`tests/unit/test_fitbit_runtime.py`、`tests/unit/test_fitbit_cli.py`、Terraform west contract。
 
 **インターフェース:** `run_sync_from_env(*, start: datetime, end: datetime, data_types: tuple[str, ...] = DATA_TYPES) -> int`は期間指定必須、永続resume引数なし。`daily_heartbeat_urls() -> dict[str, str]`は`{"daily": HTTPS_URL}`だけを返す。日次は既存`run_windows`へ直近7完了日を渡し、内部Loader/dbtへ同じlease ownerと残り期限を渡す。
 
-- [ ] **失敗するテストを書く。** 日次の各Loader・API・dbt・両stream監査が失敗/保留なら外部成功0回、すべて成功なら1回。共通のstream監査/成功記録は残る。leaseがbusyなら処理と成功通知を進めない。7日より古い停止区間は手動補修が必要な期間としてJob記録に残す。
-- [ ] **手動取得のテストを書く。** `--from`/`--to`必須、`--resume-id`は拒否。同じ期間の再実行は冪等、取得失敗でデータを全削除しない。指示した古い日付を直近7日へ切り詰めず、時間指定は日全体へ拡大しない。途中終了時は最初の未完了日・種別を結果へ出す。
-- [ ] `python -m pytest tests/integration/test_reconciliation_job.py tests/unit/test_fitbit_runtime.py tests/unit/test_fitbit_cli.py -q`と`terraform -chdir=infra/terraform test -filter=tests/west.tftest.hcl`でFAILを確認する。
-- [ ] 日次の保存済みRaw再試行→7日API再照合→dbt→監査→外部1 pingを実装する。collectorの24時間control、両streamの48時間監査、完成済みsegment保留は変更しない。
-- [ ] `west_jobs`をhourly/dailyの2件にする。runtime SAを共用し、receiver SAを分離。RawのIAM・一覧・Lifecycle対象を`raw/fitbit/v3/`へ揃える。Schedulerは毎時15分と日次04:10、準備中はpaused。専用preflight/dbt Jobを定義しない。
-- [ ] runtimeのsecret参照を本番MotherDuck・OAuth・Webhook・daily heartbeatの4 payloadへ限定する。preflight token containerは準備済み未使用資産として保持し、数値version必須条件は実際のruntime参照4 keyに対応させる。空containerの存在だけでversion作成を強制しない。
-- [ ] native監視は2 Job失敗をまとめる1 policy、24時間のPub/Sub滞留1 policy、receiver ERROR log 1 policyにする。重複したJob ERROR metric/alertと日次成功metricを撤去する。Healthchecksは既定の未使用チェックを日次1件へ設定し、24h＋24h・自分のemail通知を確認する。
-- [ ] Python/Terraform testをPASSにし、commit `refactor: 西部Jobと日次監視を最小構成へ統合`。
+- [x] **失敗するテストを書く。** 日次の各Loader・API・dbt・両stream監査が失敗/保留なら外部成功0回、すべて成功なら1回。共通のstream監査/成功記録は残る。leaseがbusyなら処理と成功通知を進めない。7日より古い停止区間は手動補修が必要な期間としてJob記録に残す。
+- [x] **手動取得のテストを書く。** `--from`/`--to`必須、`--resume-id`は拒否。同じ期間の再実行は冪等、取得失敗でデータを全削除しない。指示した古い日付を直近7日へ切り詰めず、時間指定は日全体へ拡大しない。途中終了時は最初の未完了日・種別を結果へ出す。
+- [x] `python -m pytest tests/integration/test_reconciliation_job.py tests/unit/test_fitbit_runtime.py tests/unit/test_fitbit_cli.py -q`と`terraform -chdir=infra/terraform test -filter=tests/west.tftest.hcl`でFAILを確認する。
+- [x] 日次の保存済みRaw再試行→7日API再照合→dbt→監査→外部1 pingを実装する。collectorの24時間control、両streamの48時間監査、完成済みsegment保留は変更しない。
+- [x] `west_jobs`をhourly/dailyの2件にする。runtime SAを共用し、receiver SAを分離。RawのIAM・一覧・Lifecycle対象を`raw/fitbit/v3/`へ揃える。Schedulerは毎時15分と日次04:10、準備中はpaused。専用preflight/dbt Jobを定義しない。
+- [x] runtimeのsecret参照を本番MotherDuck・OAuth・Webhook・daily heartbeatの4 payloadへ限定する。preflight token containerは準備済み未使用資産として保持し、数値version必須条件は実際のruntime参照4 keyに対応させる。空containerの存在だけでversion作成を強制しない。
+- [x] native監視は2 Job失敗をまとめる1 policy、24時間のPub/Sub滞留1 policy、receiver ERROR log 1 policyにする。重複したJob ERROR metric/alertと日次成功metricを撤去する。Healthchecksは既定の未使用チェックを日次1件へ設定し、24h＋24h・自分のemail通知を確認する。
+- [x] Python/Terraform testをPASSにし、commit `refactor: 西部Jobと日次監視を最小構成へ統合`。
 
 ## Task 4: 最小releaseを検証し、停止状態で準備する
 

@@ -1,5 +1,11 @@
 # Platform運用
 
+## 西部構成の移行と定常運用
+
+最小構成はWebhook receiverとPub/Sub、毎時/日次の2処理Jobである。毎時はFitbit通知の取得・Raw/DB反映、日次は両Screen Time stream・保存済みFitbit Raw・直近7完了日の再照合・dbt・監査を行う。日次の全完了後だけ1つのHealthchecksへ成功を送る。両streamの48時間鮮度監査と内部成功記録は維持する。
+
+GCPは`us-west1`、MotherDuckは`us-west-2`。毎時15分・最大50分、日次04:10 Asia/Tokyo・最大100分で、同じruntime identityと125分の共通leaseを使う。preflight/期間指定取得/復元は独立した資格情報で手動実行する。旧構成からの切替状態は[西部移行記録](west-migration-2026-10-05.md)、実行契約は[Fitbit運用](../sources/fitbit/operations.md#西部の最小構成)を参照する。以下の旧Job名・旧deploy workflowの手順は、切替前の資産に対応する。
+
 ## Provisioningとdeploy
 
 最初にbootstrap Terraformで、GCS Terraform state、Artifact Registry、GitHub OIDC / Workload Identity

@@ -14,7 +14,6 @@ from personal_data_platform.config import schema_profile
 from personal_data_platform.loader.deadline import interrupt_after
 from personal_data_platform.loader.job import (
     LOADER_LEASE_SECONDS,
-    JobAlreadyRunning,
     run_loader,
     run_loader_objects,
 )
@@ -324,6 +323,9 @@ def run_reconciliation_from_env(
 
 
 def _run_daily_reconciliation() -> int:
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
     from personal_data_platform.dbt_runner import run_dbt_from_env
     from personal_data_platform.sources.fitbit.logging import configure_logging
     from personal_data_platform.sources.fitbit.runtime import run_daily_repair
@@ -335,9 +337,13 @@ def _run_daily_reconciliation() -> int:
         validate_runtime_policy(source)
     warehouse = Warehouse(connect(WarehouseConfig.from_env()))
     owner = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    target_date = now.astimezone(ZoneInfo("Asia/Tokyo")).date() - timedelta(days=1)
     deadline = time.monotonic() + 100 * 60
-    acquired = False
+    acquired = job_started = completed = False
     timer = None
+    stage = "startup"
+    details: dict[str, object] = {"planned_target_date": target_date.isoformat()}
 
     def remaining() -> int:
         seconds = int(deadline - time.monotonic())
@@ -350,10 +356,33 @@ def _run_daily_reconciliation() -> int:
         warehouse.migrate(profile=schema_profile())
         acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=LOADER_LEASE_SECONDS)
         if not acquired:
-            raise JobAlreadyRunning("loader already has an unexpired job lease")
+            LOGGER.info(
+                "daily reconciliation deferred: shared loader busy",
+                extra={"event": "reconciliation", "status": "deferred"},
+            )
+            return 0
         timer = interrupt_after(warehouse, remaining())
+        warehouse.begin_job("daily-reconciliation-west", owner)
+        job_started = True
+        previous = warehouse.query_value(
+            "SELECT json_extract_string(details,'$.last_completed_target_date') FROM ops.job_run WHERE job_name='daily-reconciliation-west' AND json_extract_string(details,'$.last_completed_target_date') IS NOT NULL ORDER BY completed_at DESC LIMIT 1"
+        )
+        if previous:
+            first_missing = date.fromisoformat(str(previous)) + timedelta(days=1)
+            repair_start = target_date - timedelta(days=6)
+            if first_missing < repair_start:
+                gap = {
+                    "from": first_missing.isoformat(),
+                    "through": (repair_start - timedelta(days=1)).isoformat(),
+                }
+                details["manual_repair_required"] = gap
+                LOGGER.warning(
+                    "manual Fitbit repair required",
+                    extra={"event": "fitbit_manual_repair", **gap},
+                )
         inventories = []
         for source in sources:
+            stage = "loader:" + source.stream
             remaining()
             repository = source.repository_from_env()
             refs = tuple(list_source_raw(repository, source))
@@ -362,14 +391,17 @@ def _run_daily_reconciliation() -> int:
                 repository, warehouse, refs, source=source, _lease_owner=owner, _deadline=deadline
             ).ok:
                 return 1
+        stage = "fitbit"
         repair = run_daily_repair(
-            now=datetime.now(UTC), lease_owner=owner, timeout_seconds=remaining()
+            now=now, warehouse=warehouse, lease_owner=owner, timeout_seconds=remaining()
         )
         if not repair.ok:
             return 1
+        stage = "dbt"
         if run_dbt_from_env(lease_owner=owner, timeout_seconds=remaining()):
             return 1
         for source, repository, refs in inventories:
+            stage = "audit:" + source.stream
             remaining()
             result = run_reconciliation(
                 repository,
@@ -390,18 +422,22 @@ def _run_daily_reconciliation() -> int:
             "job_name": "daily-reconciliation-west",
             "status": "succeeded",
         }
-        # All required phases have succeeded before any external success ping.
-        for name, url in urls.items():
-            remaining()
-            publish_http_heartbeat(url, {**payload, "monitor": name})
+        stage = "completion"
+        details["last_completed_target_date"] = target_date.isoformat()
         warehouse.connection.execute("BEGIN TRANSACTION")
         try:
-            for name in urls:
+            for name in ("daily", *(source.monitor_name for source in sources)):
                 warehouse.publish_heartbeat(name, owner, payload)
+            warehouse.finish_job(owner, succeeded=True, details=details)
+            remaining()
             warehouse.connection.execute("COMMIT")
         except Exception:
             warehouse.connection.execute("ROLLBACK")
             raise
+        completed = True
+        stage = "heartbeat"
+        remaining()
+        publish_http_heartbeat(urls["daily"], {**payload, "monitor": "daily"})
         LOGGER.info(
             "daily reconciliation succeeded",
             extra={
@@ -412,6 +448,7 @@ def _run_daily_reconciliation() -> int:
         )
         return 0
     except Exception:
+        completed = False
         LOGGER.exception(
             "daily reconciliation failed",
             extra={
@@ -425,6 +462,10 @@ def _run_daily_reconciliation() -> int:
         if timer is not None:
             timer.cancel()
         if acquired and warehouse.connection_usable:
+            if job_started and not completed:
+                warehouse.finish_job(
+                    owner, succeeded=False, details={**details, "failed_stage": stage}
+                )
             warehouse.release_job_lock("loader", owner)
         warehouse.close()
 

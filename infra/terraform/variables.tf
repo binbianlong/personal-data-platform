@@ -123,8 +123,8 @@ variable "west_secret_versions" {
     error_message = "west_secret_versions must use existing west secret keys and positive numeric version strings; aliases such as latest are not allowed."
   }
   validation {
-    condition     = !var.enable_west_runtime || toset(keys(var.west_secret_versions)) == toset(keys(local.west_secret_ids))
-    error_message = "Enabled west deployment requires version pins for motherduck_token, motherduck_preflight_token, fitbit_oauth_config, fitbit_webhook_config, and heartbeat_config."
+    condition     = !var.enable_west_runtime || length(setsubtract(toset(["motherduck_token", "fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config"]), toset(keys(var.west_secret_versions)))) == 0
+    error_message = "Enabled west deployment requires version pins for motherduck_token, fitbit_oauth_config, fitbit_webhook_config, and heartbeat_config."
   }
 }
 variable "west_schedulers_enabled" {
