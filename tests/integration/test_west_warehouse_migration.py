@@ -233,6 +233,43 @@ def test_cloud_source_requires_verified_read_scaling_connection(monkeypatch, duc
         assert connection.closed
 
 
+@pytest.mark.parametrize("active_leases", [0, 1])
+def test_stopped_cloud_source_accepts_read_only_snapshot_only_without_active_leases(
+    monkeypatch, active_leases
+):
+    from scripts.migrate_west_warehouse import _source_connection
+
+    class Connection:
+        closed = False
+
+        def execute(self, query):
+            self.query = query
+            return self
+
+        def fetchone(self):
+            if self.query == "SELECT * FROM __md_duckling_id()":
+                return ("source.rw",)
+            return (active_leases,)
+
+        def close(self):
+            self.closed = True
+
+    connection = Connection()
+    monkeypatch.setenv("SOURCE_MOTHERDUCK_TOKEN", "synthetic-read-token")
+
+    def connect_read_only(database, *, read_only, config):
+        assert read_only is True
+        return connection
+
+    monkeypatch.setattr("scripts.migrate_west_warehouse.duckdb.connect", connect_read_only)
+    if active_leases:
+        with pytest.raises(ValueError, match="active.*lease"):
+            _source_connection("source", source_writers_stopped=True)
+        assert connection.closed
+    else:
+        assert _source_connection("source", source_writers_stopped=True) is connection
+
+
 def test_import_supports_source_without_retention_migration_and_respects_active_writer(tmp_path):
     from scripts.migrate_west_warehouse import export_snapshot, import_snapshot
 
@@ -270,11 +307,10 @@ def test_failed_import_rolls_back_every_table_and_can_be_restarted(tmp_path):
 
     class InterruptedConnection:
         def execute(self, *args):
-            return target.execute(*args)
-
-        def executemany(self, *args):
-            target.executemany(*args)
-            raise RuntimeError("import interrupted")
+            result = target.execute(*args)
+            if args[0].startswith("INSERT INTO base.screen_time_event"):
+                raise RuntimeError("import interrupted")
+            return result
 
     with pytest.raises(RuntimeError, match="import interrupted"):
         import_snapshot(InterruptedConnection(), snapshot, raw_path)

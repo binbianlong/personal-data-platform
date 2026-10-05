@@ -90,6 +90,16 @@ def _digest(rows) -> str:
     return hashlib.sha256(b"".join(values)).hexdigest()
 
 
+def _insert_batch(connection, table: str, columns: list[str], rows) -> None:
+    """Use one parameterized statement per batch instead of a remote call per row."""
+    projection = ",".join(f'"{name}"' for name in columns)
+    values = ",".join("unnest(?)" for _ in columns)
+    connection.execute(
+        f"INSERT INTO {table} ({projection}) SELECT {values}",
+        [list(column) for column in zip(*rows, strict=True)],
+    )
+
+
 def export_snapshot(source_connection, local_path: Path) -> dict[str, int]:
     """Read a consistent snapshot without changing any source table or migration receipt."""
     _artifact_path(local_path)
@@ -100,6 +110,7 @@ def export_snapshot(source_connection, local_path: Path) -> dict[str, int]:
     result = {}
     source_connection.execute("BEGIN TRANSACTION")
     try:
+        local.execute("BEGIN TRANSACTION")
         local.execute("CREATE SCHEMA ops; CREATE SCHEMA base")
         local.execute(
             f"CREATE TABLE {_META_TABLE} (table_name VARCHAR PRIMARY KEY, "
@@ -110,15 +121,16 @@ def export_snapshot(source_connection, local_path: Path) -> dict[str, int]:
             definitions = ", ".join(f'"{name}" {kind}' for name, kind in columns)
             local.execute(f"CREATE TABLE {table} ({definitions})")
             rows = source_connection.execute(f"SELECT * FROM {table} WHERE {scope}").fetchall()
-            if rows:
-                local.executemany(
-                    f"INSERT INTO {table} VALUES ({','.join('?' for _ in columns)})", rows
+            for offset in range(0, len(rows), 1000):
+                _insert_batch(
+                    local, table, [name for name, _ in columns], rows[offset : offset + 1000]
                 )
             result[table] = len(rows)
             local.execute(
                 f"INSERT INTO {_META_TABLE} VALUES (?, ?, ?, ?)",
                 [table, json.dumps(columns), len(rows), _digest(rows)],
             )
+        local.execute("COMMIT")
         source_connection.execute("ROLLBACK")
         local.close()
         temporary.replace(local_path)
@@ -261,13 +273,9 @@ def import_snapshot(target_connection, local_path: Path, raw_manifest: Path) -> 
         ]:
             target_connection.execute(f"DELETE FROM {table} WHERE {TABLE_SCOPES[table]}")
         for table, (columns, rows) in prepared.items():
-            projection = ",".join(f'"{name}"' for name in columns)
             for offset in range(0, len(rows), 1000):
                 check_lease()
-                target_connection.executemany(
-                    f"INSERT INTO {table} ({projection}) VALUES ({','.join('?' for _ in columns)})",
-                    rows[offset : offset + 1000],
-                )
+                _insert_batch(target_connection, table, columns, rows[offset : offset + 1000])
         result = _verify_prepared(target_connection, prepared)
         check_lease()
         target_connection.execute("COMMIT")
@@ -287,7 +295,7 @@ def final_delta(source_connection, target_connection, local_path: Path, raw_mani
     return import_snapshot(target_connection, local_path, raw_manifest)
 
 
-def _source_connection(database: str):
+def _source_connection(database: str, *, source_writers_stopped: bool = False):
     if database.endswith((".duckdb", ".db")):
         return duckdb.connect(database, read_only=True)
     token = os.environ.get("SOURCE_MOTHERDUCK_TOKEN")
@@ -301,7 +309,18 @@ def _source_connection(database: str):
     try:
         row = connection.execute("SELECT * FROM __md_duckling_id()").fetchone()
         if row is None or not isinstance(row[0], str) or not re.search(r"\.rs\.\d+$", row[0]):
-            raise ValueError("SOURCE_MOTHERDUCK_TOKEN must be a read-scaling token")
+            if not (
+                source_writers_stopped
+                and row is not None
+                and isinstance(row[0], str)
+                and row[0].endswith(".rw")
+            ):
+                raise ValueError("SOURCE_MOTHERDUCK_TOKEN must be a read-scaling token")
+            active = connection.execute(
+                "SELECT count(*) FROM ops.job_lock WHERE expires_at > current_timestamp"
+            ).fetchone()
+            if active is None or active[0] != 0:
+                raise ValueError("source export refuses active warehouse leases")
         return connection
     except BaseException:
         connection.close()
@@ -314,6 +333,11 @@ def main(argv: list[str] | None = None) -> int:
     for action in ("export", "import", "verify", "final-delta"):
         actions.add_argument(f"--{action}", action="store_true", dest=action.replace("-", "_"))
     parser.add_argument("--source-db")
+    parser.add_argument(
+        "--source-writers-stopped",
+        action="store_true",
+        help="Allow a read-only connection without read scaling after stopping every source writer",
+    )
     parser.add_argument("--target-db")
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--raw-manifest", type=Path)
@@ -324,7 +348,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("target action requires --target-db and --raw-manifest")
     if args.source_db == args.target_db:
         parser.error("source and target must be different databases")
-    source = _source_connection(args.source_db) if args.export or args.final_delta else None
+    if args.source_writers_stopped and not (args.export or args.final_delta):
+        parser.error("--source-writers-stopped requires --export or --final-delta")
+    source = (
+        _source_connection(args.source_db, source_writers_stopped=args.source_writers_stopped)
+        if args.export or args.final_delta
+        else None
+    )
     target = None
     try:
         if args.export:

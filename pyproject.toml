@@ -27,6 +27,9 @@ dependencies = [
 pdp = "personal_data_platform.cli:main"
 
 [project.optional-dependencies]
+migration = [
+  "pandas>=2.2,<4",
+]
 dev = [
   "mypy==2.3.1",
   "pytest>=8.4,<10",
