@@ -55,7 +55,7 @@ def split_notifications(
     """Bound retries to a provider date or a Tokyo day before any publication."""
     if max_units < 1:
         raise PayloadError("notification expansion exceeds the request limit")
-    units = []
+    units: list[Notification] = []
     for window in notification.windows:
         civil = window.data_type in DATE_TYPES
         if not civil and window.start >= notification.received_at:

@@ -443,7 +443,7 @@ def create_pubsub_app(
             if isinstance(payload, Verification):
                 return Response(status_code=200)
             received_at = datetime.now(UTC)
-            work = []
+            work: list[Notification] = []
             for windows in payload.groups or (payload.windows,):
                 notification = Notification(
                     uuid.uuid4().hex, payload.subject_key, windows, received_at
