@@ -32,6 +32,7 @@ def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
         ("002_screen_time_app_usage_platform.sql",),
         ("003_fitbit.sql",),
         ("004_fitbit_acquisition.sql",),
+        ("005_fitbit_acquisition_work.sql",),
     ]
     assert warehouse.query_rows(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'base' "
@@ -66,9 +67,19 @@ def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
     ) == [
         (name,)
         for name in (
+            "fitbit_attempt",
+            "fitbit_bundle",
+            "fitbit_bundle_attempt",
+            "fitbit_bundle_chunk",
             "fitbit_coverage",
             "fitbit_deleted_record",
+            "fitbit_device_sync",
+            "fitbit_notification",
+            "fitbit_notification_scope",
             "fitbit_raw_intent",
+            "fitbit_repair_cursor",
+            "fitbit_scope",
+            "fitbit_scope_success",
             "heartbeat",
             "ingestion_metadata",
             "job_lock",

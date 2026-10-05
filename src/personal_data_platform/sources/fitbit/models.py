@@ -247,3 +247,47 @@ class Snapshot:
             origin=string(data["origin"]),
             source_payload=tuple(object_dict(point) for point in source_payload),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AcquisitionScope:
+    subject_key: str
+    window: Window
+    aggregation_version: str
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.subject_key) is None:
+            raise ValueError("invalid pseudonymous subject key")
+        if not self.aggregation_version:
+            raise ValueError("aggregation version is required")
+
+    @property
+    def key(self) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                [
+                    self.subject_key,
+                    self.window.data_type,
+                    self.window.start.isoformat(),
+                    self.window.end.isoformat(),
+                    self.aggregation_version,
+                ],
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class Notification:
+    notification_id: str
+    subject_key: str
+    windows: tuple[Window, ...]
+    received_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.notification_id or len(self.notification_id) > 256 or not self.windows:
+            raise ValueError("notification needs an identity and acquisition windows")
+        AcquisitionScope(self.subject_key, self.windows[0], "fitbit-v2")
+        if len(set(self.windows)) != len(self.windows):
+            raise ValueError("duplicate notification windows")
+        object.__setattr__(self, "received_at", aware(self.received_at))
