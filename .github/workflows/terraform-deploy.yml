@@ -52,6 +52,16 @@ jobs:
       TF_VAR_fitbit_secret_ids: ${{ vars.PDP_FITBIT_SECRET_IDS || '{}' }}
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
       TF_VAR_region: us-central1
+      WEST_REGION: us-west1
+      WEST_ENABLED: ${{ vars.PDP_WEST_ENABLED || 'false' }}
+      WEST_ARTIFACT_REPOSITORY: ${{ vars.GCP_WEST_ARTIFACT_REPOSITORY || vars.GCP_ARTIFACT_REPOSITORY }}
+      TF_VAR_enable_west_runtime: ${{ vars.PDP_WEST_ENABLED || 'false' }}
+      TF_VAR_west_region: us-west1
+      TF_VAR_west_schedulers_enabled: 'false'
+      TF_VAR_west_image_uri: ${{ vars.GCP_WEST_RUNTIME_IMAGE_URI }}
+      TF_VAR_west_secret_versions: ${{ vars.PDP_WEST_SECRET_VERSIONS || '{}' }}
+      TF_VAR_west_motherduck_database: ${{ vars.PDP_WEST_MOTHERDUCK_DATABASE || 'personal_data_platform_west' }}
+      TF_VAR_west_preflight_motherduck_database: ${{ vars.PDP_WEST_PREFLIGHT_MOTHERDUCK_DATABASE || 'personal_data_platform_west_preflight' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,6 +75,16 @@ jobs:
           for name in ARTIFACT_REPOSITORY GCP_PROJECT_ID GCP_REGION IMAGE_NAME TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_collector_impersonator_member TF_VAR_deployer_service_account_email; do
             test -n "${!name}"
           done
+          if [[ "${WEST_ENABLED}" == "true" ]]; then
+            jq -e '
+              type == "object" and
+              keys == ["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_preflight_token", "motherduck_token"] and
+              all(.[]; type == "string" and test("^[1-9][0-9]*\\z"))
+            ' <<< "${TF_VAR_west_secret_versions}" > /dev/null || {
+              echo "Enabled west deployment requires all five numeric secret version pins in PDP_WEST_SECRET_VERSIONS." >&2
+              exit 1
+            }
+          fi
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -128,9 +148,12 @@ jobs:
 
       - name: Protect deployed and candidate images
         shell: bash
+        env:
+          ROLLBACK_IMAGE_URI: ${{ vars.GCP_ROLLBACK_IMAGE_URI }}
         run: |
           set -euo pipefail
           image_path="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
+          revisions="$(gcloud run revisions list --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --format=json)"
           jobs="$(gcloud run jobs list --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" \
             --filter='metadata.labels.application=personal-data-platform' --format=json)"
           current_images="$(jq -r '.[] | [.metadata.name,
@@ -143,8 +166,64 @@ jobs:
             [[ "${image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
             gcloud artifacts docker tags add "${image}" "${image_path}:deployed-job-${job}" --quiet
           done <<< "${current_images}"
+          current_revisions="$(jq -r '.[] | [.metadata.name, (.status.imageDigest // .spec.containers[0].image)] | @tsv' <<< "${revisions}")"
+          while IFS=$'\t' read -r revision image; do
+            [[ -n "${revision}" ]] || continue
+            [[ "${image}" == "${image_path}@"* || "${image}" == "${image_path}:"* ]] || continue
+            [[ "${image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
+            gcloud artifacts docker tags add "${image}" "${image_path}:deployed-revision-${revision}" --quiet
+          done <<< "${current_revisions}"
+          if [[ -n "${ROLLBACK_IMAGE_URI:-}" ]]; then
+            [[ "${ROLLBACK_IMAGE_URI}" == "${image_path}@"* && "${ROLLBACK_IMAGE_URI}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
+            gcloud artifacts docker tags add "${ROLLBACK_IMAGE_URI}" "${image_path}:deployed-rollback" --quiet
+          fi
           [[ "${TF_VAR_image_uri}" == "${image_path}@"* && "${TF_VAR_image_uri}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
           gcloud artifacts docker tags add "${TF_VAR_image_uri}" "${image_path}:deployed-candidate" --quiet
+
+      - name: Prepare west runtime image
+        if: ${{ env.WEST_ENABLED == 'true' }}
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          WEST_ROLLBACK_IMAGE_URI: ${{ vars.GCP_WEST_ROLLBACK_IMAGE_URI }}
+        run: |
+          set -euo pipefail
+          image_path="${WEST_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${WEST_ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
+          jobs="$(gcloud run jobs list --project="${GCP_PROJECT_ID}" --region="${WEST_REGION}" \
+            --filter='metadata.labels.application=personal-data-platform' --format=json)"
+          revisions="$(gcloud run revisions list --project="${GCP_PROJECT_ID}" --region="${WEST_REGION}" --format=json)"
+          current_images="$(jq -r '.[] | [.metadata.name, .spec.template.spec.template.spec.containers[0].image] | @tsv' <<< "${jobs}")"
+          while IFS=$'\t' read -r job image; do
+            [[ -n "${job}" ]] || continue
+            [[ "${image}" == "${image_path}@"* && "${image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
+            gcloud artifacts docker tags add "${image}" "${image_path}:deployed-job-${job}" --quiet
+          done <<< "${current_images}"
+          current_revisions="$(jq -r '.[] | [.metadata.name, (.status.imageDigest // .spec.containers[0].image)] | @tsv' <<< "${revisions}")"
+          while IFS=$'\t' read -r revision image; do
+            [[ -n "${revision}" ]] || continue
+            [[ "${image}" == "${image_path}@"* && "${image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
+            gcloud artifacts docker tags add "${image}" "${image_path}:deployed-revision-${revision}" --quiet
+          done <<< "${current_revisions}"
+          if [[ -n "${WEST_ROLLBACK_IMAGE_URI}" ]]; then
+            [[ "${WEST_ROLLBACK_IMAGE_URI}" == "${image_path}@"* && "${WEST_ROLLBACK_IMAGE_URI}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
+            gcloud artifacts docker tags add "${WEST_ROLLBACK_IMAGE_URI}" "${image_path}:deployed-rollback" --quiet
+          fi
+          current_image="$(jq -r '.[] | select(.metadata.name == "reconciliation-west") | .spec.template.spec.template.spec.containers[0].image' <<< "${jobs}")"
+          build=true
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
+            changed="$(git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" -- Dockerfile .dockerignore pyproject.toml src/ dbt/)"
+            if [[ -z "${changed}" && -n "${current_image}" ]]; then build=false; fi
+          fi
+          if [[ "${build}" == "true" ]]; then
+            gcloud auth configure-docker "${WEST_REGION}-docker.pkg.dev" --quiet
+            docker build --tag "${image_path}:${GITHUB_SHA}" .
+            docker push "${image_path}:${GITHUB_SHA}"
+            digest="$(gcloud artifacts docker images describe "${image_path}:${GITHUB_SHA}" --format='value(image_summary.digest)')"
+            current_image="${image_path}@${digest}"
+          fi
+          [[ "${current_image}" == "${image_path}@"* && "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
+          gcloud artifacts docker tags add "${current_image}" "${image_path}:deployed-candidate" --quiet
+          echo "TF_VAR_west_image_uri=${current_image}" >> "${GITHUB_ENV}"
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1

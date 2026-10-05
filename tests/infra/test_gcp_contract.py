@@ -574,6 +574,7 @@ def test_cleanup_protects_all_current_jobs_before_replacing_the_candidate_tag(
     gcloud = tmp_path / "gcloud"
     gcloud.write_text(
         "#!/bin/bash\n"
+        'if [[ "$1 $2 $3" == "run revisions list" ]]; then echo "[]"; exit 0; fi\n'
         'if [[ "$1 $2 $3" == "run jobs list" ]]; then\n'
         '  [[ "$FAILURE" == "list" ]] && exit 1\n'
         '  printf "%s\\n" "$JOBS_JSON"; exit 0\n'
@@ -619,3 +620,214 @@ def test_cleanup_protects_all_current_jobs_before_replacing_the_candidate_tag(
             f"{previous_digest} {IMAGE_PATH}:deployed-job-dbt-runner",
             f"{candidate_digest} {IMAGE_PATH}:deployed-candidate",
         ]
+
+
+def test_west_parallel_resources_preserve_legacy_and_pause_schedulers() -> None:
+    bootstrap = _read("infra/bootstrap/main.tf")
+    west = _read("infra/terraform/west.tf")
+    assert 'resource "google_storage_bucket" "terraform_state"' in bootstrap
+    assert 'resource "google_storage_bucket" "terraform_state_west"' in bootstrap
+    assert 'resource "google_artifact_registry_repository" "runtime_west"' in bootstrap
+    assert 'resource "google_storage_bucket" "raw_west"' in west
+    assert 'resource "google_storage_bucket" "preflight_west"' in west
+    assert 'resource "google_cloud_run_v2_job" "west"' in west
+    assert 'resource "google_cloud_scheduler_job" "west"' in west
+    assert re.search(r"paused\s*= !var.west_schedulers_enabled", west)
+    assert re.search(r"days_since_custom_time\s*= 90", west)
+    assert "retention_duration_seconds = 0" in west
+    assert "prevent_destroy = true" in west
+
+
+def test_west_pubsub_and_receiver_access_are_separate() -> None:
+    queue = _read("infra/terraform/pubsub.tf")
+    west = _read("infra/terraform/west.tf")
+    assert "allowed_persistence_regions = [var.west_region]" in queue
+    assert re.search(r"enforce_in_transit\s*= true", queue)
+    assert re.search(r'message_retention_duration\s*= "604800s"', queue)
+    assert re.search(r"retain_acked_messages\s*= false", queue)
+    assert 'ttl = ""' in queue
+    assert "roles/pubsub.publisher" in queue
+    assert "roles/pubsub.subscriber" in queue
+    receiver = west.split('resource "google_cloud_run_v2_service" "west"', 1)[1]
+    receiver = receiver.split('resource "google_cloud_run_v2_service_iam_member"', 1)[0]
+    assert re.search(r"PDP_FITBIT_WEBHOOK_CONFIG\s*=", receiver)
+    assert "PDP_FITBIT_OAUTH_CONFIG" not in receiver
+    assert "MOTHERDUCK_TOKEN" not in receiver
+    assert "GCS_BUCKET" not in receiver
+
+
+def test_ci_preparation_does_not_run_west_production_jobs() -> None:
+    workflow = _read(".github/workflows/terraform-deploy.yml")
+    assert "WEST_REGION: us-west1" in workflow
+    assert "TF_VAR_west_schedulers_enabled: 'false'" in workflow
+    assert "GCP_WEST_RUNTIME_IMAGE_URI" in _read(".github/workflows/terraform-plan.yml")
+    assert "execute reconciliation-west" not in workflow
+    assert "execute fitbit-hourly-west" not in workflow
+    assert "execute dbt-runner-west" not in workflow
+
+
+WEST_SECRET_VERSIONS = {
+    "motherduck_token": "7",
+    "motherduck_preflight_token": "3",
+    "fitbit_oauth_config": "11",
+    "fitbit_webhook_config": "13",
+    "heartbeat_config": "17",
+}
+
+
+@pytest.mark.parametrize("workflow", ["terraform-plan.yml", "terraform-deploy.yml"])
+@pytest.mark.parametrize(
+    ("enabled", "versions", "accepted"),
+    [
+        ("false", {}, True),
+        ("true", WEST_SECRET_VERSIONS, True),
+        ("true", {}, False),
+        ("true", {"motherduck_token": "7"}, False),
+        ("true", {**WEST_SECRET_VERSIONS, "unknown_secret": "19"}, False),
+    ]
+    + [
+        ("true", {**WEST_SECRET_VERSIONS, "motherduck_token": version}, False)
+        for version in ("latest", "0", "-1", "1.5", "", "01", " 1", "1\n", 1, None)
+    ],
+)
+def test_west_workflows_require_numeric_pins_before_cloud_work(
+    workflow: str, enabled: str, versions: dict[str, object], accepted: bool
+) -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(f".github/workflows/{workflow}", "Validate repository variables"),
+        ],
+        env={
+            **os.environ,
+            **dict.fromkeys(
+                [
+                    "ARTIFACT_REPOSITORY",
+                    "GCP_PROJECT_ID",
+                    "GCP_REGION",
+                    "IMAGE_NAME",
+                    "GCP_PLAN_SERVICE_ACCOUNT",
+                    "TF_STATE_BUCKET",
+                    "TF_VAR_alert_email",
+                    "TF_VAR_collector_impersonator_member",
+                    "TF_VAR_deployer_service_account_email",
+                    "TF_VAR_project_id",
+                    "TF_VAR_region",
+                ],
+                "example",
+            ),
+            "WEST_ENABLED": enabled,
+            "TF_VAR_west_secret_versions": json.dumps(versions),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) is accepted, result.stderr
+
+
+def test_deploy_protects_job_and_service_images_during_migration(tmp_path: Path) -> None:
+    revision_image = f"{IMAGE_PATH}@sha256:" + "b" * 64
+    rollback_image = f"{IMAGE_PATH}@sha256:" + "c" * 64
+    candidate_image = f"{IMAGE_PATH}@sha256:" + "d" * 64
+    gcloud = tmp_path / "gcloud"
+    gcloud.write_text(
+        "#!/bin/bash\n"
+        'case "$1 $2 $3" in\n'
+        '  "run jobs list") printf "%s\\n" "$JOBS_JSON"; exit 0;;\n'
+        '  "run revisions list") printf "%s\\n" "$REVISIONS_JSON"; exit 0;;\n'
+        "esac\n"
+        'if [[ "$1 $2 $3 $4" == "artifacts docker tags add" ]]; then\n'
+        '  printf "%s %s\\n" "$5" "$6" >> "$TAG_LOG"; exit 0\n'
+        "fi\nexit 90\n"
+    )
+    gcloud.chmod(0o755)
+    tags = tmp_path / "tags"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                ".github/workflows/terraform-deploy.yml", "Protect deployed and candidate images"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "JOBS_JSON": json.dumps([_runtime_job("screen-time-loader", CURRENT_DIGEST)]),
+            "REVISIONS_JSON": json.dumps(
+                [
+                    {
+                        "metadata": {"name": "pdp-fitbit-00001"},
+                        "status": {"imageDigest": revision_image},
+                    }
+                ]
+            ),
+            "TAG_LOG": str(tags),
+            "GCP_PROJECT_ID": "example-project",
+            "GCP_REGION": "us-central1",
+            "ARTIFACT_REPOSITORY": "runtime",
+            "IMAGE_NAME": "runtime",
+            "TF_VAR_image_uri": candidate_image,
+            "ROLLBACK_IMAGE_URI": rollback_image,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert tags.read_text().splitlines() == [
+        f"{CURRENT_DIGEST} {IMAGE_PATH}:deployed-job-screen-time-loader",
+        f"{revision_image} {IMAGE_PATH}:deployed-revision-pdp-fitbit-00001",
+        f"{rollback_image} {IMAGE_PATH}:deployed-rollback",
+        f"{candidate_image} {IMAGE_PATH}:deployed-candidate",
+    ]
+
+
+@pytest.mark.parametrize("fallback_region", ["us-central1", "us-west1"])
+def test_plan_west_fallback_rejects_legacy_repository(tmp_path: Path, fallback_region: str) -> None:
+    gcloud = tmp_path / "gcloud"
+    gcloud.write_text("#!/bin/bash\nexit 1\n")
+    gcloud.chmod(0o755)
+    output = tmp_path / "env"
+    fallback = (
+        f"{fallback_region}-docker.pkg.dev/example-project/runtime/runtime@sha256:" + "a" * 64
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                ".github/workflows/terraform-plan.yml", "Resolve west runtime image"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "TF_VAR_project_id": "example-project",
+            "WEST_REGION": "us-west1",
+            "WEST_ARTIFACT_REPOSITORY": "runtime",
+            "TF_VAR_west_image_uri": fallback,
+            "GITHUB_ENV": str(output),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if fallback_region == "us-central1":
+        assert result.returncode != 0
+        assert not output.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert output.read_text() == f"TF_VAR_west_image_uri={fallback}\n"
+
+
+def test_west_monitoring_does_not_use_daily_metric_absence() -> None:
+    monitoring = _read("infra/terraform/west_monitoring.tf")
+    assert 'resource "google_logging_metric" "west_daily_success"' in monitoring
+    assert "condition_absent" not in monitoring
+    assert 'jsonPayload.event=\\"reconciliation\\"' in monitoring
+    assert "var.west_schedulers_enabled" in monitoring
+    assert "43200" in monitoring
+    assert "48時間" in _read("infra/terraform/README.md")
