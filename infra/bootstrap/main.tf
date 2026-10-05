@@ -17,6 +17,7 @@ locals {
 
   deploy_project_roles = toset([
     "roles/cloudtasks.admin",
+    "roles/pubsub.admin",
     "roles/cloudscheduler.admin",
     "roles/iam.serviceAccountAdmin",
     "roles/logging.configWriter",
@@ -101,4 +102,54 @@ removed {
   lifecycle {
     destroy = false
   }
+}
+
+resource "google_storage_bucket" "terraform_state_west" {
+  name                        = "${var.state_bucket_name}-west"
+  project                     = var.project_id
+  location                    = "us-west1"
+  force_destroy               = false
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  versioning { enabled = true }
+  lifecycle { prevent_destroy = true }
+  depends_on = [google_project_service.bootstrap]
+}
+
+resource "google_artifact_registry_repository" "runtime_west" {
+  project       = var.project_id
+  location      = "us-west1"
+  repository_id = var.artifact_repository_id
+  description   = "Immutable runtime images for personal-data-platform"
+  format        = "DOCKER"
+
+  cleanup_policy_dry_run = false
+
+  cleanup_policies {
+    id     = "delete-older-than-30-days"
+    action = "DELETE"
+    condition {
+      tag_state  = "ANY"
+      older_than = "2592000s"
+    }
+  }
+
+  cleanup_policies {
+    id     = "keep-latest-five"
+    action = "KEEP"
+    most_recent_versions {
+      keep_count = 5
+    }
+  }
+
+  cleanup_policies {
+    id     = "keep-deployed"
+    action = "KEEP"
+    condition {
+      tag_state    = "TAGGED"
+      tag_prefixes = ["deployed-"]
+    }
+  }
+
+  depends_on = [google_project_service.bootstrap]
 }

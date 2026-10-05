@@ -122,3 +122,19 @@ run "secure_bootstrap_contract" {
     error_message = "Runtime deployment must not receive project-wide IAM or act-as permissions."
   }
 }
+
+run "west_bootstrap_preserves_legacy" {
+  command = plan
+  variables {
+    project_id        = "example-project"
+    state_bucket_name = "example-project-personal-data-platform-tfstate"
+  }
+  assert {
+    condition     = google_storage_bucket.terraform_state.location == "ASIA" && google_storage_bucket.terraform_state_west.location == "us-west1" && google_storage_bucket.terraform_state.name != google_storage_bucket.terraform_state_west.name
+    error_message = "West state must use a distinct protected bucket while legacy state stays in place."
+  }
+  assert {
+    condition     = google_artifact_registry_repository.runtime_us.location == "us-central1" && google_artifact_registry_repository.runtime_west.location == "us-west1" && contains(local.deploy_project_roles, "roles/pubsub.admin") && local.plan_project_roles == toset(["roles/viewer"])
+    error_message = "West registry must be separate and only deploy may administer Pub/Sub."
+  }
+}

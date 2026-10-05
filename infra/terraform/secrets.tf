@@ -116,3 +116,26 @@ removed {
     destroy = false
   }
 }
+
+locals {
+  west_secret_ids = {
+    motherduck_token           = "pdp-west-motherduck-token"
+    motherduck_preflight_token = "pdp-west-motherduck-preflight-token"
+    fitbit_oauth_config        = "pdp-west-fitbit-oauth-config"
+    fitbit_webhook_config      = "pdp-west-fitbit-webhook-config"
+    heartbeat_config           = "pdp-west-heartbeat-config"
+  }
+}
+# Secret versions are provisioned outside Terraform so payloads never enter state.
+resource "google_secret_manager_secret" "west" {
+  for_each  = var.enable_west_runtime ? local.west_secret_ids : {}
+  project   = var.project_id
+  secret_id = each.value
+  replication {
+    user_managed {
+      replicas { location = var.west_region }
+    }
+  }
+  lifecycle { prevent_destroy = true }
+  depends_on = [google_project_service.runtime]
+}

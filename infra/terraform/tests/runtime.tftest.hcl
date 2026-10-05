@@ -27,6 +27,11 @@ run "runtime_contract" {
   }
 
   assert {
+    condition     = !var.enable_west_runtime && length(var.west_secret_versions) == 0 && length(google_cloud_run_v2_job.west) == 0 && length(google_cloud_run_v2_service.west) == 0 && length(google_secret_manager_secret.west) == 0
+    error_message = "The default configuration must keep west disabled without requiring secret version pins."
+  }
+
+  assert {
     condition     = alltrue([for job in values(google_cloud_run_v2_job.runtime) : job.template[0].task_count == 1 && job.template[0].parallelism == 1])
     error_message = "Every Cloud Run Job must execute one task with parallelism one."
   }

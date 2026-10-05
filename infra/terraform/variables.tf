@@ -89,3 +89,74 @@ variable "preflight_motherduck_database" {
   type        = string
   default     = "personal_data_platform_test"
 }
+
+variable "enable_west_runtime" {
+  description = "Provision the parallel west deployment after its isolated dependencies are ready."
+  type        = bool
+  default     = false
+}
+variable "west_region" {
+  description = "Region for the parallel deployment; legacy region remains unchanged."
+  type        = string
+  default     = "us-west1"
+  validation {
+    condition     = var.west_region == "us-west1"
+    error_message = "West resources must use us-west1."
+  }
+}
+variable "west_image_uri" {
+  description = "Separate west Artifact Registry digest; never falls back to the legacy image."
+  type        = string
+  default     = ""
+  validation {
+    condition     = !var.enable_west_runtime || can(regex("^us-west1-docker\\.pkg\\.dev/${var.project_id}/[^/]+/[^@]+@sha256:[0-9a-f]{64}$", var.west_image_uri))
+    error_message = "Enabled west deployment requires its own digest in the us-west1 repository."
+  }
+}
+variable "west_secret_versions" {
+  description = "Non-secret numeric version pins for the west secret containers; secret payloads are provisioned outside Terraform."
+  type        = map(string)
+  default     = {}
+  nullable    = false
+  validation {
+    condition     = alltrue([for key, version in var.west_secret_versions : contains(keys(local.west_secret_ids), key) && can(regex("^[1-9][0-9]*$", version))])
+    error_message = "west_secret_versions must use existing west secret keys and positive numeric version strings; aliases such as latest are not allowed."
+  }
+  validation {
+    condition     = !var.enable_west_runtime || toset(keys(var.west_secret_versions)) == toset(keys(local.west_secret_ids))
+    error_message = "Enabled west deployment requires version pins for motherduck_token, motherduck_preflight_token, fitbit_oauth_config, fitbit_webhook_config, and heartbeat_config."
+  }
+}
+variable "west_schedulers_enabled" {
+  description = "Explicit cutover gate; all west schedules are paused during preparation."
+  type        = bool
+  default     = false
+  validation {
+    condition     = !var.west_schedulers_enabled || var.enable_west_runtime
+    error_message = "West schedules cannot be enabled before the west deployment exists."
+  }
+}
+variable "west_logging_enabled" {
+  description = "Redirect the existing _Default sink to west after reviewing existing exclusions."
+  type        = bool
+  default     = false
+}
+variable "west_logging_exclusions" {
+  description = "Existing _Default sink exclusions to preserve when routing ordinary logs west."
+  type        = map(string)
+  default     = {}
+}
+variable "west_motherduck_database" {
+  description = "Production database in the separate us-west-2 MotherDuck organization."
+  type        = string
+  default     = "personal_data_platform_west"
+}
+variable "west_preflight_motherduck_database" {
+  description = "Isolated preflight database in the west organization."
+  type        = string
+  default     = "personal_data_platform_west_preflight"
+  validation {
+    condition     = var.west_preflight_motherduck_database != var.west_motherduck_database
+    error_message = "West preflight must use a separate database."
+  }
+}

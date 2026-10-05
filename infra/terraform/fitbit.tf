@@ -9,7 +9,7 @@ variable "fitbit_subject_key" {
   type        = string
   default     = ""
   validation {
-    condition     = !var.enable_fitbit_runtime || can(regex("^[A-Za-z0-9_-]{1,128}$", var.fitbit_subject_key))
+    condition     = !(var.enable_fitbit_runtime || var.enable_west_runtime) || can(regex("^[A-Za-z0-9_-]{1,128}$", var.fitbit_subject_key))
     error_message = "Enabled Fitbit ingestion requires a stable pseudonymous subject key."
   }
 }

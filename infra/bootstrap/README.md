@@ -72,3 +72,9 @@ gcloud artifacts repositories delete "<old-repository-id>" \
 ```
 
 削除後は対象locationのrepository一覧で不在を確認する。`removed`ブロックは以前のstateからの移行用に残す。
+
+## 西部リソースの追加
+
+`terraform_state_west`は`${state_bucket_name}-west`の保護された`us-west1` bucket、`runtime_west`は`us-west1`の別Artifact Registry repositoryを作る。旧stateと`runtime_us`のaddress/locationは変えない。新state bucketの作成だけではbackendは移動しない。`state_bucket_name_west`と`artifact_repository_west`のoutputで新旧を区別できる。
+
+deploy identityにはPub/Sub管理権限と西部registryのwriter、西部stateのobjectAdminを追加する。plan identityはproject viewerと西部stateのobjectViewerを維持し、WIFのrepository/workflow/main制限を変更しない。両registryの`deployed-`保持policyはJob・Service revision・明示rollback digest・candidateの保護tagを保持する。使わなくなったrevisionやrollbackのtagは復旧確認後に整理する。

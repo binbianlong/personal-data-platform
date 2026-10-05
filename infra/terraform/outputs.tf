@@ -52,3 +52,20 @@ output "notification_channel" {
   description = "Cloud Monitoring email notification channel."
   value       = google_monitoring_notification_channel.email.name
 }
+
+output "west_resources" {
+  description = "Parallel west resources; legacy outputs remain available until cutover."
+  value = var.enable_west_runtime ? {
+    region              = var.west_region
+    raw_bucket          = google_storage_bucket.raw_west[0].name
+    preflight_bucket    = google_storage_bucket.preflight_west[0].name
+    jobs                = { for key, job in google_cloud_run_v2_job.west : key => job.name }
+    receiver_url        = "${google_cloud_run_v2_service.west[0].uri}/webhooks/fitbit"
+    secrets             = { for key, secret in google_secret_manager_secret.west : key => secret.secret_id }
+    pubsub_topic        = google_pubsub_topic.west[0].id
+    pubsub_subscription = google_pubsub_subscription.west[0].id
+    pubsub_endpoint     = "pubsub.us-west1.rep.googleapis.com"
+    logging_bucket      = google_logging_project_bucket_config.west[0].id
+    schedulers_enabled  = var.west_schedulers_enabled
+  } : null
+}

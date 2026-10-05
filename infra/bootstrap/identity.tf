@@ -142,3 +142,21 @@ resource "google_artifact_registry_repository_iam_member" "github_deploy_writer"
   role       = "roles/artifactregistry.writer"
   member     = "serviceAccount:${google_service_account.github_deploy.email}"
 }
+
+resource "google_storage_bucket_iam_member" "github_plan_state_west" {
+  bucket = google_storage_bucket.terraform_state_west.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.github_plan.email}"
+}
+resource "google_storage_bucket_iam_member" "github_deploy_state_west" {
+  bucket = google_storage_bucket.terraform_state_west.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.github_deploy.email}"
+}
+resource "google_artifact_registry_repository_iam_member" "github_deploy_writer_west" {
+  project    = var.project_id
+  location   = google_artifact_registry_repository.runtime_west.location
+  repository = google_artifact_registry_repository.runtime_west.name
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${google_service_account.github_deploy.email}"
+}

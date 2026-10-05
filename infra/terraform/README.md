@@ -115,3 +115,29 @@ Rebuildへ付与するため、sourceごとの処理分離はbucket内の完全�
 追加sourceの前に、既存runtimeの更新と旧実行の終了確認を完了させる。手順は
 [`Platform運用`](../../docs/platform/operations.md#更新時の互換性)、adapterの追加は
 [`アーキテクチャ`](../../docs/platform/architecture.md#sourcestream追加手順)を参照する。
+
+## 西部の並行構成
+
+`enable_west_runtime=true`で`us-west1`の別Raw/preflight bucket、4つのJob、通知専用Service、Pub/Sub pull subscription、5つのsecret container、通常log用bucketを追加する。既存address・bucket・secret・実行系は維持する。`west_image_uri`は`us-west1`のdigest、MotherDuckは西部組織内の別production/preflight DBを指定する。Rawは新規の`age=90`に加え、Screen Timeコピーの`days_since_custom_time=90`で元の保持起点を維持し、soft deleteを無効にする。
+
+新secretはglobal secret＋単一`us-west1` replicaで、payloadはTerraformへ渡さない。secret containerを先に作り、payload/versionの登録はTerraform外で行う。受信Serviceと各Jobの参照先は、秘密値を含まない`west_secret_versions` mapで数値versionへ固定する。`enable_west_runtime=false`の準備構成では既定の`{}`を使い、有効化するときは下記5つのkeyをすべて指定する。値は`"1"`などの正の整数文字列で、`latest`や独自alias、未知のkeyは拒否する。
+
+| `west_secret_versions` key | Secret Manager ID | 利用先 |
+|---|---|---|
+| `motherduck_token` | `pdp-west-motherduck-token` | hourly・daily・dbt |
+| `motherduck_preflight_token` | `pdp-west-motherduck-preflight-token` | preflight |
+| `fitbit_oauth_config` | `pdp-west-fitbit-oauth-config` | hourly・daily |
+| `fitbit_webhook_config` | `pdp-west-fitbit-webhook-config` | 受信Service |
+| `heartbeat_config` | `pdp-west-heartbeat-config` | daily |
+
+Plan/Deploy workflowではrepository variable `PDP_WEST_SECRET_VERSIONS`に、同じmapをJSON objectとして設定する（未設定時は`{}`）。例: `{"motherduck_token":"1","motherduck_preflight_token":"1","fitbit_oauth_config":"1","fitbit_webhook_config":"1","heartbeat_config":"1"}`。有効化したworkflowは、すべての数値pinが揃うまでcloud操作へ進まない。container作成だけを先に行う場合も有効化時のmap検証は適用されるため、登録予定のversion番号を指定してsecret containerをtarget適用し、version登録後に実際の番号へ合わせて通常のPlanを確認する。更新・rollbackではこのmapの番号を変更し、参照しているversionを無効化・破棄する前に切替完了を確認する。
+
+OAuth JSONは`client_id/client_secret/refresh_token/health_user_id`、Webhook JSONは`authorization/health_user_id`を持つ。受信ServiceにはWebhook secretとtopic publisherだけを渡す。hourly JobはOAuth・MotherDuckとsubscription subscriber、日次JobはOAuth・MotherDuck・heartbeatを使う。preflightは専用bucket/token/DB、dbtはproduction tokenのみを使う。
+
+`west_schedulers_enabled=false`を維持すると毎時・日次Schedulerは停止し、新しいalert policyも無効になる。毎時は50分、日次は100分、各Jobは1task/parallelism1である。CIの準備deployは西部production Job・preflight・dbtを自動実行しない。新旧imageの参照は別々に解決し、旧regionのimageをwestのfallbackとして受け入れない。
+
+日次成功はすべての取得・commit・Screen Time監査が完了した`reconciliation/succeeded` logを計数する。未完了・欠損の通知は`PDP_HEARTBEAT_CONFIG`内のdaily Healthchecksへ設定し、24時間の実行間隔と最大100分の実行時間を含め、48時間まで余裕を持たせる。通常のmetric-absenceは最大23.5時間のため、日次成功の欠損policyには使わない。[Monitoringの制限](https://docs.cloud.google.com/monitoring/alerts/metric-absence)
+
+`west_logging_enabled=true`は既存`_Default` sinkを西部log bucketへ切り替える。先に既存exclusionを読み取り、`west_logging_exclusions`へ同じfilterを設定する。`_Required`と旧bucket内の過去logは維持する。同一projectのlog bucketへのsinkは追加のwriter権限を必要としない。[Loggingの宛先設定](https://docs.cloud.google.com/logging/docs/export/configure_export_v2)
+
+移行中は新旧secret version、Scheduler、image、bucketが並存し、定常無料枠の目標を超え得る。切替・復旧確認後に旧資産を範囲指定で整理する。backendは既存`TF_STATE_BUCKET`とprefixを維持し、西部state bucketへの移動はバックアップ・lock確認を含む独立した操作とする。
