@@ -1,45 +1,50 @@
 import gzip
+import json
 import random
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from personal_data_platform.sources.fitbit.models import CapturedSnapshot, Snapshot, Window
+from personal_data_platform.sources.fitbit import raw
+from personal_data_platform.sources.fitbit.models import (
+    CapturedSnapshot,
+    FitbitBundle,
+    Snapshot,
+    Window,
+)
 
 
-def acquisition():
-    when = datetime(2026, 10, 1, tzinfo=UTC)
+def acquisition(day=0, size=1000):
+    when = datetime(2026, 10, 1, tzinfo=UTC) + timedelta(days=day)
     return CapturedSnapshot(
         Snapshot("self", Window("steps", when, when + timedelta(days=1)), when, ()),
-        ({"dataPoints": [], "unknown": random.Random(1).randbytes(20000).hex()},),
+        ({"dataPoints": [], "unknown": random.Random(day).randbytes(size).hex()},),
     )
 
 
-def test_bundle_preserves_unknown_page_fields_and_chunks(monkeypatch):
-    from personal_data_platform.sources.fitbit import raw
-    from personal_data_platform.sources.fitbit.models import BundleEntry, FitbitBundle
-
-    monkeypatch.setattr(raw, "MAX_COMPRESSED_BYTES", 2048)
-    original = FitbitBundle("bundle", (BundleEntry("attempt", acquisition()),))
-    chunks = raw.encode_bundle(original)
-    assert len(chunks) > 1
-    assert max(map(len, (payload for _, payload in chunks))) <= 2048
-    assert (
-        raw.decode_bundle(tuple(gzip.decompress(payload) for _, payload in reversed(chunks)))
-        == original
-    )
-    with pytest.raises(ValueError, match="chunk"):
-        raw.decode_bundle(tuple(gzip.decompress(payload) for _, payload in chunks[:-1]))
-    with pytest.raises(ValueError, match="chunk"):
-        raw.decode_bundle(
-            tuple(gzip.decompress(payload) for _, payload in chunks)
-            + (gzip.decompress(chunks[0][1]),)
-        )
+def test_bundle_splits_only_between_complete_entries(monkeypatch):
+    monkeypatch.setattr(raw, "MAX_COMPRESSED_BYTES", 1800)
+    entries = tuple(acquisition(i) for i in range(3))
+    objects = raw.encode_bundle(FitbitBundle("bundle", entries))
+    assert len(objects) == 3
+    restored = []
+    for key, stored in objects:
+        assert key.startswith("raw/fitbit/v3/") and len(stored) <= 1800
+        decoded = gzip.decompress(stored)
+        assert isinstance(json.loads(decoded), list)
+        restored.extend(raw.decode_bundle(decoded))
+    assert tuple(restored) == entries
 
 
-def test_bundle_rejects_mixed_subjects_and_repeated_attempts():
-    from personal_data_platform.sources.fitbit.models import BundleEntry, FitbitBundle
+def test_single_oversized_entry_is_rejected(monkeypatch):
+    monkeypatch.setattr(raw, "MAX_COMPRESSED_BYTES", 1800)
+    with pytest.raises(ValueError, match="limit"):
+        raw.encode_bundle(FitbitBundle("bundle", (acquisition(size=4000),)))
 
-    entry = BundleEntry("attempt", acquisition())
+
+def test_bundle_rejects_mixed_subjects():
+    one = acquisition()
+    other = replace(one, snapshot=replace(one.snapshot, subject_key="other"))
     with pytest.raises(ValueError):
-        FitbitBundle("bundle", (entry, entry))
+        FitbitBundle("bundle", (one, other))

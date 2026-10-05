@@ -145,6 +145,7 @@ def _content_digest(snapshot: Snapshot) -> str:
 @dataclass(frozen=True, slots=True)
 class FitbitBatch:
     snapshot: Snapshot
+    source_digest: str | None = None
 
     @property
     def parser_version(self) -> str:
@@ -175,7 +176,9 @@ class FitbitBatch:
         if not accepted:
             return
         digest = _content_digest(self.snapshot)
-        source_digest = self.snapshot.source_sha256()
+        source_digest = (
+            self.source_digest if self.source_digest is not None else self.snapshot.source_sha256()
+        )
         unchanged = (
             len(coverage) == 1
             and coverage[0].start == window.start

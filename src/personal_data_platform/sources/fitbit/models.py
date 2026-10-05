@@ -88,6 +88,8 @@ class Record:
             isinstance(self.value, bool) or not math.isfinite(self.value) or self.value < 0
         ):
             raise ValueError("record value must be finite and nonnegative")
+        if self.value is not None:
+            object.__setattr__(self, "value", float(self.value))
         if self.kind in DATA_TYPES[:4] and self.value is None:
             raise ValueError("metric record needs a value")
         for offset in (self.offset_seconds, self.end_offset_seconds):
@@ -420,6 +422,8 @@ class HeartRateMinute:
             raise ValueError("heart rate values must be finite and nonnegative")
         if not self.minimum <= self.average <= self.maximum:
             raise ValueError("heart rate statistics are inconsistent")
+        for name in ("average", "minimum", "maximum"):
+            object.__setattr__(self, name, float(getattr(self, name)))
         if (
             self.data_source_family != GOOGLE_WEARABLES
             or self.origin != "api"
@@ -546,53 +550,16 @@ class HeartRateMinuteSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class BundleEntry:
-    attempt_id: str
-    acquisition: CapturedSnapshot | HeartRateMinuteSnapshot
-    requested_scope: AcquisitionScope | None = None
-
-    def __post_init__(self) -> None:
-        if self.requested_scope is None:
-            object.__setattr__(
-                self,
-                "requested_scope",
-                AcquisitionScope(
-                    self.acquisition.subject_key,
-                    self.acquisition.window,
-                    self.acquisition.aggregation_version,
-                ),
-            )
-        if not self.attempt_id:
-            raise ValueError("bundle entry requires an attempt")
-        if self.requested_scope is not None and (
-            self.requested_scope.subject_key != self.acquisition.subject_key
-            or self.requested_scope.window.data_type != self.acquisition.window.data_type
-            or self.requested_scope.aggregation_version != self.acquisition.aggregation_version
-            or not self.requested_scope.window.start
-            <= self.acquisition.window.start
-            < self.acquisition.window.end
-            <= self.requested_scope.window.end
-        ):
-            raise ValueError("bundle acquisition does not match requested scope")
-
-    @property
-    def scope(self) -> AcquisitionScope:
-        return self.requested_scope or AcquisitionScope(
-            self.acquisition.subject_key,
-            self.acquisition.window,
-            self.acquisition.aggregation_version,
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class FitbitBundle:
     bundle_id: str
-    entries: tuple[BundleEntry, ...]
+    entries: tuple[CapturedSnapshot | HeartRateMinuteSnapshot, ...]
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.bundle_id) is None or not self.entries:
             raise ValueError("invalid bundle identity or empty entries")
-        if len({entry.attempt_id for entry in self.entries}) != len(self.entries):
-            raise ValueError("bundle has duplicate attempts")
-        if len({entry.acquisition.subject_key for entry in self.entries}) != 1:
+        if len({entry.subject_key for entry in self.entries}) != 1:
             raise ValueError("bundle must have one subject")
+        if len({(entry.window, entry.aggregation_version) for entry in self.entries}) != len(
+            self.entries
+        ):
+            raise ValueError("bundle has duplicate acquisition ranges")

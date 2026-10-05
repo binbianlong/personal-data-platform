@@ -117,19 +117,7 @@ def run_loader_objects(
         job_started = True
         already_loaded = warehouse.succeeded_keys_for(refs, parser_version=source.parser_version)
         pending = [raw for raw in refs if raw.key not in already_loaded]
-        from personal_data_platform.sources.fitbit.adapter import FitbitSource
-
-        grouped: dict[str, list[RawObject]] = {}
-        if isinstance(source, FitbitSource) and source.schema_versions == (2,):
-            for raw in refs:
-                grouped.setdefault(raw.logical_key.split(":")[0], []).append(raw)
-            groups = [
-                tuple(group)
-                for group in grouped.values()
-                if any(raw.key not in already_loaded for raw in group)
-            ]
-        else:
-            groups = [(raw,) for raw in pending]
+        groups = [(raw,) for raw in pending]
         for group in groups:
             guard()
             sizes: dict[str, int] = {}
@@ -141,40 +129,13 @@ def run_loader_objects(
                         if buffered_payloads is not None and raw.key in buffered_payloads
                         else repository.get_raw(raw.key, generation=raw.storage_generation)
                     )
-                    if raw.source_id == "fitbit" and raw.schema_version == 2:
-                        intent = warehouse.query_rows(
-                            "SELECT compressed_sha256, compressed_size, storage_generation FROM ops.fitbit_bundle_chunk WHERE raw_key=?",
-                            [raw.key],
-                        )
-                        if (
-                            intent
-                            and (
-                                hashlib.sha256(stored).hexdigest(),
-                                len(stored),
-                                raw.storage_generation,
-                            )
-                            != intent[0]
-                        ):
-                            raise RawDecodeError(
-                                "bundle compressed bytes or generation differ from intent"
-                            )
                     payload = _decompress_and_verify(raw, stored)
                     sizes[raw.key] = len(payload)
                     payloads.append(payload)
-                if isinstance(source, FitbitSource) and source.schema_versions == (2,):
-                    batches = source.decode_bundle(group, tuple(payloads))
-                    guard()
-                    record_count += warehouse.load_objects(
-                        (raw, sizes[raw.key], batch)
-                        for raw, batch in zip(group, batches, strict=True)
-                    )
-                else:
-                    raw = group[0]
-                    batch = source.decode(raw, payloads[0])
-                    guard()
-                    record_count += warehouse.load_object(
-                        raw, byte_size=sizes[raw.key], batch=batch
-                    )
+                raw = group[0]
+                batch = source.decode(raw, payloads[0])
+                guard()
+                record_count += warehouse.load_object(raw, byte_size=sizes[raw.key], batch=batch)
                 succeeded += len(group)
             except (WarehouseConnectionError, TimeoutError):
                 raise

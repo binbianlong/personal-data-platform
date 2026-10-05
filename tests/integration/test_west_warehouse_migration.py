@@ -62,7 +62,9 @@ def test_export_import_preserves_screen_time_and_maps_raw_without_old_fitbit_sta
     raw_path = tmp_path / "raw.json"
     raw = setup_source(source, raw_path)
     Warehouse(target).migrate(profile="west")
-    target.execute("INSERT INTO ops.fitbit_notification VALUES ('new', 'new-person', now())")
+    target.execute(
+        "INSERT INTO ops.fitbit_coverage VALUES ('new','steps', '2026-10-01'::TIMESTAMPTZ, '2026-10-02'::TIMESTAMPTZ, now(), 'api', 'new-key', 'hash', 'source-hash')"
+    )
     source.execute("INSERT INTO ops.fitbit_notification VALUES ('old', 'old-person', now())")
     snapshot = tmp_path / "export.duckdb"
     export_snapshot(source, snapshot)
@@ -75,9 +77,7 @@ def test_export_import_preserves_screen_time_and_maps_raw_without_old_fitbit_sta
         [raw.key],
     ).fetchone()
     assert row == (datetime(2026, 10, 5, tzinfo=UTC), 101, raw.storage_created_at)
-    assert target.execute("SELECT notification_id FROM ops.fitbit_notification").fetchall() == [
-        ("new",)
-    ]
+    assert target.execute("SELECT subject_key FROM ops.fitbit_coverage").fetchall() == [("new",)]
     assert target.execute("SELECT run_id FROM ops.job_run").fetchall() == [("screen-job",)]
     assert target.execute("SELECT count(*) FROM ops.job_lock").fetchone()[0] == 0
     assert target.execute(
@@ -102,15 +102,15 @@ def test_final_delta_applies_updates_and_deletions_preserving_new_fitbit(tmp_pat
     source.execute("UPDATE base.screen_time_event SET bundle_id='corrected.app', is_active=false")
     source.execute("DELETE FROM ops.screen_time_record")
     source.execute("DELETE FROM ops.job_run WHERE run_id='screen-job'")
-    target.execute("INSERT INTO ops.fitbit_notification VALUES ('new', 'new-person', now())")
+    target.execute(
+        "INSERT INTO ops.fitbit_coverage VALUES ('new','steps', '2026-10-01'::TIMESTAMPTZ, '2026-10-02'::TIMESTAMPTZ, now(), 'api', 'new-key', 'hash', 'source-hash')"
+    )
     final_delta(source, target, snapshot, raw_path)
     assert target.execute("SELECT bundle_id, is_active FROM base.screen_time_event").fetchall() == [
         ("corrected.app", False)
     ]
     assert target.execute("SELECT count(*) FROM ops.screen_time_record").fetchone()[0] == 0
-    assert target.execute("SELECT notification_id FROM ops.fitbit_notification").fetchall() == [
-        ("new",)
-    ]
+    assert target.execute("SELECT subject_key FROM ops.fitbit_coverage").fetchall() == [("new",)]
     assert target.execute("SELECT count(*) FROM ops.job_run").fetchone()[0] == 0
     source.close()
     target.close()

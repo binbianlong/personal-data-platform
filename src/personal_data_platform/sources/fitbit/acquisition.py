@@ -1,8 +1,8 @@
-"""Bounded complete acquisitions, write-ahead bundles and commit-before-ack delivery."""
+"""Bounded re-fetch, complete Raw replay and commit-before-ack delivery."""
 
 from __future__ import annotations
 
-import hashlib
+import gzip
 import logging
 import threading
 import time
@@ -16,24 +16,22 @@ from zoneinfo import ZoneInfo
 from personal_data_platform.loader.deadline import interrupt_after
 from personal_data_platform.loader.job import LOADER_LEASE_SECONDS, run_loader_objects
 from personal_data_platform.raw.models import RawObject
-from personal_data_platform.sources.contracts import RawRepository
+from personal_data_platform.sources.contracts import RawRepository, list_source_raw
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConnectionError
 
-from .acquisition_state import AcquisitionState
 from .adapter import FitbitSource
 from .api import HealthClient
 from .models import (
     DATE_TYPES,
-    AcquisitionScope,
-    BundleEntry,
+    GOOGLE_WEARABLES,
     CapturedSnapshot,
     FitbitBundle,
     HeartRateMinuteSnapshot,
-    Notification,
     Window,
 )
 from .notifications import Delivery
-from .raw import encode_bundle
+from .raw import decode_bundle, encode_bundle
+from .writer import FitbitBatch, FitbitMinuteBatch
 
 LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +42,7 @@ class AcquisitionSummary:
     failed_scopes: int = 0
     deferred_scopes: int = 0
     acked_notifications: int = 0
+    first_incomplete: Window | None = None
 
     @property
     def ok(self) -> bool:
@@ -182,7 +181,7 @@ class AcquisitionRunner:
                 queue.extend(tuple(d.ack_id for d in deliveries), seconds=0)
                 return AcquisitionSummary(deferred_scopes=len(deliveries))
             timer = interrupt_after(warehouse, self._check(warehouse, owner, deadline))
-            with _AckLease(queue, deliveries) as lease:
+            with _AckLease(queue, deliveries):
                 collect_deadline = min(deadline, self.monotonic() + collect_seconds)
                 while len(deliveries) < max_messages and self.monotonic() < collect_deadline:
                     more = queue.pull(
@@ -190,66 +189,45 @@ class AcquisitionRunner:
                         timeout_seconds=min(30, max(0.01, collect_deadline - self.monotonic())),
                     )
                     deliveries.extend(more)
-                    lease.extend()
                     if not more:
                         break
-                notifications = []
-                rejected = 0
-                for delivery in deliveries:
-                    if delivery.notification.subject_key != self.subject_key:
-                        rejected += 1
-                        continue
-                    value = delivery.notification
-                    notifications.append(
-                        Notification(
-                            value.notification_id,
-                            value.subject_key,
-                            acquisition_windows(value.windows),
-                            value.received_at,
-                        )
-                    )
-                try:
-                    result = self._process(warehouse, owner, tuple(notifications), deadline)
-                except WarehouseConnectionError:
-                    timer.cancel()
-                    warehouse.close()
-                    warehouse = self.warehouse_factory()
-                    timer = interrupt_after(warehouse, self._check(warehouse, owner, deadline))
-                    ackable = AcquisitionState(warehouse).ackable_ids(
-                        tuple(n.notification_id for n in notifications)
-                    )
-                    result = AcquisitionSummary(
-                        completed_scopes=len(ackable),
-                        failed_scopes=len(set(n.notification_id for n in notifications) - ackable),
-                    )
-                ackable = AcquisitionState(warehouse).ackable_ids(
-                    tuple(n.notification_id for n in notifications)
+                valid = [d for d in deliveries if d.notification.subject_key == self.subject_key]
+                windows = acquisition_windows(
+                    tuple(w for d in valid for w in d.notification.windows)
                 )
+                try:
+                    result, completed = self._process(warehouse, owner, windows, deadline)
+                except WarehouseConnectionError:
+                    return AcquisitionSummary(failed_scopes=len(windows))
                 ack_ids = tuple(
-                    delivery.ack_id
-                    for delivery in deliveries
-                    if delivery.notification.notification_id in ackable
+                    d.ack_id
+                    for d in valid
+                    if all(w in completed for w in acquisition_windows(d.notification.windows))
                 )
                 acked = 0
+                failures = (
+                    result.failed_scopes
+                    + len(deliveries)
+                    - len(valid)
+                    + int(getattr(queue, "invalid_count", 0))
+                )
                 try:
                     queue.ack(ack_ids)
                     acked = len(ack_ids)
                 except Exception as error:
+                    failures += 1
                     LOGGER.warning("fitbit ack failed error_type=%s", type(error).__name__)
-                    rejected += len(ack_ids)
-                pending_ids = tuple(
-                    delivery.ack_id for delivery in deliveries if delivery.ack_id not in ack_ids
+                pending = tuple(
+                    d.ack_id for d in deliveries if not acked or d.ack_id not in ack_ids
                 )
-                if pending_ids:
-                    try:
-                        queue.extend(pending_ids, seconds=0)
-                    except Exception:
-                        LOGGER.warning("fitbit pending notification release failed")
+                if pending:
+                    queue.extend(pending, seconds=0)
                 return AcquisitionSummary(
                     result.completed_scopes,
-                    result.failed_scopes + rejected,
+                    failures,
                     result.deferred_scopes,
                     acked,
+                    result.first_incomplete,
                 )
         finally:
             if timer is not None:
@@ -269,197 +247,211 @@ class AcquisitionRunner:
         timeout_seconds: int,
     ) -> AcquisitionSummary:
         if self.paused:
-            return AcquisitionSummary(deferred_scopes=len(windows))
-        if timeout_seconds <= 0 or timeout_seconds > 6000:
+            return AcquisitionSummary(
+                deferred_scopes=len(windows), first_incomplete=windows[0] if windows else None
+            )
+        if not 0 < timeout_seconds <= 6000:
             raise ValueError("invalid acquisition budget")
-        notification = Notification(
-            uuid.uuid4().hex, self.subject_key, acquisition_windows(windows), self.clock()
-        )
+        units = []
+        for window in windows:
+            start = window.start
+            while start < window.end:
+                zone = UTC if window.data_type in DATE_TYPES else ZoneInfo("Asia/Tokyo")
+                midnight = start.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+                end = min(window.end, (midnight + timedelta(days=1)).astimezone(UTC))
+                units.append(Window(window.data_type, start, end))
+                if len(units) > 50000:
+                    raise ValueError("use a narrower manual range")
+                start = end
         timer = interrupt_after(warehouse, timeout_seconds)
         try:
             return self._process(
-                warehouse, lease_owner, (notification,), self.monotonic() + timeout_seconds
-            )
+                warehouse,
+                lease_owner,
+                tuple(sorted(set(units), key=lambda w: (w.start, w.data_type))),
+                self.monotonic() + timeout_seconds,
+            )[0]
         finally:
             timer.cancel()
             if isinstance(self.client, HealthClient):
                 self.client.request_guard = None
 
     def _recover(
-        self, state: AcquisitionState, warehouse: Warehouse, owner: str, deadline: float
-    ) -> None:
-        for intent in state.pending_bundles():
-            self._check(warehouse, owner, deadline)
-            refs = []
-            for key, _, _ in intent.chunks:
-                raw = self.repository.head_raw(key)
-                if raw is None:
-                    break
-                state.mark_chunk_saved(key, raw.storage_generation)
-                refs.append(raw)
-            else:
-                self._check(warehouse, owner, deadline)
-                summary = run_loader_objects(
-                    self.repository,
-                    warehouse,
-                    refs,
-                    source=FitbitSource(version=2),
-                    _lease_owner=owner,
-                    _deadline=time.monotonic() + self._check(warehouse, owner, deadline),
-                )
-                if not summary.ok:
-                    LOGGER.error("fitbit bundle recovery failed bundle_id=%s", intent.bundle_id)
+        self, warehouse: Warehouse, owner: str, deadline: float
+    ) -> tuple[list[Window], bool, int]:
+        source = FitbitSource(version=3)
+        self._check(warehouse, owner, deadline)
+        refs = sorted(
+            list_source_raw(self.repository, source), key=lambda r: (r.observed_at, r.key)
+        )
+        summary = run_loader_objects(
+            self.repository,
+            warehouse,
+            refs,
+            source=source,
+            _lease_owner=owner,
+            _deadline=time.monotonic() + self._check(warehouse, owner, deadline),
+        )
+        blocked: list[Window] = []
+        unknown = False
+        if not summary.ok:
+            loaded = warehouse.succeeded_keys_for(refs, parser_version=source.parser_version)
+            for raw in refs:
+                if raw.key in loaded:
+                    continue
+                try:
+                    stored = self.repository.get_raw(raw.key, generation=raw.storage_generation)
+                    blocked.extend(entry.window for entry in decode_bundle(gzip.decompress(stored)))
+                except Exception:
+                    unknown = True
+        return blocked, unknown, summary.failed
 
-    def _process(
+    def _refresh_unchanged(
         self,
         warehouse: Warehouse,
+        acquisition: CapturedSnapshot | HeartRateMinuteSnapshot,
         owner: str,
-        notifications: tuple[Notification, ...],
         deadline: float,
-    ) -> AcquisitionSummary:
+    ) -> bool:
+        window = acquisition.window
+        if isinstance(acquisition, HeartRateMinuteSnapshot):
+            rows = warehouse.query_rows(
+                "SELECT source_key, source_sha256, range_start, range_end FROM ops.fitbit_minute_coverage WHERE subject_key=? AND data_source_family=? AND aggregation_version=? AND range_start < ? AND range_end > ?",
+                [
+                    self.subject_key,
+                    GOOGLE_WEARABLES,
+                    acquisition.aggregation_version,
+                    window.end,
+                    window.start,
+                ],
+            )
+            batch: FitbitBatch | FitbitMinuteBatch = FitbitMinuteBatch(acquisition)
+        else:
+            rows = warehouse.query_rows(
+                "SELECT source_key, source_sha256, range_start, range_end FROM ops.fitbit_coverage WHERE subject_key=? AND data_type=? AND origin='api' AND range_start < ? AND range_end > ?",
+                [self.subject_key, window.data_type, window.end, window.start],
+            )
+            batch = FitbitBatch(acquisition.snapshot, source_digest=acquisition.source_sha256())
+        if len(rows) != 1 or rows[0][1:] != (acquisition.source_sha256(), window.start, window.end):
+            return False
         self._check(warehouse, owner, deadline)
-        state = AcquisitionState(warehouse)
-        scopes_by_id = state.register_notifications(notifications)
-        state.retire_superseded_bundles()
-        self._recover(state, warehouse, owner, deadline)
-        grouped: dict[AcquisitionScope, list[str]] = {}
-        for notification_id, scopes in scopes_by_id.items():
-            for scope in scopes:
-                pending = warehouse.query_value(
-                    """SELECT count(*) FROM ops.fitbit_notification_scope ns
-                    LEFT JOIN ops.fitbit_attempt a USING(attempt_id)
-                    WHERE notification_id=? AND ns.scope_key=? AND a.status IS DISTINCT FROM 'succeeded' """,
-                    [notification_id, scope.key],
-                )
-                if pending:
-                    grouped.setdefault(scope, []).append(notification_id)
-        changed: list[BundleEntry] = []
-        completed = failed = deferred = 0
-        # Leave time to commit the acquired prefix before the absolute job limit.
+        warehouse.connection.execute("BEGIN")
+        try:
+            batch.write_snapshot(
+                warehouse.connection, source_key=str(rows[0][0]), loaded_at=self.clock()
+            )
+            self._check(warehouse, owner, deadline)
+        except Exception:
+            warehouse.connection.execute("ROLLBACK")
+            raise
+        try:
+            warehouse.connection.execute("COMMIT")
+        except Exception:
+            warehouse.connection_usable = False
+            raise WarehouseConnectionError("unchanged commit outcome unknown") from None
+        return True
+
+    def _process(
+        self, warehouse: Warehouse, owner: str, windows: tuple[Window, ...], deadline: float
+    ) -> tuple[AcquisitionSummary, set[Window]]:
+        self._check(warehouse, owner, deadline)
+        blocked, unknown, failed = self._recover(warehouse, owner, deadline)
+        completed: set[Window] = set()
+        incomplete: set[Window] = set()
+        changed: list[CapturedSnapshot | HeartRateMinuteSnapshot] = []
+        requested: dict[Window, Window] = {}
+        deferred = 0
         acquisition_deadline = deadline - min(120.0, self._check(warehouse, owner, deadline) / 5)
         last_fetch_seconds = 0.0
-        for index, (scope, ids) in enumerate(grouped.items()):
+        for index, window in enumerate(windows):
             try:
-                if index >= 500:
-                    raise AcquisitionDeferred("scope count budget exhausted")
                 available = self._check(warehouse, owner, acquisition_deadline)
-                if changed and available <= last_fetch_seconds:
-                    raise AcquisitionDeferred("remaining budget reserved for bundle commit")
-                started_at = self.clock()
-                attempt = state.start_attempt(scope, started_at=started_at)
-                waiting = warehouse.query_rows(
-                    """SELECT ns.notification_id FROM ops.fitbit_notification_scope ns
-                    JOIN ops.fitbit_notification n USING(notification_id)
-                    LEFT JOIN ops.fitbit_attempt a USING(attempt_id)
-                    WHERE ns.scope_key=? AND n.received_at<=? AND a.status IS DISTINCT FROM 'succeeded'""",
-                    [scope.key, started_at],
-                )
-                state.bind_attempt(tuple(row[0] for row in waiting), scope, attempt)
+                if index >= 500 or (changed and available <= last_fetch_seconds):
+                    raise AcquisitionDeferred("budget reserved for Raw commit")
+                if unknown or any(
+                    b.data_type == window.data_type
+                    and b.start < window.end
+                    and b.end > window.start
+                    for b in blocked
+                ):
+                    raise AcquisitionDeferred("saved Raw is still incomplete")
                 if isinstance(self.client, HealthClient):
                     self.client.request_guard = lambda: self._check(
                         warehouse, owner, acquisition_deadline
                     )
-                fetch_started = self.monotonic()
-                if scope.window.data_type == "heart-rate":
+                started = self.monotonic()
+                if window.data_type == "heart-rate":
                     if (
-                        min(scope.window.end, started_at).replace(second=0, microsecond=0)
-                        <= scope.window.start
+                        min(window.end, self.clock()).replace(second=0, microsecond=0)
+                        <= window.start
                     ):
-                        raise AcquisitionDeferred("heart rate range has no complete minute")
+                        raise AcquisitionDeferred("no completed UTC minute")
                     acquisition: CapturedSnapshot | HeartRateMinuteSnapshot = (
-                        self.client.fetch_heart_rate_minutes(
-                            scope.window, subject_key=scope.subject_key
-                        )
+                        self.client.fetch_heart_rate_minutes(window, subject_key=self.subject_key)
                     )
                 else:
-                    acquisition = self.client.fetch_captured(
-                        scope.window, subject_key=scope.subject_key
-                    )
-                entry = BundleEntry(attempt, acquisition, scope)
-                last_fetch_seconds = max(last_fetch_seconds, self.monotonic() - fetch_started)
+                    acquisition = self.client.fetch_captured(window, subject_key=self.subject_key)
+                last_fetch_seconds = max(last_fetch_seconds, self.monotonic() - started)
+                if (
+                    acquisition.subject_key != self.subject_key
+                    or acquisition.window.data_type != window.data_type
+                    or not window.start
+                    <= acquisition.window.start
+                    < acquisition.window.end
+                    <= window.end
+                ):
+                    raise ValueError("API acquisition does not match requested window")
                 self._check(warehouse, owner, acquisition_deadline)
-                previous = state.latest_success(scope)
-                if previous is not None and previous.source_sha256 == acquisition.source_sha256():
-                    warehouse.connection.execute("BEGIN")
-                    try:
-                        state.finish_attempt(
-                            attempt,
-                            source_sha256=previous.source_sha256,
-                            raw_keys=previous.raw_keys,
-                        )
-                        warehouse.connection.execute("COMMIT")
-                    except Exception:
-                        warehouse.connection_usable = False
-                        raise WarehouseConnectionError(
-                            "unchanged commit outcome requires verification"
-                        ) from None
-                    completed += 1
+                if self._refresh_unchanged(warehouse, acquisition, owner, deadline):
+                    completed.add(window)
                 else:
-                    changed.append(entry)
+                    encode_bundle(FitbitBundle("size-check", (acquisition,)))
+                    changed.append(acquisition)
+                    requested[acquisition.window] = window
             except AcquisitionDeferred:
                 deferred += 1
+                incomplete.add(window)
             except WarehouseConnectionError:
                 raise
             except Exception as error:
-                if self.monotonic() >= acquisition_deadline:
-                    deferred += 1
-                    continue
                 failed += 1
+                incomplete.add(window)
                 LOGGER.error(
-                    "fitbit scope failed data_type=%s error_type=%s",
-                    scope.window.data_type,
+                    "fitbit scope failed data_type=%s error_type=%s; use manual range sync if persistent",
+                    window.data_type,
                     type(error).__name__,
                 )
         if changed:
-            bundle = FitbitBundle(uuid.uuid4().hex, tuple(changed))
-            chunks = encode_bundle(bundle)
-            self._check(warehouse, owner, deadline)
-            warehouse.connection.execute("BEGIN")
-            try:
-                state.prepare_bundle(
-                    bundle.bundle_id,
-                    tuple(entry.attempt_id for entry in changed),
-                    tuple(
-                        (key, hashlib.sha256(payload).hexdigest(), len(payload))
-                        for key, payload in chunks
-                    ),
-                )
-                warehouse.connection.execute("COMMIT")
-            except Exception:
-                warehouse.connection_usable = False
-                raise WarehouseConnectionError(
-                    "bundle intent commit outcome requires verification"
-                ) from None
-            refs = []
-            try:
-                for key, payload in chunks:
+            objects = encode_bundle(FitbitBundle(uuid.uuid4().hex, tuple(changed)))
+            for key, payload in objects:
+                entries = decode_bundle(gzip.decompress(payload))
+                scopes = {requested[e.window] for e in entries}
+                try:
                     self._check(warehouse, owner, deadline)
                     raw = self.repository.put_raw_object(key, payload)
-                    state.mark_chunk_saved(key, raw.storage_generation)
-                    refs.append(raw)
-                self._check(warehouse, owner, deadline)
-                summary = run_loader_objects(
-                    self.repository,
-                    warehouse,
-                    refs,
-                    source=FitbitSource(version=2),
-                    _lease_owner=owner,
-                    buffered_payloads=dict(chunks),
-                    _deadline=time.monotonic() + self._check(warehouse, owner, deadline),
-                )
-                if not summary.ok:
-                    raise RuntimeError("bundle loader failed")
-                completed += len(changed)
-            except WarehouseConnectionError:
-                raise
-            except AcquisitionDeferred:
-                deferred += len(changed)
-            except Exception as error:
-                failed += len(changed)
-                LOGGER.error(
-                    "fitbit bundle failed bundle_id=%s error_type=%s",
-                    bundle.bundle_id,
-                    type(error).__name__,
-                )
-        state.retire_superseded_bundles()
-        return AcquisitionSummary(completed, failed, deferred)
+                    self._check(warehouse, owner, deadline)
+                    summary = run_loader_objects(
+                        self.repository,
+                        warehouse,
+                        (raw,),
+                        source=FitbitSource(version=3),
+                        _lease_owner=owner,
+                        buffered_payloads={key: payload},
+                        _deadline=time.monotonic() + self._check(warehouse, owner, deadline),
+                    )
+                    if not summary.ok:
+                        raise RuntimeError("Raw load failed")
+                    completed.update(scopes)
+                except WarehouseConnectionError:
+                    raise
+                except AcquisitionDeferred:
+                    deferred += len(scopes)
+                    incomplete.update(scopes)
+                except Exception as error:
+                    failed += len(scopes)
+                    incomplete.update(scopes)
+                    LOGGER.error("fitbit Raw load failed error_type=%s", type(error).__name__)
+        first = min(incomplete, key=lambda w: (w.start, w.data_type)) if incomplete else None
+        return AcquisitionSummary(
+            len(completed), failed, deferred, first_incomplete=first
+        ), completed

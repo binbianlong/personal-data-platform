@@ -11,13 +11,11 @@ from typing import TYPE_CHECKING
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import RawRepository, SourceHealth
 from personal_data_platform.storage.gcs import GCSRawRepository
-from personal_data_platform.storage.motherduck import Warehouse
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
 
-from .acquisition_state import AcquisitionState
-from .models import PARSER_VERSION, TABLES, FitbitBundle, HeartRateMinuteSnapshot, Snapshot
+from .models import PARSER_VERSION, TABLES, CapturedSnapshot, HeartRateMinuteSnapshot, Snapshot
 from .raw import BUNDLE_PREFIX, PREFIX, decode_bundle, parse_bundle_key, parse_raw_key
 from .writer import FitbitBatch, FitbitMinuteBatch
 
@@ -49,24 +47,25 @@ class FitbitSource:
             version
             if version is not None
             else (
-                2
+                3
                 if os.environ.get("PDP_FITBIT_DELIVERY_MODE") == "pubsub"
                 or os.environ.get("PDP_SCHEMA_PROFILE") == "west"
                 else 1
             )
         )
-        if selected not in (1, 2):
+        if selected not in (1, 3):
             raise ValueError("unsupported Fitbit Raw version")
-        if selected == 2:
-            self.schema_versions = (2,)
+        if selected == 3:
+            self.schema_versions = (3,)
             self.raw_prefixes = (BUNDLE_PREFIX,)
-            self.parser_version = "fitbit-v2"
+            self.parser_version = "fitbit-v3"
             self.required_relations = tuple(
                 f"base.{name}" for kind, name in TABLES.items() if kind != "heart-rate"
             ) + (
                 "base.fitbit_heart_rate_minute",
-                "ops.fitbit_attempt",
-                "ops.fitbit_bundle",
+                "ops.fitbit_coverage",
+                "ops.fitbit_minute_coverage",
+                "ops.fitbit_deleted_record",
                 "marts.daily_fitbit_health",
                 "marts.fitbit_heart_rate_minute_time_series",
             )
@@ -77,14 +76,20 @@ class FitbitSource:
     def parse_raw_key(
         self, key: str, *, storage_created_at: datetime, storage_generation: int
     ) -> RawObject:
-        parser = parse_bundle_key if self.schema_versions == (2,) else parse_raw_key
+        parser = parse_bundle_key if self.schema_versions == (3,) else parse_raw_key
         return parser(
             key, storage_created_at=storage_created_at, storage_generation=storage_generation
         )
 
     def decode(self, raw: RawObject, payload: bytes) -> FitbitBatch | BundleBatch:
-        if self.schema_versions == (2,):
-            return self.decode_bundle((raw,), (payload,))[0]
+        if self.schema_versions == (3,):
+            entries = decode_bundle(payload)
+            if (
+                any(entry.subject_key != raw.subject_key for entry in entries)
+                or max(entry.fetched_at for entry in entries) != raw.observed_at
+            ):
+                raise ValueError("Raw acquisition identity mismatch")
+            return BundleBatch(entries)
         snapshot = Snapshot.from_bytes(payload)
         if (
             snapshot.subject_key,
@@ -94,19 +99,6 @@ class FitbitSource:
         ) != (raw.subject_key, raw.logical_key, raw.observed_at, "api"):
             raise ValueError("Fitbit Raw envelope does not match its identity")
         return FitbitBatch(snapshot)
-
-    def decode_bundle(
-        self, refs: tuple[RawObject, ...], payloads: tuple[bytes, ...]
-    ) -> tuple[BundleBatch, ...]:
-        bundle = decode_bundle(payloads)
-        if any(
-            raw.subject_key != bundle.entries[0].acquisition.subject_key
-            or raw.logical_key.split(":")[0] != bundle.bundle_id
-            for raw in refs
-        ):
-            raise ValueError("bundle Raw scope mismatch")
-        keys = tuple(raw.key for raw in refs)
-        return tuple(BundleBatch(bundle, keys, index == 0) for index in range(len(refs)))
 
     def repository_from_env(self) -> RawRepository:
         return GCSRawRepository.from_env(source=self)
@@ -134,39 +126,27 @@ class FitbitSource:
 
 @dataclass(frozen=True, slots=True)
 class BundleBatch:
-    bundle: FitbitBundle
-    raw_keys: tuple[str, ...]
-    apply_data: bool = True
-    parser_version: str = "fitbit-v2"
+    entries: tuple[CapturedSnapshot | HeartRateMinuteSnapshot, ...]
+    parser_version: str = "fitbit-v3"
 
     @property
     def record_count(self) -> int:
-        if not self.apply_data:
-            return 0
         return sum(
-            len(entry.acquisition.minutes)
-            if isinstance(entry.acquisition, HeartRateMinuteSnapshot)
-            else len(entry.acquisition.snapshot.records)
-            for entry in self.bundle.entries
+            len(entry.minutes)
+            if isinstance(entry, HeartRateMinuteSnapshot)
+            else len(entry.snapshot.records)
+            for entry in self.entries
         )
 
     def write(
         self, connection: DuckDBPyConnection, raw: RawObject, *, byte_size: int, loaded_at: datetime
     ) -> None:
-        if not self.apply_data:
-            return
-        state = AcquisitionState(Warehouse(connection))
-        for entry in self.bundle.entries:
-            acquisition = entry.acquisition
-            state.restore_attempt(entry.attempt_id, entry.scope, started_at=acquisition.fetched_at)
-            if isinstance(acquisition, HeartRateMinuteSnapshot):
-                FitbitMinuteBatch(acquisition).write_snapshot(
+        for entry in self.entries:
+            if isinstance(entry, HeartRateMinuteSnapshot):
+                FitbitMinuteBatch(entry).write_snapshot(
                     connection, source_key=raw.key, loaded_at=loaded_at
                 )
             else:
-                FitbitBatch(acquisition.snapshot).write_snapshot(
+                FitbitBatch(entry.snapshot, source_digest=entry.source_sha256()).write_snapshot(
                     connection, source_key=raw.key, loaded_at=loaded_at
                 )
-            state.finish_attempt(
-                entry.attempt_id, source_sha256=acquisition.source_sha256(), raw_keys=self.raw_keys
-            )

@@ -8,7 +8,7 @@
 
 **設計:** [最小構成の設計書](../specs/2026-10-05-pubsub-gcs-migration-design.md)
 
-**状態:** 2026-10-06改訂。下記の最小構成は未実装。本番切替は準備段階で止めている。旧計画の実装完了は、この計画の完了を意味しない。
+**状態:** 2026-10-06改訂。通知分割・Raw v3・台帳なし取得を実装済み。Job/日次処理の改修と本番切替は未完了。旧計画の実装完了は、この計画の完了を意味しない。
 
 ## 共通条件
 
@@ -68,15 +68,15 @@
 
 **インターフェース:** `AcquisitionRunner.ingest(queue, *, max_messages=500, collect_seconds=120, timeout_seconds=3000) -> AcquisitionSummary`と`run_windows(windows, *, warehouse, lease_owner, timeout_seconds) -> AcquisitionSummary`を維持する。Task 1の単位をメモリ内でgroupingする。`FitbitBundle.entries`は`tuple[CapturedSnapshot | HeartRateMinuteSnapshot, ...]`とし、attemptとchunkの永続状態を持たせない。`encode_bundle(bundle: FitbitBundle) -> tuple[tuple[str, bytes], ...]`は完全取得の境界だけで16 MiB以内に分ける。
 
-- [ ] **失敗するテストを書く。** 通知台帳10表なしで取得→Raw→分析/coverage/取込metadataのcommit→ackが動くことを確認する。範囲が同じ・内容変更なしならRaw追加0件、A→B→Aなら3観測を保持する。未知API項目の変更、完全な空結果、途中ページ失敗はそれぞれ変更・削除・未完了として区別する。
-- [ ] **停止と進捗のテストを書く。** `test_redelivery_after_unknown_commit_is_idempotent`、`test_saved_raw_recovers_without_attempt_tables`、`test_scope_failure_does_not_block_other_days`を追加する。失敗単位はackされず、成功単位だけackされる。次回は未処理日を処理できることを実DBで確認する。
-- [ ] **変更なしの保護をテストする。** `test_pending_raw_is_loaded_before_unchanged_fetch`はA反映→BのRaw保存直後に停止→A再取得の順で、Bを先に再生し、Aを新Rawとして保存することを確認する。`test_unchanged_fetch_prevents_stale_raw_replay`は同じ内容の再取得後に古いRawを再生しても、更新・moved ID・削除を巻き戻さないことを確認する。
-- [ ] **writerの既存保護を確認する。** moved ID、削除後の古いRaw、現在日での心拍分境界、generation違い、lease喪失に対するテストを維持する。Raw codecはv3の直接gzip JSONで往復し、base64連結や欠けたchunkの補修を提供しない。
-- [ ] **Raw上限のテストを書く。** `test_bundle_splits_only_between_complete_entries`は圧縮16 MiB以内で完全取得の境界だけに分かれ、各objectを単独でdecode/loadできることを確認する。`test_oversized_scope_does_not_block_small_scopes`は単一取得が上限超過ならその単位だけ未完了とし、他の単位は保存・commit・ackできることを確認する。
-- [ ] `python -m pytest tests/integration/test_fitbit_acquisition.py tests/integration/test_fitbit_acquisition_state.py tests/integration/test_west_migration_baseline.py tests/integration/test_fitbit_writer.py tests/integration/test_fitbit_loader.py tests/unit/test_fitbit_bundle.py -q`で未対応のFAILを確認する。
-- [ ] 空ではないpullで保存済みの未反映Rawを先に一度共有Loaderで再試行し、fresh API取得の後の成功だけackする。未反映Rawが残る範囲は保留する。通常取得のRaw bytesをLoaderへ直接渡す。変更なしの取得でも既存のcoverage・対象IDの更新/削除保護の取得時刻をtransactionで進め、Raw参照は維持する。新しい専用tableを作らない。
-- [ ] 005で10表を削除する。削除前に対象の状態が空、profileがwest、writerなしを確認する。001〜004を変更しない。`test_minimal_migration_preserves_applied_checksums_and_screen_time`で既存データ・台帳・coverageが残り、10表だけ消えること、再適用が安全なことを確認する。
-- [ ] テストをPASSにし、commit `refactor: Fitbit取得を再取得とRaw取り込みへ簡素化`。
+- [x] **失敗するテストを書く。** 通知台帳10表なしで取得→Raw→分析/coverage/取込metadataのcommit→ackが動くことを確認する。範囲が同じ・内容変更なしならRaw追加0件、A→B→Aなら3観測を保持する。未知API項目の変更、完全な空結果、途中ページ失敗はそれぞれ変更・削除・未完了として区別する。
+- [x] **停止と進捗のテストを書く。** `test_redelivery_after_unknown_commit_is_idempotent`、`test_saved_raw_recovers_without_attempt_tables`、`test_scope_failure_does_not_block_other_days`を追加する。失敗単位はackされず、成功単位だけackされる。次回は未処理日を処理できることを実DBで確認する。
+- [x] **変更なしの保護をテストする。** `test_pending_raw_is_loaded_before_unchanged_fetch`はA反映→BのRaw保存直後に停止→A再取得の順で、Bを先に再生し、Aを新Rawとして保存することを確認する。`test_unchanged_fetch_prevents_stale_raw_replay`は同じ内容の再取得後に古いRawを再生しても、更新・moved ID・削除を巻き戻さないことを確認する。
+- [x] **writerの既存保護を確認する。** moved ID、削除後の古いRaw、現在日での心拍分境界、generation違い、lease喪失に対するテストを維持する。Raw codecはv3の直接gzip JSONで往復し、base64連結や欠けたchunkの補修を提供しない。
+- [x] **Raw上限のテストを書く。** `test_bundle_splits_only_between_complete_entries`は圧縮16 MiB以内で完全取得の境界だけに分かれ、各objectを単独でdecode/loadできることを確認する。`test_oversized_scope_does_not_block_small_scopes`は単一取得が上限超過ならその単位だけ未完了とし、他の単位は保存・commit・ackできることを確認する。
+- [x] `python -m pytest tests/integration/test_fitbit_acquisition.py tests/integration/test_fitbit_acquisition_state.py tests/integration/test_west_migration_baseline.py tests/integration/test_fitbit_writer.py tests/integration/test_fitbit_loader.py tests/unit/test_fitbit_bundle.py -q`で未対応のFAILを確認する。
+- [x] 空ではないpullで保存済みの未反映Rawを先に一度共有Loaderで再試行し、fresh API取得の後の成功だけackする。未反映Rawが残る範囲は保留する。通常取得のRaw bytesをLoaderへ直接渡す。変更なしの取得でも既存のcoverage・対象IDの更新/削除保護の取得時刻をtransactionで進め、Raw参照は維持する。新しい専用tableを作らない。
+- [x] 005で10表を削除する。削除前に対象の状態が空、profileがwest、writerなしを確認する。001〜004を変更しない。`test_minimal_migration_preserves_applied_checksums_and_screen_time`で既存データ・台帳・coverageが残り、10表だけ消えること、再適用が安全なことを確認する。
+- [x] テストをPASSにし、commit `refactor: Fitbit取得を再取得とRaw取り込みへ簡素化`。
 
 ## Task 3: 2つのJobと1つの欠損監視に絞る
 

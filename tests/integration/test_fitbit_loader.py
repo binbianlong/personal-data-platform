@@ -1,7 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
 import duckdb
-import pytest
 
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.storage.motherduck import Warehouse
@@ -99,7 +98,6 @@ def test_buffered_load_has_no_storage_read():
     from personal_data_platform.loader.job import run_loader_objects
     from personal_data_platform.sources.fitbit.adapter import FitbitSource
     from personal_data_platform.sources.fitbit.models import (
-        BundleEntry,
         CapturedSnapshot,
         FitbitBundle,
         Snapshot,
@@ -113,8 +111,8 @@ def test_buffered_load_has_no_storage_read():
         Snapshot("self", Window("steps", when, when + timedelta(days=1)), when, ()),
         ({"unknown": 1},),
     )
-    chunks = encode_bundle(FitbitBundle("bundle", (BundleEntry("attempt", data),)))
-    source = FitbitSource(version=2)
+    chunks = encode_bundle(FitbitBundle("bundle", (data,)))
+    source = FitbitSource(version=3)
     refs = tuple(
         source.parse_raw_key(key, storage_created_at=when, storage_generation=1)
         for key, _ in chunks
@@ -138,10 +136,8 @@ def test_buffered_load_has_no_storage_read():
             "SELECT count(*) FROM ops.ingestion_metadata WHERE status='succeeded'"
         ) == len(chunks)
         assert (
-            warehouse.query_value(
-                "SELECT status FROM ops.fitbit_attempt WHERE attempt_id='attempt'"
-            )
-            == "succeeded"
+            warehouse.query_value("SELECT source_sha256 FROM ops.fitbit_coverage")
+            == data.source_sha256()
         )
         payload = gzip.decompress(chunks[0][1])
         assert refs[0].sha256 == __import__("hashlib").sha256(payload).hexdigest()
@@ -149,83 +145,54 @@ def test_buffered_load_has_no_storage_read():
         warehouse.close()
 
 
-@pytest.mark.parametrize("failure", ["missing_chunk", "last_chunk_write"])
-def test_bundle_failure_preserves_data_and_pending_attempt(monkeypatch, failure):
-    import hashlib
-    import random
-
+def test_raw_object_failure_preserves_all_acquisitions(monkeypatch):
     from personal_data_platform.loader.job import run_loader_objects
-    from personal_data_platform.sources.fitbit import raw
-    from personal_data_platform.sources.fitbit.acquisition_state import AcquisitionState
     from personal_data_platform.sources.fitbit.adapter import FitbitSource
     from personal_data_platform.sources.fitbit.models import (
-        BundleEntry,
         CapturedSnapshot,
         FitbitBundle,
-        Notification,
         Record,
         Snapshot,
         Window,
     )
+    from personal_data_platform.sources.fitbit.raw import encode_bundle
     from personal_data_platform.sources.fitbit.writer import FitbitBatch
 
     when = datetime(2026, 10, 1, tzinfo=UTC)
-    window = Window("steps", when, when + timedelta(days=1))
+    first = Window("steps", when, when + timedelta(days=1))
+    second = Window("steps", when + timedelta(days=1), when + timedelta(days=2))
     warehouse = Warehouse(duckdb.connect())
-    warehouse.migrate()
-    state = AcquisitionState(warehouse)
-    scope = state.register_notifications((Notification("n", "self", (window,), when),))["n"][0]
-    attempt = state.start_attempt(scope, started_at=when + timedelta(seconds=1))
-    state.bind_attempt(("n",), scope, attempt)
+    warehouse.migrate(profile="west")
     old = Snapshot(
         "self",
-        window,
+        first,
         when - timedelta(minutes=1),
         (Record("steps", "old", when, when, when + timedelta(minutes=1), 10.0),),
     )
-    warehouse.connection.execute("BEGIN")
     FitbitBatch(old).write_snapshot(warehouse.connection, source_key="old", loaded_at=when)
-    warehouse.connection.execute("COMMIT")
-    acquisition = CapturedSnapshot(
-        Snapshot("self", window, when + timedelta(seconds=1), ()),
-        ({"unknown": random.Random(1).randbytes(5000).hex()},),
+    entries = tuple(
+        CapturedSnapshot(Snapshot("self", window, when + timedelta(seconds=1), ()), ())
+        for window in (first, second)
     )
-    monkeypatch.setattr(raw, "MAX_COMPRESSED_BYTES", 2048)
-    chunks = raw.encode_bundle(FitbitBundle("atomic", (BundleEntry(attempt, acquisition),)))
-    assert len(chunks) > 1
-    source = FitbitSource(version=2)
-    refs = tuple(
-        source.parse_raw_key(key, storage_created_at=when, storage_generation=1)
-        for key, _ in chunks
-    )
-    state.prepare_bundle(
-        "atomic",
-        (attempt,),
-        tuple((key, hashlib.sha256(data).hexdigest(), len(data)) for key, data in chunks),
-    )
-    for reference in refs:
-        state.mark_chunk_saved(reference.key, reference.storage_generation)
-    original = warehouse.load_object
+    objects = encode_bundle(FitbitBundle("atomic", entries))
+    assert len(objects) == 1
+    source = FitbitSource(version=3)
+    reference = source.parse_raw_key(objects[0][0], storage_created_at=when, storage_generation=1)
+    original = FitbitBatch.write_snapshot
 
-    def interrupted(reference, **kwargs):
-        if reference.key == refs[-1].key:
-            raise RuntimeError("last chunk interrupted")
-        return original(reference, **kwargs)
+    def interrupted(self, *args, **kwargs):
+        if self.snapshot.window == second:
+            raise RuntimeError("second acquisition interrupted")
+        return original(self, *args, **kwargs)
 
     try:
         with monkeypatch.context() as patch:
-            if failure == "last_chunk_write":
-                patch.setattr(warehouse, "load_object", interrupted)
+            patch.setattr(FitbitBatch, "write_snapshot", interrupted)
             result = run_loader_objects(
-                object(),
-                warehouse,
-                refs[:-1] if failure == "missing_chunk" else refs,
-                source=source,
-                buffered_payloads=dict(chunks),
+                object(), warehouse, (reference,), source=source, buffered_payloads=dict(objects)
             )
         assert not result.ok
         assert warehouse.query_value("SELECT sum(value) FROM base.fitbit_steps") == 10.0
-        assert state.ackable_ids(("n",)) == frozenset()
         assert (
             warehouse.query_value(
                 "SELECT count(*) FROM ops.ingestion_metadata WHERE status='succeeded'"
@@ -233,9 +200,8 @@ def test_bundle_failure_preserves_data_and_pending_attempt(monkeypatch, failure)
             == 0
         )
         assert run_loader_objects(
-            object(), warehouse, refs, source=source, buffered_payloads=dict(chunks)
+            object(), warehouse, (reference,), source=source, buffered_payloads=dict(objects)
         ).ok
         assert warehouse.query_value("SELECT count(*) FROM base.fitbit_steps") == 0
-        assert state.ackable_ids(("n",)) == frozenset({"n"})
     finally:
         warehouse.close()

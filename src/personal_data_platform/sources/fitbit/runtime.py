@@ -147,7 +147,7 @@ def _acquisition_runner() -> AcquisitionRunner:
     values["PDP_FITBIT_DELIVERY_MODE"] = "pubsub"
     oauth = GoogleOAuth.from_env(values)
     return AcquisitionRunner(
-        repository=GCSRawRepository.from_env(source=FitbitSource(version=2)),
+        repository=GCSRawRepository.from_env(source=FitbitSource(version=3)),
         client=HealthClient(access_token=oauth),
         warehouse_factory=_warehouse,
         subject_key=required("PDP_FITBIT_SUBJECT_KEY"),

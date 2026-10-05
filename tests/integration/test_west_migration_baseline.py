@@ -39,16 +39,6 @@ def test_west_baseline_creates_only_final_fitbit_schema(warehouse):
         "base.fitbit_sleep_wake",
         "base.fitbit_heart_rate_minute",
         "ops.fitbit_minute_coverage",
-        "ops.fitbit_scope",
-        "ops.fitbit_notification",
-        "ops.fitbit_notification_scope",
-        "ops.fitbit_attempt",
-        "ops.fitbit_bundle",
-        "ops.fitbit_bundle_attempt",
-        "ops.fitbit_bundle_chunk",
-        "ops.fitbit_repair_cursor",
-        "ops.fitbit_scope_success",
-        "ops.fitbit_device_sync",
     } <= tables
     assert "base.fitbit_heart_rate" not in tables
     assert "ops.fitbit_raw_intent" not in tables
@@ -59,6 +49,7 @@ def test_west_baseline_creates_only_final_fitbit_schema(warehouse):
         ("002_screen_time_app_usage_platform.sql",),
         ("003_fitbit_baseline.sql",),
         ("004_raw_retention_origin.sql",),
+        ("005_minimal_fitbit_processing.sql",),
     ]
     assert warehouse.query_rows(
         "SELECT column_name FROM information_schema.columns WHERE table_schema='ops' "
@@ -82,12 +73,12 @@ def test_west_migration_reapply_preserves_screen_time_and_fitbit(warehouse):
     warehouse.migrate(profile="west")
     raw = _raw()
     warehouse.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
-    warehouse.connection.execute("INSERT INTO ops.fitbit_notification VALUES ('n', 's', now())")
+
     tables = (
         "ops.schema_migration",
         "ops.ingestion_metadata",
         "base.screen_time_event",
-        "ops.fitbit_notification",
+        "ops.fitbit_coverage",
     )
     before = {table: warehouse.query_rows(f"SELECT * FROM {table}") for table in tables}
     warehouse.migrate(profile="west")
@@ -102,14 +93,14 @@ def test_west_baseline_matches_forward_schema_and_constraints(warehouse):
         sql = (
             "SELECT table_schema, table_name, column_name, data_type, is_nullable, column_default "
             "FROM information_schema.columns WHERE table_schema IN ('base','ops') "
-            "AND table_name NOT IN ('fitbit_heart_rate', 'fitbit_raw_intent') "
+            "AND table_name NOT IN ('fitbit_heart_rate', 'fitbit_raw_intent', 'fitbit_scope', 'fitbit_notification', 'fitbit_notification_scope', 'fitbit_attempt', 'fitbit_scope_success', 'fitbit_bundle', 'fitbit_bundle_attempt', 'fitbit_bundle_chunk', 'fitbit_repair_cursor', 'fitbit_device_sync') "
             "ORDER BY table_schema, table_name, ordinal_position"
         )
         assert warehouse.query_rows(sql) == legacy.query_rows(sql)
         sql = (
             "SELECT schema_name, table_name, constraint_type, constraint_text FROM duckdb_constraints() "
             "WHERE schema_name IN ('base','ops') "
-            "AND table_name NOT IN ('fitbit_heart_rate','fitbit_raw_intent') "
+            "AND table_name NOT IN ('fitbit_heart_rate', 'fitbit_raw_intent', 'fitbit_scope', 'fitbit_notification', 'fitbit_notification_scope', 'fitbit_attempt', 'fitbit_scope_success', 'fitbit_bundle', 'fitbit_bundle_attempt', 'fitbit_bundle_chunk', 'fitbit_repair_cursor', 'fitbit_device_sync') "
             "ORDER BY schema_name, table_name, constraint_type, constraint_text"
         )
         assert warehouse.query_rows(sql) == legacy.query_rows(sql)
@@ -123,7 +114,7 @@ def test_interrupted_west_common_migrations_resume_and_reject_legacy(warehouse, 
     with pytest.raises(RuntimeError, match="profile"):
         warehouse.migrate(profile="legacy")
     warehouse.migrate(profile="west")
-    assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 4
+    assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 5
 
 
 def test_existing_unprofiled_legacy_receipts_reject_west_without_mutation(warehouse):
@@ -199,3 +190,45 @@ def test_preflight_rejects_invalid_schema_profile_before_accessing_clients(monke
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     with pytest.raises(ConfigurationError, match="PDP_SCHEMA_PROFILE"):
         run_preflight_from_env()
+
+
+def test_minimal_migration_preserves_applied_checksums_and_screen_time(warehouse, tmp_path):
+    for file in (DEFAULT_MIGRATIONS / "west").glob("00[1-4]*.sql"):
+        shutil.copyfile(file, tmp_path / file.name)
+    warehouse.migrate(tmp_path, profile="west")
+    before = warehouse.query_rows(
+        "SELECT migration_id,checksum,applied_at FROM ops.schema_migration ORDER BY migration_id"
+    )
+    raw = _raw()
+    warehouse.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
+    rows = warehouse.query_rows("SELECT * FROM base.screen_time_event")
+    warehouse.migrate(profile="west")
+    assert (
+        warehouse.query_rows(
+            "SELECT migration_id,checksum,applied_at FROM ops.schema_migration WHERE migration_id< '005' ORDER BY migration_id"
+        )
+        == before
+    )
+    assert warehouse.query_rows("SELECT * FROM base.screen_time_event") == rows
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema='ops' AND table_name='fitbit_notification'"
+        )
+        == 0
+    )
+    warehouse.migrate(profile="west")
+    assert warehouse.query_rows("SELECT * FROM base.screen_time_event") == rows
+
+
+@pytest.mark.parametrize("occupied", ["state", "lease"])
+def test_minimal_migration_rejects_pending_state_or_writer(warehouse, tmp_path, occupied):
+    for file in (DEFAULT_MIGRATIONS / "west").glob("00[1-4]*.sql"):
+        shutil.copyfile(file, tmp_path / file.name)
+    warehouse.migrate(tmp_path, profile="west")
+    if occupied == "state":
+        warehouse.connection.execute("INSERT INTO ops.fitbit_notification VALUES ('n','s',now())")
+    else:
+        warehouse.acquire_job_lock("loader", "writer", lease_seconds=7500)
+    with pytest.raises(Exception, match="empty|writer"):
+        warehouse.migrate(profile="west")
+    assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 4
