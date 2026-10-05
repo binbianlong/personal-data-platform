@@ -1,270 +1,127 @@
-# Pub/Sub・GCSを使う西部リージョンへの移行設計
+# Webhookを維持する最小構成と西部リージョンへの移行設計
 
 - 作成日: 2026-10-05
-- 状態: アプリケーション・Terraformの移行準備を実装し、ローカル検証済み。本番環境への適用・データ移行・切替は未実施。
-- 移行元: `main` の `adc527a8fb25de1c93eca454aab2f39b0dec4e7c`
+- 更新日: 2026-10-06
+- 状態: 最小構成へ改訂。旧設計の実装・資産準備は一部完了しているが、最小構成の実装と本番切替は未完了。
+- 実施順序: [実装・移行計画](../plans/2026-10-05-pubsub-gcs-migration-plan.md)
+- 実環境の記録: [西部移行記録](../../platform/west-migration-2026-10-05.md)
 
-実装と切替の順序は[移行計画](../plans/2026-10-05-pubsub-gcs-migration-plan.md)に記載する。
+## 目的と構成
 
-## 目的と採用する構成
+Screen TimeとFitbitを継続収集し、GCSへRaw、MotherDuckへ分析履歴を保存する。Webhookを維持し、通知処理の独自台帳・自動復旧機構と常設の運用Jobを減らす。優先順位は金銭的なコスト、保守の手間、source追加の容易さとする。無料枠への収まりは実測で確認する。
 
-Screen TimeとFitbitを継続収集し、取得したRawを90日保存しながら、GCSのClass A操作と実行回数を抑える。個人利用の無料枠内での運用を目標にする。無料枠は請求先アカウント内の他用途とも共有されるため、移行後の実測で判定する。
+定常運用は受信Service 1つ、Pub/Sub topic/subscription各1つ、処理Job 2つ、Scheduler 2つとする。処理Jobは同じimageとruntime Service Accountを使う。
 
-- GCPで受信・定期処理・Raw保存を行う。
-- FitbitのWebhookを維持し、通知の受け渡しをPub/Subにする。
-- 毎時のCloud Run Jobで通知をまとめて取得・反映する。
-- 日次のCloud Run JobでScreen Timeの取り込み・監査とFitbitの再照合を行う。
-- GCSにScreen Timeの元SEGBとFitbitの取得レスポンスを圧縮保存する。
-- MotherDuckに分析データ、取り込み結果、保存予定、取得範囲の進捗を保存する。
-- 心拍はGoogle Health APIの60秒集約を取得し、新しい分単位のモデルに保存する。
-- GCPは`us-west1`、MotherDuckはAWS `us-west-2`へ移す。
+| 用途 | 構成・頻度 |
+| --- | --- |
+| Webhook受信 | Cloud Run Service。検証と処理単位の発行だけを行う |
+| 通知の保持・再配信 | Pub/Sub pull subscription。未ack保持7日 |
+| Fitbit取得 | Cloud Run Job。毎時15分、最大50分 |
+| Screen Time取り込み・Fitbit再照合・dbt・監査 | Cloud Run Job。日次04:10 Asia/Tokyo、最大100分 |
+| 保存・分析 | GCS Standard `us-west1`とMotherDuck `us-west-2` |
+| 欠損監視 | Healthchecksの1チェック。日次全体の成功から48時間 |
+| 失敗・滞留の通知 | Cloud MonitoringのJob失敗とPub/Sub滞留 |
 
-通知の待ち行列はPub/Sub、取り込みに関する永続状態はMotherDuckに置く。Firestoreの導入は初期構成に含めない。
-
-移行時の既存Fitbitデータは全消去可能とする。分析table、旧Raw、receipt、checkpoint、通知・取得状態を新環境へ引き継ぐ必要はなく、最終スキーマで新規取得を始める。過去履歴のbackfillは必要な期間だけ任意に行い、全期間復元を切替条件にしない。Screen TimeのRaw・分析履歴と共通基盤の状態は維持する。
+日次を04:10とするのは、03:15開始の毎時処理が最大50分で終わる想定に5分の余裕を置くためである。実際の起動遅延や手動実行との競合は共通leaseで防ぐ。
 
 ```mermaid
-flowchart TD
-    health[Google Health API / Fitbit] -->|Webhook| receiver[Cloud Run 受信Service]
-    receiver -->|発行完了後に204| queue[Pub/Sub pull subscription]
-    hourly[Cloud Scheduler 毎時] --> fitbit[Cloud Run Job 通知の集約・取得]
-    queue -->|pull / 期限延長 / 完了後ack| fitbit
-    fitbit -->|API取得| health
-    fitbit -->|圧縮Raw| gcs[GCS Standard us-west1 / Raw 90日]
-    fitbit -->|データと進捗| md[MotherDuck us-west-2]
-    pc[PCのScreen Time collector] -->|変更したSEGBの圧縮Raw| gcs
-    daily[Cloud Scheduler 日次] --> reconcile[Cloud Run Job 取り込み・再照合・監査]
-    gcs -->|未取り込みRaw| reconcile
-    reconcile -->|直近7完了日のAPI再取得| health
-    reconcile -->|変更した取得結果| gcs
-    reconcile -->|データと進捗| md
+flowchart LR
+    API[Google Health API] -->|Webhook| Receiver[受信Service]
+    Receiver -->|日付と種別で分割| PubSub[Pub/Sub]
+    PubSub --> Hourly[毎時Job]
+    Hourly -->|完全取得| API
+    Hourly --> Raw[GCS Raw]
+    Hourly --> DB[MotherDuck]
+    Mac[Screen Time collector] --> Raw
+    Raw --> Daily[日次Job]
+    Daily -->|直近7完了日| API
+    Daily --> DB
+    Daily -->|全処理成功時だけ| Check[Healthchecks 1件]
 ```
 
-ここでの処理Jobは、現在のPythonの取得・取り込み処理をコンテナで実行するものを指す。Webhookを受けるHTTP Serviceと、時間をかけてAPIを取得するJobは責務を分ける。
+常設のpreflight Job、dbt専用Job、source別の外部heartbeat、独自MCP server、通知のexactly-once処理、自動backfillカーソル、汎用Job orchestrationは追加しない。preflight・期間指定取得・復元は必要時に手動で行う。実装済みのAPI client、型付きwriter、共通Loader、Source adapter、Screen Time collectorを利用する。
 
-## 移行元との差分
+## Webhookと処理単位
 
-現在の仕様の正本は[基盤構成](../../platform/architecture.md)、[Fitbit取得](../../sources/fitbit/acquisition.md)、[Raw契約](../../platform/raw-data.md)、[Screen Time取得](../../sources/screen-time/acquisition.md)とする。この文書は移行後の目標仕様であり、現在の運用手順を置き換えない。
+Authorization、Tink署名、対象ユーザー・5種別、1 MiBのbody上限、検証ハンドシェイクを維持する。認証不正は401、不正payloadは400、発行失敗・結果不明は503。受信ServiceにOAuth、MotherDuck、Raw bucketの権限を与えない。
 
-| 項目 | 移行元の`main` | 移行後 |
-| --- | --- | --- |
-| Fitbit通知 | GCS receipt保存、Cloud Tasks登録 | Pub/Subへ発行、毎時まとめてpull |
-| Fitbit処理 | 通知ごとの処理と同期・補修 | 毎時の通知処理と日次の再照合 |
-| 取得の進捗 | GCS checkpointとMotherDuckの取り込み状態 | MotherDuckの範囲別進捗・保存予定 |
-| Fitbit Raw | 日・種別ごとのスナップショット | 変更した範囲をまとめた圧縮bundle |
-| 心拍の分析データ | 個々の心拍サンプル | 1分の平均・最小・最大 |
-| Screen Time | 定期Loaderとcollector control | 日次Loader、24時間間隔のcontrol公開 |
-| リージョン | GCP `us-central1`、既存MotherDuck組織 | GCP `us-west1`、新しいMotherDuck西部組織 |
+検証した通知を、ユーザー・日付・データ種別ごとの処理単位へ分割し、各単位を1メッセージとして発行する。既存の通知envelopeを使い、`windows`は1要素、期間は1日以内とする。物理時刻はAsia/Tokyoの日境界、睡眠・日次安静時心拍は提供元のcivil dateを使う。時差のない通知に対する既存の保守的な範囲解釈を維持し、保守的な展開で生じた完全な未来日は発行対象から外す。未来だけを明示した物理通知は400で拒否する。現在日の心拍は処理時点で完了した分まで取得し、未来の分を取得済みとして記録しない。同日の後続更新は新通知と日次再照合で取得する。
 
-既存のGCS receipt、Cloud Tasks、GCS上のFitbit checkpointは、旧writer停止と新経路の動作を確認して廃止する。再収集開始前の未処理分は廃棄可能とし、開始以降の通知は新Pub/Subで保持する。
+全処理単位の発行完了後に204を返す。途中発行後に失敗した場合の再送は重複を許容する。1リクエストの展開上限は1,000単位とし、上限超過は発行前に400で拒否し、期間指定の補修対象としてログに残す。Pub/Subへ健康データ本体や資格情報は入れない。
 
-## 受信と通知処理
+Pub/Subの保存先は`us-west1`、`enforceInTransit=true`、endpointは`pubsub.us-west1.rep.googleapis.com`。subscriptionの自動期限切れを無効にし、ack済み保持・topic追加保持・snapshot・別のdead-letter queueは使わない。
 
-### Webhook受信Service
+## 毎時取得と失敗時の動作
 
-既存のAuthorization検証、Tink署名検証、対象ユーザー・種別・リクエストサイズの検証を維持する。検証用のハンドシェイクも維持する。通常の通知では、検証済み通知のPub/Sub発行がすべて成功した後に`204`を返す。失敗・結果不明なら成功応答を返さず、送信元の再送を受ける。[Google Health Webhook仕様](https://developers.google.com/health/webhooks)
+1回で最大500メッセージ、収集待ちは最大120秒、処理期限は50分とする。空pullはDBへ接続せず終了する。共通の`loader` leaseを取得し、同じ日付・種別を実行中のメモリ内でまとめる。
 
-Pub/Subメッセージには、schema version、対象ユーザー、データ種別、通知の対象範囲、受信日時、相関IDを含める。トークン・秘密鍵・健康データ本体は含めない。受信ServiceはGoogle Health APIやMotherDuckへ接続せず、GCS receiptも書かない。
+空ではないpullでは、保存済みの未取り込みFitbit Rawを先に共有Loaderで一度再試行する。未反映Rawが残る範囲を、変更なしとしてackしない。Raw保存後の停止を通知台帳なしで回復するため、GCSのobjectと共通取込metadataを使う。
 
-発行成功後のHTTP応答消失、発行結果不明からの再試行などで同じ通知が複数回届く。通知の内容が同じでも、その後にデータが更新されることがあるため、同一内容を永続的に除外するキーにはしない。
+各処理単位を全ページ取得し、直前の同一範囲・取得条件の成功結果と比較する。未知のAPI項目を含む内容hashを使い、取得時刻やページ分割は比較から外す。変更がなければRawを増やさず、既存のcoverage・対象IDの更新/削除保護に今回の取得時刻をtransactionで反映してからackする。Raw参照は最後に保存したobjectを維持する。過去の成功記録だけで新通知をackしない。
 
-### Pub/Sub設定
+変更した完全取得結果はRawへ保存し、共有Loaderのtransactionで分析データ・coverage・取込結果を確定する。確定できた処理単位だけackし、失敗・未処理の単位は再配信する。複数単位を同じRawに含めた場合は、そのRawのtransactionが確定してから対応する単位をackする。保持中のack期限は延長し、単発の延長は600秒以内とする。
 
-- 通常のpull subscriptionを1つ使う。通知ごとのpushによる重い処理の起動は行わない。
-- 未ackメッセージの保持期間は7日。ack済み保持、topic側の追加保持、snapshotは使わない。
-- subscriptionの無操作による自動期限切れを無効にする。
-- メッセージの保存先を`us-west1`に制限し、`enforceInTransit`とリージョンに対応した接続先を設定する。
-- 発行Serviceはpublisher権限、処理Jobはsubscriber権限を持つ。
-
-通常配信は少なくとも1回で、順序は前提にしない。Google Health、GCS、MotherDuck、Pub/Subの間に共通トランザクションはないため、全体のexactly-onceは保証しない。再実行と再配信を冪等に処理する。[配信モデル](https://docs.cloud.google.com/pubsub/docs/subscription-overview)、[保存先制限](https://docs.cloud.google.com/pubsub/docs/resource-location-restriction)
-
-### 毎時のFitbit Job
-
-初期設定は1時間ごとに実行する。1回の収集は最大500通知・最大2分で打ち切り、処理全体のCloud Run timeoutを50分にする。件数・ページ数・API時間にも上限を設け、上限に達した分は次回へ繰り越す。
-
-1. 通知を少量pullする。空ならMotherDuckへ接続せず終了する。
-2. 共通のMotherDuck `loader` leaseを取得する。競合時は取得済み通知を再配信可能にして、処理を延期する。
-3. 上限内で通知を集め、ユーザー・対象日・データ種別・集約条件を表す取得範囲にまとめる。通知と必要な取得範囲を永続記録してからAPI取得を始める。
-4. 保存予定の復旧を先に行い、必要な範囲のGoogle Health APIを全ページ取得する。
-5. 現在の同じ取得範囲の内容と比較し、変更した結果を圧縮Rawとして保存する。
-6. MotherDuckへ反映し、範囲別の完了状態を記録する。
-7. その通知が要求するすべての取得範囲が完了した後にackする。
-
-物理時刻の範囲はAsia/Tokyoの日付へ分割する。睡眠・日次安静時心拍などのcivil dateはAPIの意味に従って扱う。タイムゾーンを含まない通知は、既存の保守的な範囲展開を維持する。一通知が複数日にまたがる場合、すべての範囲が完了するまでackしない。
-
-取得中・集約待ちを含め、保持している全通知のack期限を定期的に延長する。単発の延長は600秒以内にし、クライアントの最大延長時間をJobの上限と整合させる。期限延長やackに失敗した場合は再配信を受け入れる。[lease管理](https://docs.cloud.google.com/pubsub/docs/lease-management)
-
-内容が変わらない場合はRawも分析データも書き直さない。ただし照合成功は記録し、通知をackできる状態にする。集約した通知の件数はAPI取得回数・Raw数・MotherDuck接続回数と別に計測する。
-
-### 日次Jobと長期停止からの復旧
-
-日次Jobは04:30 Asia/Tokyoに実行し、timeoutを100分にする。Screen Timeの取り込み・監査、未完了の保存予定の復旧、Fitbitの直近7完了日の再照合を行う。当日の未完了範囲は毎時Jobが扱う。Schedulerは専用Service Accountで認証して`jobs.run`を呼び、各Jobの実行権限と実行時のデータアクセス権限を分ける。
-
-再照合は、通知欠損や遅い同期を補う処理である。7日より古い更新、7日を超える停止、通知の保持期限を超えた欠損は、別の期間指定backfillで補修する。日次Jobは正常完了した日付・取得範囲を永続記録し、停止で空いた範囲を上限内で順次埋める。取得の失敗でカーソルを先へ進めない。
-
-古い日付の通知も取得対象とし、直近7日だけに切り詰めない。広い通知・backfillは範囲ごとに分割し、通常通知とScreen Timeの処理を長期間止めない。APIが返せる履歴の範囲と権限を確認し、再取得できなかった範囲を明示する。`rollUp`の心拍の14日上限は1リクエストの範囲制限であり、保持される履歴期間を意味しない。[rollUp仕様](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/rollUp)
-
-## 永続状態と途中失敗
-
-### MotherDuckの状態
-
-以下の状態を新DB用Fitbit baselineへ定義する。共通取り込み台帳は利用するが、旧Fitbit intent・成功状態は引き継がない。旧環境向けの追加migrationとbaselineは移行中だけ分け、既存DBの適用済みmigrationは書き換えない。
-
-| 状態 | 保存する内容 |
+| 失敗箇所 | 再実行 |
 | --- | --- |
-| 範囲別の最新成功 | ユーザー、日・時間範囲、種別、取得・集約version、内容hash、取得時刻、Raw参照 |
-| 通知の未完了範囲 | 通知ID・受信日時、必要な取得範囲、対応する取得attempt、完了状態 |
-| Rawの保存予定 | bundle ID、対象範囲、object key、圧縮バイト列のhash・size、状態、保存後のgeneration |
-| 取り込み結果 | bundleと範囲ごとのcommit、Raw参照、更新・削除した範囲 |
-| 補修の進捗 | 次の未完了範囲、試行結果、再開位置 |
+| API途中ページ・429・通信失敗 | ackせず、既存データを維持して単位を再取得 |
+| Raw保存前の停止 | Pub/Subの単位を再取得 |
+| Raw保存後のDB反映失敗 | 未取り込みRawを共有Loaderで再試行 |
+| DB commitの結果不明 | ackせず再実行。Rawと取込結果を照合し、冪等に反映 |
+| DB確定後のack失敗 | 再配信時に再取得しても、同じデータは重複生成しない |
+| lease競合・処理期限での保留 | 未処理単位を次回へ返し、保留だけならJob失敗として通知しない |
 
-通知から取得範囲・取得attemptへの対応を保持し、範囲別に成功を確認できるようにする。Pub/Sub message IDだけをデータの識別子にしない。初めて処理する通知は、その通知を受信した後に開始した完全取得へ対応させる。同範囲の過去成功だけで新しい通知をackしない。再配信では、その通知に対応済みのattemptがすべてcommit済みなら再取得せずackできる。
+通知と取得attemptの永続的な対応表、Raw保存前のintent、bundle/chunkの進捗、端末同期checkpointを持たない。新たな中間状態を復旧する代わりに、小さい単位の再取得と保存済みRawの再取り込みを使う。その代償として、途中失敗・ack消失ではAPIを余分に呼ぶことを許容する。
 
-分析データの更新、範囲の成功、取り込み台帳は同じMotherDuckトランザクションで確定する。Raw intentはGCS保存前に確定し、Rawから再開できる状態を残す。commit結果が不明な場合は成功扱いにせず、新しい接続で台帳を確認する。
+完全取得の空結果は対象範囲の削除として反映する。途中失敗を空結果として扱わない。後から古いRawを再生しても、新しい更新・削除を巻き戻さない。既存のcoverageと削除記録による保護を維持する。
 
-### 失敗時の動作
+## Rawと必要なDB状態
 
-| 停止・失敗した位置 | 再実行時の動作 |
-| --- | --- |
-| APIの途中ページ・429・通信失敗 | 範囲は未完了のまま。既存データを削除せず再取得する |
-| intent確定後、GCS保存前 | objectの存在をkeyで確認。存在しなければ再取得して新しいintentを作る |
-| GCS保存後、MotherDuck反映前 | hash・size・generationを検証し、保存済みRawから取り込む |
-| MotherDuck commitの応答消失 | 台帳を確認して確定済みなら再書き込みを避ける。未確定なら再実行する |
-| commit後、ack前 | 再配信時に状態を照合し、完了を確認してackする |
-| bundleの一部範囲だけ失敗 | 成功範囲を記録し、未完了範囲を再試行する。その範囲を必要とする通知はackしない |
+Screen TimeのSEGB envelope・key・parser・長期履歴は変更しない。新規Rawは90日保持、soft-delete/versioningなし、create-only、hashとgeneration指定readを維持する。移行コピーでは元の保持起点をCustom-Timeへ設定する。
 
-APIが完全に取得できて結果が空なら、その範囲の削除を反映する。途中取得・異常終了で空になった結果は削除の根拠にしない。認証・権限エラーは通常の空データと区別し、運用上の失敗として通知する。
+Fitbitの最小Rawは`raw/fitbit/v3/`のgzip JSONとする。完全取得の配列を直接保存し、attempt ID、chunk連結、base64 wrapperを含めない。APIの取得条件・取得日時・全レスポンスの内容を保存する。変更単位を可能な範囲でまとめ、圧縮16 MiBを超える場合は完全取得単位の境界で別objectにする。単一取得が上限を超える場合は、その単位を完了にせず、狭い範囲を指定する手動取得へ回す。
 
-### 同時実行の制御
+Rawの保存直後は手元の同じbytesをLoaderへ渡す。日次は未取り込みRawを走査し、通常の処理に新たなreceipt/sidecar書き込みを加えない。通知後からAPI取得までの中間更新や、APIで消えた旧状態の完全な再現は保証しない。
 
-毎時・日次・手動処理はすべて共通の`loader` leaseを使う。Jobの`taskCount=1`や`parallelism=1`だけでは、別実行との競合を防げない。
+Fitbitの永続状態は既存の以下に限定する。
 
-現在の`loader` leaseは125分固定で更新されない。移行元の日次監査には別名の`reconciliation` leaseが155分あり、手動dbtにも共通leaseがないため、既存経路をそのまま併用しても全writerを排他できない。初期移行では全writerを共通`loader` leaseへ揃え、すべての書き込みJobを最大100分以内に制限する。API・DB呼び出しにもtimeoutを設け、終了・commit確認の余裕を残す。lease所有者を確認してから書き込み、所有権が不明・喪失した場合は続行しない。125分を超える処理が必要になった場合は、所有者を確認する更新と古い実行による書き込みを防ぐ仕組みを先に導入する。
+- `ops.fitbit_coverage`・`ops.fitbit_minute_coverage`: 完全取得範囲、取得日時、内容hash、Raw参照
+- `ops.fitbit_deleted_record`: 古い取得結果による削除済みIDの復活を防ぐ
+- 共通`ops.ingestion_metadata`・Job/lease/監査/成功時刻の記録: 再取り込みと運用確認
 
-## GCS Rawの契約と操作削減
+`fitbit_scope`、`fitbit_notification`、`fitbit_notification_scope`、`fitbit_attempt`、`fitbit_scope_success`、`fitbit_bundle`、`fitbit_bundle_attempt`、`fitbit_bundle_chunk`、`fitbit_repair_cursor`、`fitbit_device_sync`の10表を通常経路から外す。
 
-GCS Standard、単一リージョン`us-west1`、通常のフラットなobject構成を使う。両ソースの新規Rawは作成から90日で削除するlifecycleを設定する。移行コピーは元の保持起点を引き継ぐ。既存契約どおりsoft deleteとversioningを無効にし、create-only書き込み、hash照合、generationを固定した読み込みを維持する。新規bucketのsoft delete初期設定をそのまま使わない。[lifecycle](https://docs.cloud.google.com/storage/docs/lifecycle)、[soft delete](https://docs.cloud.google.com/storage/docs/soft-delete)
+西部DBには既にmigration 001〜004を適用している。適用済みSQLとchecksumを変更せず、`src/personal_data_platform/migrations/west/005_minimal_fitbit_processing.sql`で上記10表を撤去する。撤去前に対象10表が空であること、writerがないことを確認する。既存のScreen Time・共通表・型付きFitbit表・coverageは維持する。旧DBへ新migrationを適用しない。
 
-Fitbit Rawは新しいschema version・prefixのbundleにする。bundle内に範囲、問い合わせ・集約条件、取得日時、各ページの取得レスポンスを保存し、未知のAPI項目も落とさない。JSONの空白やキー順までの再現ではなく、取得したレスポンスの内容を保存する。心拍のRawは60秒集約のAPIレスポンスであり、新規に秒単位の心拍を取得して保存する構成ではない。
+## 日次・手動取得・分析
 
-変更判定は、同じ範囲・取得条件・schema/aggregation versionの最新成功と、取得内容全体のhashを比較する。取得時刻・bundle ID・ページング用tokenは変更判定から除外し、データ点・窓の順序とページ分割に依存しない形に正規化する。A→B→Aの更新では、直前のBと比較してAを新しい履歴として保存する。過去に同じAがあったことを理由に保存を省略しない。
+日次は両Screen Time streamの未取り込みRaw、保存済みFitbit Rawの再試行、5種別の直近7完了日のAPI再照合、dbt、両streamの監査を順に行う。現在日の未完了範囲は毎時取得が扱う。全処理完了時だけ外部heartbeatを1回送る。streamごとの監査結果は共通DBとログに残す。
 
-一実行の変更範囲を可能な範囲でまとめて保存する。APIで完全に取得できた範囲だけをbundleに含め、1object最大16MiBの圧縮サイズを初期上限として分割する。一範囲が上限を超える場合は同じattemptのchunkとして分割し、全chunkの保存・検証・取り込みが終わるまで範囲を完了にしない。保存後は保持しているバイト列をそのままLoaderへ渡し、直後のGCS GET・LISTを省く。再実行で必要なときはintentのobject keyから読む。
+永続カーソルと端末同期時刻に基づく自動長期backfillは廃止する。7日より長い停止・1,000単位を超えた通知・古い履歴の修復は`pdp fitbit sync --from START --to END`を手動実行する。最後の完了対象日と、7日再照合だけでは埋まらない空白期間は共通Job記録のdetailsへ残す。直近7日の再開だけで過去の空白が埋まったとは記録しない。`--resume-id`は提供しない。期間指定でも日付×種別で順に処理し、同じ範囲の再実行で重複を作らない。期限に達した場合は最初の未完了日と種別を結果へ出し、次の手動実行はそこから指定する。日時指定の手動取得は指定した短い範囲を保ち、日全体へ拡大しない。
 
-通知受付・処理状態はGCSへ保存せず、Rawごとのsidecarも追加しない。旧Fitbit Rawは移行入力・保存要件から外し、v1 decoderの維持や90日の満了待ちを必須にしない。新規Rawの90日保持とScreen Timeの既存形式は維持する。
+心拍は既存の60秒rollUpを使い、平均・最小・最大・観測分数を維持する。元サンプル数はNULL、欠測は0で埋めない。秒心拍を新環境へコピーしない。その他の4種別と睡眠詳細の分析契約を維持する。
 
-RawはAPIで実際に取得できた時点の状態を保存する。通知後、次の取得までに追加・削除された中間状態は残らない。変更がない日のRawを毎日複製することもない。FitbitはAPIから現在取得できる内容で再収集できればよく、過去の取得レスポンスや中間状態の再現は要件にしない。Screen Timeは90日Rawだけで全期間を復元できるとは限らないため、長期履歴のバックアップを別途維持する。
+Screen Time collectorは30分scan、完成済みsegmentの差分保存、24時間control公開、48時間鮮度監査を維持する。削除・後着・端末休止の意味を変えず、既存の共通処理を作り直さない。
 
-## Screen Time
+全writerは共通`loader` leaseを使い、125分のlease内で完了する。毎時50分、日次100分、手動最大50分とし、所有権喪失後の書き込みを防ぐ。大きい実行のためのlease更新や追加orchestratorは作らない。
 
-PCのcollectorは30分間隔のscan、ローカルSQLiteでの差分管理、変更したSEGBの圧縮アップロードを維持する。最新の未完了segmentは、次のsegmentが現れるまで送らない。macOSの`app-usage`とiPhoneの`app-in-focus`の両streamを対象とする。元データの意味とRaw形式は[Screen Timeデータモデル](../../sources/screen-time/data-model.md)を維持する。
+## 監視・資格情報・費用
 
-Rawアップロードは変更を検出したタイミングで行い、controlの公開間隔と切り離す。controlのreceiptとmanifestは、初回・端末構成や送信先bucketの変更時、および前回の成功から24時間以上経過したscanで公開する。片方だけ失敗した場合は、そのcontrolの次回scanで再試行する。PC停止中に成功時刻を進めない。
+Healthchecksは1チェック、Period 24時間＋Grace 24時間で、日次処理が実際に全完了した時だけ成功を送る。`PDP_HEARTBEAT_CONFIG`は`daily`のHTTPS URLだけを持つ。原因は既存のJob・監査記録とログから確認する。
 
-日次JobはGCS上の未取り込みsegmentを取り込み、同じinventoryを監査でも使う。正常時のcontrol鮮度判定は48時間とし、24時間の公開間隔にscan・日次Jobのずれを加味する。PCのsleepで48時間を超えた場合は、collectorが停止している可能性を示す。allowlist・新端末・inactive/reactivationの状態変化は永続管理する。
+Cloud Monitoringは、2 Jobの失敗をまとめた1 policy、Pub/Subの最古未ackが24時間を超える1 policy、受信ServiceのERROR logの1 policyを使う。正常な短い保留に通知しない。Jobごとの重複ERROR metric/policy、日次成功の独自log metric、source別の外部チェックを追加しない。
 
-Screen Timeは変更したsegment数に応じてGCS操作が発生する。日単位bundleへの再編は初期移行に含めない。
+Secret Managerは本番MotherDuck、Fitbit OAuth JSON、Webhook検証JSON、日次heartbeat JSONの4 payloadを通常runtimeに使い、数値versionへ固定する。receiverと処理Jobの権限を分ける。preflightの独立DB/tokenは手動試験用に保管し、常設Jobへ注入しない。分析/MCPは本番DBのrestricted read-only shareを同じ所有者の分析アカウントへ許可して使い、preflightへ本番shareを渡さない。秘密値はGit・Terraform stateへ入れない。
 
-## 心拍の1分モデル
+既作成の西部bucket、Pub/Sub、registry/state、受信Service、空のMotherDuck DBは利用する。未作成のpreflight/dbt Jobは作らない。不要になる資産・secret versionは、本番切替と復元確認後に使用元を確認して整理する。旧Screen Timeと旧組織は一括削除しない。
 
-Google Health `dataPoints:rollUp`へ`windowSize="60s"`、`dataSourceFamily="users/me/dataSourceFamilies/google-wearables"`を指定する。開始・終了をUTCの分境界へ固定し、当日は完了した分まで取得する。1リクエスト14日以内で分割し、すべてのページを取得する。[rollUp仕様](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/rollUp)
+GCPからAWSへの通信を無料と仮定しない。Cloud Runの北米内インターネット転送無料枠は月1 GiBである。運用再開後にGCS操作数/bytes、Cloud Run実行時間/外向きbytes、MotherDuck容量/CUhを確認する。費用確認のための専用Jobや収集基盤は作らず、既存の監視値と請求情報を使う。[Cloud Run料金](https://cloud.google.com/run/pricing)
 
-APIが返す心拍の集約値は平均・最小・最大で、元サンプル数は含まれない。欠測窓を0で埋めず、非着用や心拍値のない窓は観測数に含めない。[HeartRateRollupValue](https://developers.google.com/health/reference/rest/v4/HeartRateRollupValue)
+## 移行と完了条件
 
-新しい分単位tableは、ユーザー・データソース・窓開始・集約versionを識別子とし、窓終了、平均・最小・最大、取得元、取得時刻、Raw参照を持つ。元サンプル数はAPI経由ではNULLとする。区間値を既存の単一心拍sampleへ押し込まず、分の数を`heart_rate_samples`と呼ばない。
+Screen TimeのRaw・分析履歴・必要な共有台帳は、既存のallowlist付きscriptで移す。旧Fitbitは引き継がず、限定期間を新規取得する。旧writerとcollectorを止めて最終差分を確保し、source exportとtarget importは別processで実行する。同じDuckDB processに異なるMotherDuck資格情報を持たせない。
 
-日次モデルは、分平均の平均を「観測分の平均心拍」、分最小の最小値を最小心拍、分最大の最大値を最大心拍とする。観測分数も提供する。観測分平均は、従来の全サンプルを重みとする平均とは意味が異なるため、新しい指標名と説明を追加する。
+新writerは、Raw/DBの照合、限定5種別の実取得、両streamの監査、日次1 heartbeat、保存済みRawからの復元を確認して有効化する。旧URLへの再送も西部Pub/Subへ発行するよう、切替期間だけ旧receiverを残す。新旧writerを同時に動かさない。
 
-既存の秒単位心拍tableは廃止し、新DBには作らない。旧履歴の分集約・sample countの移行は行わず、APIの60秒集約から新しい分モデルを作る。新規取得と利用先切替を確認して旧tableを削除する。削除後もMotherDuckのfailsafe期間中は容量がすぐに減らない可能性がある。[storage lifecycle](https://motherduck.com/docs/concepts/storage-lifecycle)
+rollbackは最小Raw v3と分心拍を扱えるreleaseを使う。writerを止め、健全な西部warehouseを維持するか、別の空DBへScreen Time backupを復元してFitbitを再取得する。旧DBの台帳を書き換えて戻す方法は使わない。
 
-## マイグレーションと移行後の整理
-
-西部の新DBは最終定義のFitbit baselineで初期化する。旧`003_fitbit.sql`・`004_fitbit_acquisition.sql`と新しい取得状態・分心拍DDLを統合し、旧秒心拍tableやreceipt向けintent、途中のALTERを含めない。共通基盤とScreen TimeのSQLは維持し、保持起点の変更は別migrationにする。
-
-既存DBの適用済みSQL/checksumを変更して適用を通す方法は使わない。新DBへ旧`ops.schema_migration`をコピーせず、baselineを実際に適用して台帳を作る。移行期間のみ新旧migration集合を分け、旧環境の廃止後は新集合を通常運用の正本とする。その後のschema変更は追加migrationにし、適用済みbaselineを繰り返し書き換えない。
-
-切替・復旧確認後、Cloud Tasks、旧receipt/checkpoint、旧mode、v1 decoder、秒心拍モデルと不要な依存を撤去する。取得、配送、永続状態、Raw形式、データ反映、runtimeの設定構築を責務ごとに整理する。共通Jobのlease・期限・結果処理、Terraform/CIの旧region参照、secret/env、tests、運用docsも見直す。廃止作業と挙動を保つリファクタリングは別commitにし、通知の完了条件・Screen Timeの安全な保留・分析指標・監査を維持する。
-
-## リージョン移行
-
-地域を選べるGCPの実行・保存リソースは、Rawだけでなく検証用・管理用も`us-west1`へ揃える。
-
-| 対象 | 移行先・設定 |
-| --- | --- |
-| Cloud Run Serviceと全Job | `us-west1`。preflight・dbtも対象 |
-| Cloud Scheduler | `us-west1`。実行時刻は`Asia/Tokyo`を維持 |
-| GCS Raw・preflight・Terraform state | `us-west1`の別bucket。stateは独立したbackend移行 |
-| Artifact Registry | `us-west1`のrepository |
-| Pub/Sub | global resourceのメッセージ保存先を`us-west1`に制限し、`enforceInTransit=true`と`pubsub.us-west1.rep.googleapis.com`を使う |
-| Secret Manager | global secretにuser-managedの単一`us-west1` replicaを指定 |
-| 通常のCloud Logging | `us-west1`のlog bucketへ`_Default` sinkを切り替える |
-| IAM・Service Accounts・WIF・API有効化・Monitoring | global resourceとして維持。監視の地域・Job filterを更新 |
-
-Secret Managerの既存auto replicationは場所を変更できないため新secretを作る。Cloud Runのnative secret injectionはregional secretsに対応しないので、global secretのreplica指定で現在の注入方式を維持する。[replication policy](https://docs.cloud.google.com/secret-manager/docs/choosing-replication)、[Cloud Run secrets](https://docs.cloud.google.com/run/docs/configuring/services/secrets)
-
-既存の`_Required`監査log bucket/sinkは移動できないため例外として残す。通常logの過去分も旧bucketで期限まで保持し、新旧sinkの重複保存を避ける。これは実行・保存場所を揃える方針であり、全管理メタデータの地域限定を保証するものではない。[Logging地域化](https://docs.cloud.google.com/logging/docs/regionalized-logs)、[Pub/Sub endpoints](https://docs.cloud.google.com/pubsub/docs/reference/service_apis_overview)
-
-MotherDuckはAWS `us-west-2`の新しい組織に移す。組織リージョンは作成後に変更できない。[MotherDuckリージョン](https://motherduck.com/docs/about-motherduck/cloud-regions)
-
-GCPとAWSは同じOregonでも別クラウドなので、通信が無料になるとは仮定しない。GCPの外向き転送とMotherDuckの取り込み量を計測する。Terraform stateの移行はRaw bucketの移行と分け、stateの保管先・バックアップ・ロックを確認する。
-
-1. v2 Raw・分心拍・Screen Timeの保持起点を扱うreleaseを用意し、rollback先として検証する。新しいbucket・組織・受信Service・Job・Pub/Subを作る。既存の保護されたbucketをregion変数の変更で置き換えない。
-2. Screen Timeと必要な共有台帳のバックアップを確保し、新組織のDBをbaselineで初期化して移す。件数・期間・主キー・代表集計を照合する。旧Fitbit table・取得状態・migration台帳・active leaseをimportしない。Fitbitは直近の限定取得で新モデルを確認し、過去のbackfillは任意とする。
-3. Screen Timeの90日内Rawと取り込み参照を移す。コピー時に元のGCS作成日時を`Custom-Time`へ設定し、Raw prefixに`daysSinceCustomTime=90`の削除ruleを追加する。新規Rawの`age=90`と併用して元の期限を維持する。保持起点・コピー先の実作成日時・新generationを分けて台帳に保存し、90日/削除猶予3日の監査も保持起点を使うよう更新する。hash・sizeを検証する。[lifecycle条件](https://docs.cloud.google.com/storage/docs/lifecycle#conditions)
-4. Webhookの新規通知・旧URLへの再送を新Pub/Subへ発行する受信経路へ切り替える。この時点では新定期Jobを動かさない。旧実行系とPC collectorを停止し、実行中の書き込みが終わったこととローカルpendingを確認する。再収集開始前のFitbit queue・receipt・intentは廃棄可能とし、開始以降の通知を新Pub/Subに保持する。Screen Timeの最終差分をコピー・検証し、Fitbitは初回取得後の範囲をAPI再照合する。通知の保持期限を超える場合は永続記録と補修範囲を確保する。
-5. Webhook URL、collectorの送信先、Jobの参照先・秘密情報、分析/MCPの接続先を切り替える。collectorは新bucketのcontrolを初回として強制公開して再開する。旧bucketで成功したsegmentはSQLiteで再送対象にならないため、最終コピーと再開の間に旧bucketへ書き込みが入らない境界を守る。API再照合と両streamの監査で欠損を確認する。
-6. 旧SchedulerとCloud Tasksの新規投入を停止し、新経路を確認する。旧Fitbit table/Raw/receipt/checkpoint/取得状態はsource・prefix・tableで範囲を限定して削除し、Screen Timeと共通基盤を保護する。新Pub/Subと新取得台帳を旧資産の削除に含めない。復旧確認後に旧実行系・互換処理を撤去し、コード・設定・tests・docsを整理する。
-
-Screen Timeの移行コピー・旧新の併存・Fitbitの初回取得と任意backfillには通常運用とは別の操作・容量・実行時間が必要になる。無料枠の定常目標と移行時の費用を分けて見積もる。
-
-rollbackでは新writerとcollectorを止める。西部warehouseが正常なら維持して実行系だけ戻し、DBも戻す場合は別の空DBをbaselineで初期化してScreen Timeのbackup・切替後差分を取り込む。旧DBへ新baselineを直接適用しない。Rawの保持起点とgenerationを更新し、controlも再公開する。Fitbitは通知を引き継ぎ、空の最終スキーマからAPI再取得で再開できればよく、旧履歴の復元は必要条件にしない。再収集開始時刻と補修範囲を記録する。移行元`main`のv1 parserと秒心拍モデルだけでは新bundle・分心拍を扱えないため、新モデルに対応する検証済みreleaseを使う。
-
-## 無料枠と計測
-
-以下は設計時に確認した無料枠であり、各サービスの条件・アカウント内の共有使用量を確認する。予算通知は課金を停止する上限ではない。
-
-| サービス | 無料枠の目安 | この構成での確認事項 |
-| --- | --- | --- |
-| GCS | 5GB-month、Class A 5,000/月、Class B 50,000/月 | `us-west1`は対象。Raw・LIST・control・その他bucketを合算 |
-| Pub/Sub基本配信 | 10GiB/月 | publishとdeliveryの合計。再送・最小課金単位を含む |
-| Cloud Run Jobs | 240,000 vCPU秒、450,000 GiB秒/月 | 実行ごと最低1分。空の毎時実行も計上 |
-| Cloud Run受信Service | request-basedの2百万request、180,000 vCPU秒、360,000 GiB秒/月 | min instances 0、CPU idle、小さな最大instance数 |
-| Cloud Scheduler | 3Job/月 | 毎時・日次の2schedule。他のscheduleと共有 |
-| Artifact Registry | 0.5GiB-month | 古いimageを整理し、保持tagを絞る |
-| Secret Manager | active version 6個、access 10,000/月 | disabled versionも対象。token更新後の旧versionを整理 |
-| MotherDuck Lite | 10GB、10CUh/月 | RawのGCS容量とは別。変更・削除後のfailsafeも容量に含む |
-
-出典: [GCS](https://cloud.google.com/storage/pricing)、[Pub/Sub](https://cloud.google.com/pubsub/pricing)、[Cloud Run](https://cloud.google.com/run/pricing)、[Scheduler](https://cloud.google.com/scheduler/pricing)、[Artifact Registry](https://cloud.google.com/artifact-registry/pricing)、[Secret Manager](https://cloud.google.com/secret-manager/pricing)、[MotherDuck](https://motherduck.com/docs/about-motherduck/billing/pricing)。
-
-Pub/Subは保持期間を7日にしていても、24時間を超えた未ackメッセージには保持料金が生じる。最古の未ack時刻を監視し、通常時は24時間以内に完了させる。長期停止はAPIと永続進捗から補修する。[Pub/Sub保持料金](https://cloud.google.com/pubsub/pricing)
-
-Secret Managerは移行元の5つのFitbit関連secretと基盤用secretをそのまま残すと無料枠を超え得る。OAuth設定を1secret、受信に必要な検証設定を1secretへまとめ、受信ServiceにはOAuth secretへの権限を与えない。heartbeatの設定もまとめ、環境別MotherDuck tokenと合わせて通常時のactive versionを6個以内にする。旧versionの破棄は新設定の動作と復旧手段を確認してから行う。
-
-31日、1vCPU・2GiB、毎時Jobがすべて最低1分で終わる場合だけでも、44,640 vCPU秒・89,280 GiB秒になる。別途日次Jobが20分/日なら37,200 vCPU秒・74,400 GiB秒で、合計81,840 vCPU秒・163,680 GiB秒になる。これは実行量を仮定した計算で、API待ち時間・backfill・再実行・他Jobは含めていない。MotherDuckのCUhはCloud Runの実行時間から換算しない。
-
-FitbitのRaw bundleが1日1個なら31個/月、毎時1個なら744個/月になる。ただし変更したデータ量による分割、Screen Timeのsegment、control、inventory LISTは別に加算する。通知ごとの保存を外すだけでClass A全体が無料枠に収まるとは断定しない。
-
-移行前と切替後の7日・30日の実測を比較する。最低限、GCSの容量とClass A/B、ソース別Raw作成数・圧縮サイズ、Pub/Subの送受信量・再配信・最古未ack、Cloud Runの課金対象秒・CPU/memory・外向き転送、MotherDuckの保存容量・CUhを記録する。Cloud Runのインターネット転送無料枠は北米内の通信で1GiB/月であり、米国から東京への通信には適用しない。GCSの転送無料枠とは別で、同じOregonのGCPとAWS間もインターネット転送として計測する。[Cloud Run料金](https://cloud.google.com/run/pricing)
-
-無料枠から余裕を残すため、通常月の容量・操作・実行量の目標を各枠の70%以下とする。Scheduler数とsecret version数は無料枠内に収める。まず重複処理・空実行・保存単位・image/secretの保持を調整し、通知の集約間隔や補修頻度を変える場合は鮮度と復旧範囲への影響を確認する。
-
-## 監視と完了条件
-
-毎時Jobの起動受付と、データの取り込み成功を区別する。Schedulerの`jobs.run`成功だけではデータ更新の成功としない。日次成功のheartbeatは、対象の取得・commit・Screen Time監査がすべて完了した時点で記録する。lease競合や意図したpauseは延期として記録し、未完了範囲を成功扱いにしない。
-
-API認証失敗、GCS保存失敗、Pub/Subの最古未ackが12時間を超えた状態、日次処理の未完了、Screen Time controlの鮮度・欠損をソース別に監視する。1つの不正通知・失敗範囲で他の正常範囲を止めない。完了できない通知は失敗を記録して再配信させる。MotherDuckに接続できず未完了範囲を記録できない停止が7日を超えた場合、通知からの完全な復旧は保証できない。停止期間・対象履歴を指定したbackfillを実行し、取得不能な範囲を報告する。
-
-移行の実装は、次の確認を満たしてから切り替える。
-
-- 発行成功後の応答消失・重複通知・ack期限切れで、データの重複や欠落が起きない。
-- intent、GCS保存、MotherDuck commit、ackの各境界で停止しても復旧できる。
-- 一通知の複数範囲、bundleの部分失敗、A→B→A、完全な空結果による削除を正しく扱う。
-- 毎時・日次・手動実行の競合と終了時間上限を検証し、古いwriterが書き込みを続けない。
-- 7日を超える停止・古い修正通知・広いbackfillが、カーソルから再開できる。
-- 心拍の全ページ、分境界、欠測、非着用、平均の定義、旧秒心拍tableなしでの分析を検証する。
-- Screen Time両streamで未完了segmentの保留、24時間control、sleep、片方のcontrol失敗、48時間監査を検証する。
-- 新旧リージョンのScreen Time Raw・分析データを照合し、切替後の差分を含むrollback手順を確認する。Fitbitは旧データなしで新規取得でき、旧資産の削除がScreen Timeや新Fitbit状態を巻き込まないことを確認する。
-- 新DB用baselineの初期化・再適用・適用先検証と、整理後のコード/設定/docsの整合を確認する。
-- 7日・30日の通常運用の使用量で無料枠の目標を評価する。超過見込みは金額と原因を記録する。
-
-文書だけの段階では、これらの動作・費用・本番反映を検証済みとは扱わない。実装・運用開始時に、現在のソース別仕様と運用手順へ確定した内容を反映する。
+完了は、新経路の通知→取得→Raw→DB→ack、日次の全処理と欠損監視、collector/分析/MCPの接続先、復元と旧資産の範囲限定整理を確認した時点とする。初回切替の確認と、後日の継続運用・費用計測は別の結果として記録する。
