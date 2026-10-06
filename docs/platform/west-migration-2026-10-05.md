@@ -34,11 +34,20 @@ remoteの対応revisionが公開されるまで停止する。ローカルのCI�
 
 ## Releaseとデータ保全
 
-現在のreleaseは`a9cd2f8`、image digestは
-`sha256:6d20724f9e0fcbf7fced407a3fd75fa4712e104634fd80df8bb974367c959640`。
+現在のアプリケーションreleaseは`0562f36`、image digestは
+`sha256:89d6b8577749c282936af5ce79d45c12beca2100700e875261dea2ee3fd4db6a`。
+Cloud Runの実行が参照するlinux/amd64 manifestは
+`sha256:cb5baa6fddd31ccbe0340622e25c0e8685a7d4306160b21c7601ee2c782435fb`で、
+同じimage indexに含まれることを確認した。
 linux/amd64のRaw v3・west 5 migration・CLI smoke、clean wheelを確認した。
 setuptoolsの以前のbuild treeに残った廃止moduleを除き、配布wheelにも廃止Fitbit台帳moduleが含まれないことを確認した。
 Raw v3に非対応の旧imageをrollbackへ使わない。
+
+MotherDuckの通常のworkspace接続で、別DBのmigration台帳が見えていると空DBの初期化が失敗する問題を修正した。
+台帳の存在確認を接続先DBに限定し、実際の一時cloud DBで5 migrationの適用と再適用を確認した。
+既存preflightの台帳・checksum・適用時刻は変わらず、試験用DBは削除した。
+最終Python suiteは678件成功。Ruff・mypy・Terraform各rootの検証も成功し、
+最終image反映後のruntime planは変更0件だった。
 
 - 本番/preflightにwest001〜005を適用。適用済み001〜004 checksumを維持し、005で空の通知・attempt・bundle・cursor等10表だけ撤去。
 - 旧4 Jobの終了・旧2 Scheduler/queue停止・旧lease 0を確認してcollectorを停止。Raw・warehouse・collector/Biome SQLiteを最終backupし、SQLite integrity_checkを確認。
@@ -58,17 +67,22 @@ Google Health subscriberのendpointUri変更operation完了と西部URLを再読
 制御した通知でもcommit後ackを確認した。Pub/Subの初回空応答を収集期限まで再試行し、
 実行予算を越えない回帰テストを追加している。
 
-最新版の毎時実行`fitbit-hourly-west-x7xkl`は5範囲完了・34通知ack・失敗0・保留0。
-日次実行`reconciliation-west-zqvfx`は10:48:50〜10:51:00 JSTに成功した。
+初回切替時の毎時実行`fitbit-hourly-west-x7xkl`は5範囲完了・34通知ack・失敗0・保留0。
+有効化後の毎時Schedulerは11:15〜17:15 JSTに7回自動実行し、すべて成功した。
+合計33範囲完了・216通知ack・失敗0・保留0で、西部Loggingから各結果を確認した。
+最終修正版の自動実行`fitbit-hourly-west-t52fv`も5範囲完了・35通知ackで成功した。
+
+最終修正版の日次実行`reconciliation-west-zjkff`は17:16:18〜17:17:22 JSTに成功した。
 両Screen Time streamの監査2件、内部heartbeat3件、外部POST1回と復旧後のlease0を確認。
 完了対象日は2026-10-05で、直近7日×5種別の35範囲をcoverageで照合した。
 睡眠・日次指標のcivil dateと、物理時刻のTokyo日境界は別々に検証した。
+日次Schedulerの切替後初回04:10 JSTはまだ到来しておらず、日次の実行確認は手動起動による。
 
 最初の日次Screen Time取込では行ごと送信によりiPhone streamの未取込Rawが16分15秒かかった。
 入力を同じtransaction内の列配列1回送信へ変更し、2,001行と削除・再実行の回帰を確認した。
 独立した実MotherDuck preflightで20,001行・NULLを1回のINSERTで保存し、0.656秒だった。
 この数値を日次全体の実行時間や定常費用へ外挿しない。
-最新版の約2分10秒は、初回の53 Rawを取り込んだ後に追加3 Rawを処理した実行であり、
+初回切替時の`reconciliation-west-zqvfx`の約2分10秒は、初回の53 Rawを取り込んだ後に追加3 Rawを処理した実行であり、
 初回の未取込量と同じ条件の速度比較ではない。
 
 Healthchecksの制御試験はup→grace→down→upを確認して24h＋24hへ復元。
