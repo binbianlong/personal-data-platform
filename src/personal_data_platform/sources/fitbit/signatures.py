@@ -8,22 +8,13 @@ from collections.abc import Callable
 from typing import Protocol, cast
 
 import httpx
-from google.auth.transport.requests import Request
-from google.oauth2 import id_token
 from tink import json_proto_keyset_format, signature
-
-from .models import object_dict
-from .webhook import AuthenticationError
 
 KEYSET_URL = "https://www.gstatic.com/googlehealthapi/webhooks/webhooks_public_keyset.json"
 
 
 class KeyPrimitive(Protocol):
     def verify(self, signature: bytes, data: bytes) -> None: ...
-
-
-class TokenVerifier(Protocol):
-    def __call__(self, token: str, *, audience: str) -> dict[str, object]: ...
 
 
 def _keyset() -> str:
@@ -72,34 +63,3 @@ class TinkSignatures:
             except Exception:
                 pass
         return False
-
-
-def _verify_token(token: str, *, audience: str) -> dict[str, object]:
-    claims = id_token.verify_oauth2_token(token, Request(), audience=audience)  # type: ignore[no-untyped-call]
-    return object_dict(claims)
-
-
-class GoogleTaskIdentity:
-    def __init__(
-        self, *, audience: str, service_account: str, verify_token: TokenVerifier = _verify_token
-    ) -> None:
-        if not audience or not service_account:
-            raise ValueError("task audience and service account are required")
-        self._audience = audience
-        self._account = service_account
-        self._verify = verify_token
-
-    def authenticate(self, authorization: str | None) -> None:
-        if not authorization or not authorization.startswith("Bearer "):
-            raise AuthenticationError("task identity is required")
-        try:
-            claims = self._verify(authorization[7:], audience=self._audience)
-        except Exception:
-            raise AuthenticationError("task identity verification failed") from None
-        if (
-            claims.get("iss") not in ("accounts.google.com", "https://accounts.google.com")
-            or claims.get("aud") != self._audience
-            or claims.get("email") != self._account
-            or claims.get("email_verified") is not True
-        ):
-            raise AuthenticationError("unexpected task identity")

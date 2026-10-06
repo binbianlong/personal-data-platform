@@ -34,13 +34,20 @@ jobs:
       TF_VAR_alert_email: ${{ vars.GCP_ALERT_EMAIL }}
       TF_VAR_collector_impersonator_member: ${{ vars.GCP_COLLECTOR_IMPERSONATOR_MEMBER }}
       TF_VAR_deployer_service_account_email: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
-      TF_VAR_enable_fitbit_runtime: ${{ vars.PDP_FITBIT_ENABLED || 'false' }}
-      TF_VAR_fitbit_processing_paused: ${{ vars.PDP_FITBIT_PROCESSING_PAUSED || 'true' }}
       TF_VAR_fitbit_subject_key: ${{ vars.PDP_FITBIT_SUBJECT_KEY }}
-      TF_VAR_fitbit_secret_ids: ${{ vars.PDP_FITBIT_SECRET_IDS || '{}' }}
-      TF_VAR_image_uri: ${{ vars.GCP_RUNTIME_IMAGE_URI }}
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
-      TF_VAR_region: us-central1
+      WEST_REGION: us-west1
+      WEST_ENABLED: ${{ vars.PDP_WEST_ENABLED || 'false' }}
+      WEST_ARTIFACT_REPOSITORY: ${{ vars.GCP_WEST_ARTIFACT_REPOSITORY || vars.GCP_ARTIFACT_REPOSITORY }}
+      TF_VAR_enable_west_runtime: ${{ vars.PDP_WEST_ENABLED || 'false' }}
+      TF_VAR_west_region: us-west1
+      TF_VAR_west_schedulers_enabled: ${{ vars.PDP_WEST_SCHEDULERS_ENABLED || 'false' }}
+      TF_VAR_west_logging_enabled: ${{ vars.PDP_WEST_LOGGING_ENABLED || 'false' }}
+      TF_VAR_west_logging_exclusions: ${{ vars.PDP_WEST_LOGGING_EXCLUSIONS || '{}' }}
+      TF_VAR_west_image_uri: ${{ vars.GCP_WEST_RUNTIME_IMAGE_URI }}
+      TF_VAR_west_secret_versions: ${{ vars.PDP_WEST_SECRET_VERSIONS || '{}' }}
+      TF_VAR_west_motherduck_database: ${{ vars.PDP_WEST_MOTHERDUCK_DATABASE || 'personal_data_platform_west' }}
+      TF_VAR_west_preflight_motherduck_database: ${{ vars.PDP_WEST_PREFLIGHT_MOTHERDUCK_DATABASE || 'personal_data_platform_west_preflight' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,9 +56,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in GCP_PLAN_SERVICE_ACCOUNT TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_collector_impersonator_member TF_VAR_deployer_service_account_email TF_VAR_project_id TF_VAR_region; do
+          for name in GCP_PLAN_SERVICE_ACCOUNT TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_collector_impersonator_member TF_VAR_deployer_service_account_email TF_VAR_project_id WEST_REGION; do
             test -n "${!name}"
           done
+          if [[ "${WEST_ENABLED}" == "true" ]]; then
+            jq -e '
+              type == "object" and
+              (["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_token"] - keys | length == 0) and
+              (keys - ["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_preflight_token", "motherduck_token"] | length == 0) and
+              all(.[]; type == "string" and test("^[1-9][0-9]*\\z"))
+            ' <<< "${TF_VAR_west_secret_versions}" > /dev/null || {
+              echo "Enabled west deployment requires four runtime numeric secret version pins in PDP_WEST_SECRET_VERSIONS." >&2
+              exit 1
+            }
+          fi
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -62,22 +80,19 @@ jobs:
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      - name: Resolve current runtime image
+      - name: Resolve west runtime image
+        if: ${{ env.WEST_ENABLED == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-          current_image="$(gcloud run jobs describe screen-time-loader \
-            --project="${TF_VAR_project_id}" \
-            --region="${TF_VAR_region}" \
+          current_image="$(gcloud run jobs describe reconciliation-west \
+            --project="${TF_VAR_project_id}" --region="${WEST_REGION}" \
             --format='value(spec.template.spec.template.spec.containers[0].image)' 2>/dev/null || true)"
           if [[ ! "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
-            current_image="${TF_VAR_image_uri}"
+            current_image="${TF_VAR_west_image_uri}"
           fi
-          if [[ ! "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
-            echo "A digest-pinned runtime image is required for planning." >&2
-            exit 1
-          fi
-          echo "TF_VAR_image_uri=${current_image}" >> "${GITHUB_ENV}"
+          [[ "${current_image}" == "${WEST_REGION}-docker.pkg.dev/${TF_VAR_project_id}/${WEST_ARTIFACT_REPOSITORY}/"* && "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
+          echo "TF_VAR_west_image_uri=${current_image}" >> "${GITHUB_ENV}"
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1

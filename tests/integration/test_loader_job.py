@@ -487,3 +487,79 @@ def test_loader_runtime_rejects_retention_drift_before_cloud_access(
     )
     with pytest.raises(ValueError, match=name):
         run_loader_from_env()
+
+
+def test_inherited_loader_lease_stops_after_owner_loss(monkeypatch):
+    from types import SimpleNamespace
+
+    from personal_data_platform.loader.job import run_loader_objects
+    from personal_data_platform.sources.registry import get_source
+    from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+
+    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    warehouse.migrate()
+    assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
+    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
+    try:
+        with pytest.raises(RuntimeError, match="lease"):
+            run_loader_objects(
+                SimpleNamespace(), warehouse, (), source=get_source(), _lease_owner="daily"
+            )
+        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "other"
+    finally:
+        warehouse.close()
+
+
+def test_warehouse_deadline_interrupts_a_blocking_query():
+    import time
+
+    import duckdb
+
+    from personal_data_platform.loader.deadline import interrupt_after
+    from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+
+    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    started = time.monotonic()
+    timer = interrupt_after(warehouse, 0.05)
+    try:
+        with pytest.raises(duckdb.InterruptException):
+            warehouse.query_value("SELECT sum(i) FROM range(1000000000000) t(i)")
+        assert time.monotonic() - started < 5
+    finally:
+        timer.cancel()
+        warehouse.close()
+
+
+def test_loader_deadline_interrupts_database_work(monkeypatch):
+    import time
+
+    from personal_data_platform.loader.deadline import interrupt_after
+    from personal_data_platform.loader.job import run_loader_objects
+    from personal_data_platform.sources.registry import get_source
+
+    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    warehouse.migrate()
+    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
+    monkeypatch.setattr(
+        warehouse,
+        "succeeded_keys_for",
+        lambda *args, **kwargs: warehouse.query_value(
+            "SELECT sum(i) FROM range(1000000000000) t(i)"
+        ),
+    )
+    started = time.monotonic()
+    fallback = interrupt_after(warehouse, 3)
+    try:
+        with pytest.raises(Exception):
+            run_loader_objects(
+                SimpleNamespace(),
+                warehouse,
+                (),
+                source=get_source(),
+                _deadline=started + 1.2,
+            )
+        assert time.monotonic() - started < 2
+        assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+    finally:
+        fallback.cancel()
+        warehouse.close()

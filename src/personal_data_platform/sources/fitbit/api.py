@@ -18,9 +18,13 @@ from urllib.request import Request, urlopen
 
 from personal_data_platform.sources.fitbit.models import (
     DATE_TYPES,
+    CapturedSnapshot,
+    HeartRateMinute,
+    HeartRateMinuteSnapshot,
     Record,
     Snapshot,
     Window,
+    aware,
     date_cursor,
     object_dict,
     parse_time,
@@ -212,7 +216,7 @@ class HealthClient:
 
     ``window`` is the actual cursor range to replace. The caller expands interval
     boundaries against existing records before invoking this method. Retries are
-    owned by the durable task worker, so a failed page never produces a snapshot.
+    completed by the acquisition runner, so a failed page never produces a snapshot.
     """
 
     def __init__(
@@ -233,6 +237,11 @@ class HealthClient:
         self._timeout = timeout
         self._clock = clock
         self._max_pages = max_pages
+        self.request_guard: Callable[[], float | None] | None = None
+
+    def _request_timeout(self) -> float:
+        remaining = self.request_guard() if self.request_guard is not None else None
+        return self._timeout if remaining is None else min(self._timeout, remaining)
 
     def latest_tracker_sync(self) -> SyncTime | None:
         """Read every paired-device page and take the newest tracker sync."""
@@ -240,6 +249,8 @@ class HealthClient:
         page_token = ""
         seen_tokens: set[str] = set()
         for _ in range(self._max_pages):
+            if self.request_guard is not None:
+                self.request_guard()
             token = self._access_token()
             if not isinstance(token, str) or not token.strip():
                 raise AuthenticationError("Google Health access token is missing")
@@ -252,7 +263,7 @@ class HealthClient:
                 "GET",
                 f"https://health.googleapis.com/v4/users/me/pairedDevices?{urlencode(query)}",
                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                timeout=self._timeout,
+                timeout=self._request_timeout(),
             )
             devices = page.get("pairedDevices", [])
             if not isinstance(devices, list):
@@ -280,8 +291,19 @@ class HealthClient:
         raise InvalidResponseError("Google Health paired device page limit exceeded")
 
     def fetch(self, window: Window, *, subject_key: str) -> Snapshot:
+        return self._fetch_captured(window, subject_key=subject_key, strict_pages=True).snapshot
+
+    def fetch_captured(self, window: Window, *, subject_key: str) -> CapturedSnapshot:
+        if window.data_type == "heart-rate":
+            raise ValueError("heart rate requires the minute aggregation API")
+        return self._fetch_captured(window, subject_key=subject_key, strict_pages=False)
+
+    def _fetch_captured(
+        self, window: Window, *, subject_key: str, strict_pages: bool
+    ) -> CapturedSnapshot:
         snapshot = Snapshot(subject_key, window, self._clock(), ())
         points: list[dict[str, object]] = []
+        pages: list[dict[str, object]] = []
         records: list[Record] = []
         identities: set[tuple[str, str]] = set()
         page_count = 0
@@ -293,9 +315,12 @@ class HealthClient:
                 if page_count >= self._max_pages or time.monotonic() >= deadline:
                     raise InvalidResponseError("Google Health acquisition limit exceeded")
                 page_count += 1
+                if self.request_guard is not None:
+                    self.request_guard()
                 page = self._page(chunk, page_token)
-                if set(page) - {"dataPoints", "nextPageToken"}:
+                if strict_pages and set(page) - {"dataPoints", "nextPageToken"}:
                     raise InvalidResponseError("Unexpected Google Health page fields")
+                pages.append(page)
                 raw_points = page.get("dataPoints", [])
                 if not isinstance(raw_points, list):
                     raise InvalidResponseError("Google Health dataPoints must be an array")
@@ -328,11 +353,116 @@ class HealthClient:
                 seen_tokens.add(next_token)
                 page_token = next_token
         try:
-            return replace(snapshot, records=tuple(records), source_payload=tuple(points))
+            return CapturedSnapshot(
+                replace(snapshot, records=tuple(records), source_payload=tuple(points)),
+                tuple(pages),
+            )
         except ValueError:
             raise InvalidResponseError(
                 "Google Health records do not form a valid snapshot"
             ) from None
+
+    def fetch_heart_rate_minutes(
+        self, window: Window, *, subject_key: str
+    ) -> HeartRateMinuteSnapshot:
+        """Acquire all rollup pages over completed, aligned UTC minute windows."""
+        if window.data_type != "heart-rate":
+            raise ValueError("minute heart rate requires a heart-rate window")
+        fetched_at = aware(self._clock())
+        start = window.start.replace(second=0, microsecond=0)
+        if start < window.start:
+            start += timedelta(minutes=1)
+        end = min(window.end, fetched_at).replace(second=0, microsecond=0)
+        if start >= end:
+            raise ValueError("heart rate range has no complete minute")
+        effective = Window("heart-rate", start, end)
+        minutes: list[HeartRateMinute] = []
+        pages: list[dict[str, object]] = []
+        seen_starts: set[datetime] = set()
+        deadline = time.monotonic() + 1200
+        for chunk in _chunks(effective):
+            page_token = ""
+            seen_tokens: set[str] = set()
+            while True:
+                if len(pages) >= self._max_pages or time.monotonic() >= deadline:
+                    raise InvalidResponseError("Google Health acquisition limit exceeded")
+                if self.request_guard is not None:
+                    self.request_guard()
+                page = self._rollup_page(chunk, page_token)
+                pages.append(page)
+                points = page.get("rollupDataPoints", [])
+                if not isinstance(points, list):
+                    raise InvalidResponseError("Google Health rollupDataPoints must be an array")
+                for value in points:
+                    try:
+                        point = object_dict(value)
+                        left, right = _timestamp(point["startTime"]), _timestamp(point["endTime"])
+                        if left.second or left.microsecond or right - left != timedelta(minutes=1):
+                            raise ValueError("rollup window is not one UTC minute")
+                        if not chunk.start <= left < right <= chunk.end:
+                            raise ValueError("rollup window outside query range")
+                        if left in seen_starts:
+                            raise ValueError("duplicate rollup window")
+                        seen_starts.add(left)
+                        if any(field in point for field in _ROLLUP_OTHER_FIELDS):
+                            raise ValueError("rollup has a conflicting data type")
+                        if "heartRate" not in point:
+                            continue
+                        stats = object_dict(point["heartRate"])
+                        minutes.append(
+                            HeartRateMinute(
+                                left,
+                                right,
+                                _rollup_number(stats["beatsPerMinuteAvg"]),
+                                _rollup_number(stats["beatsPerMinuteMin"]),
+                                _rollup_number(stats["beatsPerMinuteMax"]),
+                                DATA_SOURCE_FAMILY,
+                            )
+                        )
+                    except (KeyError, ValueError, TypeError, OverflowError):
+                        raise InvalidResponseError(
+                            "Malformed Google Health heart rate rollup"
+                        ) from None
+                    if len(minutes) > 250_000:
+                        raise InvalidResponseError("Google Health record limit exceeded")
+                next_token = page.get("nextPageToken", "")
+                if not isinstance(next_token, str):
+                    raise InvalidResponseError("Google Health page token must be a string")
+                if not next_token:
+                    break
+                if next_token in seen_tokens:
+                    raise InvalidResponseError("Google Health repeated a page token")
+                seen_tokens.add(next_token)
+                page_token = next_token
+        return HeartRateMinuteSnapshot(
+            subject_key, effective, fetched_at, tuple(minutes), tuple(pages)
+        )
+
+    def _rollup_page(self, window: Window, page_token: str) -> dict[str, object]:
+        token = self._access_token()
+        if not isinstance(token, str) or not token.strip():
+            raise AuthenticationError("Google Health access token is missing")
+        body: dict[str, object] = {
+            "range": {"startTime": _utc_text(window.start), "endTime": _utc_text(window.end)},
+            "windowSize": "60s",
+            "pageSize": 10_000,
+            "dataSourceFamily": DATA_SOURCE_FAMILY,
+        }
+        if page_token:
+            body["pageToken"] = page_token
+        LOGGER.info("fitbit api_request endpoint=rollUp data_type=heart-rate count=1")
+        return request_json(
+            self._transport,
+            "POST",
+            "https://health.googleapis.com/v4/users/me/dataTypes/heart-rate/dataPoints:rollUp",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            body=json.dumps(body, separators=(",", ":")).encode(),
+            timeout=self._request_timeout(),
+        )
 
     def _page(self, window: Window, page_token: str) -> dict[str, object]:
         _, field = _FIELDS[window.data_type]
@@ -357,8 +487,38 @@ class HealthClient:
             f"https://health.googleapis.com/v4/users/me/dataTypes/{window.data_type}"
             f"/dataPoints:reconcile?{urlencode(query)}",
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-            timeout=self._timeout,
+            timeout=self._request_timeout(),
         )
+
+
+_ROLLUP_OTHER_FIELDS = (
+    "steps",
+    "floors",
+    "weight",
+    "altitude",
+    "distance",
+    "bodyFat",
+    "totalCalories",
+    "activeZoneMinutes",
+    "sedentaryPeriod",
+    "runVo2Max",
+    "caloriesInHeartRateZone",
+    "activityLevel",
+    "nutritionLog",
+    "hydrationLog",
+    "timeInHeartRateZone",
+    "activeMinutes",
+    "swimLengthsData",
+    "coreBodyTemperature",
+    "activeEnergyBurned",
+    "bloodGlucose",
+)
+
+
+def _rollup_number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("heart rate statistic must be numeric")
+    return float(value)
 
 
 def _integer(value: object, *, minimum: int = 0, maximum: int = 2**63 - 1) -> int:

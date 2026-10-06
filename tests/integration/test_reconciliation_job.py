@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -40,7 +42,7 @@ def _raw(storage_created_at: datetime) -> RawObject:
 
 def _warehouse() -> Warehouse:
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
-    warehouse.migrate()
+    warehouse.migrate(profile="west")
     for relation in (
         "base.screen_time_transition",
         "base.screen_time_interval",
@@ -370,3 +372,122 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
             assert result.details["repair_summary"]["succeeded"] == 1
     finally:
         warehouse.close()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["loader", "fitbit", "dbt", "app-in-focus", "app-usage", "none", "gap", "busy", "marker"],
+)
+def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, failure):
+    from personal_data_platform import dbt_runner
+    from personal_data_platform.reconciliation import job
+    from personal_data_platform.sources.fitbit import runtime
+
+    logger = logging.getLogger("personal_data_platform.reconciliation")
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "level", logger.level)
+    monkeypatch.setattr(logger, "propagate", logger.propagate)
+    warehouse = _warehouse()
+    successes = []
+    phases = []
+    inventories = {}
+    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
+    monkeypatch.setenv("MOTHERDUCK_DATABASE", "test")
+    monkeypatch.setenv(
+        "PDP_HEARTBEAT_CONFIG",
+        '{"daily":"https://example.test/daily"}',
+    )
+    monkeypatch.setattr(job, "connect", lambda _: warehouse.connection)
+    monkeypatch.setattr(job, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(warehouse, "close", lambda: None)
+    monkeypatch.setattr(job, "publish_http_heartbeat", lambda *args: successes.append(args))
+
+    def phase(name, kwargs):
+        owner = kwargs.get("_lease_owner", kwargs.get("lease_owner"))
+        assert (
+            warehouse.query_value("SELECT owner_id FROM ops.job_lock WHERE job_name='loader'")
+            == owner
+        )
+        phases.append(name)
+        return SimpleNamespace(ok=failure != name)
+
+    def load(_repository, _warehouse, refs, **kwargs):
+        inventories[kwargs["source"].stream] = refs
+        return phase("loader", kwargs)
+
+    monkeypatch.setattr(job, "run_loader_objects", load)
+    monkeypatch.setattr(runtime, "run_daily_repair", lambda **kwargs: phase("fitbit", kwargs))
+
+    def dbt(**kwargs):
+        phase("dbt", kwargs)
+        if failure == "dbt":
+            raise RuntimeError("model failed")
+        return 0
+
+    monkeypatch.setattr(dbt_runner, "run_dbt_from_env", dbt)
+    sources = (get_source("screen_time", "app-in-focus"), get_source("screen_time", "app-usage"))
+    monkeypatch.setattr(job, "get_sources", lambda *args, **kwargs: sources)
+    for source in sources:
+        monkeypatch.setattr(type(source), "repository_from_env", lambda _: _Repository())
+
+    def audit(*args, source, **kwargs):
+        assert kwargs["raw_objects"] is inventories[source.stream]
+        assert kwargs["publish_success"] is False
+        return phase(source.stream, kwargs)
+
+    monkeypatch.setattr(job, "run_reconciliation", audit)
+    if failure == "busy":
+        warehouse.acquire_job_lock("loader", "competitor", lease_seconds=7500)
+    if failure == "marker":
+
+        def broken_marker(*args, **kwargs):
+            raise RuntimeError("marker write failed")
+
+        monkeypatch.setattr(warehouse, "publish_heartbeat", broken_marker)
+    if failure == "gap":
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 10, 6, 12, tzinfo=UTC)
+
+        monkeypatch.setattr(job, "datetime", Clock)
+        warehouse.begin_job("daily-reconciliation-west", "previous")
+        warehouse.finish_job(
+            "previous", succeeded=True, details={"last_completed_target_date": "2026-09-01"}
+        )
+    try:
+        assert job.run_reconciliation_from_env(all_streams=True) == int(
+            failure not in ("none", "gap", "busy")
+        )
+        assert len(successes) == (1 if failure in ("none", "gap") else 0)
+        assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == (
+            3 if failure in ("none", "gap") else 0
+        )
+        if failure in ("none", "gap"):
+            assert phases == ["loader", "loader", "fitbit", "dbt", "app-in-focus", "app-usage"]
+            entries = [json.loads(line) for line in capfd.readouterr().err.splitlines()]
+            assert any(
+                entry.get("event") == "reconciliation"
+                and entry.get("status") == "succeeded"
+                and entry.get("job_name") == "daily-reconciliation-west"
+                for entry in entries
+            )
+        if failure == "gap":
+            details = json.loads(
+                warehouse.query_value(
+                    "SELECT details FROM ops.job_run WHERE run_id!='previous' AND job_name='daily-reconciliation-west'"
+                )
+            )
+            assert details["manual_repair_required"] == {
+                "from": "2026-09-02",
+                "through": "2026-09-28",
+            }
+            assert details["last_completed_target_date"] == "2026-10-05"
+        if failure == "busy":
+            assert phases == []
+            assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "competitor"
+        else:
+            assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+    finally:
+        warehouse.connection.close()

@@ -8,6 +8,8 @@ import time
 from collections.abc import Callable, Mapping
 from urllib.parse import urlencode
 
+from personal_data_platform.config import secret_config
+
 from .api import HttpTransport, InvalidResponseError, UrllibTransport, request_json
 
 
@@ -42,17 +44,22 @@ class GoogleOAuth:
         cls, environ: Mapping[str, str] | None = None, *, transport: HttpTransport | None = None
     ) -> GoogleOAuth:
         values = os.environ if environ is None else environ
-        credentials = {}
-        for name in ("CLIENT_ID", "CLIENT_SECRET", "REFRESH_TOKEN"):
-            key = "PDP_FITBIT_OAUTH_" + name
-            value = values.get(key, "")
-            if not value.strip():
-                raise ValueError(f"{key} is required")
-            credentials[name.lower()] = value
+        if values.get("PDP_FITBIT_DELIVERY_MODE", "pubsub") != "pubsub":
+            raise ValueError("PDP_FITBIT_DELIVERY_MODE must be pubsub")
+        if any(
+            values.get("PDP_FITBIT_OAUTH_" + key)
+            for key in ("CLIENT_ID", "CLIENT_SECRET", "REFRESH_TOKEN")
+        ):
+            raise ValueError("legacy OAuth settings conflict with pubsub configuration")
+        bundled = secret_config(
+            "PDP_FITBIT_OAUTH_CONFIG",
+            ("client_id", "client_secret", "refresh_token", "health_user_id"),
+            values,
+        )
         return cls(
-            client_id=credentials["client_id"],
-            client_secret=credentials["client_secret"],
-            refresh_token=credentials["refresh_token"],
+            client_id=bundled["client_id"],
+            client_secret=bundled["client_secret"],
+            refresh_token=bundled["refresh_token"],
             transport=transport,
         )
 

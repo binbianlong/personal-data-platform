@@ -30,6 +30,7 @@ class RecordingUploader:
         self.manifests: list[CollectorDeviceManifest] = []
         self.operations: list[str] = []
         self.fail_once = fail_once
+        self.fail_control = None
 
     def put_compressed_raw(self, key: str, compressed_bytes: bytes) -> None:
         self.operations.append("raw")
@@ -40,10 +41,16 @@ class RecordingUploader:
 
     def put_scan_receipt(self, receipt: CollectorScanReceipt) -> None:
         self.operations.append("receipt")
+        if self.fail_control == "receipt":
+            self.fail_control = None
+            raise RuntimeError("synthetic receipt outage")
         self.receipts.append(receipt)
 
     def put_device_manifest(self, manifest: CollectorDeviceManifest) -> None:
         self.operations.append("manifest")
+        if self.fail_control == "manifest":
+            self.fail_control = None
+            raise RuntimeError("synthetic manifest outage")
         self.manifests.append(manifest)
 
 
@@ -87,7 +94,9 @@ def _source_tree(tmp_path, *, successor: bool = True):
     return source, segment
 
 
-def _collector(tmp_path, source, uploader, clock, *, allowlisted: bool = True):
+def _collector(
+    tmp_path, source, uploader, clock, *, allowlisted: bool = True, destination="synthetic-bucket"
+):
     device_key = build_device_key(SECRET, DEVICE_IDENTIFIER)
     allowlist = frozenset({device_key}) if allowlisted else frozenset({"f" * 64})
     return ScreenTimeCollector(
@@ -96,6 +105,7 @@ def _collector(tmp_path, source, uploader, clock, *, allowlisted: bool = True):
         uploader=uploader,
         pseudonym_key=SECRET,
         allowed_device_keys=allowlist,
+        destination=destination,
         clock=clock,
     )
 
@@ -123,12 +133,12 @@ def test_collects_a_b_a_but_skips_consecutive_same_segment(tmp_path) -> None:
         b"state-b",
         b"state-a",
     ]
-    assert len(uploader.receipts) == 4
+    assert len(uploader.receipts) == 1
     assert all(
         receipt.device_key == build_device_key(SECRET, DEVICE_IDENTIFIER)
         for receipt in uploader.receipts
     )
-    assert len(uploader.manifests) == 4
+    assert len(uploader.manifests) == 1
     assert uploader.manifests[-1].device_keys == (build_device_key(SECRET, DEVICE_IDENTIFIER),)
 
 
@@ -178,6 +188,7 @@ def test_decommissioned_device_pending_is_retried_before_manifest_update(tmp_pat
         uploader=successful_uploader,
         pseudonym_key=SECRET,
         allowed_device_keys=frozenset({active_device_key}),
+        destination="synthetic-bucket",
         clock=clock,
     )
 
@@ -222,6 +233,7 @@ def test_manifest_keeps_the_full_allowlist_when_one_device_is_not_discovered(tmp
         uploader=uploader,
         pseudonym_key=SECRET,
         allowed_device_keys=frozenset({discovered_key, undiscovered_key}),
+        destination="synthetic-bucket",
         clock=AdvancingClock(),
     )
 
@@ -251,6 +263,7 @@ def test_missing_directory_for_one_allowlisted_device_fails_the_complete_scan(tm
                 build_device_key(SECRET, missing_identifier),
             }
         ),
+        destination="synthetic-bucket",
         clock=AdvancingClock(),
     )
 
@@ -275,7 +288,7 @@ def test_waits_through_updates_and_restart_until_successor_exists(tmp_path, caps
     state = CollectorState(tmp_path / "collector.db")
     assert state.pending() == []
     assert state.last_successful_scan() is not None
-    assert len(uploader.receipts) == len(uploader.manifests) == 2
+    assert len(uploader.receipts) == len(uploader.manifests) == 1
     assert uploader.receipts[-1].segment_count == 1
 
     clock.current += timedelta(days=30)
@@ -337,6 +350,7 @@ def test_devices_and_parent_directories_have_independent_successors(tmp_path) ->
             build_device_key(SECRET, identifier)
             for identifier in (DEVICE_IDENTIFIER, other_identifier)
         ),
+        destination="synthetic-bucket",
         clock=AdvancingClock(),
     )
     assert collector.collect_once() == CollectionStats(
@@ -407,3 +421,89 @@ def test_incomplete_scan_does_not_advance_liveness(tmp_path, monkeypatch, failur
         collector.collect_once()
     assert uploader.calls == uploader.receipts == uploader.manifests == []
     assert CollectorState(tmp_path / "collector.db").last_successful_scan() == previous
+
+
+def test_raw_changes_upload_before_controls_are_due_and_bucket_switch_skips_uploaded(
+    tmp_path,
+) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"initial")
+    uploader = RecordingUploader()
+    clock = AdvancingClock()
+    collector = _collector(tmp_path, source, uploader, clock)
+    assert collector.collect_once().uploaded == 1
+    first_receipt_time = clock.current
+    clock.current = first_receipt_time + timedelta(hours=23, minutes=59)
+    segment.write_bytes(b"changed")
+    assert collector.collect_once().uploaded == 1
+    assert len(uploader.receipts) == len(uploader.manifests) == 1
+    clock.current = first_receipt_time + timedelta(hours=24)
+    collector.collect_once()
+    assert len(uploader.receipts) == len(uploader.manifests) == 2
+
+    new_uploader = RecordingUploader()
+    switched = _collector(tmp_path, source, new_uploader, clock, destination="new-bucket")
+    assert switched.collect_once().uploaded == 0
+    assert len(new_uploader.receipts) == len(new_uploader.manifests) == 1
+    assert new_uploader.calls == []
+
+
+@pytest.mark.parametrize("control_kind", ["receipt", "manifest"])
+def test_failed_control_retries_after_restart_without_republishing_success(tmp_path, control_kind):
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"initial")
+    uploader = RecordingUploader()
+    uploader.fail_control = control_kind
+    clock = AdvancingClock()
+    with pytest.raises(ExceptionGroup, match="control publication failed"):
+        _collector(tmp_path, source, uploader, clock).collect_once()
+    assert len(uploader.receipts) + len(uploader.manifests) == 1
+    assert CollectorState(tmp_path / "collector.db").last_successful_scan() is None
+    assert CollectorState(tmp_path / "collector.db").pending() == []
+
+    uploader.operations.clear()
+    clock.current += timedelta(minutes=30)
+    assert _collector(tmp_path, source, uploader, clock).collect_once().uploaded == 0
+    assert uploader.operations == [control_kind]
+    assert len(uploader.receipts) == len(uploader.manifests) == 1
+
+
+def test_allowlist_and_new_device_force_controls_without_resetting_uploaded(tmp_path) -> None:
+    source, segment = _source_tree(tmp_path)
+    segment.write_bytes(b"initial")
+    uploader = RecordingUploader()
+    clock = AdvancingClock()
+    collector = _collector(tmp_path, source, uploader, clock)
+    collector.collect_once()
+    additional = "new-phone"
+    additional_key = build_device_key(SECRET, additional)
+    original_key = build_device_key(SECRET, DEVICE_IDENTIFIER)
+    state = CollectorState(tmp_path / "collector.db")
+    changed = ScreenTimeCollector(
+        source=source,
+        state=state,
+        uploader=uploader,
+        pseudonym_key=SECRET,
+        allowed_device_keys=frozenset({original_key, additional_key}),
+        destination="synthetic-bucket",
+        clock=clock,
+    )
+    assert changed.collect_once().uploaded == 0
+    assert len(uploader.manifests) == 2
+    assert len(uploader.receipts) == 2
+    with sqlite3.connect(source.sync_db_path) as connection:
+        connection.execute(
+            "INSERT INTO DevicePeer VALUES (?, 'New Phone', 'Synthetic2,1', 2, 1)",
+            (additional,),
+        )
+    new_directory = source.remote_dir / additional
+    new_directory.mkdir()
+    (new_directory / "100").write_bytes(b"active")
+    assert changed.collect_once().deferred == 2
+    assert len(uploader.manifests) == 3
+    assert len(uploader.receipts) == 4
+    assert {receipt.device_key for receipt in uploader.receipts[-2:]} == {
+        original_key,
+        additional_key,
+    }
+    assert state.pending() == []

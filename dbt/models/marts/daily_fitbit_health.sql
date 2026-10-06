@@ -22,11 +22,7 @@ with intervals as (
         sum(value) filter (where metric = 'active_zone_minutes') as active_zone_minutes
     from parts group by subject_key, activity_date
 ), heart as (
-    select subject_key, cast(timezone('Asia/Tokyo', start_at) as date) as activity_date,
-        avg(value) as mean_heart_rate, min(value) as min_heart_rate,
-        max(value) as max_heart_rate, count(*) as heart_rate_samples
-    from {{ source('fitbit_base', 'fitbit_heart_rate') }}
-    group by subject_key, activity_date
+    select * from {{ ref('daily_fitbit_heart_rate_minute') }}
 ), resting as (
     select subject_key, source_date as activity_date, value as resting_heart_rate
     from {{ source('fitbit_base', 'fitbit_resting_heart_rate') }}
@@ -41,7 +37,7 @@ with intervals as (
     union select subject_key, activity_date from sleep
 )
 select dates.*, daily.steps, daily.active_zone_minutes,
-    heart.mean_heart_rate, heart.min_heart_rate, heart.max_heart_rate, heart.heart_rate_samples,
+    heart.mean_minute_heart_rate, heart.min_heart_rate, heart.max_heart_rate, heart.observed_heart_rate_minutes,
     resting.resting_heart_rate, sleep.sleep_minutes, sleep.sleep_sessions
 from dates
 left join daily using (subject_key, activity_date)

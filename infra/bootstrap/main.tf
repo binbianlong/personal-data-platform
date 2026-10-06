@@ -16,7 +16,7 @@ locals {
   ])
 
   deploy_project_roles = toset([
-    "roles/cloudtasks.admin",
+    "roles/pubsub.admin",
     "roles/cloudscheduler.admin",
     "roles/iam.serviceAccountAdmin",
     "roles/logging.configWriter",
@@ -55,9 +55,31 @@ resource "google_storage_bucket" "terraform_state" {
   depends_on = [google_project_service.bootstrap]
 }
 
-resource "google_artifact_registry_repository" "runtime_us" {
+# Keep a previously provisioned Asia repository and its images intact while
+# creating the new us-central1 repository at a separate Terraform address.
+removed {
+  from = google_artifact_registry_repository.runtime
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+resource "google_storage_bucket" "terraform_state_west" {
+  name                        = "${var.state_bucket_name}-west"
+  project                     = var.project_id
+  location                    = "us-west1"
+  force_destroy               = false
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  versioning { enabled = true }
+  lifecycle { prevent_destroy = true }
+  depends_on = [google_project_service.bootstrap]
+}
+
+resource "google_artifact_registry_repository" "runtime_west" {
   project       = var.project_id
-  location      = var.region
+  location      = "us-west1"
   repository_id = var.artifact_repository_id
   description   = "Immutable runtime images for personal-data-platform"
   format        = "DOCKER"
@@ -91,14 +113,4 @@ resource "google_artifact_registry_repository" "runtime_us" {
   }
 
   depends_on = [google_project_service.bootstrap]
-}
-
-# Keep a previously provisioned Asia repository and its images intact while
-# creating the new us-central1 repository at a separate Terraform address.
-removed {
-  from = google_artifact_registry_repository.runtime
-
-  lifecycle {
-    destroy = false
-  }
 }

@@ -40,7 +40,21 @@ CREATE TABLE IF NOT EXISTS collector_scan (
     uploaded_count INTEGER NOT NULL,
     skipped_count INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS collector_control_configuration (
+    stream TEXT PRIMARY KEY,
+    destination TEXT NOT NULL,
+    config_digest TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS collector_control_publication (
+    stream TEXT NOT NULL,
+    device_key TEXT NOT NULL,
+    control_kind TEXT NOT NULL CHECK (control_kind IN ('receipt', 'manifest')),
+    published_at TEXT NOT NULL,
+    PRIMARY KEY (stream, device_key, control_kind)
+);
 """
+
+CONTROL_PUBLICATION_INTERVAL = timedelta(hours=24)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,7 +226,7 @@ class CollectorState:
             connection.commit()
 
     def record_successful_scan(self, scan: SuccessfulScan) -> None:
-        """Persist liveness only after all Raw uploads and GCS receipts succeeded."""
+        """Persist liveness only after all Raw uploads and due controls succeeded."""
         with self._connect() as connection:
             connection.execute(
                 """
@@ -249,6 +263,75 @@ class CollectorState:
             segment_count=row[2],
             uploaded_count=row[3],
             skipped_count=row[4],
+        )
+
+    def control_due(
+        self,
+        *,
+        stream: str,
+        device_key: str,
+        destination: str,
+        config_digest: str,
+        control_kind: str,
+        now: datetime,
+    ) -> bool:
+        """Check success age, retaining configuration transitions across restarts."""
+        format_observed_at(now)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._ensure_control_configuration(connection, stream, destination, config_digest)
+            row = connection.execute(
+                """SELECT published_at FROM collector_control_publication
+                WHERE stream = ? AND device_key = ? AND control_kind = ?""",
+                (stream, device_key, control_kind),
+            ).fetchone()
+        if row is None:
+            return True
+        published_at = parse_observed_at(row[0])
+        return now < published_at or now - published_at >= CONTROL_PUBLICATION_INTERVAL
+
+    def mark_control_published(
+        self,
+        *,
+        stream: str,
+        device_key: str,
+        destination: str,
+        config_digest: str,
+        control_kind: str,
+        published_at: datetime,
+    ) -> None:
+        """Record only a successful receipt or manifest publication."""
+        timestamp = format_observed_at(published_at)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._ensure_control_configuration(connection, stream, destination, config_digest)
+            connection.execute(
+                """INSERT INTO collector_control_publication
+                (stream, device_key, control_kind, published_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT (stream, device_key, control_kind)
+                DO UPDATE SET published_at = excluded.published_at""",
+                (stream, device_key, control_kind, timestamp),
+            )
+
+    @staticmethod
+    def _ensure_control_configuration(
+        connection: sqlite3.Connection,
+        stream: str,
+        destination: str,
+        config_digest: str,
+    ) -> None:
+        current = connection.execute(
+            "SELECT destination, config_digest FROM collector_control_configuration WHERE stream = ?",
+            (stream,),
+        ).fetchone()
+        if current == (destination, config_digest):
+            return
+        connection.execute("DELETE FROM collector_control_publication WHERE stream = ?", (stream,))
+        connection.execute(
+            """INSERT INTO collector_control_configuration VALUES (?, ?, ?)
+            ON CONFLICT (stream) DO UPDATE SET
+                destination = excluded.destination, config_digest = excluded.config_digest""",
+            (stream, destination, config_digest),
         )
 
     def _connect(self) -> sqlite3.Connection:

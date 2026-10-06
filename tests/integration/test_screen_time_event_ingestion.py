@@ -32,6 +32,54 @@ def warehouse_at(path):
     return warehouse
 
 
+def test_large_screen_time_batch_uses_one_columnar_insert(tmp_path):
+    repository = Repository()
+    raw = repository.add("100", segb(event("batch.app"))[0])
+    decoded = decode(repository, raw)
+    prototype = decoded.records[0]
+    batch = replace(
+        decoded,
+        records=[
+            replace(
+                prototype,
+                event_key=f"{index:064x}",
+                original_payload=f"record-{index}".encode(),
+                record_offset=32 + 80 * index,
+                record_metadata_offset=200000 + 16 * index,
+                event_at=prototype.event_at + timedelta(seconds=index),
+            )
+            for index in range(2001)
+        ],
+    )
+    warehouse = warehouse_at(tmp_path / "columnar.duckdb")
+
+    class RemoteConnection:
+        inserts = 0
+
+        def execute(self, sql, *args):
+            if "INSERT INTO screen_time_input" in sql:
+                self.inserts += 1
+            return warehouse_connection.execute(sql, *args)
+
+        def executemany(self, sql, *args):
+            raise AssertionError("Row-by-row remote inserts exceed the daily job budget")
+
+        def __getattr__(self, name):
+            return getattr(warehouse_connection, name)
+
+    warehouse_connection = warehouse.connection
+    remote = RemoteConnection()
+    warehouse.connection = remote
+    try:
+        warehouse.load_object(raw, byte_size=1, batch=batch)
+        assert remote.inserts == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 2001
+        assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_record") == 2001
+        assert warehouse.query_value("SELECT record_count FROM ops.ingestion_metadata") == 2001
+    finally:
+        warehouse.close()
+
+
 @pytest.mark.parametrize("version", [1, 2])
 def test_unknown_segb_state_fails_without_replacing_last_good_observation(tmp_path, version):
     warehouse = warehouse_at(tmp_path / "events.duckdb")

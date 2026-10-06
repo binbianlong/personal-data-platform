@@ -17,6 +17,8 @@ class GCSBlob(Protocol):
     @property
     def time_created(self) -> datetime | None: ...
 
+    custom_time: datetime | None
+
     content_encoding: str | None
 
     def upload_from_string(

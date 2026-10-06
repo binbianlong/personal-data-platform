@@ -159,8 +159,12 @@ def write_state(
             ]
         )
     if rows:
-        connection.executemany(
-            "INSERT INTO screen_time_input VALUES (" + ",".join("?" for _ in rows[0]) + ")", rows
+        # One array parameter per column avoids a remote statement per record.
+        # SELECT unnest zips equally sized arrays and preserves typed NULLs.
+        column_params = [list(column) for column in zip(*rows, strict=True)]
+        connection.execute(
+            "INSERT INTO screen_time_input SELECT " + ",".join("unnest(?)" for _ in column_params),
+            column_params,
         )
     connection.execute("""
         UPDATE screen_time_input SET physical_id = ops.screen_time_physical_id(

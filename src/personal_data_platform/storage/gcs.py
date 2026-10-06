@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 
 import google.cloud.storage as storage
 import google_crc32c
@@ -13,7 +14,7 @@ from personal_data_platform.config import GCSConfig
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import RawCodec, selected_prefixes
 
-from .gcs_types import GCSClient
+from .gcs_types import GCSBlob, GCSClient
 
 
 class GCSRawRepository:
@@ -38,6 +39,9 @@ class GCSRawRepository:
 
     def put_compressed_raw(self, key: str, compressed_bytes: bytes) -> None:
         """Create immutable pre-compressed Raw without any read or list request."""
+        self._upload_raw(key, compressed_bytes)
+
+    def _upload_raw(self, key: str, compressed_bytes: bytes) -> GCSBlob | None:
         self._source.validate_raw_key(key)
         blob = self._bucket.blob(key)
         blob.content_encoding = "gzip"
@@ -57,17 +61,27 @@ class GCSRawRepository:
         except PreconditionFailed:
             # The durable retry uses the same content-derived identity. The loader
             # verifies the uncompressed checksum of the stored generation again.
-            return
+            return None
+        return blob
 
     def put_raw_object(self, key: str, compressed_bytes: bytes) -> RawObject:
         """Save one immutable observation and obtain its exact storage generation."""
-        self.put_compressed_raw(key, compressed_bytes)
-        blob = self._bucket.blob(key)
-        blob.reload()
+        blob = self._upload_raw(key, compressed_bytes)
+        if blob is None:
+            blob = self._bucket.blob(key)
+            blob.reload()
+            if blob.generation is None:
+                raise RuntimeError("GCS omitted immutable object generation")
+            existing = self.get_raw(key, generation=int(blob.generation))
+            if existing != compressed_bytes:
+                raise RuntimeError("existing immutable Raw differs from upload bytes")
         if blob.time_created is None or blob.generation is None:
             raise RuntimeError("GCS omitted immutable object metadata")
-        return self._source.parse_raw_key(
-            key, storage_created_at=blob.time_created, storage_generation=int(blob.generation)
+        return replace(
+            self._source.parse_raw_key(
+                key, storage_created_at=blob.time_created, storage_generation=int(blob.generation)
+            ),
+            retention_started_at=getattr(blob, "custom_time", None),
         )
 
     def get_raw(self, key: str, *, generation: int) -> bytes:
@@ -86,8 +100,11 @@ class GCSRawRepository:
             return None
         if blob.time_created is None or blob.generation is None:
             raise RuntimeError("GCS omitted immutable object metadata")
-        return self._source.parse_raw_key(
-            key, storage_created_at=blob.time_created, storage_generation=int(blob.generation)
+        return replace(
+            self._source.parse_raw_key(
+                key, storage_created_at=blob.time_created, storage_generation=int(blob.generation)
+            ),
+            retention_started_at=getattr(blob, "custom_time", None),
         )
 
     def list_raw(self, prefix: str | None = None) -> list[RawObject]:
@@ -124,6 +141,7 @@ class GCSRawRepository:
                         storage_created_at=storage_created_at,
                         storage_generation=int(storage_generation),
                     )
+                    raw = replace(raw, retention_started_at=getattr(blob, "custom_time", None))
                     if raw.source_id != self._source.source_id:
                         raise RuntimeError("Raw codec returned a mismatched source")
                     if raw.schema_version not in self._source.schema_versions:

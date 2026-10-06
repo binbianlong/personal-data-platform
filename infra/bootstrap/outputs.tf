@@ -5,7 +5,7 @@ output "state_bucket_name" {
 
 output "artifact_repository" {
   description = "Artifact Registry repository resource name."
-  value       = google_artifact_registry_repository.runtime_us.name
+  value       = google_artifact_registry_repository.runtime_west.name
 }
 
 output "storage_custom_roles" {
@@ -47,4 +47,13 @@ output "deploy_attribute_condition" {
 output "plan_attribute_condition" {
   description = "Effective repository, workflow, and event restriction for planning."
   value       = google_iam_workload_identity_pool_provider.github_plan.attribute_condition
+}
+
+output "state_bucket_name_west" {
+  description = "Separate west state bucket; migrate the backend independently."
+  value       = google_storage_bucket.terraform_state_west.name
+}
+output "artifact_repository_west" {
+  description = "West Artifact Registry resource name."
+  value       = google_artifact_registry_repository.runtime_west.name
 }

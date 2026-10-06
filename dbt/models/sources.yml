@@ -5,7 +5,7 @@ sources:
     schema: base
     tables:
       - name: fitbit_steps
-      - name: fitbit_heart_rate
+      - name: fitbit_heart_rate_minute
       - name: fitbit_resting_heart_rate
       - name: fitbit_active_zone
       - name: fitbit_sleep

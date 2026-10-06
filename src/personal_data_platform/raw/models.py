@@ -21,6 +21,12 @@ class RawObject:
     sha256: str
     storage_created_at: datetime
     storage_generation: int
+    retention_started_at: datetime | None = None
+
+    @property
+    def retention_origin(self) -> datetime:
+        """Preserve the original retention clock across physical copies."""
+        return self.retention_started_at or self.storage_created_at
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[a-z][a-z0-9_]*", self.source_id) is None:
@@ -37,3 +43,8 @@ class RawObject:
                 raise ValueError(f"{name} must be timezone-aware")
         if self.storage_generation < 1:
             raise ValueError("storage_generation must be positive")
+        if self.retention_started_at is not None and (
+            self.retention_started_at.tzinfo is None
+            or self.retention_started_at.utcoffset() is None
+        ):
+            raise ValueError("retention_started_at must be timezone-aware")

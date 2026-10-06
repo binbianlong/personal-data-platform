@@ -6,26 +6,32 @@ from personal_data_platform import dbt_runner
 
 
 def test_cloud_dbt_migrates_before_models(monkeypatch) -> None:
-    calls: list[str] = []
+    import duckdb
 
-    class FakeWarehouse:
-        def __init__(self, _connection) -> None:
-            calls.append("connect")
+    from personal_data_platform.storage.motherduck import Warehouse
 
-        def migrate(self) -> None:
-            calls.append("migrate")
-
-        def close(self) -> None:
-            calls.append("close")
-
+    warehouse = Warehouse(duckdb.connect())
+    calls = []
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "connect", lambda _config: object())
-    monkeypatch.setattr(dbt_runner, "Warehouse", FakeWarehouse)
-    monkeypatch.setattr(dbt_runner, "run_dbt", lambda *, target: calls.append(f"dbt:{target}"))
+    monkeypatch.setattr(dbt_runner, "connect", lambda _config: warehouse.connection)
+    monkeypatch.setattr(dbt_runner, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(warehouse, "close", lambda: None)
 
-    assert dbt_runner.run_dbt_from_env() == 0
-    assert calls == ["connect", "migrate", "close", "dbt:prod"]
+    def run_models(**kwargs):
+        assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 5
+        assert (
+            warehouse.query_value("SELECT count(*) FROM ops.job_lock WHERE expires_at > now()") == 1
+        )
+        calls.append(kwargs["target"])
+
+    monkeypatch.setattr(dbt_runner, "run_dbt", run_models)
+    try:
+        assert dbt_runner.run_dbt_from_env() == 0
+        assert calls == ["prod"]
+        assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+    finally:
+        warehouse.connection.close()
 
 
 def test_cloud_dbt_rejects_non_production_target(monkeypatch) -> None:
@@ -89,3 +95,63 @@ def test_selected_dbt_models_and_tests_use_the_same_scope(monkeypatch):
     assert all(
         arguments[-2:] == ["--select", "tag:screen_time_app_in_focus"] for arguments in calls
     )
+
+
+def test_all_writers_share_loader_lease(monkeypatch):
+    import duckdb
+
+    from personal_data_platform.storage.motherduck import Warehouse
+
+    warehouse = Warehouse(duckdb.connect(":memory:"))
+    warehouse.migrate(profile="west")
+    assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
+    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
+    monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
+    monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
+    monkeypatch.setattr(dbt_runner, "connect", lambda _: warehouse.connection)
+    monkeypatch.setattr(dbt_runner, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(warehouse, "close", lambda: None)
+    monkeypatch.setattr(dbt_runner, "run_dbt", lambda **kwargs: pytest.fail("dbt was invoked"))
+    try:
+        with pytest.raises(RuntimeError, match="lease"):
+            dbt_runner.run_dbt_from_env()
+        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "other"
+    finally:
+        warehouse.connection.close()
+
+
+def test_inherited_dbt_lease_is_checked_and_not_released(monkeypatch):
+    import duckdb
+
+    from personal_data_platform.storage.motherduck import Warehouse
+
+    warehouse = Warehouse(duckdb.connect(":memory:"))
+    warehouse.migrate(profile="west")
+    assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
+    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
+    monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
+    monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
+    monkeypatch.setattr(dbt_runner, "connect", lambda _: warehouse.connection)
+    monkeypatch.setattr(dbt_runner, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(warehouse, "close", lambda: None)
+    calls = []
+    monkeypatch.setattr(dbt_runner, "run_dbt", lambda **kwargs: calls.append(kwargs))
+    try:
+        assert dbt_runner.run_dbt_from_env(lease_owner="daily") == 0
+        assert len(calls) == 1
+        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
+    finally:
+        warehouse.connection.close()
+
+
+def test_bounded_dbt_subprocess_uses_remaining_deadline(monkeypatch):
+    commands = []
+    monkeypatch.setattr(
+        dbt_runner.subprocess, "run", lambda *args, **kwargs: commands.append((args, kwargs))
+    )
+    dbt_runner._invoke(["run", "--target", "local"], timeout_seconds=15)
+    assert commands[0][1]["timeout"] == 15
+    assert commands[0][1]["check"] is True
+    with pytest.raises(TimeoutError):
+        dbt_runner._invoke(["test"], timeout_seconds=0)
+    assert len(commands) == 1

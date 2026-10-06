@@ -10,7 +10,15 @@ from typing import TYPE_CHECKING
 
 from personal_data_platform.raw.models import RawObject
 
-from .models import PARSER_VERSION, TABLES, Record, Snapshot, Window
+from .models import (
+    GOOGLE_WEARABLES,
+    PARSER_VERSION,
+    TABLES,
+    HeartRateMinuteSnapshot,
+    Record,
+    Snapshot,
+    Window,
+)
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
@@ -42,49 +50,6 @@ class _Coverage:
     source_key: str
     content_sha256: str
     source_sha256: str
-
-
-def can_skip_snapshot(warehouse: Warehouse, snapshot: Snapshot) -> bool:
-    """Omit Raw only for one exact, fully loaded, unchanged acquisition scope."""
-    window = snapshot.window
-    if warehouse.query_value(
-        "SELECT count(*) FROM ops.fitbit_raw_intent WHERE subject_key=? AND data_type=?",
-        [snapshot.subject_key, window.data_type],
-    ):
-        return False
-    rows = warehouse.query_rows(
-        "SELECT range_start, range_end, origin, source_sha256 "
-        "FROM ops.fitbit_coverage WHERE subject_key=? AND data_type=? "
-        "AND range_start < ? AND range_end > ?",
-        [snapshot.subject_key, window.data_type, window.end, window.start],
-    )
-    return rows == [(window.start, window.end, snapshot.origin, snapshot.source_sha256())]
-
-
-def clear_intents_for_loaded_raw(connection: DuckDBPyConnection, raw: RawObject) -> None:
-    """Resolve covered attempts and their failures inside the load transaction."""
-    row = connection.execute(
-        "SELECT receipt_key, work_index, subject_key, data_type, range_start, range_end "
-        "FROM ops.fitbit_raw_intent WHERE raw_key=?",
-        [raw.key],
-    ).fetchone()
-    if row is not None:
-        scope = (
-            "receipt_key=? AND work_index=? AND subject_key=? AND data_type=? "
-            "AND range_start >= ? AND range_end <= ? AND fetched_at <= ?"
-        )
-        parameters = [*row, raw.observed_at]
-        # A successfully loaded replacement retires the superseded failure,
-        # rather than claiming the missing original Raw was loaded or expired.
-        connection.execute(
-            "DELETE FROM ops.ingestion_metadata WHERE status='failed' AND object_key IN "
-            f"(SELECT raw_key FROM ops.fitbit_raw_intent WHERE {scope})",
-            parameters,
-        )
-        connection.execute(
-            f"DELETE FROM ops.fitbit_raw_intent WHERE {scope}",
-            parameters,
-        )
 
 
 def _accepted_ranges(
@@ -127,6 +92,7 @@ def _content_digest(snapshot: Snapshot) -> str:
 @dataclass(frozen=True, slots=True)
 class FitbitBatch:
     snapshot: Snapshot
+    source_digest: str | None = None
 
     @property
     def parser_version(self) -> str:
@@ -145,7 +111,6 @@ class FitbitBatch:
         loaded_at: datetime,
     ) -> None:
         self.write_snapshot(connection, source_key=raw.key, loaded_at=loaded_at)
-        clear_intents_for_loaded_raw(connection, raw)
 
     def write_snapshot(
         self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
@@ -157,7 +122,9 @@ class FitbitBatch:
         if not accepted:
             return
         digest = _content_digest(self.snapshot)
-        source_digest = self.snapshot.source_sha256()
+        source_digest = (
+            self.source_digest if self.source_digest is not None else self.snapshot.source_sha256()
+        )
         unchanged = (
             len(coverage) == 1
             and coverage[0].start == window.start
@@ -288,6 +255,19 @@ class FitbitBatch:
                 " WHERE range_start <= previous.cursor_at AND range_end > previous.cursor_at)",
                 [snapshot.subject_key, window.data_type, sorted(moved_cursors)],
             )
+            has_scope_success = connection.execute(
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_schema='ops' AND table_name='fitbit_scope_success'"
+            ).fetchone()
+            if has_scope_success is not None and has_scope_success[0]:
+                connection.execute(
+                    "UPDATE ops.fitbit_scope_success SET source_sha256='' "
+                    "WHERE scope_key IN (SELECT scope_key FROM ops.fitbit_scope "
+                    "WHERE subject_key=? AND data_type=? AND EXISTS "
+                    "(SELECT 1 FROM unnest(?::TIMESTAMPTZ[]) previous(cursor_at) "
+                    "WHERE range_start <= previous.cursor_at AND range_end > previous.cursor_at))",
+                    [snapshot.subject_key, window.data_type, sorted(moved_cursors)],
+                )
         return protected_ids
 
     def _update_deletions(
@@ -472,3 +452,110 @@ def expand_window(warehouse: Warehouse, subject_key: str, window: Window) -> Win
         if (left, right) == (start, end):
             return Window(window.data_type, start, end)
         start, end = left, right
+
+
+@dataclass(frozen=True, slots=True)
+class FitbitMinuteBatch:
+    """Replace complete minute windows while preserving newer acquisitions."""
+
+    snapshot: HeartRateMinuteSnapshot
+
+    @property
+    def parser_version(self) -> str:
+        return "fitbit-v2"
+
+    @property
+    def record_count(self) -> int:
+        return len(self.snapshot.minutes)
+
+    def write(
+        self, connection: DuckDBPyConnection, raw: RawObject, *, byte_size: int, loaded_at: datetime
+    ) -> None:
+        self.write_snapshot(connection, source_key=raw.key, loaded_at=loaded_at)
+
+    def write_snapshot(
+        self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
+    ) -> None:
+        snapshot = self.snapshot
+        window = snapshot.window
+        scope = [snapshot.subject_key, GOOGLE_WEARABLES, snapshot.aggregation_version]
+        rows = connection.execute(
+            "SELECT range_start,range_end,fetched_at,origin,source_key,content_sha256,source_sha256 "
+            "FROM ops.fitbit_minute_coverage WHERE subject_key=? AND data_source_family=? "
+            "AND aggregation_version=? AND range_start < ? AND range_end > ? ORDER BY range_start",
+            [*scope, window.end, window.start],
+        ).fetchall()
+        coverage = [_Coverage(*row) for row in rows]
+        accepted = [(window.start, window.end)]
+        for prior in coverage:
+            if (prior.fetched_at, prior.source_key) > (snapshot.fetched_at, source_key):
+                accepted = _subtract(accepted, prior.start, prior.end)
+        if not accepted:
+            return
+        digest = hashlib.sha256(
+            json.dumps(
+                [asdict(row) for row in sorted(snapshot.minutes, key=lambda row: row.start)],
+                default=str,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode()
+        ).hexdigest()
+        unchanged = (
+            len(coverage) == 1
+            and coverage[0].start == window.start
+            and coverage[0].end == window.end
+            and coverage[0].content_sha256 == digest
+        )
+        if not unchanged:
+            for start, end in accepted:
+                connection.execute(
+                    "DELETE FROM base.fitbit_heart_rate_minute WHERE subject_key=? AND data_source_family=? "
+                    "AND aggregation_version=? AND start_at>=? AND start_at<?",
+                    [*scope, start, end],
+                )
+            incoming = [
+                asdict(row)
+                for row in snapshot.minutes
+                if any(start <= row.start < end for start, end in accepted)
+            ]
+            if incoming:
+                connection.execute(
+                    """INSERT INTO base.fitbit_heart_rate_minute
+                    SELECT ?, r.data_source_family::VARCHAR, r.start::TIMESTAMPTZ,
+                        r.aggregation_version::VARCHAR, r.end::TIMESTAMPTZ,
+                        r.average::DOUBLE, r.minimum::DOUBLE, r.maximum::DOUBLE,
+                        r.sample_count::BIGINT, r.origin::VARCHAR, ?, ?, ?
+                    FROM unnest(?) incoming(r)""",
+                    [snapshot.subject_key, snapshot.fetched_at, source_key, loaded_at, incoming],
+                )
+        for prior in coverage:
+            remaining = [(prior.start, prior.end)]
+            for start, end in accepted:
+                remaining = _subtract(remaining, start, end)
+            if remaining == [(prior.start, prior.end)]:
+                continue
+            connection.execute(
+                "DELETE FROM ops.fitbit_minute_coverage WHERE subject_key=? AND data_source_family=? AND aggregation_version=? AND range_start=?",
+                [*scope, prior.start],
+            )
+            for start, end in remaining:
+                connection.execute(
+                    "INSERT INTO ops.fitbit_minute_coverage VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    [*scope, start, end, prior.fetched_at, prior.origin, prior.source_key, "", ""],
+                )
+        source_digest = snapshot.source_sha256() if accepted == [(window.start, window.end)] else ""
+        for start, end in accepted:
+            connection.execute(
+                "INSERT INTO ops.fitbit_minute_coverage VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [
+                    *scope,
+                    start,
+                    end,
+                    snapshot.fetched_at,
+                    snapshot.origin,
+                    source_key,
+                    digest,
+                    source_digest,
+                ],
+            )

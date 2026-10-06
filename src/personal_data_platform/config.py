@@ -9,6 +9,7 @@ import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 from urllib.parse import unquote, urlsplit
 
 DEFAULT_REBUILD_ADC_PATH = (
@@ -19,6 +20,14 @@ DEFAULT_REBUILD_ADC_PATH = (
 
 class ConfigurationError(ValueError):
     """Raised when required runtime configuration is absent or invalid."""
+
+
+def schema_profile() -> Literal["west"]:
+    """Choose one migration history consistently across jobs and recovery commands."""
+    value = os.environ.get("PDP_SCHEMA_PROFILE", "west")
+    if value != "west":
+        raise ConfigurationError("PDP_SCHEMA_PROFILE must be west")
+    return "west"
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,3 +134,32 @@ def _validate_impersonated_adc(
         is None
     ):
         raise ConfigurationError(f"{service_account_name} is invalid")
+
+
+def secret_config(
+    name: str, fields: tuple[str, ...], environ: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Validate a bundled secret while keeping its payload out of diagnostics."""
+    values = os.environ if environ is None else environ
+
+    def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        data = json.loads(values.get(name, ""), object_pairs_hook=unique)
+        if (
+            not isinstance(data, dict)
+            or set(data) != set(fields)
+            or any(not isinstance(value, str) or not value.strip() for value in data.values())
+        ):
+            raise ValueError("invalid fields")
+    except (ValueError, TypeError):
+        raise ConfigurationError(
+            f"{name} requires valid JSON with fields: {', '.join(fields)}"
+        ) from None
+    return {key: str(data[key]) for key in fields}

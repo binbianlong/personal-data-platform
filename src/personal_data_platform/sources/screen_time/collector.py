@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -20,6 +21,7 @@ from personal_data_platform.sources.screen_time.raw import (
     build_device_key,
     build_segment_key,
     encode_segment_envelope,
+    sha256_hex,
 )
 from personal_data_platform.sources.screen_time.state import (
     CollectorState,
@@ -205,6 +207,7 @@ class ScreenTimeCollector:
         uploader: CompressedRawUploader,
         pseudonym_key: bytes,
         allowed_device_keys: frozenset[str],
+        destination: str,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._source = source
@@ -212,6 +215,7 @@ class ScreenTimeCollector:
         self._uploader = uploader
         self._pseudonym_key = pseudonym_key
         self._allowed_device_keys = allowed_device_keys
+        self._destination = destination
         self._clock = clock or (lambda: datetime.now(UTC))
 
     @property
@@ -313,23 +317,17 @@ class ScreenTimeCollector:
             deferred=deferred,
         )
         completed_at = self._clock()
-        for device in devices:
-            device_key = build_device_key(self._pseudonym_key, device.identifier)
-            self._uploader.put_scan_receipt(
-                CollectorScanReceipt(
-                    device_key=device_key,
-                    completed_at=completed_at,
-                    segment_count=device_segment_counts[device_key],
-                    stream=self._source.raw_stream,
-                )
-            )
-        self._uploader.put_device_manifest(
-            CollectorDeviceManifest(
-                device_keys=tuple(sorted(self._allowed_device_keys)),
-                completed_at=completed_at,
-                stream=self._source.raw_stream,
-            )
+        config_digest = sha256_hex(
+            json.dumps(
+                {
+                    "allowed": sorted(self._allowed_device_keys),
+                    "discovered": sorted(device_segment_counts),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
         )
+        self._publish_controls(device_segment_counts, completed_at, config_digest)
         self._state.record_successful_scan(
             SuccessfulScan(
                 completed_at=completed_at,
@@ -340,6 +338,56 @@ class ScreenTimeCollector:
             )
         )
         return stats
+
+    def _publish_controls(
+        self, device_segment_counts: dict[str, int], completed_at: datetime, config_digest: str
+    ) -> None:
+        controls: list[CollectorScanReceipt | CollectorDeviceManifest] = [
+            CollectorScanReceipt(
+                device_key=device_key,
+                completed_at=completed_at,
+                segment_count=segment_count,
+                stream=self.stream,
+            )
+            for device_key, segment_count in device_segment_counts.items()
+        ]
+        controls.append(
+            CollectorDeviceManifest(
+                device_keys=tuple(sorted(self._allowed_device_keys)),
+                completed_at=completed_at,
+                stream=self.stream,
+            )
+        )
+        failures: list[Exception] = []
+        for control in controls:
+            device_key = control.device_key if isinstance(control, CollectorScanReceipt) else ""
+            control_kind = "receipt" if isinstance(control, CollectorScanReceipt) else "manifest"
+            if not self._state.control_due(
+                stream=self.stream,
+                device_key=device_key,
+                destination=self._destination,
+                config_digest=config_digest,
+                control_kind=control_kind,
+                now=completed_at,
+            ):
+                continue
+            try:
+                if isinstance(control, CollectorScanReceipt):
+                    self._uploader.put_scan_receipt(control)
+                else:
+                    self._uploader.put_device_manifest(control)
+                self._state.mark_control_published(
+                    stream=self.stream,
+                    device_key=device_key,
+                    destination=self._destination,
+                    config_digest=config_digest,
+                    control_kind=control_kind,
+                    published_at=self._clock(),
+                )
+            except Exception as error:
+                failures.append(RuntimeError(f"{control_kind} {device_key}: {error}"))
+        if failures:
+            raise ExceptionGroup("Screen Time control publication failed", failures)
 
     def _upload(self, observation: PendingObservation) -> None:
         self._uploader.put_compressed_raw(

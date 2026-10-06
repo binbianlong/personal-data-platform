@@ -1,11 +1,7 @@
-"""Use real Tink keys while keeping key discovery and Google token transport local."""
-
-import pytest
 import tink
 from tink import json_proto_keyset_format, signature
 
-from personal_data_platform.sources.fitbit.signatures import GoogleTaskIdentity, TinkSignatures
-from personal_data_platform.sources.fitbit.webhook import AuthenticationError
+from personal_data_platform.sources.fitbit.signatures import TinkSignatures
 
 
 def key_pair():
@@ -47,50 +43,3 @@ def test_tink_expired_keyset_refreshes_before_verification() -> None:
     now[0] = 11
     assert verifier.verify(signer.sign(b"body"), b"body")
     assert len(calls) == 2
-
-
-def test_task_identity_requires_verified_exact_service_account_and_audience() -> None:
-    expected = {
-        "iss": "https://accounts.google.com",
-        "aud": "https://service.run.app",
-        "email": "task@project.iam.gserviceaccount.com",
-        "email_verified": True,
-    }
-    observed = []
-
-    def verify(token, *, audience):
-        observed.append((token, audience))
-        return expected
-
-    identity = GoogleTaskIdentity(
-        audience="https://service.run.app",
-        service_account="task@project.iam.gserviceaccount.com",
-        verify_token=verify,
-    )
-    identity.authenticate("Bearer signed-id-token")
-    assert observed == [("signed-id-token", "https://service.run.app")]
-    for claim, bad_value in [
-        ("iss", "https://attacker.example"),
-        ("aud", "https://other.run.app"),
-        ("email", "other@project.iam.gserviceaccount.com"),
-        ("email_verified", False),
-        ("email_verified", "true"),
-    ]:
-        previous = expected[claim]
-        expected[claim] = bad_value
-        with pytest.raises(AuthenticationError):
-            identity.authenticate("Bearer signed-id-token")
-        expected[claim] = previous
-    with pytest.raises(AuthenticationError):
-        identity.authenticate(None)
-
-
-def test_task_token_verification_failure_is_not_authorization() -> None:
-    def invalid(token, *, audience):
-        raise ValueError("invalid JWT")
-
-    identity = GoogleTaskIdentity(
-        audience="https://service.run.app", service_account="task", verify_token=invalid
-    )
-    with pytest.raises(AuthenticationError):
-        identity.authenticate("Bearer invalid")

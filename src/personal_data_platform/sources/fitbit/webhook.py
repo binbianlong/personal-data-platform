@@ -4,14 +4,25 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
-from .models import DATA_TYPES, DATE_TYPES, Window, date_cursor, object_dict, parse_time, string
+from .models import (
+    DATA_TYPES,
+    DATE_TYPES,
+    Notification,
+    Window,
+    date_cursor,
+    object_dict,
+    parse_time,
+    string,
+)
 
 
 class AuthenticationError(ValueError):
@@ -35,6 +46,42 @@ class Verification:
 class VerifiedNotification:
     subject_key: str
     windows: tuple[Window, ...]
+    groups: tuple[tuple[Window, ...], ...] = ()
+
+
+def split_notifications(
+    notification: Notification, *, max_units: int = 1000
+) -> tuple[Notification, ...]:
+    """Bound retries to a provider date or a Tokyo day before any publication."""
+    if max_units < 1:
+        raise PayloadError("notification expansion exceeds the request limit")
+    units: list[Notification] = []
+    for window in notification.windows:
+        civil = window.data_type in DATE_TYPES
+        if not civil and window.start >= notification.received_at:
+            raise PayloadError("physical notification is entirely in the future")
+        zone = UTC if civil else ZoneInfo("Asia/Tokyo")
+        start = window.start
+        while start < window.end:
+            midnight = start.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+            if not civil and midnight >= notification.received_at:
+                break
+            end = min(window.end, (midnight + timedelta(days=1)).astimezone(UTC))
+            if len(units) >= max_units:
+                raise PayloadError("notification expansion exceeds the request limit")
+            identity = hashlib.sha256(
+                f"{notification.notification_id}:{window.data_type}:{start.isoformat()}:{end.isoformat()}".encode()
+            ).hexdigest()
+            units.append(
+                Notification(
+                    identity,
+                    notification.subject_key,
+                    (Window(window.data_type, start, end),),
+                    notification.received_at,
+                )
+            )
+            start = end
+    return tuple(units)
 
 
 def merge_windows(windows: tuple[Window, ...]) -> tuple[Window, ...]:
@@ -182,6 +229,7 @@ class GoogleHealthAuthenticator:
         if not 1 <= len(notifications) <= 99:
             raise PayloadError("webhook requires between one and 99 notifications")
         windows: list[Window] = []
+        groups: list[tuple[Window, ...]] = []
         try:
             for notification in notifications:
                 data = object_dict(object_dict(notification)["data"])
@@ -195,9 +243,11 @@ class GoogleHealthAuthenticator:
                 intervals = data["intervals"]
                 if not isinstance(intervals, list) or not intervals:
                     raise ValueError("webhook intervals must be nonempty")
-                windows.extend(_window(kind, interval) for interval in intervals)
+                group = merge_windows(tuple(_window(kind, interval) for interval in intervals))
+                groups.append(group)
+                windows.extend(group)
         except AuthenticationError:
             raise
         except (ValueError, KeyError, TypeError, OverflowError) as error:
             raise PayloadError("invalid notification batch") from error
-        return VerifiedNotification(self._subject, merge_windows(tuple(windows)))
+        return VerifiedNotification(self._subject, merge_windows(tuple(windows)), tuple(groups))

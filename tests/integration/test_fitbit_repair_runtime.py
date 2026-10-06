@@ -1,251 +1,126 @@
-"""Repair composition preserves real warehouse leases and observable outcomes."""
-
 import json
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-import duckdb
 import pytest
-from fastapi.testclient import TestClient
 
-from personal_data_platform.cli import main
 from personal_data_platform.sources.fitbit import runtime
-from personal_data_platform.sources.fitbit.adapter import FitbitSource
-from personal_data_platform.sources.fitbit.models import Snapshot, Window
-from personal_data_platform.sources.fitbit.receipts import Receipt, ReceiptReadConflict
-from personal_data_platform.sources.fitbit.service import ReceiptWorker, create_app
-from personal_data_platform.storage.motherduck import Warehouse
-from tests.unit.test_fitbit_runtime import Devices, Queue, _stores
+from personal_data_platform.sources.fitbit.models import Window
+from tests.integration.test_fitbit_acquisition import setup
 
 NOW = datetime(2026, 9, 28, 3, tzinfo=UTC)
-WINDOW = Window("steps", NOW.replace(hour=0), NOW.replace(hour=1))
 
 
 @pytest.fixture
-def repair_env(monkeypatch, tmp_path, caplog):
-    database = str(tmp_path / "repair.duckdb")
-    warehouse = Warehouse(duckdb.connect(database))
-    warehouse.migrate()
-    for relation in FitbitSource.required_relations:
-        if relation.startswith("marts."):
-            warehouse.connection.execute(f"CREATE VIEW {relation} AS SELECT 1 AS value")
-    warehouse.close()
+def manual_env(monkeypatch, tmp_path):
+    runner, store, api, factory, _ = setup(tmp_path, states=("A",))
+    fetch = api.fetch_captured
 
-    def factory():
-        return Warehouse(duckdb.connect(database))
+    def daily_records(window, **kwargs):
+        captured = fetch(window, **kwargs)
+        return replace(
+            captured,
+            snapshot=replace(
+                captured.snapshot,
+                records=tuple(
+                    replace(record, record_id=window.start.isoformat())
+                    for record in captured.snapshot.records
+                ),
+            ),
+        )
 
-    receipts, sync_state = _stores()
-    queue = Queue()
-    raw = SimpleNamespace(objects=[])
-    raw.list_raw = lambda prefix: raw.objects
-    for key, value in {
-        "PDP_FITBIT_REPAIR_ENABLED": "true",
-        "PDP_FITBIT_PROCESSING_PAUSED": "false",
-        "PDP_FITBIT_SUBJECT_KEY": "self",
-        "GOOGLE_CLOUD_PROJECT": "test-project",
-        "GCS_BUCKET": "test-bucket",
-    }.items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.setattr(runtime, "_stores", lambda: (receipts, raw))
-    monkeypatch.setattr(runtime, "_queue", lambda: queue)
+    monkeypatch.setattr(api, "fetch_captured", daily_records)
+    monkeypatch.setenv("PDP_SCHEMA_PROFILE", "west")
+    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
+    monkeypatch.setenv("PDP_FITBIT_SUBJECT_KEY", "self")
+    monkeypatch.setenv("PDP_FITBIT_PROCESSING_PAUSED", "false")
     monkeypatch.setattr(runtime, "_warehouse", factory)
-    monkeypatch.setattr(runtime.storage, "Client", lambda **kwargs: receipts._client)
-    monkeypatch.setattr(runtime.GoogleOAuth, "from_env", lambda: object())
-    monkeypatch.setattr(runtime, "HealthClient", lambda **kwargs: Devices(None))
-
+    monkeypatch.setattr(runtime, "_acquisition_runner", lambda: runner)
     logger = logging.getLogger("personal_data_platform.sources.fitbit")
     previous = (logger.level, logger.propagate, logger.handlers[:])
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    logger.addHandler(caplog.handler)
-    yield SimpleNamespace(
-        warehouse=factory, receipts=receipts, state=sync_state, queue=queue, raw=raw
-    )
+    yield SimpleNamespace(runner=runner, store=store, api=api, warehouse=factory)
     for handler in logger.handlers[:]:
         if handler not in previous[2]:
             logger.removeHandler(handler)
-            if handler is not caplog.handler:
-                handler.close()
+            handler.close()
     logger.setLevel(previous[0])
     logger.propagate = previous[1]
 
 
-@pytest.mark.parametrize(
-    ("lease", "missing_raw", "phases"),
-    [
-        ("loader", False, ("orphan_recovery",)),
-        ("reconciliation", False, ("raw_audit",)),
-        ("loader", True, ("raw_audit", "orphan_recovery")),
-    ],
-)
-def test_repair_defers_busy_leases_without_releasing_another_owner(
-    repair_env, caplog, lease, missing_raw, phases
+def test_manual_retry_records_first_unfinished_day_and_preserves_committed_data(
+    manual_env, monkeypatch, capsys
 ):
-    if missing_raw:
-        from personal_data_platform.sources.fitbit.raw import encode_snapshot
+    start = datetime(2026, 10, 1, 15, tzinfo=UTC)
+    end = start + timedelta(days=3)
+    failed_day = start + timedelta(days=1)
+    fetch = manual_env.api.fetch_captured
 
-        key, _ = encode_snapshot(Snapshot("self", WINDOW, NOW, ()))
-        repair_env.raw.objects.append(
-            FitbitSource().parse_raw_key(key, storage_created_at=NOW, storage_generation=1)
-        )
-    warehouse = repair_env.warehouse()
-    assert warehouse.acquire_job_lock(lease, "other", lease_seconds=3600)
-    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_raw_intent") == 0
+    def partial(window, **kwargs):
+        if window.start == failed_day:
+            raise TimeoutError("temporary API failure")
+        return fetch(window, **kwargs)
+
+    monkeypatch.setattr(manual_env.api, "fetch_captured", partial)
+    assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 1
+    first = json.loads(capsys.readouterr().out)
+    assert first["completed_scopes"] == 2 and first["failed_scopes"] == 1
+    assert first["first_incomplete"]["start"] == str(failed_day)
+    warehouse = manual_env.warehouse()
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 2
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_steps") > 0
     warehouse.close()
 
-    summary = runtime.run_repair_from_env()
-    assert summary.status == "deferred"
-    assert summary.deferred_phases == phases
-    assert summary.failed_count == summary.at_risk_count == 0
-    assert summary.queued_count == 1
-    assert not any(getattr(record, "status", None) == "succeeded" for record in caplog.records)
-    warehouse = repair_env.warehouse()
-    assert (
-        warehouse.query_value("SELECT owner_id FROM ops.job_lock WHERE job_name=?", [lease])
-        == "other"
-    )
-    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_raw_intent") == 0
-    warehouse.release_job_lock(lease, "other")
+    monkeypatch.setattr(manual_env.api, "fetch_captured", fetch)
+    assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 0
+    retry = json.loads(capsys.readouterr().out)
+    assert retry["completed_scopes"] == 3 and retry["first_incomplete"] is None
+    warehouse = manual_env.warehouse()
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 3
     warehouse.close()
+    saved = manual_env.store.puts
+    assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 0
+    assert manual_env.store.puts == saved
 
 
-def test_repair_completion_emits_one_success_even_with_async_pending_receipts(repair_env, caplog):
-    summary = runtime.run_repair_from_env()
-    assert summary.status == "succeeded"
-    assert summary.pending_count == summary.queued_count == 1
-    events = [
-        record for record in caplog.records if getattr(record, "event", None) == "fitbit_repair"
+def test_manual_old_narrow_range_keeps_exact_bounds(manual_env, capsys):
+    start = datetime(2020, 1, 2, 1, 23, tzinfo=UTC)
+    end = start + timedelta(minutes=2)
+    assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 0
+    assert manual_env.api.calls == [Window("steps", start, end)]
+    warehouse = manual_env.warehouse()
+    assert warehouse.query_rows("SELECT range_start,range_end FROM ops.fitbit_coverage") == [
+        (start, end)
     ]
-    assert len(events) == 1
-    assert events[0].status == "succeeded"
-    warehouse = repair_env.warehouse()
     assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     warehouse.close()
 
 
-@pytest.mark.parametrize("failure", ["enqueue", "audit", "retention"])
-def test_repair_real_failures_take_priority_over_deferral(repair_env, monkeypatch, failure, capsys):
-    if failure == "enqueue":
-
-        def broken_enqueue(key):
-            raise OSError("queue unavailable")
-
-        monkeypatch.setattr(repair_env.queue, "enqueue", broken_enqueue)
-    elif failure == "audit":
-        warehouse = repair_env.warehouse()
-        warehouse.connection.execute("DROP VIEW marts.daily_fitbit_health")
+def test_daily_paused_leaves_existing_data_and_shared_owner(manual_env, monkeypatch):
+    monkeypatch.setenv("PDP_FITBIT_PROCESSING_PAUSED", "true")
+    warehouse = manual_env.warehouse()
+    assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
+    try:
+        result = runtime.run_daily_repair(
+            now=NOW, warehouse=warehouse, lease_owner="daily", timeout_seconds=6000
+        )
+        assert not result.ok and result.deferred_scopes == 1
+        assert manual_env.api.calls == [] and manual_env.store.puts == 0
+        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
+    finally:
         warehouse.close()
-    else:
-        from datetime import timedelta
 
-        repair_env.receipts.create(
-            Receipt.create("self", (WINDOW,), received_at=datetime.now(UTC) - timedelta(days=88))
-        )
-    warehouse = repair_env.warehouse()
-    assert warehouse.acquire_job_lock("loader", "other", lease_seconds=3600)
+
+def test_manual_busy_does_not_release_competing_owner(manual_env):
+    from personal_data_platform.loader.job import JobAlreadyRunning
+
+    warehouse = manual_env.warehouse()
+    assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
     warehouse.close()
-    assert main(["fitbit", "repair"]) == 1
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["status"] == "failed"
-    assert summary["deferred_phases"] == ["orphan_recovery"]
-
-
-def test_repair_cli_exposes_deferral_and_recovery(repair_env, capsys):
-    warehouse = repair_env.warehouse()
-    warehouse.acquire_job_lock("loader", "other", lease_seconds=3600)
+    with pytest.raises(JobAlreadyRunning):
+        runtime.run_sync_from_env(start=NOW, end=NOW + timedelta(hours=1), data_types=("steps",))
+    assert manual_env.api.calls == []
+    warehouse = manual_env.warehouse()
+    assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "other"
     warehouse.close()
-    assert main(["fitbit", "repair"]) == 0
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["status"] == "deferred"
-    assert summary["deferred_phases"] == ["orphan_recovery"]
-    assert summary["receipt_read_deferred_count"] == 0
-    warehouse = repair_env.warehouse()
-    warehouse.release_job_lock("loader", "other")
-    warehouse.close()
-    assert main(["fitbit", "repair"]) == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "succeeded"
-
-
-@pytest.mark.parametrize("phase", ["scheduled_receipts", "receipt_inventory"])
-def test_receipt_deferral_still_enqueues_unaffected_work(repair_env, monkeypatch, phase, caplog):
-    unaffected = repair_env.receipts.create(Receipt.create("self", (WINDOW,), received_at=NOW))
-    if phase == "scheduled_receipts":
-
-        def changing_read(key):
-            raise ReceiptReadConflict("receipt keeps changing")
-
-        monkeypatch.setattr(repair_env.receipts, "read", changing_read)
-    else:
-        inventory = repair_env.receipts.inventory
-        monkeypatch.setattr(
-            repair_env.receipts, "inventory", lambda: replace(inventory(), deferred_count=1)
-        )
-    summary = runtime.run_repair_from_env()
-    assert unaffected.receipt.key in repair_env.queue.keys
-    assert summary.status == "deferred"
-    assert phase in summary.deferred_phases
-    assert summary.receipt_read_deferred_count == (phase == "receipt_inventory")
-    assert repair_env.state.read("self").state.bootstrap_complete is False
-    assert not any(getattr(record, "status", None) == "succeeded" for record in caplog.records)
-
-
-@pytest.mark.parametrize(
-    ("enabled", "paused", "status"), [(False, False, "disabled"), (True, True, "paused")]
-)
-def test_inactive_repair_does_not_report_completion(
-    repair_env, monkeypatch, caplog, enabled, paused, status
-):
-    monkeypatch.setenv("PDP_FITBIT_REPAIR_ENABLED", str(enabled).lower())
-    monkeypatch.setenv("PDP_FITBIT_PROCESSING_PAUSED", str(paused).lower())
-    summary = runtime.run_repair_from_env()
-    assert summary.status == status
-    assert repair_env.queue.keys == []
-    assert not any(getattr(record, "status", None) == "succeeded" for record in caplog.records)
-
-
-def test_orphan_storage_failure_remains_a_failed_cli_execution(
-    repair_env, monkeypatch, capsys, caplog
-):
-    def failed_recovery(self, *, limit):
-        raise OSError("storage unavailable")
-
-    monkeypatch.setattr(ReceiptWorker, "recover_orphan_intents", failed_recovery)
-    assert main(["fitbit", "repair"]) == 1
-    assert "storage unavailable" in capsys.readouterr().err
-    events = [
-        record for record in caplog.records if getattr(record, "event", None) == "fitbit_repair"
-    ]
-    assert len(events) == 1
-    assert events[0].status == "failed"
-    assert events[0].levelno == logging.ERROR
-
-
-def test_worker_lease_contention_retries_without_failure_alert(repair_env, caplog):
-    stored = repair_env.receipts.create(Receipt.create("self", (WINDOW,), received_at=NOW))
-    warehouse = repair_env.warehouse()
-    warehouse.acquire_job_lock("loader", "other", lease_seconds=3600)
-    warehouse.close()
-    app = create_app(
-        authenticator=None,
-        identity=SimpleNamespace(authenticate=lambda authorization: None),
-        receipts=repair_env.receipts,
-        queue=repair_env.queue,
-        worker=ReceiptWorker(
-            receipts=repair_env.receipts,
-            repository=repair_env.raw,
-            client=None,
-            warehouse_factory=repair_env.warehouse,
-            subject_key="self",
-        ),
-    )
-    response = TestClient(app).post(
-        "/internal/tasks/fitbit",
-        headers={"Authorization": "Bearer test"},
-        json={"receipt_key": stored.receipt.key},
-    )
-    assert response.status_code == 503
-    assert repair_env.receipts.read(stored.receipt.key) == stored
-    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
-    assert any("deferred" in record.message for record in caplog.records)

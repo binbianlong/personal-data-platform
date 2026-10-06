@@ -114,3 +114,199 @@ def test_health_views_split_tokyo_days_preserve_missing_and_keep_devices_separat
         ) == [("mac", "macos", 1800.0), ("phone", "ios", 1800.0)]
     finally:
         warehouse.close()
+
+
+def test_minute_daily_average_has_observed_minute_semantics(
+    tmp_path,
+    monkeypatch,
+    dbt_project,  # noqa: F811
+):
+    from personal_data_platform.sources.fitbit.models import (
+        HeartRateMinute,
+        HeartRateMinuteSnapshot,
+    )
+    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+
+    database = tmp_path / "minutes.duckdb"
+    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
+    warehouse.migrate()
+    base = datetime(2026, 9, 1, 14, 59, tzinfo=UTC)
+    minutes = tuple(
+        HeartRateMinute(
+            at,
+            at + timedelta(minutes=1),
+            avg,
+            avg - 5,
+            avg + 5,
+            "users/me/dataSourceFamilies/google-wearables",
+            sample_count=count,
+        )
+        for at, avg, count in [
+            (base, 60, 1),
+            (base + timedelta(minutes=1), 100, 50),
+            (base + timedelta(minutes=2), 60, 10),
+        ]
+    )
+    snapshot = HeartRateMinuteSnapshot(
+        "self",
+        Window("heart-rate", base, base + timedelta(minutes=3)),
+        base + timedelta(days=1),
+        minutes,
+        (),
+    )
+    FitbitMinuteBatch(snapshot).write_snapshot(
+        warehouse.connection, source_key="minutes", loaded_at=base + timedelta(days=1)
+    )
+    warehouse.connection.execute("DROP TABLE base.fitbit_heart_rate")
+    warehouse.close()
+    monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
+    run_dbt(target="local", project_dir=dbt_project, selector="tag:fitbit tag:screen_time")
+    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
+    try:
+        assert warehouse.query_rows(
+            "SELECT activity_date,mean_minute_heart_rate,observed_heart_rate_minutes,min_heart_rate,max_heart_rate FROM marts.daily_fitbit_heart_rate_minute ORDER BY activity_date"
+        ) == [(date(2026, 9, 1), 60, 1, 55, 65), (date(2026, 9, 2), 80, 2, 55, 105)]
+        assert (
+            warehouse.query_value(
+                "SELECT mean_minute_heart_rate FROM marts.daily_fitbit_health WHERE activity_date=?",
+                [date(2026, 9, 2)],
+            )
+            == 80
+        )
+    finally:
+        warehouse.close()
+
+
+def test_minute_writer_empty_deletes_and_stale_snapshot_protects_newer_subrange(tmp_path):
+    from personal_data_platform.sources.fitbit.models import (
+        HeartRateMinute,
+        HeartRateMinuteSnapshot,
+    )
+    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+
+    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "minute-writer.duckdb"))))
+    warehouse.migrate()
+    base = datetime(2026, 9, 1, tzinfo=UTC)
+    window = Window("heart-rate", base, base + timedelta(minutes=3))
+
+    def snapshot(at, rows, scope=window):
+        return HeartRateMinuteSnapshot("self", scope, at, tuple(rows), ())
+
+    def minute(at, avg=60):
+        return HeartRateMinute(
+            at,
+            at + timedelta(minutes=1),
+            avg,
+            avg,
+            avg,
+            "users/me/dataSourceFamilies/google-wearables",
+        )
+
+    try:
+        FitbitMinuteBatch(
+            snapshot(base + timedelta(hours=1), [minute(base), minute(base + timedelta(minutes=1))])
+        ).write_snapshot(warehouse.connection, source_key="first", loaded_at=base)
+        narrow = Window("heart-rate", base + timedelta(minutes=1), base + timedelta(minutes=2))
+        FitbitMinuteBatch(
+            snapshot(base + timedelta(hours=3), [minute(narrow.start, 100)], narrow)
+        ).write_snapshot(warehouse.connection, source_key="new", loaded_at=base)
+        FitbitMinuteBatch(snapshot(base + timedelta(hours=2), [])).write_snapshot(
+            warehouse.connection, source_key="stale", loaded_at=base
+        )
+        assert warehouse.query_rows(
+            "SELECT start_at,average,sample_count FROM base.fitbit_heart_rate_minute"
+        ) == [(narrow.start, 100, None)]
+        FitbitMinuteBatch(snapshot(base + timedelta(hours=4), [])).write_snapshot(
+            warehouse.connection, source_key="empty", loaded_at=base
+        )
+        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 0
+    finally:
+        warehouse.close()
+
+
+def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path):
+    import pytest
+
+    from personal_data_platform.sources.fitbit.api import TransientError
+    from personal_data_platform.sources.fitbit.models import (
+        HeartRateMinute,
+        HeartRateMinuteSnapshot,
+    )
+    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+    from tests.unit.test_fitbit_api import FakeTransport, client, rollup
+
+    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "partial.duckdb"))))
+    warehouse.migrate()
+    base = datetime(2026, 9, 1, tzinfo=UTC)
+    window = Window("heart-rate", base, base + timedelta(days=1))
+    snapshot = HeartRateMinuteSnapshot(
+        "self",
+        window,
+        base + timedelta(days=1),
+        (HeartRateMinute(base, base + timedelta(minutes=1), 60, 50, 70),),
+        (),
+    )
+    try:
+        warehouse.connection.execute("DROP TABLE ops.fitbit_raw_intent")
+        warehouse.connection.execute("DROP TABLE base.fitbit_heart_rate")
+        FitbitMinuteBatch(snapshot).write_snapshot(
+            warehouse.connection, source_key="existing", loaded_at=base
+        )
+        with pytest.raises(TransientError):
+            acquired = client(
+                FakeTransport(
+                    [
+                        {
+                            "rollupDataPoints": [rollup(average=100, maximum=105)],
+                            "nextPageToken": "next",
+                        },
+                        (503, {}, {}),
+                    ]
+                ),
+                clock=lambda: base + timedelta(days=2),
+            ).fetch_heart_rate_minutes(window, subject_key="self")
+            FitbitMinuteBatch(acquired).write_snapshot(
+                warehouse.connection, source_key="partial", loaded_at=base
+            )
+        assert warehouse.query_rows(
+            "SELECT average,source_key FROM base.fitbit_heart_rate_minute"
+        ) == [(60, "existing")]
+    finally:
+        warehouse.close()
+
+
+def test_scalar_bundle_writer_and_unchanged_check_work_without_legacy_intents(tmp_path):
+    from personal_data_platform.raw.models import RawObject
+
+    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "no-intents.duckdb"))))
+    warehouse.migrate()
+    base = datetime(2026, 9, 1, tzinfo=UTC)
+    snapshot = Snapshot(
+        "self",
+        Window("steps", base, base + timedelta(days=1)),
+        base + timedelta(days=1),
+        (Record("steps", "steps", base, base, base + timedelta(minutes=1), 10),),
+    )
+    raw = RawObject(
+        key="raw/fitbit/v2/self/bundle/0.json.gz",
+        source_id="fitbit",
+        schema_version=2,
+        subject_key="self",
+        stream="steps",
+        logical_key="bundle",
+        observed_at=snapshot.fetched_at,
+        sha256="a" * 64,
+        storage_created_at=snapshot.fetched_at,
+        storage_generation=1,
+    )
+    try:
+        warehouse.connection.execute("DROP TABLE ops.fitbit_raw_intent")
+        FitbitBatch(snapshot).write_snapshot(
+            warehouse.connection, source_key=raw.key, loaded_at=base
+        )
+        FitbitBatch(snapshot).write(warehouse.connection, raw, byte_size=1, loaded_at=base)
+        assert warehouse.query_rows("SELECT value,source_key FROM base.fitbit_steps") == [
+            (10, raw.key)
+        ]
+    finally:
+        warehouse.close()
