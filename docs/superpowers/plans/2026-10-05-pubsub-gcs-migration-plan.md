@@ -99,13 +99,13 @@
 **変更:** 必要なCI/package設定、`scripts/migrate_west_warehouse.py`、`scripts/migrate_west_raw.py`、`docs/platform/west-migration-2026-10-05.md`。
 **成果:** Raw v3対応image、source/targetを分離した移行経路、復元結果、pausedの2 Job。
 
-- [ ] Ruff check/format、mypy、`python -m pytest -q`、package build、linux/amd64 container smoke、各Terraform rootのfmt/validate/test、`git diff --check`を実行する。原計画向けの台帳テストはTask 2の最小契約へ改訂し、必要な障害・データ保護のテストを残す。
-- [ ] 新DBで001〜005の適用、source export→別processのtarget import、全値digestとRaw generation/保持起点、0 active leaseを確認する。同一processで異なるMotherDuck tokenを使う`--final-delta`経路は分離実行へ直すか廃止し、通常のexport/importを使用する。
-- [ ] 手動preflightを独立DB/tokenとpreflight bucketで実施し、検証tokenで本番DBへ接続できないことを確認する。新たな常設Jobは作らない。
-- [ ] 5種別の限定1完了日を実API取得し、Raw v3・分心拍・空結果・dbtを確認する。別の空DBへScreen Time backupと保存Rawを復元する試験を1回行う。既存の初回snapshotを最終差分とは扱わない。
-- [ ] 最小releaseのcommit/image digestと復元先を記録し、停止状態の2 Jobだけdeployする。Terraform planは保護bucketの置換、旧resourceの意図しない変更/削除、予定外のJob/metric作成がないことを確認して適用する。
-- [ ] Healthchecksの短い試験周期で欠損→通知→成功による復旧を確認し、24h＋24hへ戻す。native警報も発火/復旧を確認する。メールの到達を未確認なら明記する。
-- [ ] commit `fix: 最小構成の移行と復元を検証可能にする`。cloud検証の結果は状態・時刻・件数だけ記録する。
+- [x] Ruff check/format、mypy、`python -m pytest -q`、package build、linux/amd64 container smoke、各Terraform rootのfmt/validate/test、`git diff --check`を実行する。原計画向けの台帳テストはTask 2の最小契約へ改訂し、必要な障害・データ保護のテストを残す。
+- [x] 新DBで001〜005の適用、source export→別processのtarget import、全値digestとRaw generation/保持起点、0 active leaseを確認する。同一processで異なるMotherDuck tokenを使う`--final-delta`経路は分離実行へ直すか廃止し、通常のexport/importを使用する。
+- [x] 手動preflightを独立DB/tokenとpreflight bucketで実施し、検証tokenで本番DBへ接続できないことを確認する。新たな常設Jobは作らない。
+- [x] 5種別の限定1完了日を実API取得し、Raw v3・分心拍・空結果・dbtを確認する。別の空DBへScreen Time backupと保存Rawを復元する試験を1回行う。既存の初回snapshotを最終差分とは扱わない。
+- [x] 最小releaseのcommit/image digestと復元先を記録し、停止状態の2 Jobだけdeployする。Terraform planは保護bucketの置換、旧resourceの意図しない変更/削除、予定外のJob/metric作成がないことを確認して適用する。
+- [x] Healthchecksの短い試験周期で欠損→通知→成功による復旧を確認し、24h＋24hへ戻す。native警報は発火とJob/receiverの復旧を確認する。滞留警報はcommit後ackを確認済みで、集計後の復旧状態の確認だけTask 5の開始確認に含める。メールの到達を未確認なら明記する。
+- [x] commit `fix: 最小構成の移行と復元を検証可能にする`。cloud検証の結果は状態・時刻・件数だけ記録する。
 
 ## Task 5: 最終差分・切替・旧経路の整理
 
