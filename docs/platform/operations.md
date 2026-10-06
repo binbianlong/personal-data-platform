@@ -1,7 +1,7 @@
 # Platform運用
 
 通常構成はus-west1のWebhook receiver・Pub/Sub・毎時Job・日次Jobと、us-west-2のMotherDuck。
-接続先・確認結果は[西部移行記録](west-migration-2026-10-05.md)を参照する。
+切替時の接続先・確認結果は[西部移行記録](west-migration-2026-10-05.md)を参照する。
 
 ## Deploy
 
@@ -17,10 +17,29 @@ source・dbt・依存・Dockerfileに変更がないpushでは現行reconciliati
 GitHubのPDP_WEST_SCHEDULERS_ENABLED/PDP_WEST_LOGGING_ENABLEDで切替状態を維持する。
 手動run_dailyではcombined daily Jobを実行できる。
 
+## DBの初期化と更新
+
+通常runtimeとscratch DBは`west` profileを使い、SQLは`src/personal_data_platform/migrations/west/`を正本とする。
+`pdp fitbit migrate`は共通スキーマを含む全west migrationを適用する。`--database`を省略した場合は
+`MOTHERDUCK_DATABASE`と`MOTHERDUCK_TOKEN`の接続先を使う。ローカルの空DBなら次のように指定する。
+
+```bash
+pdp fitbit migrate --database /private/path/west-scratch.duckdb --profile west
+```
+
+各migrationのSQLとchecksum記録は同じtransactionで確定し、再実行は適用済みの一致を確認してskipする。
+既存SQLを書き換えず、新しい変更はforward migrationで追加する。旧DBの台帳・適用済みSQLは履歴として保全し、
+通常runtimeから旧DBへmigrationを適用しない。
+
+初回は独立したbucket・DB・tokenで手動preflightを行い、対象DBのmigration、Loader、dbt、日次処理の
+成功を確認してからSchedulerを有効にする。スキーマ更新時は両Schedulerを止めて実行中Jobの終了を確認し、
+runtime・forward migration・dbtを反映する。日次全段階の成功後にSchedulerを再開する。
+
 ## 収集・日次処理
 
 毎時15分のfitbit-hourly-westは通知を集め、完全取得したRawとDBが確定してからackする。
-日次04:10 JSTのreconciliation-westは次の順で進む。
+`pdp reconciliation`は日次全体を実行する。互換性のため受け付けるsource / stream引数でも対象を狭めず、
+Screen Time両streamとFitbitを処理する。日次04:10 JSTのreconciliation-westは次の順で進む。
 
 1. Screen TimeのiPhone・Mac Rawをgeneration指定で取り込む。
 2. 未取込Fitbit Rawを再生し、5種別のTokyo直近7完了日を再照合する。
@@ -97,6 +116,6 @@ target databaseがproductionと同一、既存tableを持つ、環境識別が�
 本番DB ownerから分析アカウントへrestricted read-onlyの自動更新shareを付与する。
 preflightへ本番shareを付与しない。MCPは西部接続とpdp_analytics_westを使う。
 
-schema変更では両Schedulerを止め、Jobの終了を確認し、runtime・forward migration・dbtを反映する。
-日次全段階の成功後にSchedulerを再開する。Raw v3にはv3対応imageを使い、旧decoderへ戻さない。
+schema変更は[DBの初期化と更新](#dbの初期化と更新)に従う。
+Raw v3にはv3対応imageを使い、旧decoderへ戻さない。
 旧組織・Screen Time・共通台帳・Raw/state backupを通常のFitbit整理へ巻き込まない。

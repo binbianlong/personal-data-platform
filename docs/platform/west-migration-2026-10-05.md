@@ -3,6 +3,9 @@
 2026-10-06更新。Webhook・collector・分析/MCPを西部へ切り替え、最小構成をdeployした。
 毎時・日次の手動成功後、2 Scheduler・native監視・西部Loggingを有効化した。
 
+以下の接続先・release・検証結果は切替時点の記録である。現在の通常操作と復旧は[Platform運用](operations.md)、
+構成は[アーキテクチャ](architecture.md)を参照する。切替完了後、移行用のコピー・整理scriptは撤去した。
+
 ## 接続先
 
 GCP projectは`health-data-pipeline-503813`。通常のcompute/Raw/Pub/Sub/Loggingは`us-west1`、
@@ -34,7 +37,7 @@ remoteの対応revisionが公開されるまで停止する。ローカルのCI�
 
 ## Releaseとデータ保全
 
-現在のアプリケーションreleaseは`0562f36`、image digestは
+切替時のアプリケーションreleaseは`0562f36`、image digestは
 `sha256:89d6b8577749c282936af5ce79d45c12beca2100700e875261dea2ee3fd4db6a`。
 Cloud Runの実行が参照するlinux/amd64 manifestは
 `sha256:cb5baa6fddd31ccbe0340622e25c0e8685a7d4306160b21c7601ee2c782435fb`で、

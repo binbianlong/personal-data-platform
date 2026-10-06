@@ -22,12 +22,22 @@ Macは`platform = 3 AND me = 1`の行がちょうど1件あることを確認し
 `pdp screen-time devices`は発見したiPhoneとローカルMacの疑似化`device_key`を表示する。Mac行が
 見つからなくてもMac keyが未設定ならiPhoneの表示を続ける。iPhoneの取得対象は環境変数
 `PDP_SCREEN_TIME_DEVICE_ALLOWLIST`へカンマ区切りで指定した`device_key`だけとし、raw device identifierを
-設定へ保存しない。allowlistが空、または許可した端末を1台も`DevicePeer`に発見できない場合は設定エラーと
-する。一部だけ未発見の場合は発見済み端末を収集するため、`devices`の結果とallowlistを照合して対象端末の
+設定へ保存しない。iPhoneのallowlistを設定したのに許可した端末を1台も`DevicePeer`に発見できない場合はエラーと
+する。未設定のstreamは休止扱いとする。一部だけ未発見の場合は発見済み端末を収集するため、`devices`の結果とallowlistを照合して対象端末の
 不足を確認する。複数iPhoneは別々の`device_key`として処理する。
 
 これらのpathを読むCollectorプロセスにはFull Disk Accessが必要である。開発時のTerminalではなく、
 本番で実際に起動するLaunchAgentの実行バイナリを権限主体にする。
+
+## 認証と疑似化secret
+
+疑似化secretはmacOS Keychain service `personal-data-platform`、account `screen-time-pseudonym-key-hex`から読む。
+`PDP_PSEUDONYM_KEY_HEX`を設定した場合は環境変数を優先する。32 bytes以上のhex値を使い、
+secretをKeychainへ登録してから`pdp screen-time devices`でdevice候補を確認する。
+secretの変更は過去のdevice / segment keyとの同一性を失うため、通常のcredential更新では変更しない。
+
+GCS認証は専用Collector Service AccountをimpersonateするADCを使う。
+作成、所有者・mode確認、LaunchAgentへの設定は[運用](operations.md#launchagent)に従う。
 
 ## SEGB container
 

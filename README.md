@@ -2,8 +2,9 @@
 
 個人データの取得、Raw保存、MotherDuckへの取込、dbt分析を行うPythonプロジェクト。
 
-Loader、監査、再構築はsourceとstreamを選んで実行する。Screen TimeはiPhoneの`App.InFocus`と
-Macの`ScreenTime.AppUsage`を扱う。FitbitはGoogle Health Webhook経由の取り込みを実装し、西部で継続収集する。共通処理とsourceの分離・追加手順は
+Screen TimeはiPhoneの`App.InFocus`とMacの`ScreenTime.AppUsage`を扱う。
+FitbitはGoogle Health WebhookとPub/Sub経由で毎時取り込み、日次Jobで両sourceの取得・分析・監査を行う。
+GCPは`us-west1`、MotherDuckは`us-west-2`を使う。共通処理とsourceの分離・追加手順は
 [`アーキテクチャ`](docs/platform/architecture.md)を参照する。
 
 ## 開発環境
@@ -38,6 +39,7 @@ pdp reconciliation
 pdp rebuild --dry-run
 pdp rebuild --target-db <scratch-database> --allow-partial-history
 pdp preflight
+pdp fitbit migrate --database <scratch.duckdb> --profile west
 pdp fitbit serve
 pdp fitbit ingest-notifications
 pdp fitbit sync --from 2026-09-20 --to 2026-09-27
@@ -45,13 +47,14 @@ pdp fitbit sync --from 2026-09-20 --to 2026-09-27
 
 `loader`、`rebuild`は指定を省略するとiPhoneの`screen_time / app-in-focus`を対象にする。
 `reconciliation`はScreen Time両stream・Fitbitの直近7完了日・dbt・監査をまとめた日次処理である。
-両端末を処理する場合は`--source screen_time --all-streams`、単一streamなら
+`loader`、`rebuild`で両端末を処理する場合は`--source screen_time --all-streams`、単一streamなら
 `--source screen_time --stream app-in-focus`または`--stream app-usage`を付ける。
-未登録の組合せは拒否する。`pdp dbt`は指定なしでは全model、source / stream指定時は対応するmodelとtestを実行する。
+未登録の組合せは拒否する。`reconciliation`の対象は常に日次全体である。
+`pdp dbt`は指定なしでは全model、source / stream指定時は対応するmodelとtestを実行する。
 
 Fitbitの設定・スキーマ準備・復旧手順は[`Fitbit運用`](docs/sources/fitbit/operations.md)を参照する。
-西部リージョンのPub/Sub構成、データ移行、切替・rollbackの順序は
-[`移行計画`](docs/superpowers/plans/2026-10-05-pubsub-gcs-migration-plan.md)に記録する。
+デプロイ、DB更新、日次処理、監視、再構築は[`Platform運用`](docs/platform/operations.md)を参照する。
+完了したリージョン移行の記録は[`西部移行記録`](docs/platform/west-migration-2026-10-05.md)に残す。
 ZIP取り込み機能はアプリに含めない。
 
 `pdp screen-time inspect-mac`はMac自身の`App.InFocus/local`にある完成済みsegmentを読み取り専用で
@@ -61,71 +64,22 @@ GCS認証、Keychainの設定は行わない。詳細は[`Screen Time取得仕�
 
 ## Screen Time Collector
 
-CollectorはMacへ同期されたBiomeの`sync.db`から`platform = 2`のiPhoneを列挙し、allowlistに含まれるdeviceの`App.InFocus/remote` segmentをGCSへ保存する。Full Disk AccessはTerminalではなく、実際にCollectorを起動するプロセスへ付与する。
-Mac自身は`platform = 3 AND me = 1`の唯一の行から同じsecretで疑似化し、
-`PDP_SCREEN_TIME_MAC_DEVICE_KEY`を設定した場合に`ScreenTime.AppUsage/local`の完成済みsegmentを収集する。
-
-疑似化secretはmacOS Keychain service `personal-data-platform`から読む。対応する環境変数があれば環境変数を
-優先する。GCS認証には専用Collector Service AccountをimpersonateするADCを使う。
-
-| Keychain account | 環境変数 |
-|---|---|
-| `screen-time-pseudonym-key-hex` | `PDP_PSEUDONYM_KEY_HEX` |
-
-疑似化secretには32 bytes以上のhex値を使う。まずsecretをKeychainへ登録し、device候補を確認する。
+CollectorはMac上のBiomeから完成済みsegmentをGCSへ保存する。
+疑似化secretはKeychain、認証は専用Service AccountをimpersonateするADCを使う。
+`devices`の疑似化keyからiPhoneのallowlistとMacの対象を設定し、収集プロセスへFull Disk Accessを付与する。
 
 ```bash
 pdp screen-time devices
-```
-
-出力された`device_key`のうち収集対象だけをカンマ区切りで`PDP_SCREEN_TIME_DEVICE_ALLOWLIST`へ設定する。Raw device identifierはallowlistへ保存しない。
-Macを収集する場合は`devices`で`platform=macos`の`device_key`を確認し、
-`PDP_SCREEN_TIME_MAC_DEVICE_KEY`へ設定する。両方の設定は同じCollectorで併用できる。
-
-接続先には`GOOGLE_CLOUD_PROJECT`、`GCS_BUCKET`、`PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL`、
-`GOOGLE_APPLICATION_CREDENTIALS`を設定する。Collector Service Accountは`raw/screen_time/v1/`へのcreateと
-scan receipt・active-device manifestの更新だけを許可し、Rawのread / list / deleteを許可しない。
-
-```bash
 pdp screen-time doctor
 pdp screen-time collect --once
 pdp screen-time collect --watch
 ```
 
-`doctor`はBiome、allowlist、local state、GCS設定、impersonated ADCの種類・所有者・mode・target
-Service Accountを診断する。実際のtoken発行とGCS書込権限は`collect --once`で検証する。
-
-Raw object keyは次の形式で、device identifierとsegment pathはHMAC-SHA-256で疑似化する。SHA-256はgzip前のRaw v2 envelope全体に対して計算する。
-
-```text
-raw/screen_time/v2/<device_key>/<app-in-focus または app-usage>/<segment_key>/
-  <YYYYMMDDTHHMMSSffffffZ>/<sha256>.segb.gz
-```
-
-local SQLite stateはupload前に同じobject keyと決定的gzip bytesを`pending`として保存し、GCS upload成功後だけ`uploaded`へ更新する。再起動時は現在のallowlistから削除済みのdeviceも含め、GCSのread/list権限を使わずに同じkeyとbytesでpending uploadを再試行する。連続する同一segmentはskipするが、`A → B → A`の観測は3件とも保持する。
-
-`--watch`はdefaultで1800秒（30分）ごとにcomplete scanを行う。間隔は`PDP_COLLECTOR_POLL_SECONDS`で変更できる。controlは
-iPhoneの`raw/screen_time/v1/_control/collector/latest/`と`_control/collector/active.json`、Macの
-`_control/collector/app-usage/latest/`と`_control/collector/app-usage/active.json`を別々に公開する。
-成功から24時間で再公開し、送信先・端末設定・休止状態が変わった場合は次のscanで公開する。
-失敗したcontrolは次のscanで再試行する。Rawの変更は各scanで保存し、最新の未完了segmentは後続segmentが現れるまで保留する。
-端末の正式なdecommissionはallowlistまたはMac keyから削除した後、次のcomplete scanがmanifest更新まで
-成功した時点とする。対象が0台になったstreamは空のmanifestで休止を示す。
-
-`pdp rebuild`はCollectorのwrite-only ADCを使わない。Terraformが作るread-only Rebuild Service Account用の
-別ADCを`PDP_REBUILD_GOOGLE_APPLICATION_CREDENTIALS`で指定する。作成手順は
-[`Platform運用`](docs/platform/operations.md#rebuild)に従う。
-
-常駐実行には、秘密値を含まないLaunchAgent plistを生成してからmacOSへ登録する。生成だけでは登録・起動されない。
-
-```bash
-pdp screen-time launch-agent \
-  --output "$HOME/Library/LaunchAgents/com.personal-data-platform.screen-time-collector.plist" \
-  --project-root "$(pwd)" \
-  --python-executable "$(pwd)/.venv/bin/python"
-```
-
-Full Disk Accessの付与、plistの検証、登録・停止手順は[`Screen Time運用`](docs/sources/screen-time/operations.md)に従う。
+`--watch`は30分ごとに走査する。最新の未完了segmentは後続segmentが現れるまで保留し、
+upload失敗時はlocal SQLiteに保存した同じkeyとbytesで再送する。
+認証・疑似化は[`取得仕様`](docs/sources/screen-time/acquisition.md#認証と疑似化secret)、
+Raw形式は[`データモデル`](docs/sources/screen-time/data-model.md)、
+環境変数・LaunchAgent・端末の休止・復旧は[`Screen Time運用`](docs/sources/screen-time/operations.md)を正本とする。
 
 ## テスト
 

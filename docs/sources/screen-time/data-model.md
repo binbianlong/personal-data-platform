@@ -66,7 +66,8 @@ SHA-256が同じ場合だけ新規保存をskipする。転送対象の`A -> B -
 
 ## Collector scan receipt
 
-complete scanが成功したdeviceごとに、次のmutable control objectを更新する。
+complete scanが成功したdeviceごとに、次のmutable control objectを公開する。
+成功した公開から24時間後、または送信先・端末設定の変更後のscanで更新し、失敗した公開は次のscanで再試行する。
 
 ```text
 raw/screen_time/v1/_control/collector/latest/<device_key>.json
@@ -78,7 +79,7 @@ RawのSystem of Recordではなく稼働確認用であり、端末identifier、
 最新ファイルとして転送待ちの分も含む発見総数である。走査が正常に完了し、pendingと完成扱いの転送対象の
 Raw uploadがすべて成功した後だけ更新する。完成待ちだけの場合も更新する。
 
-今回発見できたallowlist対象deviceのreceiptを更新した後、次のmutable manifestを最後に更新する。
+公開対象のallowlist対象deviceのreceiptを更新した後、次のmutable manifestを最後に更新する。
 
 ```text
 raw/screen_time/v1/_control/collector/active.json

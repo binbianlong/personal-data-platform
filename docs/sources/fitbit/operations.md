@@ -1,10 +1,13 @@
 # Fitbit運用
 
-西部の通常構成と切替結果は[西部移行記録](../../platform/west-migration-2026-10-05.md)を参照する。
+通常のJob・監視・停止手順は[Platform運用](../../platform/operations.md)、切替時の結果は
+[西部移行記録](../../platform/west-migration-2026-10-05.md)を参照する。
 
 ## 西部の最小構成
 
-受信Service、Pub/Sub topic/subscription、毎時取得Job、日次Jobを使う。毎時は15分開始・最大50分、日次は04:10 Asia/Tokyo開始・最大100分。2 Jobは同じruntime Service Accountと125分の共有leaseを使い、receiverは別権限とする。常設のpreflight/dbt Jobは作らない。
+受信Service、Pub/Sub topic/subscription、毎時取得Job、日次Jobを使う。
+
+## 環境変数
 
 | 設定 | 用途 |
 | --- | --- |
@@ -13,9 +16,14 @@
 | `PDP_FITBIT_PUBSUB_TOPIC` / `PDP_FITBIT_PUBSUB_SUBSCRIPTION` | 完全なPub/Sub resource名 |
 | `PDP_FITBIT_PUBSUB_ENDPOINT` | `pubsub.us-west1.rep.googleapis.com` |
 | `PDP_HEARTBEAT_CONFIG` | `daily`だけを持つHTTPS成功ping URLのJSON |
-| `PDP_SCHEMA_PROFILE` | 新DBでは`west`。旧DBへ適用しない |
+| `PDP_FITBIT_SUBJECT_KEY` | 安定した疑似subject key。receiverと処理Jobで一致させる |
+| `PDP_FITBIT_PROCESSING_PAUSED` | `true`で取得処理を保留する。通常は`false` |
+| `PDP_SCHEMA_PROFILE` | `west`。旧DBへ適用しない |
 
-通常runtimeのsecret payloadはMotherDuck・OAuth・Webhook・日次heartbeatの4件。`west_secret_versions`で4件の正の数値versionを固定する。preflightのDB/tokenは手動試験用であり、空のpreflight secretにversionを追加する必要はない。秘密値をGit・Terraform stateへ保存しない。
+処理Jobには`GOOGLE_CLOUD_PROJECT`、`GCS_BUCKET`、`MOTHERDUCK_DATABASE`、`MOTHERDUCK_TOKEN`も必要である。
+通常のsecret container・数値pinと手動preflightの資格情報は[Runtime Terraform](../../../infra/terraform/README.md#secretと資格情報)を参照する。
+
+## CLIと再試行
 
 通知は認証・全件検証後に日付×種別へ分割する。1リクエスト1,000単位まで、Pub/Subの各メッセージは1日以内。毎時は最大500メッセージを120秒まで集めて取得し、RawとDBが確定した単位だけackする。未完了単位は再配信し、期限/leaseによる保留だけではJob失敗にしない。
 
@@ -25,16 +33,17 @@ Fitbit Rawは`raw/fitbit/v3/`の直接gzip JSON配列で、1 object最大16 MiB�
 pdp fitbit migrate --database /private/path/west-scratch.duckdb --profile west
 pdp fitbit ingest-notifications --max-messages 500 --collect-seconds 120 --timeout-seconds 3000
 pdp fitbit sync --from 2026-09-28 --to 2026-10-05
-pdp reconciliation --source screen_time --all-streams
+pdp reconciliation
 ```
 
-日次はScreen Timeの両streamと保存Rawの取り込み、5種別の直近7完了日の再照合、dbt、両stream監査を行う。内部のstream監査/成功記録を残し、全段階の完了後だけHealthchecksへ1 pingを送る。監視はPeriod 24時間＋Grace 24時間。Job失敗、Pub/Sub最古未ackが24時間を超える滞留、receiver ERROR logはCloud Monitoringで確認する。
+日次の順序・成功記録・監視は[Platform運用](../../platform/operations.md#収集日次処理)に従う。
 
 7日より長い停止や広い期間の補修は、明示的な`--from`/`--to`で行う。`--resume-id`は提供しない。途中終了時は最初の未完了日・種別を出力し、その範囲から再実行する。日次の7日だけで過去の空白を埋めたと記録しない。手動の物理時刻範囲を日全体へ拡大しない。睡眠・日次指標はproviderのcivil dateを使う。
 
 心拍は完全なUTC分の平均・最小・最大を保存し、sample countはNULL、欠測を0で埋めない。旧秒心拍をコピーしない。Screen Timeの履歴・control・削除保護を維持する。
 
-適用済みwest migration 001〜004は変更せず、005で空の取得台帳10表を撤去する。移行はallowlist付きscriptでScreen Timeと共有記録をコピーし、source exportとtarget importを別processで実行する。Raw v3に対応する最小releaseで復元を確認し、旧Fitbit資産の整理はtable/prefix/queueの限定inventoryに従う。旧組織を削除しない。
+DBの初期化・更新は[Platform運用](../../platform/operations.md#dbの初期化と更新)に従う。
+完了した移行のデータ保全と旧Fitbit整理は[西部移行記録](../../platform/west-migration-2026-10-05.md)に残す。
 
 ## 停止と復旧
 

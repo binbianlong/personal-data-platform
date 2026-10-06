@@ -3,14 +3,16 @@
 ## API Raw
 
 ```text
-raw/fitbit/v3/<subject_key>/health/<YYYYMMDDTHHMMSSffffffZ>/<sha256>.json.gz
+raw/fitbit/v3/<subject_key>/health/<YYYYMMDDTHHMMSSffffffZ>/<bundle_id>/<object_index>/<sha256>.json.gz
 ```
 
 Raw v3は完全取得した単位の直接gzip JSON配列で、最大16 MiB。
 境界をまたいで一つの取得を分割せず、各objectを単独で再生できる。
 subjectは安定した疑似識別子で、OAuth IDやtokenをobject keyへ含めない。
 元APIの未知フィールド、取得範囲、取得時刻、正規化結果を保持し、gzipは決定的・create-only。
-共通`observed_at`は取得開始時刻で、遅れて到着した古い取得による上書きを防ぐ。
+各取得単位の`fetched_at`は全ページ取得の開始時刻で、遅れて到着した古い取得による上書きを防ぐ。
+objectの`observed_at`は含まれる取得単位の`fetched_at`の最大値。`bundle_id`と0始まりの`object_index`で
+独立再生するobjectを識別し、`sha256`はgzip前のJSON全体から計算する。
 Rawは90日。通知・attempt・bundle・cursorの永続台帳、GCS receipt、同期checkpointは保存しない。
 保存済みRawを先に再生し、同一内容の新取得ではRawを増やさずcoverageの取得順位を更新する。
 
@@ -22,23 +24,28 @@ Rawは90日。通知・attempt・bundle・cursorの永続台帳、GCS receipt、
 | base table | 行とvalueの単位 |
 |---|---|
 | `fitbit_steps` | 歩数区間・歩数 |
-| `fitbit_heart_rate` | UTC分ごとの平均・最小・最大bpm、sample countはNULL |
+| `fitbit_heart_rate_minute` | UTC分ごとの平均・最小・最大bpm、sample countはNULL |
 | `fitbit_resting_heart_rate` | 提供元の日付ごとの安静時心拍・bpm |
 | `fitbit_active_zone` | アクティブゾーン区間・既に重み付けされた分 |
 | `fitbit_sleep` | 選択済み睡眠セッション・summaryの睡眠分 |
 | `fitbit_sleep_stage` | 親睡眠に含まれる段階区間・秒 |
 | `fitbit_sleep_wake` | 段階と重なる短い覚醒等の区間・秒 |
 
-共通列はsubject、record ID、置換cursor、UTC開始/終了、value、元UTCオフセット、提供元日付、親ID、
+分心拍以外の共通列はsubject、record ID、置換cursor、UTC開始/終了、value、元UTCオフセット、提供元日付、親ID、
 category、main sleep区分、origin、取得時刻、入力key、取込時刻。主キーは`(subject_key, record_id)`。
 IDのないサンプルはsubject・種別・時刻/区間から決定的なIDを作る。
 日付cursorはcivil dateをUTC午前0時で表した比較用の値であり、実時刻ではない。
 睡眠明細のcursorは親と一致し、物理区間は親の範囲内でなければならない。
 
+分心拍は`average`・`minimum`・`maximum`とUTC分の開始/終了を持ち、主キーは
+`(subject_key, data_source_family, start_at, aggregation_version)`である。
+取得順位・入力key・取込時刻を保持し、`sample_count`はNULLのままとする。
+
 ## 範囲置換と再実行
 
 全ページ取得済みのcursor範囲だけを置き換える。空結果も反映済み範囲として残す。
 `ops.fitbit_coverage`は重ならない範囲ごとの取得順位と現在内容のhashを保持する。
+分心拍の同じ範囲・順位・hashは`ops.fitbit_minute_coverage`で管理する。
 順位は`(fetched_at, source_key)`。新しい範囲を保護し、古い取得は未反映部分だけを更新する。
 
 Snapshot全体から`fetched_at`だけを除き、未知の元API項目も含めた別のhashを重複判定に使う。
@@ -64,9 +71,11 @@ Rawを省いた期間は元のRawが90日後に消えるとRawだけでの完全
 
 | marts view | 内容 |
 |---|---|
-| `daily_fitbit_health` | 歩数・心拍平均/最小/最大/件数・安静時心拍・AZM・睡眠の日時集計 |
+| `daily_fitbit_health` | 歩数・分心拍の日次指標・安静時心拍・AZM・睡眠の日次集計 |
+| `daily_fitbit_heart_rate_minute` | 分平均の平均、分最小値の最小、分最大値の最大、観測分数の日次集計 |
 | `fitbit_steps_time_series` | 歩数区間 |
-| `fitbit_heart_rate_time_series` | 分心拍の平均・最小・最大 |
+| `fitbit_heart_rate_minute_time_series` | 分心拍の平均・最小・最大 |
+| `fitbit_heart_rate_time_series` | 分心拍時系列と同じ列を公開する互換View |
 | `fitbit_sleep_sessions` | 睡眠セッションとsummary |
 | `fitbit_sleep_screen_time` | 睡眠開始前2時間の端末別Screen Time |
 

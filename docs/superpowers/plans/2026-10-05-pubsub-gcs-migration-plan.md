@@ -10,6 +10,9 @@
 
 **状態:** 2026-10-06、本番切替完了。通知分割・Raw v3・台帳なし取得・2 Job・日次1外部heartbeatを実装し、手動成功後に定期実行と西部Loggingを有効化した。保全・整理・検証結果は[西部移行記録](../../platform/west-migration-2026-10-05.md)に記録する。7日・30日の定常使用量とメール到達は継続運用の確認項目である。
 
+以下は完了した実装・移行の履歴。現在の仕様は[アーキテクチャ](../../platform/architecture.md)、通常の操作・復旧は[Platform運用](../../platform/operations.md)を参照する。
+移行用のコピー・整理scriptは撤去済み。適用済みSQLと移行記録は保持する。
+
 ## 共通条件
 
 - 通常runtimeはGCP `us-west1`、MotherDuck `us-west-2`。受信Service 1、Pub/Sub topic/subscription各1、処理Job 2、Scheduler 2。

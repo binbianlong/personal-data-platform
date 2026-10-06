@@ -53,7 +53,8 @@ Raw objectごとの最新取込状態を保持する。
 | `schema_version` | Rawの形式version。parser versionとは区別する |
 | `subject_key` / `logical_key` | sourceが定義する対象と観測単位 |
 | `observed_at` | UTC観測時刻 |
-| `storage_created_at` | GCS upload完了時刻。Lifecycle期限判定の正本 |
+| `storage_created_at` | GCS upload完了時刻 |
+| `retention_started_at` | 移行コピーの元の保持起点。NULLなら`storage_created_at`で期限判定 |
 | `storage_generation` | listingとdownloadを結び付けるGCS object generation |
 | `retention_expired_at` | sourceの保持期限以降のLifecycle削除をReconciliationが確認した時刻 |
 | `content_sha256` | 展開後Raw bytesのSHA-256 |
@@ -64,7 +65,7 @@ Raw objectごとの最新取込状態を保持する。
 | `error_type` / `error_message` | 最新失敗。成功時はnull |
 | `retry_count` | 同じobject keyの再試行回数 |
 
-`storage_created_at`が不明な欠損objectは安全側に失敗させる。`retention_expired_at`を持つ成功行は長期分析履歴と
+保持起点が不明な欠損objectは安全側に失敗させる。`retention_expired_at`を持つ成功行は長期分析履歴と
 監査証跡として残すが、日次のlive Raw照合対象から外す。状態と件数の読取には`source_id`と`source_stream`を
 必ず指定し、他scopeの`failed`や古い成功行を混ぜない。
 
@@ -88,11 +89,14 @@ LoaderはRaw identityの値をそのまま保存し、成功判定と再試行�
 
 forward-only migrationの`migration_id`、ファイルSHA-256、`applied_at`を保持する。一度適用した
 migrationのchecksumが変わっていた場合は停止し、既存migrationを書き換えない。
-`001_initial.sql`で初期スキーマを作成する。`002_screen_time_app_usage_platform.sql`で
-streamから`ios`/`macos`を決めるmacroへ更新する。
-`003_fitbit.sql`でFitbitの7 base table、範囲台帳、削除IDの順位台帳を追加する。
+通常runtimeは`west` profileを使う。`001_initial.sql`で初期スキーマを作成し、
+`002_screen_time_app_usage_platform.sql`でstreamから`ios`/`macos`を決めるmacroへ更新する。
+`003_fitbit_baseline.sql`で分心拍を含むFitbit baseと範囲・削除台帳を追加し、
+`004_raw_retention_origin.sql`で保持起点を記録する。`005_minimal_fitbit_processing.sql`は未使用の取得状態10表を撤去する。
 各SQLと適用履歴は同じtransactionで確定し、失敗時はそのSQLの変更と履歴をrollbackする。
-SQLの正本はPython package内の`src/personal_data_platform/migrations/`に置き、wheelにも同梱する。
+通常のSQLはPython package内の`src/personal_data_platform/migrations/west/`に置き、wheelにも同梱する。
+旧profileの適用済みSQLは履歴として保持し、新runtimeで旧DBを更新しない。
+初期化・更新手順は[Platform運用](operations.md#dbの初期化と更新)に従う。
 
 ### `ops.job_lock`
 

@@ -12,3 +12,4 @@
 | [`chatgpt-mcp.md`](chatgpt-mcp.md) | ChatGPTへのread-only MCP接続と受入確認 |
 | [`security.md`](security.md) | IAM、secret、暗号化、個人情報の扱い |
 | [`operations.md`](operations.md) | デプロイ、定期実行、監視、照合、再構築 |
+| [`west-migration-2026-10-05.md`](west-migration-2026-10-05.md) | 2026-10-06に完了した西部移行の記録 |

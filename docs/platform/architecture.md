@@ -3,24 +3,29 @@
 ## 構成
 
 ```text
-Source固有の取得処理
-  -> GCS Raw（source固有のkey、schema version、保持期限）
-  -> source / stream別Loader（Cloud Run JobまたはWebhook worker）
+Screen Time Collector -> GCS Raw -> 日次JobのLoader
+Google Health Webhook -> receiver -> Pub/Sub -> 毎時Job
+  -> API完全取得 -> 変更時だけGCS Raw -> Loader -> commit後ack
+
+共通Loader
   -> MotherDuckの型付きbase
   -> dbt View
   -> MotherDuck Remote MCP（read-only）
   -> ChatGPT
 
-source / stream別Cloud Run Reconciliation Job
-  -> sourceの稼働状況 / GCS / MotherDuck / 必須relationを照合
-  -> 成功時だけ対応する外部monitorへheartbeat
+日次Cloud Run Job
+  -> Screen Time両streamと保存済みFitbit Rawの取込
+  -> Fitbit直近7完了日の再照合 -> dbt -> 両streamの監査
+  -> 全段階成功時だけdaily heartbeatを1回送信
 ```
 
-実データの取得まで実装しているのは、Macへ同期されたiPhoneの`App.InFocus`と
-Mac自身の`ScreenTime.AppUsage`である。両方とも[`Screen Time`](../sources/screen-time/)に属し、
+Macへ同期されたiPhoneの`App.InFocus`とMac自身の`ScreenTime.AppUsage`は
+[`Screen Time`](../sources/screen-time/)に属し、
 `source_id=screen_time`、`stream=app-in-focus`または`app-usage`でRaw schema v1/v2を扱う。
-Fitbitは`fitbit / health`としてWebhook受信・API取得・Raw保存・取込・分析を実装し、
-本番導入は準備段階である。専用Service/queueで即時処理し、定期補修は既存reconciliationを使う。
+Fitbitは`fitbit / health`としてWebhook受信・API取得・Raw v3保存・取込・分析を行う。
+GCP `us-west1`の通知専用receiver、Pub/Sub、毎時15分の取得Job、日次04:10 Asia/TokyoのJobと、
+MotherDuck `us-west-2`を使う。通常のJobは同じimageとruntime Service Accountを共有し、receiverの権限を分ける。
+定期実行・監視・leaseの契約は[Platform運用](operations.md)を参照する。
 複数source、同じsource内の別stream、複数schema versionを扱う共通処理はsynthetic fixtureで検証する。
 
 単一GCP project内で本番と検証を運用する。本番とは別のRawを使う検証ではGCS bucket、MotherDuck database、
@@ -57,9 +62,10 @@ source固有の稼働監査は`SourceHealth`として成功可否と詳細を共
 - 取得処理はRawの保存までを担当し、分析のinterval生成や日次集計を行わない。
 - Source adapterはRawを型付きbatchへdecodeし、Warehouseがobject単位のtransactionを管理する。
 - Screen Timeは取り込み側で重複・削除を判定し、MotherDuckにはイベントを1件ずつ保存する。
-  判定状態は原文を含まないSQLite差分状態としてGCSの専用control領域に保持する。
+  判定状態は原文を含まないMotherDuckの補助tableへ保存し、Rawの取込成功と同じtransactionで確定する。
 - dbtはinterval、日境界、集計、source横断JOINをViewとして提供する。
-- ChatGPTは分析用Viewだけをread-onlyで参照する。
+- ChatGPTは本番DBのrestricted read-only shareを分析アカウントから参照する。公開範囲は
+  [`ChatGPT接続`](chatgpt-mcp.md)に従う。
 
 詳細は[`raw-data.md`](raw-data.md)、[`analytics.md`](analytics.md)、[`security.md`](security.md)を正本とする。
 source間の処理分離はアプリケーションの契約である。同じRaw bucketとMotherDuck databaseを使うruntimeの
@@ -72,9 +78,10 @@ source間の処理分離はアプリケーションの契約である。同じRa
 3. 同じRaw identityとgenerationの再実行で分析行を重複生成しない。
 4. 後着・訂正の分析上の扱いはsourceの型付きmodelで定義し、取込済み履歴をMotherDuckへ保持する。
 5. GCSに残る選択source / streamの保持範囲を、明示的なpartial historyとしてscratch databaseへ再構築できる。
-6. 選択scopeの全監査項目が成功した後だけ対応する外部heartbeatを送信する。確定順序と制約は
+6. 日次の全取得・dbt・両Screen Time監査が成功した後だけ外部daily heartbeatを送信する。確定順序と制約は
    [`analytics.md`](analytics.md)に従う。
-7. iPhone Screen Timeは毎時Loaderを実行し、upload完了から2時間以内の分析View反映を通常時のfreshness基準とする。
+7. Screen Timeは日次Jobで取り込む。Collectorは30分ごとに走査するが、最新の未完了segmentは
+   後続segmentが現れるまで保留するため、event発生からの即時反映を保証しない。
 
 ## Source・stream追加手順
 

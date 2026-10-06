@@ -12,9 +12,10 @@ Macは`sync.db`の唯一の`platform = 3 AND me = 1`行から疑似化device key
 継続収集する`ScreenTime.AppUsage/local`とは別のstreamを読むため、日次集計の入力には使わない。
 
 共通処理には`source_id=screen_time`、`stream=app-in-focus`と`app-usage`を登録する。
-新規segmentはどちらもRaw v2で保存する。`loader`、`reconciliation`、`rebuild`の引数省略時は
+新規segmentはどちらもRaw v2で保存する。`loader`、`rebuild`の引数省略時は
 従来のiPhone stream、両方を処理する場合は`--source screen_time --all-streams`を使う。
 dbt selectorは共通の`tag:screen_time`である。
+`reconciliation`は両Screen Time streamとFitbitをまとめた日次処理である。
 
 取得、設定、SQLite state、LaunchAgent、Raw key / control、GCSのcontrol更新、decoder、型付きbatch、
 Collector稼働監査の実装は`src/personal_data_platform/sources/screen_time/`に置く。既存の

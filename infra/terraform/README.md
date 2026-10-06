@@ -19,11 +19,13 @@ terraform apply runtime.tfplan
 
 `PDP_WEST_SCHEDULERS_ENABLED`と`PDP_WEST_LOGGING_ENABLED`をrepository variablesで管理し、
 切替後のdeployで停止状態へ戻さない。`PDP_WEST_LOGGING_EXCLUSIONS`は既存_Defaultの除外を引き継ぐ。
-移行中はTerraform Plan/Deploy workflowを停止し、対応revisionの公開・plan確認後に再開する。
+通常のデプロイ、DB更新、停止・復旧手順は[Platform運用](../../docs/platform/operations.md)を参照する。
 
-## 西部の並行構成
+## Runtime構成
 
-`enable_west_runtime=true`で`us-west1`の別Raw/preflight bucket、毎時/日次の2つのJob、通知専用Service、Pub/Sub pull subscription、5つのsecret container、通常log用bucketを追加する。旧実行系・Cloud Tasks・旧secret参照は撤去済み。Screen Timeの旧Rawとstate backupは保持する。`west_image_uri`は`us-west1`のdigest、MotherDuckは西部組織内の別production/preflight DBを指定する。Rawは新規の`age=90`に加え、Screen Timeコピーの`days_since_custom_time=90`で元の保持起点を維持し、soft deleteを無効にする。
+通常は`enable_west_runtime=true`とし、`us-west1`のRaw/preflight bucket、毎時/日次Job、通知専用Service、Pub/Sub pull subscription、5つのsecret container、通常log用bucketを管理する。Screen Timeの旧Rawとstate backupは保持する。`west_image_uri`は`us-west1`のdigest、MotherDuckは西部組織内の別production/preflight DBを指定する。Rawは新規の`age=90`に加え、Screen Timeコピーの`days_since_custom_time=90`で元の保持起点を維持し、soft deleteを無効にする。
+
+## Secretと資格情報
 
 新secretはglobal secret＋単一`us-west1` replicaで、payloadはTerraformへ渡さない。secret containerを先に作り、payload/versionの登録はTerraform外で行う。受信Serviceと各Jobの参照先は、秘密値を含まない`west_secret_versions` mapで数値versionへ固定する。`enable_west_runtime=false`の準備構成では既定の`{}`を使い、有効化するときは通常runtimeが使う下記4つのkeyを指定する。未使用のpreflight keyは省略できる。値は`"1"`などの正の整数文字列で、`latest`や独自alias、未知のkeyは拒否する。
 
@@ -45,4 +47,6 @@ OAuth JSONは`client_id/client_secret/refresh_token/health_user_id`、Webhook JS
 
 `west_logging_enabled=true`は既存`_Default` sinkを西部log bucketへ切り替える。先に既存exclusionを読み取り、`west_logging_exclusions`へ同じfilterを設定する。`_Required`と旧bucket内の過去logは維持する。同一projectのlog bucketへのsinkは追加のwriter権限を必要としない。[Loggingの宛先設定](https://docs.cloud.google.com/logging/docs/export/configure_export_v2)
 
-移行中は新旧secret version、Scheduler、image、bucketが並存し、定常無料枠の目標を超え得る。切替・復旧確認後に旧資産を範囲指定で整理する。backendは既存`TF_STATE_BUCKET`とprefixを維持し、西部state bucketへの移動はバックアップ・lock確認を含む独立した操作とする。
+backendは西部state bucketを`TF_STATE_BUCKET`へ指定し、prefix `personal-data-platform/runtime`を使う。
+stateの移動は通常deployから分け、バックアップ・lock確認を行う。完了した切替と旧資産整理の結果は
+[西部移行記録](../../docs/platform/west-migration-2026-10-05.md)に残す。

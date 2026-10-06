@@ -16,8 +16,8 @@ stateはpublic access prevention、uniform access、versioning、prevent_destroy
 既存ASIA state bucketを保全し、西部runtime backendにはstate_bucket_name_westを指定する。
 bootstrap自身のstateはローカルに保存し、安全な場所へbackupする。
 
-通常registryはruntime_westだけ。us-central1の旧repositoryは、旧Job/Serviceの参照を外し、
-Raw v3対応releaseと復元を確認してから撤去する。旧imageをRaw v3のrollbackへ使わない。
+通常registryはruntime_westだけ。旧repositoryの撤去とRaw v3対応releaseの復元確認は
+[西部移行記録](../../docs/platform/west-migration-2026-10-05.md)に残す。rollbackにはRaw v3対応imageを使う。
 西部registryは30日超のimageを削除し、直近5版とdeployed-タグを保持する。
 CIは現行Job・receiver・指定rollback・candidateのdigestをapply前に保護する。
 
