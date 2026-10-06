@@ -26,10 +26,6 @@ dependencies = [
 pdp = "personal_data_platform.cli:main"
 
 [project.optional-dependencies]
-migration = [
-  "google-cloud-tasks>=2.20,<3",
-  "pandas>=2.2,<4",
-]
 dev = [
   "mypy==2.3.1",
   "pytest>=8.4,<10",
@@ -62,5 +58,5 @@ strict = true
 # These dependencies do not publish a py.typed marker. Their values are
 # constrained by the transport and parser protocols at the application boundary.
 [[tool.mypy.overrides]]
-module = ["google.cloud", "google.cloud.storage.*", "google.cloud.tasks_v2.*", "google.cloud.pubsub_v1.*", "tink", "tink.*", "ccl_segb", "ccl_segb.*"]
+module = ["google.cloud", "google.cloud.storage.*", "google.cloud.pubsub_v1.*", "tink", "tink.*", "ccl_segb", "ccl_segb.*"]
 ignore_missing_imports = true
