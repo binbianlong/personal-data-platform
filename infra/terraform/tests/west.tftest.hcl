@@ -223,6 +223,10 @@ run "west_storage_and_monitoring_are_separate" {
     condition     = google_logging_project_sink.default_west[0].name == "_Default" && strcontains(google_logging_project_sink.default_west[0].destination, google_logging_project_bucket_config.west[0].id) && google_logging_project_bucket_config.west[0].location == "us-west1" && !google_monitoring_alert_policy.west_pubsub_backlog[0].enabled && alltrue([for policy in google_monitoring_alert_policy.west_job_failed : !policy.enabled])
     error_message = "Ordinary logs must have one west route and paused preparation must not send missing-work alerts."
   }
+  assert {
+    condition     = google_logging_project_sink.default_west[0].unique_writer_identity
+    error_message = "The existing _Default sink reports a Google-managed writer identity; preserve it to avoid persistent deployment drift."
+  }
 }
 
 run "west_only_runtime_pins_and_shared_identity" {

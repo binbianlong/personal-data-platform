@@ -100,6 +100,8 @@ Cloud Tasks SDKは一度だけの整理script用のoptional migration dependency
 西部registryと互換性のあるRaw v3 rollback imageを保持し、Cloud Tasks向けのdeploy権限を撤去した。
 最終inventoryはJob2件・Service1件・有効Scheduler2件・有効native警報3件・registry1件。
 通常logの西部30日保持と、runtimeが4 secretのversion1だけを使うことを確認した。
+既定Logging sinkのGoogle-managed writer identityをTerraformでも維持し、
+再読後に同じ設定へ更新し続ける差分を解消した。
 
 検証・backup・secret・健康データはGit対象外の`var/west-migration/2026-10-05/`へ保存する。
 7日・30日のGCS容量/Class A/B、Pub/Sub滞留・再配信、Cloud Run実行時間/送信、MotherDuck容量/CUhと
