@@ -136,7 +136,7 @@ def test_schema_profile_validates_runtime_selection(monkeypatch):
     from personal_data_platform import config
 
     monkeypatch.delenv("PDP_SCHEMA_PROFILE", raising=False)
-    assert config.schema_profile() == "legacy"
+    assert config.schema_profile() == "west"
     monkeypatch.setenv("PDP_SCHEMA_PROFILE", "west")
     assert config.schema_profile() == "west"
     monkeypatch.setenv("PDP_SCHEMA_PROFILE", "unknown")

@@ -6,26 +6,32 @@ from personal_data_platform import dbt_runner
 
 
 def test_cloud_dbt_migrates_before_models(monkeypatch) -> None:
-    calls: list[str] = []
+    import duckdb
 
-    class FakeWarehouse:
-        def __init__(self, _connection) -> None:
-            calls.append("connect")
+    from personal_data_platform.storage.motherduck import Warehouse
 
-        def migrate(self) -> None:
-            calls.append("migrate")
-
-        def close(self) -> None:
-            calls.append("close")
-
+    warehouse = Warehouse(duckdb.connect())
+    calls = []
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "connect", lambda _config: object())
-    monkeypatch.setattr(dbt_runner, "Warehouse", FakeWarehouse)
-    monkeypatch.setattr(dbt_runner, "run_dbt", lambda *, target: calls.append(f"dbt:{target}"))
+    monkeypatch.setattr(dbt_runner, "connect", lambda _config: warehouse.connection)
+    monkeypatch.setattr(dbt_runner, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(warehouse, "close", lambda: None)
 
-    assert dbt_runner.run_dbt_from_env() == 0
-    assert calls == ["connect", "migrate", "close", "dbt:prod"]
+    def run_models(**kwargs):
+        assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 5
+        assert (
+            warehouse.query_value("SELECT count(*) FROM ops.job_lock WHERE expires_at > now()") == 1
+        )
+        calls.append(kwargs["target"])
+
+    monkeypatch.setattr(dbt_runner, "run_dbt", run_models)
+    try:
+        assert dbt_runner.run_dbt_from_env() == 0
+        assert calls == ["prod"]
+        assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+    finally:
+        warehouse.connection.close()
 
 
 def test_cloud_dbt_rejects_non_production_target(monkeypatch) -> None:
@@ -97,7 +103,7 @@ def test_all_writers_share_loader_lease(monkeypatch):
     from personal_data_platform.storage.motherduck import Warehouse
 
     warehouse = Warehouse(duckdb.connect(":memory:"))
-    warehouse.migrate()
+    warehouse.migrate(profile="west")
     assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
     monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
@@ -120,7 +126,7 @@ def test_inherited_dbt_lease_is_checked_and_not_released(monkeypatch):
     from personal_data_platform.storage.motherduck import Warehouse
 
     warehouse = Warehouse(duckdb.connect(":memory:"))
-    warehouse.migrate()
+    warehouse.migrate(profile="west")
     assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
     monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")

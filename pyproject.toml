@@ -14,7 +14,6 @@ dependencies = [
   "google-auth>=2.40,<3",
   "google-cloud-storage>=3.13.1,<4",
   "google-cloud-pubsub>=2,<3",
-  "google-cloud-tasks>=2.20,<3",
   "google-crc32c>=1.6,<2",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
@@ -28,6 +27,7 @@ pdp = "personal_data_platform.cli:main"
 
 [project.optional-dependencies]
 migration = [
+  "google-cloud-tasks>=2.20,<3",
   "pandas>=2.2,<4",
 ]
 dev = [

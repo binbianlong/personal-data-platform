@@ -216,7 +216,7 @@ class HealthClient:
 
     ``window`` is the actual cursor range to replace. The caller expands interval
     boundaries against existing records before invoking this method. Retries are
-    owned by the durable task worker, so a failed page never produces a snapshot.
+    completed by the acquisition runner, so a failed page never produces a snapshot.
     """
 
     def __init__(

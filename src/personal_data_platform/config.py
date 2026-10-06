@@ -24,12 +24,10 @@ class ConfigurationError(ValueError):
 
 def schema_profile() -> Literal["legacy", "west"]:
     """Choose one migration history consistently across jobs and recovery commands."""
-    value = os.environ.get("PDP_SCHEMA_PROFILE", "legacy")
-    if value == "legacy":
-        return "legacy"
-    if value == "west":
-        return "west"
-    raise ConfigurationError("PDP_SCHEMA_PROFILE must be legacy or west")
+    value = os.environ.get("PDP_SCHEMA_PROFILE", "west")
+    if value != "west":
+        raise ConfigurationError("PDP_SCHEMA_PROFILE must be west")
+    return "west"
 
 
 @dataclass(frozen=True, slots=True)

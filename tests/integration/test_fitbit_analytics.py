@@ -277,7 +277,6 @@ def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path)
 
 def test_scalar_bundle_writer_and_unchanged_check_work_without_legacy_intents(tmp_path):
     from personal_data_platform.raw.models import RawObject
-    from personal_data_platform.sources.fitbit.writer import can_skip_snapshot
 
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "no-intents.duckdb"))))
     warehouse.migrate()
@@ -305,7 +304,6 @@ def test_scalar_bundle_writer_and_unchanged_check_work_without_legacy_intents(tm
         FitbitBatch(snapshot).write_snapshot(
             warehouse.connection, source_key=raw.key, loaded_at=base
         )
-        assert can_skip_snapshot(warehouse, snapshot)
         FitbitBatch(snapshot).write(warehouse.connection, raw, byte_size=1, loaded_at=base)
         assert warehouse.query_rows("SELECT value,source_key FROM base.fitbit_steps") == [
             (10, raw.key)

@@ -102,7 +102,7 @@ def fixture():
         "'api',now(),'raw/fitbit/v2/a',now())"
     )
     warehouse.connection.execute(
-        "INSERT INTO ops.job_lock VALUES ('loader','new-writer',now()+INTERVAL '1 hour')"
+        "INSERT INTO ops.job_lock VALUES ('loader','new-writer',now()-INTERVAL '1 hour')"
     )
     warehouse.connection.execute(
         "INSERT INTO ops.ingestion_metadata "
@@ -232,10 +232,9 @@ def test_cleanup_rejects_modified_rows_and_preserves_unreviewed_rows(fixture):
         "INSERT INTO ops.fitbit_raw_intent SELECT receipt_key,work_index+1,subject_key,data_type,"
         "range_start,range_end,raw_key||'-unreviewed',fetched_at FROM ops.fitbit_raw_intent"
     )
-    apply(fixture, manifest)
-    assert warehouse.query_rows("SELECT raw_key FROM ops.fitbit_raw_intent") == [
-        ("raw/fitbit/v1/a-unreviewed",)
-    ]
+    with pytest.raises(ValueError, match="row changed"):
+        apply(fixture, manifest)
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_raw_intent") == 2
 
 
 def test_cleanup_requires_stopped_writers_paused_queue_and_reviewed_digest(fixture):
@@ -319,3 +318,26 @@ def test_cleanup_preserves_v2_metric_and_coverage_rows_in_shared_legacy_tables(f
     assert warehouse.query_rows("SELECT source_key FROM ops.fitbit_coverage") == [
         ("raw/fitbit/v2/a",)
     ]
+
+
+def test_large_inventory_keeps_only_database_side_fingerprint(fixture):
+    warehouse, _, _ = fixture
+    warehouse.connection.execute(
+        "INSERT INTO base.fitbit_steps (subject_key,record_id,cursor_at,start_at,origin,"
+        "fetched_at,source_key,loaded_at) SELECT 's', 'bulk-' || i, now(),now(),'api',"
+        "now(),'raw/fitbit/v1/bulk',now() FROM range(10000) t(i)"
+    )
+    manifest = inventory(fixture)
+    table = next(v for v in manifest["tables"] if v["table"] == "base.fitbit_steps")
+    assert table["row_count"] == 10001
+    assert "rows" not in table
+    assert len(str(manifest)) < 10000
+    assert apply(fixture, manifest)["rows"] >= 10001
+    assert apply(fixture, manifest)["rows"] == 0
+
+
+def test_cleanup_refuses_active_old_database_writer(fixture):
+    fixture[0].connection.execute("UPDATE ops.job_lock SET expires_at=now()+INTERVAL '1 hour'")
+    with pytest.raises(ValueError, match="active.*lease"):
+        apply(fixture, inventory(fixture))
+    assert fixture[0].query_value("SELECT count(*) FROM base.fitbit_steps") == 1

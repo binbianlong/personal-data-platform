@@ -85,27 +85,23 @@ def _resources(connection, bucket, old: ResourceIds, new: ResourceIds) -> None:
         raise ValueError("connected database does not match the old resource ID")
 
 
-def _primary_key(connection, table: str) -> list[str]:
-    schema, name = table.split(".")
-    rows = connection.execute(
-        "SELECT constraint_column_names FROM duckdb_constraints() "
-        "WHERE schema_name=? AND table_name=? AND constraint_type='PRIMARY KEY'",
-        [schema, name],
-    ).fetchall()
-    if (
-        len(rows) != 1
-        or not rows[0][0]
-        or any(not _IDENTIFIER.fullmatch(value) for value in rows[0][0])
-    ):
-        raise ValueError(f"cleanup requires an explicit primary key: {table}")
-    return list(rows[0][0])
+def _table_inventory(connection, table: str) -> dict:
+    columns = [row[0] for row in connection.execute(f"DESCRIBE {table}").fetchall()]
+    if not columns or any(not _IDENTIFIER.fullmatch(name) for name in columns):
+        raise ValueError("unexpected cleanup columns")
+    expression = "hash(" + ",".join(f'"{name}"' for name in columns) + ")"
+    count, total, xor = connection.execute(
+        f"SELECT count(*), coalesce(sum({expression}::HUGEINT),0)::VARCHAR, "
+        f"coalesce(bit_xor({expression}),0)::VARCHAR FROM {table} WHERE {TABLE_SCOPES[table]}"
+    ).fetchone()
+    return {"table": table, "columns": columns, "row_count": count, "fingerprint": [total, xor]}
 
 
 def inventory_legacy(connection, bucket, tasks, *, old: ResourceIds, new: ResourceIds) -> dict:
     """Read one source-scoped inventory; no resource is mutated or paused."""
     _resources(connection, bucket, old, new)
     manifest = {
-        "version": 1,
+        "version": 2,
         "old": asdict(old),
         "new": asdict(new),
         "inventoried_at": datetime.now(UTC).isoformat(),
@@ -125,24 +121,7 @@ def inventory_legacy(connection, bucket, tasks, *, old: ResourceIds, new: Resour
         for table, scope in TABLE_SCOPES.items():
             if table not in existing:
                 continue
-            key = _primary_key(connection, table)
-            columns = [row[0] for row in connection.execute(f"DESCRIBE {table}").fetchall()]
-            positions = [columns.index(name) for name in key]
-            rows = connection.execute(f"SELECT * FROM {table} WHERE {scope}").fetchall()
-            manifest["tables"].append(
-                {
-                    "table": table,
-                    "primary_key": key,
-                    "row_count": len(rows),
-                    "rows": [
-                        {
-                            "key": [_canonical(row[position]) for position in positions],
-                            "sha256": manifest_sha256(row),
-                        }
-                        for row in rows
-                    ],
-                }
-            )
+            manifest["tables"].append(_table_inventory(connection, table))
         connection.execute("ROLLBACK")
     except BaseException:
         connection.execute("ROLLBACK")
@@ -161,7 +140,7 @@ def inventory_legacy(connection, bucket, tasks, *, old: ResourceIds, new: Resour
 
 def _validate_manifest(connection, manifest: dict, old: ResourceIds, new: ResourceIds) -> None:
     if (
-        manifest.get("version") != 1
+        manifest.get("version") != 2
         or manifest.get("old") != asdict(old)
         or manifest.get("new") != asdict(new)
     ):
@@ -177,23 +156,19 @@ def _validate_manifest(connection, manifest: dict, old: ResourceIds, new: Resour
         if table not in TABLE_SCOPES or table in seen_tables:
             raise ValueError("table is outside the cleanup allowlist or duplicated")
         seen_tables.add(table)
-        if item.get("primary_key") != _primary_key(connection, table):
-            raise ValueError("manifest primary key does not match the table")
-        rows = item.get("rows")
-        if not isinstance(rows, list) or item.get("row_count") != len(rows):
-            raise ValueError("manifest row inventory is incomplete")
-        seen_keys = set()
-        for row in rows:
-            key = row.get("key")
-            if not isinstance(key, list) or len(key) != len(item["primary_key"]):
-                raise ValueError("invalid manifest row key")
-            digest = row.get("sha256")
-            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-                raise ValueError("invalid manifest row digest")
-            encoded = json.dumps(key, sort_keys=True)
-            if encoded in seen_keys:
-                raise ValueError("duplicate manifest row key")
-            seen_keys.add(encoded)
+        if item.get("columns") != [
+            row[0] for row in connection.execute(f"DESCRIBE {table}").fetchall()
+        ]:
+            raise ValueError("manifest columns do not match the table")
+        if type(item.get("row_count")) is not int or item["row_count"] < 0:
+            raise ValueError("invalid manifest row count")
+        digest = item.get("fingerprint")
+        if (
+            not isinstance(digest, list)
+            or len(digest) != 2
+            or any(not isinstance(v, str) or re.fullmatch(r"[0-9]+", v) is None for v in digest)
+        ):
+            raise ValueError("invalid manifest fingerprint")
     for row in objects:
         key, generation = row.get("key"), row.get("generation")
         if not isinstance(key, str) or not key.startswith(PREFIXES) or key in seen_objects:
@@ -211,10 +186,6 @@ def _validate_manifest(connection, manifest: dict, old: ResourceIds, new: Resour
         ):
             raise ValueError("task is outside the cleanup allowlist or duplicated")
         seen_tasks.add(name)
-
-
-def _row_predicate(item: dict) -> str:
-    return " AND ".join(f'"{name}" IS NOT DISTINCT FROM ?' for name in item["primary_key"])
 
 
 def apply_manifest(
@@ -248,25 +219,26 @@ def apply_manifest(
     counts = {"rows": 0, "objects": 0, "tasks": 0}
     connection.execute("BEGIN TRANSACTION")
     try:
+        if connection.execute(
+            "SELECT count(*) FROM ops.job_lock WHERE expires_at > current_timestamp"
+        ).fetchone()[0]:
+            raise ValueError("active old writer lease prevents cleanup")
+        remaining = []
         for item in manifest["tables"]:
+            current = _table_inventory(connection, item["table"])
+            if current["row_count"] == 0:
+                continue
+            if current != item:
+                raise ValueError(f"inventoried row changed: {item['table']}")
+            remaining.append(item)
+        for item in remaining:
             table = item["table"]
-            predicate = _row_predicate(item)
-            scope = TABLE_SCOPES[table]
-            for row in item["rows"]:
-                current = connection.execute(
-                    f"SELECT * FROM {table} WHERE ({scope}) AND {predicate}", row["key"]
-                ).fetchone()
-                if current is not None and manifest_sha256(current) != row["sha256"]:
-                    raise ValueError(f"inventoried row changed: {table}")
-        for item in manifest["tables"]:
-            table = item["table"]
-            for row in item["rows"]:
-                deleted = connection.execute(
-                    f"DELETE FROM {table} WHERE ({TABLE_SCOPES[table]}) AND {_row_predicate(item)} "
-                    "RETURNING 1",
-                    row["key"],
-                ).fetchall()
-                counts["rows"] += len(deleted)
+            deleted = connection.execute(
+                f"DELETE FROM {table} WHERE {TABLE_SCOPES[table]}"
+            ).fetchone()[0]
+            if deleted != item["row_count"]:
+                raise RuntimeError("cleanup row count changed")
+            counts["rows"] += deleted
         connection.execute("COMMIT")
     except BaseException:
         connection.execute("ROLLBACK")

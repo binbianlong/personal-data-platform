@@ -9,8 +9,8 @@ import pytest
 from personal_data_platform.loader.models import LoadSummary
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.job import (
+    _run_reconciliation_sources,
     run_reconciliation,
-    run_reconciliation_from_env,
 )
 from personal_data_platform.reconciliation.models import ReconciliationResult
 from personal_data_platform.sources.registry import get_source
@@ -660,7 +660,7 @@ def test_reconciliation_rejects_deployment_retention_drift_before_cloud_access(
     )
 
     with pytest.raises(ValueError, match=name):
-        run_reconciliation_from_env()
+        _run_reconciliation_sources()
 
 
 def test_reconciliation_rejects_heartbeat_url_with_cloud_monitoring(monkeypatch) -> None:
@@ -668,7 +668,7 @@ def test_reconciliation_rejects_heartbeat_url_with_cloud_monitoring(monkeypatch)
     monkeypatch.setenv("RECONCILIATION_HEARTBEAT_URL", "https://heartbeat.invalid/ping")
 
     with pytest.raises(ValueError, match="not used with Cloud Monitoring"):
-        run_reconciliation_from_env()
+        _run_reconciliation_sources()
 
 
 def test_all_streams_reconciliation_attempts_mac_after_iphone_failure(monkeypatch) -> None:
@@ -726,5 +726,5 @@ def test_all_streams_reconciliation_attempts_mac_after_iphone_failure(monkeypatc
     monkeypatch.setattr(job.WarehouseConfig, "from_env", lambda: object())
     monkeypatch.setattr(job, "run_reconciliation", fake_reconcile)
 
-    assert run_reconciliation_from_env(source_id="screen_time", all_streams=True) == 1
+    assert _run_reconciliation_sources(source_id="screen_time", all_streams=True) == 1
     assert seen == [("app-in-focus", True), ("app-usage", True)]

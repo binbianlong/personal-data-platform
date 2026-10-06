@@ -586,27 +586,26 @@ def test_oauth_refresh_is_form_encoded_and_cached_only_until_safety_margin():
 
 
 def test_oauth_reads_only_explicitly_supplied_environment_credentials():
+    import json
+
     from personal_data_platform.sources.fitbit.oauth import GoogleOAuth
 
     transport = FakeTransport(
         [{"access_token": "synthetic-access", "expires_in": 3600, "token_type": "Bearer"}]
     )
+    config = {
+        "client_id": "synthetic-client",
+        "client_secret": "synthetic-secret",
+        "refresh_token": "synthetic-refresh",
+        "health_user_id": "owner",
+    }
     oauth = GoogleOAuth.from_env(
-        {
-            "PDP_FITBIT_OAUTH_CLIENT_ID": "synthetic-client",
-            "PDP_FITBIT_OAUTH_CLIENT_SECRET": "synthetic-secret",
-            "PDP_FITBIT_OAUTH_REFRESH_TOKEN": "synthetic-refresh",
-        },
-        transport=transport,
+        {"PDP_FITBIT_OAUTH_CONFIG": json.dumps(config)}, transport=transport
     )
     assert oauth() == "synthetic-access"
-    with pytest.raises(ValueError, match="PDP_FITBIT_OAUTH_REFRESH_TOKEN"):
-        GoogleOAuth.from_env(
-            {
-                "PDP_FITBIT_OAUTH_CLIENT_ID": "synthetic-client",
-                "PDP_FITBIT_OAUTH_CLIENT_SECRET": "synthetic-secret",
-            }
-        )
+    del config["refresh_token"]
+    with pytest.raises(ValueError, match="refresh_token"):
+        GoogleOAuth.from_env({"PDP_FITBIT_OAUTH_CONFIG": json.dumps(config)})
 
 
 @pytest.mark.parametrize(

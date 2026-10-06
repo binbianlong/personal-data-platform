@@ -11,7 +11,7 @@ def test_targeted_loader_never_lists_or_migrates():
     from personal_data_platform.loader.job import run_loader_objects
     from personal_data_platform.sources.fitbit.adapter import FitbitSource
     from personal_data_platform.sources.fitbit.models import Snapshot, Window
-    from personal_data_platform.sources.fitbit.raw import encode_snapshot
+    from tests.fitbit_helpers import encode_snapshot
 
     now = datetime(2026, 9, 1, tzinfo=UTC)
     data = Snapshot("self", Window("steps", now, now + timedelta(days=1)), now, ())
@@ -48,7 +48,7 @@ def test_fitbit_reconciliation_checks_schema_and_expires_old_raw(
     from personal_data_platform.reconciliation.job import run_reconciliation
     from personal_data_platform.sources.fitbit.adapter import FitbitSource
     from personal_data_platform.sources.fitbit.models import Snapshot, Window
-    from personal_data_platform.sources.fitbit.raw import encode_snapshot
+    from tests.fitbit_helpers import encode_snapshot
 
     now = datetime(2026, 9, 27, tzinfo=UTC)
     old = now - timedelta(days=94)

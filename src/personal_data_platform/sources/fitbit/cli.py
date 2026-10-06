@@ -17,7 +17,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
     commands = parser.add_subparsers(dest="fitbit_command", required=True)
     migrate = commands.add_parser("migrate", help="apply additive schema migrations explicitly")
     migrate.add_argument("--database")
-    migrate.add_argument("--profile", choices=("legacy", "west"))
+    migrate.add_argument("--profile", choices=("west",))
     sync = commands.add_parser(
         "sync", help="repair a half-open physical range; dates use Asia/Tokyo"
     )
@@ -30,8 +30,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
     ingest.add_argument("--max-messages", type=int, default=500)
     ingest.add_argument("--collect-seconds", type=int, default=120)
     ingest.add_argument("--timeout-seconds", type=int, default=3000)
-    commands.add_parser("serve", help="start the webhook and authenticated worker service")
-    commands.add_parser("repair", help="recover pending receipts and Raw when repair is enabled")
+    commands.add_parser("serve", help="start the webhook notification receiver")
 
 
 def _database(value: str | None) -> Warehouse:
@@ -59,7 +58,7 @@ def run(args: argparse.Namespace) -> int:
         finally:
             migration_warehouse.close()
         return 0
-    from .runtime import run_repair_from_env, run_serve_from_env, run_sync_from_env
+    from .runtime import run_serve_from_env, run_sync_from_env
 
     if command == "ingest-notifications":
         from .runtime import run_notification_job
@@ -79,8 +78,4 @@ def run(args: argparse.Namespace) -> int:
             end=_physical(args.end),
             data_types=tuple(args.data_type or DATA_TYPES),
         )
-    if command == "repair":
-        repaired = run_repair_from_env()
-        print(json.dumps(asdict(repaired), sort_keys=True))
-        return int(bool(repaired.failed_count or repaired.at_risk_count))
     raise ValueError("unsupported Fitbit command")

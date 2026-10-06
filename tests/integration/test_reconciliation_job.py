@@ -42,7 +42,7 @@ def _raw(storage_created_at: datetime) -> RawObject:
 
 def _warehouse() -> Warehouse:
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
-    warehouse.migrate()
+    warehouse.migrate(profile="west")
     for relation in (
         "base.screen_time_transition",
         "base.screen_time_interval",

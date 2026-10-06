@@ -52,59 +52,6 @@ class _Coverage:
     source_sha256: str
 
 
-def _has_legacy_intents(connection: DuckDBPyConnection) -> bool:
-    row = connection.execute(
-        "SELECT count(*) FROM information_schema.tables "
-        "WHERE table_schema='ops' AND table_name='fitbit_raw_intent'"
-    ).fetchone()
-    return row is not None and row[0] > 0
-
-
-def can_skip_snapshot(warehouse: Warehouse, snapshot: Snapshot) -> bool:
-    """Omit Raw only for one exact, fully loaded, unchanged acquisition scope."""
-    window = snapshot.window
-    if _has_legacy_intents(warehouse.connection) and warehouse.query_value(
-        "SELECT count(*) FROM ops.fitbit_raw_intent WHERE subject_key=? AND data_type=?",
-        [snapshot.subject_key, window.data_type],
-    ):
-        return False
-    rows = warehouse.query_rows(
-        "SELECT range_start, range_end, origin, source_sha256 "
-        "FROM ops.fitbit_coverage WHERE subject_key=? AND data_type=? "
-        "AND range_start < ? AND range_end > ?",
-        [snapshot.subject_key, window.data_type, window.end, window.start],
-    )
-    return rows == [(window.start, window.end, snapshot.origin, snapshot.source_sha256())]
-
-
-def clear_intents_for_loaded_raw(connection: DuckDBPyConnection, raw: RawObject) -> None:
-    """Resolve covered attempts and their failures inside the load transaction."""
-    if not _has_legacy_intents(connection):
-        return
-    row = connection.execute(
-        "SELECT receipt_key, work_index, subject_key, data_type, range_start, range_end "
-        "FROM ops.fitbit_raw_intent WHERE raw_key=?",
-        [raw.key],
-    ).fetchone()
-    if row is not None:
-        scope = (
-            "receipt_key=? AND work_index=? AND subject_key=? AND data_type=? "
-            "AND range_start >= ? AND range_end <= ? AND fetched_at <= ?"
-        )
-        parameters = [*row, raw.observed_at]
-        # A successfully loaded replacement retires the superseded failure,
-        # rather than claiming the missing original Raw was loaded or expired.
-        connection.execute(
-            "DELETE FROM ops.ingestion_metadata WHERE status='failed' AND object_key IN "
-            f"(SELECT raw_key FROM ops.fitbit_raw_intent WHERE {scope})",
-            parameters,
-        )
-        connection.execute(
-            f"DELETE FROM ops.fitbit_raw_intent WHERE {scope}",
-            parameters,
-        )
-
-
 def _accepted_ranges(
     snapshot: Snapshot, source_key: str, coverage: list[_Coverage]
 ) -> list[tuple[datetime, datetime]]:
@@ -164,7 +111,6 @@ class FitbitBatch:
         loaded_at: datetime,
     ) -> None:
         self.write_snapshot(connection, source_key=raw.key, loaded_at=loaded_at)
-        clear_intents_for_loaded_raw(connection, raw)
 
     def write_snapshot(
         self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
