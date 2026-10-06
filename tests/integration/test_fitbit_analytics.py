@@ -6,14 +6,13 @@ from personal_data_platform.sources.fitbit.models import Record, Snapshot, Windo
 from personal_data_platform.sources.fitbit.writer import FitbitBatch
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-from tests.integration.test_dbt_models import dbt_project  # noqa: F401
 from tests.screen_time_helpers import _raw, _record
 
 
 def test_health_views_split_tokyo_days_preserve_missing_and_keep_devices_separate(
     tmp_path,
     monkeypatch,
-    dbt_project,  # noqa: F811
+    dbt_project,
 ):
     database = tmp_path / "health.duckdb"
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
@@ -28,7 +27,6 @@ def test_health_views_split_tokyo_days_preserve_missing_and_keep_devices_separat
             "active-zone-minutes",
             (Record("active-zone-minutes", "azm", at, at, at + timedelta(minutes=1), 2),),
         ),
-        ("heart-rate", (Record("heart-rate", "hr", base, base, value=65),)),
         (
             "sleep",
             (
@@ -119,7 +117,7 @@ def test_health_views_split_tokyo_days_preserve_missing_and_keep_devices_separat
 def test_minute_daily_average_has_observed_minute_semantics(
     tmp_path,
     monkeypatch,
-    dbt_project,  # noqa: F811
+    dbt_project,
 ):
     from personal_data_platform.sources.fitbit.models import (
         HeartRateMinute,
@@ -157,7 +155,6 @@ def test_minute_daily_average_has_observed_minute_semantics(
     FitbitMinuteBatch(snapshot).write_snapshot(
         warehouse.connection, source_key="minutes", loaded_at=base + timedelta(days=1)
     )
-    warehouse.connection.execute("DROP TABLE base.fitbit_heart_rate")
     warehouse.close()
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
     run_dbt(target="local", project_dir=dbt_project, selector="tag:fitbit tag:screen_time")
@@ -247,8 +244,6 @@ def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path)
         (),
     )
     try:
-        warehouse.connection.execute("DROP TABLE ops.fitbit_raw_intent")
-        warehouse.connection.execute("DROP TABLE base.fitbit_heart_rate")
         FitbitMinuteBatch(snapshot).write_snapshot(
             warehouse.connection, source_key="existing", loaded_at=base
         )
@@ -275,8 +270,11 @@ def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path)
         warehouse.close()
 
 
-def test_scalar_bundle_writer_and_unchanged_check_work_without_legacy_intents(tmp_path):
-    from personal_data_platform.raw.models import RawObject
+def test_scalar_v3_bundle_preserves_rows_on_unchanged_write(tmp_path):
+    import gzip
+
+    from personal_data_platform.sources.fitbit.adapter import FitbitSource
+    from tests.fitbit_helpers import encode_snapshot
 
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "no-intents.duckdb"))))
     warehouse.migrate()
@@ -287,26 +285,21 @@ def test_scalar_bundle_writer_and_unchanged_check_work_without_legacy_intents(tm
         base + timedelta(days=1),
         (Record("steps", "steps", base, base, base + timedelta(minutes=1), 10),),
     )
-    raw = RawObject(
-        key="raw/fitbit/v2/self/bundle/0.json.gz",
-        source_id="fitbit",
-        schema_version=2,
-        subject_key="self",
-        stream="steps",
-        logical_key="bundle",
-        observed_at=snapshot.fetched_at,
-        sha256="a" * 64,
+    source = FitbitSource()
+    key, payload = encode_snapshot(snapshot)
+    raw = source.parse_raw_key(
+        key,
         storage_created_at=snapshot.fetched_at,
         storage_generation=1,
     )
+    batch = source.decode(raw, gzip.decompress(payload))
     try:
-        warehouse.connection.execute("DROP TABLE ops.fitbit_raw_intent")
-        FitbitBatch(snapshot).write_snapshot(
-            warehouse.connection, source_key=raw.key, loaded_at=base
+        batch.write(warehouse.connection, raw, byte_size=len(payload), loaded_at=base)
+        batch.write(
+            warehouse.connection, raw, byte_size=len(payload), loaded_at=base + timedelta(hours=1)
         )
-        FitbitBatch(snapshot).write(warehouse.connection, raw, byte_size=1, loaded_at=base)
-        assert warehouse.query_rows("SELECT value,source_key FROM base.fitbit_steps") == [
-            (10, raw.key)
+        assert warehouse.query_rows("SELECT value,source_key,loaded_at FROM base.fitbit_steps") == [
+            (10, raw.key, base)
         ]
     finally:
         warehouse.close()

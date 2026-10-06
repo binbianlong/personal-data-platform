@@ -22,6 +22,28 @@ def warehouse():
     value.close()
 
 
+def test_default_migration_supports_current_runtime_and_preserves_loaded_data(warehouse):
+    warehouse.migrate()
+    warehouse.migrate(profile="west")
+    raw = _raw()
+    warehouse.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
+    before = warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
+
+    warehouse.migrate()
+
+    assert warehouse.query_rows("SELECT event_key FROM base.screen_time_event") == [("event",)]
+    assert (
+        warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id") == before
+    )
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema='ops' "
+            "AND table_name='fitbit_notification'"
+        )
+        == 0
+    )
+
+
 def test_west_baseline_creates_only_final_fitbit_schema(warehouse):
     warehouse.migrate(profile="west")
     tables = {
@@ -89,7 +111,7 @@ def test_west_baseline_matches_forward_schema_and_constraints(warehouse):
     warehouse.migrate(profile="west")
     legacy = Warehouse(connect(WarehouseConfig(":memory:")))
     try:
-        legacy.migrate()
+        legacy.migrate(profile="legacy")
         sql = (
             "SELECT table_schema, table_name, column_name, data_type, is_nullable, column_default "
             "FROM information_schema.columns WHERE table_schema IN ('base','ops') "
@@ -192,12 +214,12 @@ def test_explicit_migration_paths_cannot_bypass_profile_selection(
 
 
 def test_legacy_ledger_upgrade_preserves_applied_sql_receipts(warehouse):
-    warehouse.migrate()
+    warehouse.migrate(profile="legacy")
     warehouse.connection.execute("ALTER TABLE ops.schema_migration DROP COLUMN schema_profile")
     before = warehouse.query_rows(
         "SELECT migration_id,checksum,applied_at FROM ops.schema_migration ORDER BY migration_id"
     )
-    warehouse.migrate()
+    warehouse.migrate(profile="legacy")
     assert (
         warehouse.query_rows(
             "SELECT migration_id,checksum,applied_at FROM ops.schema_migration ORDER BY migration_id"

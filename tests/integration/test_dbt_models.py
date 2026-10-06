@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import shutil
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 
-from personal_data_platform.dbt_runner import DBT_PROJECT_DIR, run_dbt
+from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.screen_time.models import ParsedScreenTimeRecord
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
@@ -16,17 +14,6 @@ from personal_data_platform.storage.motherduck import (
     WarehouseConfig,
     connect,
 )
-
-
-@pytest.fixture
-def dbt_project(tmp_path: Path) -> Path:
-    project = tmp_path / "dbt"
-    project.mkdir()
-    for filename in ("dbt_project.yml", "profiles.yml"):
-        shutil.copyfile(DBT_PROJECT_DIR / filename, project / filename)
-    for directory in ("models", "macros", "tests"):
-        shutil.copytree(DBT_PROJECT_DIR / directory, project / directory)
-    return project
 
 
 @pytest.fixture

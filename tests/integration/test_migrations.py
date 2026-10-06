@@ -25,8 +25,8 @@ def warehouse():
         value.close()
 
 
-def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
-    warehouse.migrate()
+def test_legacy_schema_preserves_historical_tables_and_screen_time_ingestion(warehouse):
+    warehouse.migrate(profile="legacy")
     assert warehouse.query_rows("SELECT migration_id FROM ops.schema_migration") == [
         ("001_initial.sql",),
         ("002_screen_time_app_usage_platform.sql",),
@@ -118,8 +118,43 @@ def test_initial_schema_supports_current_ingestion_without_archives(warehouse):
         )
 
 
-def test_repeated_migration_preserves_loaded_data_and_ledger(warehouse):
-    warehouse.migrate()
+@pytest.mark.parametrize("profile", ["legacy", "west"])
+def test_migration_preserves_receipts_committed_by_another_startup(tmp_path, profile):
+    database = str(tmp_path / "concurrent.duckdb")
+    connection = connect(WarehouseConfig(database))
+    other = Warehouse(connect(WarehouseConfig(database)))
+    committed = []
+    raw = _raw()
+
+    class InterveningConnection:
+        def execute(self, sql, *parameters):
+            if sql == "CREATE SCHEMA IF NOT EXISTS ops" and not committed:
+                other.migrate(profile=profile)
+                other.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
+                committed.extend(
+                    other.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
+                )
+            return connection.execute(sql, *parameters)
+
+        def close(self):
+            connection.close()
+
+    warehouse = Warehouse(InterveningConnection())
+    try:
+        warehouse.migrate(profile=profile)
+        assert (
+            warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
+            == committed
+        )
+        assert warehouse.query_rows("SELECT event_key FROM base.screen_time_event") == [("event",)]
+    finally:
+        warehouse.close()
+        other.close()
+
+
+@pytest.mark.parametrize("profile", ["legacy", "west"])
+def test_repeated_migration_preserves_loaded_data_and_ledger(warehouse, profile):
+    warehouse.migrate(profile=profile)
     raw = _raw()
     warehouse.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
     tables = (
@@ -130,20 +165,22 @@ def test_repeated_migration_preserves_loaded_data_and_ledger(warehouse):
         "base.screen_time_event",
     )
     before = {name: warehouse.query_rows(f"SELECT * FROM {name}") for name in tables}
-    warehouse.migrate()
+    warehouse.migrate(profile=profile)
     assert {name: warehouse.query_rows(f"SELECT * FROM {name}") for name in tables} == before
 
 
-def test_applied_sql_changes_stop_before_applying_later_migrations(warehouse, tmp_path):
-    for path in DEFAULT_MIGRATIONS.glob("*.sql"):
+@pytest.mark.parametrize("profile", ["legacy", "west"])
+def test_applied_sql_changes_stop_before_applying_later_migrations(warehouse, tmp_path, profile):
+    migrations = DEFAULT_MIGRATIONS / "west" if profile == "west" else DEFAULT_MIGRATIONS
+    for path in migrations.glob("*.sql"):
         shutil.copyfile(path, tmp_path / path.name)
-    warehouse.migrate(tmp_path)
+    warehouse.migrate(tmp_path, profile=profile)
     before = warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
     initial = tmp_path / "001_initial.sql"
     initial.write_text(initial.read_text() + "\nSELECT 1;\n")
     (tmp_path / "002_later.sql").write_text("CREATE TABLE base.later (id INTEGER);")
     with pytest.raises(RuntimeError, match="applied migration changed"):
-        warehouse.migrate(tmp_path)
+        warehouse.migrate(tmp_path, profile=profile)
     assert (
         warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id") == before
     )
@@ -157,19 +194,20 @@ def test_applied_sql_changes_stop_before_applying_later_migrations(warehouse, tm
 
 
 @pytest.mark.parametrize("initial", [True, False], ids=["initial", "forward"])
-def test_failed_migration_rolls_back_schema_data_and_ledger(warehouse, tmp_path, initial):
+@pytest.mark.parametrize("profile", ["legacy", "west"])
+def test_failed_migration_rolls_back_schema_data_and_ledger(warehouse, tmp_path, initial, profile):
     if initial:
         path = tmp_path / "001_initial.sql"
         sql = (DEFAULT_MIGRATIONS / path.name).read_text()
         before = []
     else:
-        warehouse.migrate()
+        warehouse.migrate(profile=profile)
         before = warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
         path = tmp_path / "002_next.sql"
         sql = "CREATE TABLE base.next (id INTEGER); INSERT INTO base.next VALUES (1);"
     path.write_text(sql + "\nSELECT error('interrupted migration');")
     with pytest.raises(duckdb.InvalidInputException, match="interrupted migration"):
-        warehouse.migrate(tmp_path)
+        warehouse.migrate(tmp_path, profile=profile)
     assert (
         warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id") == before
     )
@@ -182,12 +220,12 @@ def test_failed_migration_rolls_back_schema_data_and_ledger(warehouse, tmp_path,
         == 0
     )
     path.write_text(sql)
-    warehouse.migrate(tmp_path)
+    warehouse.migrate(tmp_path, profile=profile)
     ledger = warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
     assert len(ledger) == len(before) + 1
     if not initial:
         assert warehouse.query_rows("SELECT * FROM base.next") == [(1,)]
-    warehouse.migrate(tmp_path)
+    warehouse.migrate(tmp_path, profile=profile)
     assert (
         warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id") == ledger
     )
@@ -199,7 +237,7 @@ def test_forward_migration_keeps_iphone_rows_and_sets_mac_platform(warehouse, tm
         DEFAULT_MIGRATIONS / "007_raw_retention_origin.sql",
         tmp_path / "007_raw_retention_origin.sql",
     )
-    warehouse.migrate(tmp_path)
+    warehouse.migrate(tmp_path, profile="legacy")
     iphone_raw = _raw()
     warehouse.load_object(iphone_raw, byte_size=10, batch=ScreenTimeBatch([_record(iphone_raw)]))
     assert warehouse.query_rows("SELECT event_key, platform FROM base.screen_time_event") == [
@@ -210,7 +248,7 @@ def test_forward_migration_keeps_iphone_rows_and_sets_mac_platform(warehouse, tm
         DEFAULT_MIGRATIONS / "002_screen_time_app_usage_platform.sql",
         tmp_path / "002_screen_time_app_usage_platform.sql",
     )
-    warehouse.migrate(tmp_path)
+    warehouse.migrate(tmp_path, profile="legacy")
     mac_raw = replace(
         iphone_raw, key="raw/mac", subject_key="mac", stream="app-usage", logical_key="mac-segment"
     )
