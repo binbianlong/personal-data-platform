@@ -441,7 +441,7 @@ def create_pubsub_app(
                 body=await _body(request),
             )
             if isinstance(payload, Verification):
-                return Response(status_code=200)
+                return Response(status_code=201)
             received_at = datetime.now(UTC)
             work: list[Notification] = []
             for windows in payload.groups or (payload.windows,):

@@ -485,7 +485,7 @@ def test_receiver_requires_all_publishes_before_204():
     assert publisher.calls == 2
     publisher.fail = False
     assert client.post("/webhooks/fitbit", content="{}").status_code == 204
-    assert client.post("/webhooks/fitbit", content='{"type":"verification"}').status_code == 200
+    assert client.post("/webhooks/fitbit", content='{"type":"verification"}').status_code == 201
     assert publisher.calls == 4
     assert client.post("/internal/tasks/fitbit", content="{}").status_code == 404
 

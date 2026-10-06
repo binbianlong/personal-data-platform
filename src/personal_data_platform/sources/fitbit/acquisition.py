@@ -163,7 +163,25 @@ class AcquisitionRunner:
         ):
             raise ValueError("invalid notification job limits")
         deadline = self.monotonic() + timeout_seconds
-        deliveries = list(queue.pull(limit=min(50, max_messages), timeout_seconds=1))
+        collect_deadline = min(deadline, self.monotonic() + collect_seconds)
+        deliveries = list(
+            queue.pull(
+                limit=min(50, max_messages),
+                timeout_seconds=min(30, collect_seconds or 1, deadline - self.monotonic()),
+            )
+        )
+        while (
+            not deliveries
+            and not getattr(queue, "invalid_count", 0)
+            and self.monotonic() < collect_deadline
+        ):
+            time.sleep(min(1, max(0, collect_deadline - self.monotonic())))
+            seconds = collect_deadline - self.monotonic()
+            if seconds <= 0:
+                break
+            deliveries.extend(
+                queue.pull(limit=min(50, max_messages), timeout_seconds=min(30, seconds))
+            )
         if not deliveries:
             return AcquisitionSummary(failed_scopes=int(bool(getattr(queue, "invalid_count", 0))))
         if self.paused:
@@ -182,7 +200,6 @@ class AcquisitionRunner:
                 return AcquisitionSummary(deferred_scopes=len(deliveries))
             timer = interrupt_after(warehouse, self._check(warehouse, owner, deadline))
             with _AckLease(queue, deliveries):
-                collect_deadline = min(deadline, self.monotonic() + collect_seconds)
                 while len(deliveries) < max_messages and self.monotonic() < collect_deadline:
                     more = queue.pull(
                         limit=min(50, max_messages - len(deliveries)),

@@ -149,6 +149,30 @@ def test_empty_pull_opens_no_warehouse(tmp_path):
     assert connections == []
 
 
+def test_initial_empty_pull_retries_within_collection_budget(tmp_path):
+    runner, _, api, _, connections = setup(tmp_path)
+    broker = Broker([(), (delivery(),)])
+    result = runner.ingest(broker, collect_seconds=2)
+    assert result.ok and result.acked_notifications == 1
+    assert len(api.calls) == 1 and len(connections) == 1
+    assert broker.acked == ["ack-n"]
+
+
+def test_initial_poll_respects_execution_deadline(tmp_path):
+    runner, _, _, _, connections = setup(tmp_path)
+    elapsed, timeouts = [0.0], []
+    runner.monotonic = lambda: elapsed[0]
+
+    class SlowEmptyBroker(Broker):
+        def pull(self, *, timeout_seconds, **kwargs):
+            timeouts.append(timeout_seconds)
+            elapsed[0] += timeout_seconds
+            return ()
+
+    assert runner.ingest(SlowEmptyBroker([]), collect_seconds=120, timeout_seconds=1).ok
+    assert timeouts == [1] and connections == []
+
+
 def test_fresh_fetch_without_attempt_tables_skips_unchanged_raw(tmp_path):
     runner, store, api, factory, _ = setup(tmp_path)
     for identity in ("old", "late"):
