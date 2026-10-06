@@ -78,8 +78,7 @@ def run_notification_job(
     from .notifications import PubSubNotifications
 
     configure_logging()
-    if delivery_mode() != "pubsub":
-        raise ValueError("ingest-notifications requires pubsub delivery mode")
+    delivery_mode()
     return _acquisition_runner().ingest(
         PubSubNotifications.from_env(),
         max_messages=max_messages,
@@ -89,24 +88,24 @@ def run_notification_job(
 
 
 def run_serve_from_env() -> int:
-    configure_logging()
-    if delivery_mode() == "pubsub":
-        from .notifications import PubSubNotifications
+    from .notifications import PubSubNotifications
 
-        if os.environ.get("PDP_FITBIT_WEBHOOK_AUTHORIZATION") or os.environ.get(
-            "PDP_FITBIT_HEALTH_USER_ID"
-        ):
-            raise ValueError("legacy webhook settings conflict with pubsub configuration")
-        config = secret_config("PDP_FITBIT_WEBHOOK_CONFIG", ("authorization", "health_user_id"))
-        app = create_pubsub_app(
-            authenticator=GoogleHealthAuthenticator(
-                authorization=config["authorization"],
-                health_user_id=config["health_user_id"],
-                subject_key=required("PDP_FITBIT_SUBJECT_KEY"),
-                signatures=TinkSignatures(),
-            ),
-            notifications=PubSubNotifications.from_env(),
-        )
+    configure_logging()
+    delivery_mode()
+    if os.environ.get("PDP_FITBIT_WEBHOOK_AUTHORIZATION") or os.environ.get(
+        "PDP_FITBIT_HEALTH_USER_ID"
+    ):
+        raise ValueError("legacy webhook settings conflict with pubsub configuration")
+    config = secret_config("PDP_FITBIT_WEBHOOK_CONFIG", ("authorization", "health_user_id"))
+    app = create_pubsub_app(
+        authenticator=GoogleHealthAuthenticator(
+            authorization=config["authorization"],
+            health_user_id=config["health_user_id"],
+            subject_key=required("PDP_FITBIT_SUBJECT_KEY"),
+            signatures=TinkSignatures(),
+        ),
+        notifications=PubSubNotifications.from_env(),
+    )
     uvicorn.run(
         app,
         host="0.0.0.0",

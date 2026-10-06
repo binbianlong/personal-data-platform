@@ -20,7 +20,6 @@ TABLES = {
     "sleep-stage": "fitbit_sleep_stage",
     "sleep-wake": "fitbit_sleep_wake",
 }
-PARSER_VERSION = "fitbit-v1"
 
 
 def aware(value: datetime) -> datetime:

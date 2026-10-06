@@ -68,7 +68,6 @@ class AcquisitionClient(Protocol):
 
 class AcquisitionRepository(RawRepository, Protocol):
     def put_raw_object(self, key: str, compressed_bytes: bytes) -> RawObject: ...
-    def head_raw(self, key: str) -> RawObject | None: ...
 
 
 def acquisition_windows(windows: tuple[Window, ...]) -> tuple[Window, ...]:

@@ -5,25 +5,19 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING
-
-from personal_data_platform.raw.models import RawObject
 
 from .models import (
     GOOGLE_WEARABLES,
-    PARSER_VERSION,
     TABLES,
     HeartRateMinuteSnapshot,
     Record,
     Snapshot,
-    Window,
 )
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
-
-    from personal_data_platform.storage.motherduck import Warehouse
 
 
 def _subtract(
@@ -93,24 +87,6 @@ def _content_digest(snapshot: Snapshot) -> str:
 class FitbitBatch:
     snapshot: Snapshot
     source_digest: str | None = None
-
-    @property
-    def parser_version(self) -> str:
-        return PARSER_VERSION
-
-    @property
-    def record_count(self) -> int:
-        return len(self.snapshot.records)
-
-    def write(
-        self,
-        connection: DuckDBPyConnection,
-        raw: RawObject,
-        *,
-        byte_size: int,
-        loaded_at: datetime,
-    ) -> None:
-        self.write_snapshot(connection, source_key=raw.key, loaded_at=loaded_at)
 
     def write_snapshot(
         self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
@@ -433,45 +409,11 @@ class FitbitBatch:
             )
 
 
-def expand_window(warehouse: Warehouse, subject_key: str, window: Window) -> Window:
-    """Include existing interval starts crossing a notification's physical bounds."""
-    if window.data_type not in ("steps", "active-zone-minutes"):
-        return window
-    start = window.start.replace(second=0, microsecond=0)
-    end = window.end.replace(second=0, microsecond=0)
-    if end < window.end:
-        end += timedelta(minutes=1)
-    while True:
-        row = warehouse.query_rows(
-            f"SELECT min(start_at), max(end_at) FROM base.{TABLES[window.data_type]} "
-            "WHERE subject_key=? AND start_at < ? AND end_at > ?",
-            [subject_key, end, start],
-        )[0]
-        left = min(start, row[0]) if row[0] is not None else start
-        right = max(end, row[1]) if row[1] is not None else end
-        if (left, right) == (start, end):
-            return Window(window.data_type, start, end)
-        start, end = left, right
-
-
 @dataclass(frozen=True, slots=True)
 class FitbitMinuteBatch:
     """Replace complete minute windows while preserving newer acquisitions."""
 
     snapshot: HeartRateMinuteSnapshot
-
-    @property
-    def parser_version(self) -> str:
-        return "fitbit-v2"
-
-    @property
-    def record_count(self) -> int:
-        return len(self.snapshot.minutes)
-
-    def write(
-        self, connection: DuckDBPyConnection, raw: RawObject, *, byte_size: int, loaded_at: datetime
-    ) -> None:
-        self.write_snapshot(connection, source_key=raw.key, loaded_at=loaded_at)
 
     def write_snapshot(
         self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime

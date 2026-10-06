@@ -45,10 +45,7 @@ def rebuild_inventory(
     observations: Iterable[RawObject], *, source: SourceAdapter | None = None
 ) -> dict[str, object]:
     source = source or get_source()
-    materialized = sorted(
-        validate_observations(source, observations),
-        key=lambda value: (value.observed_at, value.key),
-    )
+    materialized = validate_observations(source, observations)
     creation_times = sorted(value.storage_created_at for value in materialized)
     retention_times = sorted(value.retention_origin for value in materialized)
     return {

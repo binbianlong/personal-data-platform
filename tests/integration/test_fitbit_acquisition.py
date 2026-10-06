@@ -17,18 +17,6 @@ NOW = datetime(2026, 10, 5, 15, tzinfo=UTC)
 WINDOW = Window(
     "steps", datetime(2026, 10, 1, 15, tzinfo=UTC), datetime(2026, 10, 2, 15, tzinfo=UTC)
 )
-STATE_TABLES = (
-    "fitbit_scope",
-    "fitbit_notification",
-    "fitbit_notification_scope",
-    "fitbit_attempt",
-    "fitbit_scope_success",
-    "fitbit_bundle",
-    "fitbit_bundle_attempt",
-    "fitbit_bundle_chunk",
-    "fitbit_repair_cursor",
-    "fitbit_device_sync",
-)
 
 
 class Broker:
@@ -65,8 +53,6 @@ def setup(tmp_path, *, states=("A", "A", "B", "A"), fail_kind=None):
     path = str(tmp_path / "acquisition.duckdb")
     warehouse = Warehouse(duckdb.connect(path))
     warehouse.migrate(profile="west")
-    for table in STATE_TABLES:
-        warehouse.connection.execute(f"DROP TABLE IF EXISTS ops.{table}")
     warehouse.close()
     connections = []
 
@@ -96,9 +82,6 @@ def setup(tmp_path, *, states=("A", "A", "B", "A"), fail_kind=None):
             raw, payload = self.objects[key]
             assert raw.storage_generation == generation
             return payload
-
-        def head_raw(self, key):
-            return self.objects.get(key, (None,))[0]
 
         def list_raw(self, prefix):
             self.lists += 1

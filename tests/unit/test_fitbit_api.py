@@ -62,13 +62,17 @@ def client(transport, **kwargs):
     return HealthClient(access_token=lambda: "synthetic-token", transport=transport, **kwargs)
 
 
-def test_paired_device_pages_use_remaining_job_budget():
+@pytest.mark.parametrize(
+    ("method", "kind"),
+    [("fetch_captured", "steps"), ("fetch_heart_rate_minutes", "heart-rate")],
+)
+def test_acquisition_pages_use_remaining_job_budget(method, kind):
     remaining = [0.25]
     transport = FakeTransport(
         [{"nextPageToken": "next"}, {}],
         before_request=lambda: remaining.__setitem__(0, 0),
     )
-    health = client(transport)
+    health = client(transport, clock=lambda: START + timedelta(days=2))
 
     def guard():
         if remaining[0] <= 0:
@@ -77,69 +81,9 @@ def test_paired_device_pages_use_remaining_job_budget():
 
     health.request_guard = guard
     with pytest.raises(TimeoutError, match="deadline"):
-        health.latest_tracker_sync()
+        getattr(health, method)(Window(kind, START, START + timedelta(days=1)), subject_key="self")
     assert len(transport.calls) == 1
     assert transport.calls[0][-1] == 0.25
-
-
-def test_latest_tracker_sync_reads_every_page_and_preserves_nanosecond_order():
-    transport = FakeTransport(
-        [
-            {
-                "pairedDevices": [
-                    {
-                        "deviceType": "TRACKER",
-                        "deviceVersion": "Sense 2",
-                        "lastSyncTime": "2026-09-27T10:00:00.123456001Z",
-                    },
-                    {"deviceType": "SCALE", "lastSyncTime": "2026-09-27T12:00:00Z"},
-                ],
-                "nextPageToken": "second",
-            },
-            {
-                "pairedDevices": [
-                    {
-                        "deviceType": "TRACKER",
-                        "deviceVersion": "Inspire 3",
-                        "lastSyncTime": "2026-09-27T19:00:00.123456002+09:00",
-                    },
-                ]
-            },
-        ]
-    )
-    observed = client(transport).latest_tracker_sync()
-    assert observed is not None
-    assert observed.text == "2026-09-27T10:00:00.123456002Z"
-    assert [parse_qs(urlsplit(call[1]).query) for call in transport.calls] == [
-        {"pageSize": ["100"]},
-        {"pageSize": ["100"], "pageToken": ["second"]},
-    ]
-    assert all(urlsplit(call[1]).path == "/v4/users/me/pairedDevices" for call in transport.calls)
-
-
-def test_latest_tracker_sync_without_tracker_returns_none():
-    transport = FakeTransport(
-        [{"pairedDevices": [{"deviceType": "SCALE", "lastSyncTime": "2026-09-27T12:00:00Z"}]}]
-    )
-    assert client(transport).latest_tracker_sync() is None
-
-
-def test_latest_tracker_sync_rejects_repeated_pages_or_malformed_tracker_time():
-    from personal_data_platform.sources.fitbit.api import InvalidResponseError
-
-    transport = FakeTransport(
-        [
-            {"pairedDevices": [], "nextPageToken": "same"},
-            {"pairedDevices": [], "nextPageToken": "same"},
-        ]
-    )
-    with pytest.raises(InvalidResponseError, match="page token"):
-        client(transport).latest_tracker_sync()
-    transport = FakeTransport(
-        [{"pairedDevices": [{"deviceType": "TRACKER", "lastSyncTime": "invalid"}]}]
-    )
-    with pytest.raises(InvalidResponseError, match="tracker sync"):
-        client(transport).latest_tracker_sync()
 
 
 def test_unbounded_unique_pagination_stops_without_returning_partial_data():

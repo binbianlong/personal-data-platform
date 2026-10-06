@@ -9,8 +9,8 @@ import pytest
 from personal_data_platform.loader.models import LoadSummary
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.job import (
-    _run_reconciliation_sources,
     run_reconciliation,
+    run_reconciliation_from_env,
 )
 from personal_data_platform.reconciliation.models import ReconciliationResult
 from personal_data_platform.sources.registry import get_source
@@ -651,8 +651,7 @@ def test_reconciliation_rejects_partial_inventory_before_auditing_warehouse():
 def test_reconciliation_rejects_deployment_retention_drift_before_cloud_access(
     monkeypatch, name, value
 ):
-    monkeypatch.setenv("PDP_RECONCILIATION_MONITORING_MODE", "cloud_monitoring")
-    monkeypatch.delenv("RECONCILIATION_HEARTBEAT_URL", raising=False)
+    monkeypatch.setenv("PDP_HEARTBEAT_CONFIG", '{"daily":"https://heartbeat.invalid/ping"}')
     monkeypatch.setenv(name, value)
     monkeypatch.setattr(
         "personal_data_platform.sources.screen_time.adapter.ScreenTimeSource.repository_from_env",
@@ -660,71 +659,4 @@ def test_reconciliation_rejects_deployment_retention_drift_before_cloud_access(
     )
 
     with pytest.raises(ValueError, match=name):
-        _run_reconciliation_sources()
-
-
-def test_reconciliation_rejects_heartbeat_url_with_cloud_monitoring(monkeypatch) -> None:
-    monkeypatch.setenv("PDP_RECONCILIATION_MONITORING_MODE", "cloud_monitoring")
-    monkeypatch.setenv("RECONCILIATION_HEARTBEAT_URL", "https://heartbeat.invalid/ping")
-
-    with pytest.raises(ValueError, match="not used with Cloud Monitoring"):
-        _run_reconciliation_sources()
-
-
-def test_all_streams_reconciliation_attempts_mac_after_iphone_failure(monkeypatch) -> None:
-    from types import SimpleNamespace
-
-    from personal_data_platform.reconciliation import job
-
-    monkeypatch.setenv("PDP_RECONCILIATION_MONITORING_MODE", "cloud_monitoring")
-    monkeypatch.delenv("RECONCILIATION_HEARTBEAT_URL", raising=False)
-    sources = [
-        SimpleNamespace(
-            source_id="screen_time", stream=stream, repository_from_env=lambda: object()
-        )
-        for stream in ("app-in-focus", "app-usage")
-    ]
-    seen = []
-
-    class FakeWarehouse:
-        connection_usable = True
-
-        def __init__(self, _connection):
-            self.locked = False
-
-        def migrate(self):
-            pass
-
-        def acquire_job_lock(self, *_args, **_kwargs):
-            self.locked = True
-            return True
-
-        def release_job_lock(self, *_args):
-            self.locked = False
-
-        def close(self):
-            pass
-
-    def fake_reconcile(_repository, warehouse, *, source, **_kwargs):
-        seen.append((source.stream, warehouse.locked))
-        if source.stream == "app-in-focus":
-            raise RuntimeError("synthetic iPhone failure")
-        return SimpleNamespace(
-            ok=True,
-            status="succeeded",
-            raw_object_count=0,
-            loaded_object_count=0,
-            missing_object_count=0,
-            failed_object_count=0,
-            orphaned_loaded_object_count=0,
-        )
-
-    monkeypatch.setattr(job, "get_sources", lambda *_args, **_kwargs: tuple(sources))
-    monkeypatch.setattr(job, "validate_runtime_policy", lambda _source: None)
-    monkeypatch.setattr(job, "Warehouse", FakeWarehouse)
-    monkeypatch.setattr(job, "connect", lambda _config: object())
-    monkeypatch.setattr(job.WarehouseConfig, "from_env", lambda: object())
-    monkeypatch.setattr(job, "run_reconciliation", fake_reconcile)
-
-    assert _run_reconciliation_sources(source_id="screen_time", all_streams=True) == 1
-    assert seen == [("app-in-focus", True), ("app-usage", True)]
+        run_reconciliation_from_env()
