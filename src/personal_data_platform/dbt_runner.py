@@ -94,17 +94,6 @@ def run_dbt_from_env(
         raise ValueError("Cloud dbt entrypoint requires DBT_TARGET=prod")
 
     warehouse = Warehouse(connect(WarehouseConfig.from_env()))
-    west = schema_profile() == "west" or os.environ.get("PDP_FITBIT_DELIVERY_MODE") == "pubsub"
-    if not west:
-        try:
-            warehouse.migrate()
-        finally:
-            warehouse.close()
-        if source is None:
-            run_dbt(target=target)
-        else:
-            run_dbt(target=target, selector=source.dbt_selector)
-        return 0
     owner = lease_owner or str(uuid.uuid4())
     acquired = False
     try:

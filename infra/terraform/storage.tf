@@ -23,15 +23,12 @@ resource "google_storage_bucket" "raw" {
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
 
-  dynamic "lifecycle_rule" {
-    for_each = local.ingestion_pipelines
-    content {
-      action { type = "Delete" }
-      condition {
-        age            = lifecycle_rule.value.retention_days
-        matches_prefix = lifecycle_rule.value.raw_prefixes
-        matches_suffix = lifecycle_rule.value.raw_suffixes
-      }
+  lifecycle_rule {
+    action { type = "Delete" }
+    condition {
+      age            = 90
+      matches_prefix = ["raw/screen_time/v1/", "raw/screen_time/v2/"]
+      matches_suffix = [".segb.gz"]
     }
   }
 
@@ -39,33 +36,7 @@ resource "google_storage_bucket" "raw" {
     retention_duration_seconds = 0
   }
 
-  dynamic "lifecycle_rule" {
-    for_each = var.enable_fitbit_runtime ? toset(["raw", "receipts"]) : toset([])
-    content {
-      action { type = "Delete" }
-      condition {
-        age            = 90
-        matches_prefix = [lifecycle_rule.value == "raw" ? "raw/fitbit/v1/" : "receipts/fitbit/v1/"]
-        matches_suffix = lifecycle_rule.value == "raw" ? [".json.gz"] : null
-      }
-    }
-  }
-
-  lifecycle {
-    prevent_destroy = true
-
-    precondition {
-      condition = length(distinct([
-        for pipeline in values(local.ingestion_pipelines) : "${pipeline.source_id}/${pipeline.stream}"
-      ])) == length(local.ingestion_pipelines)
-      error_message = "Each source and stream must have exactly one ingestion pipeline."
-    }
-
-    precondition {
-      condition     = local.compatible_raw_retention
-      error_message = "Overlapping Raw prefix and suffix scopes must use the same retention period."
-    }
-  }
+  lifecycle { prevent_destroy = true }
 
   depends_on = [google_project_service.runtime]
 }
@@ -98,67 +69,14 @@ resource "google_storage_bucket" "preflight" {
 }
 
 data "google_iam_policy" "raw_bucket" {
-  dynamic "binding" {
-    for_each = var.enable_fitbit_runtime ? [
-      { prefix = "raw/fitbit/v1/", role = local.storage_roles.collector_raw_creator, title = "fitbit_raw_create", suffix = ".json.gz" },
-      { prefix = "receipts/fitbit/v1/", role = local.storage_roles.collector_receipt_writer, title = "fitbit_receipt_write", suffix = ".json" },
-      { prefix = "raw/fitbit/v1/_control/device-sync/", role = local.storage_roles.collector_receipt_writer, title = "fitbit_device_sync_write", suffix = ".json" },
-    ] : []
-    content {
-      role    = binding.value.role
-      members = local.fitbit_storage_members
-      condition {
-        title      = binding.value.title
-        expression = "resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${binding.value.prefix}') && resource.name.endsWith('${binding.value.suffix}')"
-      }
-    }
-  }
-  dynamic "binding" {
-    for_each = var.enable_fitbit_runtime ? [1] : []
-    content {
-      role    = "roles/storage.objectViewer"
-      members = ["serviceAccount:${google_service_account.fitbit[0].email}"]
-      condition {
-        title      = "fitbit_read_and_list"
-        expression = "resource.name == 'projects/_/buckets/${local.raw_bucket_name}' || resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/raw/fitbit/v1/') || resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/receipts/fitbit/v1/')"
-      }
-    }
-  }
   binding {
     role    = "roles/storage.admin"
     members = [var.collector_impersonator_member]
   }
 
-  dynamic "binding" {
-    for_each = { for key, pipeline in local.ingestion_pipelines : key => pipeline if length(pipeline.raw_creator_members) > 0 }
-    content {
-      role    = local.storage_roles.collector_raw_creator
-      members = binding.value.raw_creator_members
-      condition {
-        title       = binding.key == "screen_time_app_in_focus" ? "collector_raw_create_only" : "${binding.key}_raw_create_only"
-        description = "Allow immutable Raw creation only in the configured source namespace."
-        expression  = "(${join(" || ", [for prefix in binding.value.raw_prefixes : "resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${prefix}')"])}) && (${join(" || ", [for suffix in binding.value.raw_suffixes : "resource.name.endsWith('${suffix}')"])})"
-      }
-    }
-  }
-
   binding {
-    role    = local.storage_roles.collector_receipt_writer
-    members = ["serviceAccount:${google_service_account.collector.email}"]
-
-    condition {
-      title       = "collector_control_state_only"
-      description = "Allow replacement of latest receipts and the expected-device manifest only."
-      expression  = "((resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${local.receipt_object_prefix}') || resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/${local.mac_receipt_object_prefix}')) && resource.name.endsWith('.json')) || resource.name == 'projects/_/buckets/${local.raw_bucket_name}/objects/${local.device_manifest_key}' || resource.name == 'projects/_/buckets/${local.raw_bucket_name}/objects/${local.mac_device_manifest_key}'"
-    }
-  }
-
-  binding {
-    role = "roles/storage.objectViewer"
-    members = concat(
-      [for key in keys(local.ingestion_jobs) : "serviceAccount:${google_service_account.runtime[key].email}"],
-      ["serviceAccount:${google_service_account.rebuild_operator.email}"]
-    )
+    role    = "roles/storage.objectViewer"
+    members = ["serviceAccount:${google_service_account.rebuild_operator.email}"]
   }
 }
 
@@ -173,10 +91,7 @@ data "google_iam_policy" "preflight_bucket" {
     members = [var.collector_impersonator_member]
   }
 
-  binding {
-    role    = local.storage_roles.preflight_object_operator
-    members = ["serviceAccount:${google_service_account.runtime["preflight"].email}"]
-  }
+
 }
 
 resource "google_storage_bucket_iam_policy" "preflight" {

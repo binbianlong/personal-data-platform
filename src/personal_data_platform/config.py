@@ -22,7 +22,7 @@ class ConfigurationError(ValueError):
     """Raised when required runtime configuration is absent or invalid."""
 
 
-def schema_profile() -> Literal["legacy", "west"]:
+def schema_profile() -> Literal["west"]:
     """Choose one migration history consistently across jobs and recovery commands."""
     value = os.environ.get("PDP_SCHEMA_PROFILE", "west")
     if value != "west":

@@ -14,8 +14,8 @@ on:
       - ".github/workflows/terraform-deploy.yml"
   workflow_dispatch:
     inputs:
-      run_dbt:
-        description: Run dbt after the deployment preflight
+      run_daily:
+        description: Run combined daily processing after deployment
         required: true
         type: boolean
         default: false
@@ -36,9 +36,7 @@ jobs:
     timeout-minutes: 45
     environment: production
     env:
-      ARTIFACT_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-      GCP_REGION: us-central1
       IMAGE_NAME: ${{ vars.GCP_IMAGE_NAME }}
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
@@ -46,18 +44,16 @@ jobs:
       TF_VAR_alert_email: ${{ vars.GCP_ALERT_EMAIL }}
       TF_VAR_collector_impersonator_member: ${{ vars.GCP_COLLECTOR_IMPERSONATOR_MEMBER }}
       TF_VAR_deployer_service_account_email: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
-      TF_VAR_enable_fitbit_runtime: ${{ vars.PDP_FITBIT_ENABLED || 'false' }}
-      TF_VAR_fitbit_processing_paused: ${{ vars.PDP_FITBIT_PROCESSING_PAUSED || 'true' }}
       TF_VAR_fitbit_subject_key: ${{ vars.PDP_FITBIT_SUBJECT_KEY }}
-      TF_VAR_fitbit_secret_ids: ${{ vars.PDP_FITBIT_SECRET_IDS || '{}' }}
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
-      TF_VAR_region: us-central1
       WEST_REGION: us-west1
       WEST_ENABLED: ${{ vars.PDP_WEST_ENABLED || 'false' }}
       WEST_ARTIFACT_REPOSITORY: ${{ vars.GCP_WEST_ARTIFACT_REPOSITORY || vars.GCP_ARTIFACT_REPOSITORY }}
       TF_VAR_enable_west_runtime: ${{ vars.PDP_WEST_ENABLED || 'false' }}
       TF_VAR_west_region: us-west1
-      TF_VAR_west_schedulers_enabled: 'false'
+      TF_VAR_west_schedulers_enabled: ${{ vars.PDP_WEST_SCHEDULERS_ENABLED || 'false' }}
+      TF_VAR_west_logging_enabled: ${{ vars.PDP_WEST_LOGGING_ENABLED || 'false' }}
+      TF_VAR_west_logging_exclusions: ${{ vars.PDP_WEST_LOGGING_EXCLUSIONS || '{}' }}
       TF_VAR_west_image_uri: ${{ vars.GCP_WEST_RUNTIME_IMAGE_URI }}
       TF_VAR_west_secret_versions: ${{ vars.PDP_WEST_SECRET_VERSIONS || '{}' }}
       TF_VAR_west_motherduck_database: ${{ vars.PDP_WEST_MOTHERDUCK_DATABASE || 'personal_data_platform_west' }}
@@ -72,9 +68,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in ARTIFACT_REPOSITORY GCP_PROJECT_ID GCP_REGION IMAGE_NAME TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_collector_impersonator_member TF_VAR_deployer_service_account_email; do
+          for name in WEST_ARTIFACT_REPOSITORY GCP_PROJECT_ID WEST_REGION IMAGE_NAME TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_collector_impersonator_member TF_VAR_deployer_service_account_email; do
             test -n "${!name}"
           done
+          [[ "${WEST_ENABLED}" == "true" ]] || { echo "PDP_WEST_ENABLED must be true for normal deployment." >&2; exit 1; }
           if [[ "${WEST_ENABLED}" == "true" ]]; then
             jq -e '
               type == "object" and
@@ -96,93 +93,7 @@ jobs:
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      - name: Select runtime image
-        id: select_image
-        shell: bash
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          build=true
-          if [[ "${GITHUB_EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
-            # A missing base or a failed diff must not be treated as no changes.
-            changed="$(git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" -- Dockerfile .dockerignore pyproject.toml src/ dbt/)"
-            if [[ -z "${changed}" ]]; then
-              jobs="$(gcloud run jobs list --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" \
-                --filter='metadata.labels.application=personal-data-platform' --format=json)"
-              current_image="$(jq -r '.[] | select(.metadata.name == "screen-time-loader") |
-                .spec.template.spec.template.spec.containers[0].image' <<< "${jobs}")"
-              if [[ -n "${current_image}" ]]; then
-                image_path="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
-                if [[ "${current_image}" != "${image_path}@"* || ! "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
-                  echo "The deployed runtime image must be a digest in the configured repository." >&2
-                  exit 1
-                fi
-                build=false
-                echo "TF_VAR_image_uri=${current_image}" >> "${GITHUB_ENV}"
-                echo "Reusing runtime image: \`${current_image}\`" >> "${GITHUB_STEP_SUMMARY}"
-              fi
-            fi
-          fi
-          echo "build=${build}" >> "${GITHUB_OUTPUT}"
-
-      - name: Configure Artifact Registry authentication
-        if: ${{ steps.select_image.outputs.build == 'true' }}
-        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
-
-      - name: Build and publish runtime image
-        if: ${{ steps.select_image.outputs.build == 'true' }}
-        id: image
-        shell: bash
-        run: |
-          set -euo pipefail
-          image_path="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
-          image_tag="${image_path}:${GITHUB_SHA}"
-          docker build --tag "${image_tag}" .
-          docker push "${image_tag}"
-          digest="$(gcloud artifacts docker images describe "${image_tag}" --format='value(image_summary.digest)')"
-          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-          image_uri="${image_path}@${digest}"
-          echo "image_uri=${image_uri}" >> "${GITHUB_OUTPUT}"
-          echo "TF_VAR_image_uri=${image_uri}" >> "${GITHUB_ENV}"
-          echo "Runtime image: \`${image_uri}\`" >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Protect deployed and candidate images
-        shell: bash
-        env:
-          ROLLBACK_IMAGE_URI: ${{ vars.GCP_ROLLBACK_IMAGE_URI }}
-        run: |
-          set -euo pipefail
-          image_path="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
-          revisions="$(gcloud run revisions list --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --format=json)"
-          jobs="$(gcloud run jobs list --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" \
-            --filter='metadata.labels.application=personal-data-platform' --format=json)"
-          current_images="$(jq -r '.[] | [.metadata.name,
-            .spec.template.spec.template.spec.containers[0].image] | @tsv' <<< "${jobs}")"
-          # Keep each live Job's image before moving the candidate tag. This also
-          # preserves mixed digests left by a partially failed Terraform apply.
-          while IFS=$'\t' read -r job image; do
-            [[ -n "${job}" ]] || continue
-            [[ "${image}" == "${image_path}@"* || "${image}" == "${image_path}:"* ]] || continue
-            [[ "${image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
-            gcloud artifacts docker tags add "${image}" "${image_path}:deployed-job-${job}" --quiet
-          done <<< "${current_images}"
-          current_revisions="$(jq -r '.[] | [.metadata.name, (.status.imageDigest // .spec.containers[0].image)] | @tsv' <<< "${revisions}")"
-          while IFS=$'\t' read -r revision image; do
-            [[ -n "${revision}" ]] || continue
-            [[ "${image}" == "${image_path}@"* || "${image}" == "${image_path}:"* ]] || continue
-            [[ "${image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
-            gcloud artifacts docker tags add "${image}" "${image_path}:deployed-revision-${revision}" --quiet
-          done <<< "${current_revisions}"
-          if [[ -n "${ROLLBACK_IMAGE_URI:-}" ]]; then
-            [[ "${ROLLBACK_IMAGE_URI}" == "${image_path}@"* && "${ROLLBACK_IMAGE_URI}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
-            gcloud artifacts docker tags add "${ROLLBACK_IMAGE_URI}" "${image_path}:deployed-rollback" --quiet
-          fi
-          [[ "${TF_VAR_image_uri}" == "${image_path}@"* && "${TF_VAR_image_uri}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
-          gcloud artifacts docker tags add "${TF_VAR_image_uri}" "${image_path}:deployed-candidate" --quiet
-
       - name: Prepare west runtime image
-        if: ${{ env.WEST_ENABLED == 'true' }}
         shell: bash
         env:
           BEFORE_SHA: ${{ github.event.before }}
@@ -242,43 +153,11 @@ jobs:
         run: terraform -chdir=infra/terraform validate
 
       - name: Plan runtime changes
-        id: plan
-        shell: bash
-        run: |
-          set -euo pipefail
-          terraform -chdir=infra/terraform plan -input=false -out=runtime.tfplan
-          first_deployment="$(terraform -chdir=infra/terraform show -json runtime.tfplan | jq -r '
-            any(.resource_changes[]?;
-              .address == "google_cloud_run_v2_job.runtime[\"dbt\"]" and
-              (.change.actions | index("create")) != null)
-          ')"
-          echo "first_deployment=${first_deployment}" >> "${GITHUB_OUTPUT}"
+        run: terraform -chdir=infra/terraform plan -input=false -out=runtime.tfplan
 
       - name: Apply runtime changes
         run: terraform -chdir=infra/terraform apply -input=false -auto-approve runtime.tfplan
 
-      - name: Run isolated deployment preflight
-        run: gcloud run jobs execute platform-preflight --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --wait
-
-      - name: Determine whether to run dbt
-        id: dbt
-        shell: bash
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
-          FIRST_DEPLOYMENT: ${{ steps.plan.outputs.first_deployment }}
-          REQUESTED: ${{ inputs.run_dbt }}
-        run: |
-          set -euo pipefail
-          run_dbt=false
-          if [[ "${FIRST_DEPLOYMENT}" == "true" || "${REQUESTED}" == "true" ]]; then
-            run_dbt=true
-          elif [[ "${GITHUB_EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
-            if ! git diff --quiet "${BEFORE_SHA}" "${GITHUB_SHA}" -- dbt/ src/personal_data_platform/migrations/; then
-              run_dbt=true
-            fi
-          fi
-          echo "run=${run_dbt}" >> "${GITHUB_OUTPUT}"
-
-      - name: Initialize or update dbt models
-        if: ${{ steps.dbt.outputs.run == 'true' }}
-        run: gcloud run jobs execute dbt-runner --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --wait
+      - name: Run combined daily job
+        if: ${{ inputs.run_daily }}
+        run: gcloud run jobs execute reconciliation-west --project="${GCP_PROJECT_ID}" --region="${WEST_REGION}" --wait

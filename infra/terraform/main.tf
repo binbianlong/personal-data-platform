@@ -7,7 +7,7 @@ locals {
     "run.googleapis.com",
     "secretmanager.googleapis.com",
     "storage.googleapis.com",
-  ], var.enable_west_runtime ? ["pubsub.googleapis.com"] : [], var.enable_fitbit_runtime ? ["cloudtasks.googleapis.com"] : []))
+  ], var.enable_west_runtime ? ["pubsub.googleapis.com"] : []))
 }
 
 resource "google_project_service" "runtime" {

@@ -21,49 +21,6 @@ def _workflow_step_script(relative_path: str, step_name: str) -> str:
     return textwrap.dedent(step.split("        run: |\n", 1)[1])
 
 
-def test_runtime_uses_only_approved_jobs_and_schedules() -> None:
-    jobs = _read("infra/terraform/jobs.tf")
-    scheduler = _read("infra/terraform/scheduler.tf")
-    sources = _read("infra/terraform/sources.tf")
-
-    for role in ("preflight", "dbt"):
-        assert f"    {role} = {{" in jobs
-    assert 'for role in ["loader", "reconciliation"]' in sources
-    assert "runtime_jobs = merge(local.shared_jobs, local.ingestion_jobs)" in jobs
-    assert "for key, job in local.ingestion_jobs" in scheduler
-    assert "cloudtasks" not in (jobs + sources + scheduler).lower()
-    assert "webhook" not in (jobs + sources + scheduler).lower()
-    assert "fetch" not in (jobs + sources + scheduler).lower()
-    assert 'default     = "15 * * * *"' in _read("infra/terraform/variables.tf")
-    assert 'default     = "30 4,16 * * *"' in _read("infra/terraform/variables.tf")
-    assert 'default     = "Asia/Tokyo"' in _read("infra/terraform/variables.tf")
-    assert "PREFLIGHT_MOTHERDUCK_DATABASE = var.preflight_motherduck_database" in jobs
-    assert 'PDP_RECONCILIATION_MONITORING_MODE = "cloud_monitoring"' in sources
-    assert 'RECONCILIATION_HEARTBEAT_URL = "${key}_heartbeat"' in sources
-    assert 'duration = "84600s"' in _read("infra/terraform/monitoring.tf")
-
-
-def test_preflight_uses_an_isolated_gcs_bucket_and_token() -> None:
-    jobs = _read("infra/terraform/jobs.tf")
-    secrets = _read("infra/terraform/secrets.tf")
-
-    assert "GCS_BUCKET                    = local.raw_bucket_name" in jobs
-    assert "GCS_PREFLIGHT_BUCKET          = local.preflight_bucket_name" in jobs
-    assert 'MOTHERDUCK_TOKEN = "motherduck_preflight_token"' in jobs
-    assert 'secret_id = "motherduck-preflight-token"' in secrets
-    assert "B2_KEY_ID" not in jobs
-    assert "B2_APPLICATION_KEY" not in jobs
-
-
-def test_runtime_image_requires_digest() -> None:
-    variables = _read("infra/terraform/variables.tf")
-    jobs = _read("infra/terraform/jobs.tf")
-
-    assert "@sha256:[0-9a-f]{64}$" in variables
-    assert "image = var.image_uri" in jobs
-    assert ":latest" not in jobs
-
-
 def test_deploy_identity_and_workflow_are_restricted() -> None:
     identity = _read("infra/bootstrap/identity.tf")
     deploy = _read(".github/workflows/terraform-deploy.yml")
@@ -75,7 +32,7 @@ def test_deploy_identity_and_workflow_are_restricted() -> None:
     assert "roles/resourcemanager.projectIamAdmin" not in bootstrap
     assert "roles/iam.serviceAccountUser" not in bootstrap
     assert "github.ref == 'refs/heads/main'" in deploy
-    assert "TF_VAR_image_uri=${image_uri}" in deploy
+    assert "TF_VAR_west_image_uri=${current_image}" in deploy
 
 
 def test_plan_identity_is_separate_and_read_only() -> None:
@@ -88,8 +45,8 @@ def test_plan_identity_is_separate_and_read_only() -> None:
     assert 'role   = "roles/storage.objectAdmin"' in identity
     assert "roles/viewer" in main
     assert "roles/iam.securityReviewer" not in main
-    assert "deployer_act_as_runtime" in _read("infra/terraform/jobs.tf")
-    assert "deployer_act_as_scheduler" in _read("infra/terraform/scheduler.tf")
+    assert "west_deployer" in _read("infra/terraform/west.tf")
+    assert "west_scheduler_deployer" in _read("infra/terraform/west.tf")
 
 
 def test_runtime_bucket_manager_has_no_object_data_permissions() -> None:
@@ -140,50 +97,6 @@ def test_bootstrap_service_accounts_wait_for_api_enablement(account: str) -> Non
     assert "depends_on = [google_project_service.bootstrap]" in resource
 
 
-def test_runtime_uses_fixed_gcs_buckets_without_a_prefix_override() -> None:
-    jobs = _read("infra/terraform/jobs.tf")
-    variables = _read("infra/terraform/variables.tf")
-
-    sources = _read("infra/terraform/sources.tf")
-    assert jobs.count("GCS_PREFLIGHT_BUCKET") == 1
-    assert "GCS_BUCKET                    = local.raw_bucket_name" in jobs
-    assert "GCS_BUCKET               = local.raw_bucket_name" in sources
-    assert "GCS_PREFLIGHT_BUCKET" not in sources
-    assert "B2_RAW_PREFIX" not in jobs + sources
-    assert 'variable "preflight_b2_prefix"' not in variables
-
-
-def test_raw_bucket_is_standard_and_permanently_deletes_segments_after_90_days() -> None:
-    storage = _read("infra/terraform/storage.tf")
-    raw = storage.split('resource "google_storage_bucket" "raw" {', 1)[1]
-    raw = raw.split('resource "google_storage_bucket" "preflight" {', 1)[0]
-
-    assert re.search(r'raw_bucket_name\s*= "\$\{var.project_id\}-pdp-raw"', storage)
-    assert "location                    = var.region" in raw
-    assert 'storage_class               = "STANDARD"' in raw
-    assert "force_destroy               = false" in raw
-    assert "uniform_bucket_level_access = true" in raw
-    assert 'public_access_prevention    = "enforced"' in raw
-    assert 'type = "Delete"' in raw
-    sources = _read("infra/terraform/sources.tf")
-    default_pipeline = sources.split("screen_time_app_in_focus = {", 1)[1].split("\n    }", 1)[0]
-    assert (
-        'raw_prefixes            = ["raw/screen_time/v1/", "raw/screen_time/v2/"]'
-        in default_pipeline
-    )
-    assert 'raw_suffixes            = [".segb.gz"]' in default_pipeline
-    assert "retention_days          = 90" in default_pipeline
-    assert "for_each = local.ingestion_pipelines" in raw
-    assert "age            = lifecycle_rule.value.retention_days" in raw
-    assert "matches_prefix = lifecycle_rule.value.raw_prefixes" in raw
-    assert "matches_suffix = lifecycle_rule.value.raw_suffixes" in raw
-    assert "condition     = local.compatible_raw_retention" in raw
-    assert "retention_duration_seconds = 0" in raw
-    assert "prevent_destroy = true" in raw
-    assert "versioning" not in raw
-    assert "autoclass" not in raw
-
-
 def test_preflight_bucket_isolated_and_orphans_expire_after_one_day() -> None:
     storage = _read("infra/terraform/storage.tf")
     preflight = storage.split('resource "google_storage_bucket" "preflight" {', 1)[1]
@@ -197,42 +110,6 @@ def test_preflight_bucket_isolated_and_orphans_expire_after_one_day() -> None:
     assert "retention_duration_seconds = 0" in preflight
 
 
-def test_bucket_iam_is_authoritative_and_service_specific() -> None:
-    storage = _read("infra/terraform/storage.tf")
-    roles = _read("infra/bootstrap/storage_roles.tf")
-
-    assert 'resource "google_storage_bucket_iam_policy" "raw"' in storage
-    assert 'resource "google_storage_bucket_iam_policy" "preflight"' in storage
-    assert "google_storage_bucket_iam_member" not in storage
-    assert 'permissions = ["storage.objects.create"]' in roles
-    assert 'role = "roles/storage.objectViewer"' in storage
-    assert "for key in keys(local.ingestion_jobs)" in storage
-    assert "google_service_account.runtime[key].email" in storage
-    assert "members = binding.value.raw_creator_members" in storage
-    assert "for prefix in binding.value.raw_prefixes" in storage
-    assert "for suffix in binding.value.raw_suffixes" in storage
-    assert "google_service_account.rebuild_operator" in storage
-    assert "collector_raw_create_only" in storage
-    assert "collector_control_state_only" in storage
-    assert "device_manifest_key" in storage
-    assert "mac_receipt_object_prefix" in storage
-    assert "mac_device_manifest_key" in storage
-    assert "projectViewer:" not in storage
-    assert "projectEditor:" not in storage
-
-
-def test_existing_screen_time_jobs_process_both_streams_without_a_second_pipeline() -> None:
-    sources = _read("infra/terraform/sources.tf")
-    assert "screen_time_app_in_focus = {" in sources
-    assert "screen_time_app_usage = {" not in sources
-    assert (
-        'key == "screen_time_app_in_focus" ? [role, "--source", pipeline.source_id, "--all-streams"]'
-        in sources
-    )
-    assert '"screen-time-loader"' in sources
-    assert '"reconciliation"' in sources
-
-
 def test_rebuild_uses_a_separate_read_only_impersonated_identity() -> None:
     jobs = _read("infra/terraform/jobs.tf")
     storage = _read("infra/terraform/storage.tf")
@@ -241,7 +118,7 @@ def test_rebuild_uses_a_separate_read_only_impersonated_identity() -> None:
     assert 'resource "google_service_account_iam_member" "rebuild_operator_impersonator"' in jobs
     assert 'role               = "roles/iam.serviceAccountTokenCreator"' in jobs
     assert "google_service_account.rebuild_operator.email" in storage
-    assert 'role = "roles/storage.objectViewer"' in storage
+    assert re.search(r'role\s*= "roles/storage.objectViewer"', storage)
 
 
 def test_former_b2_secrets_are_retained_but_not_injected() -> None:
@@ -253,22 +130,7 @@ def test_former_b2_secrets_are_retained_but_not_injected() -> None:
     assert secrets.count("\nremoved {\n") == 6
     assert secrets.count("destroy = false") == 6
     assert "B2_" not in jobs
-    assert "for key in keys(local.runtime_secrets)" in outputs
-
-
-def test_runtime_and_artifact_registry_are_fixed_to_us_central1() -> None:
-    runtime_variables = _read("infra/terraform/variables.tf")
-    bootstrap_variables = _read("infra/bootstrap/variables.tf")
-    plan = _read(".github/workflows/terraform-plan.yml")
-    deploy = _read(".github/workflows/terraform-deploy.yml")
-
-    assert 'default     = "us-central1"' in runtime_variables
-    assert 'default     = "us-central1"' in bootstrap_variables
-    assert "TF_VAR_region: us-central1" in plan
-    assert "GCP_REGION: us-central1" in deploy
-    assert "TF_VAR_region: us-central1" in deploy
-    assert "GCP_COLLECTOR_IMPERSONATOR_MEMBER" in plan
-    assert "GCP_COLLECTOR_IMPERSONATOR_MEMBER" in deploy
+    assert "for key, secret in google_secret_manager_secret.west" in outputs
 
 
 def test_analytics_day_boundaries_are_not_advertised_as_configurable() -> None:
@@ -280,187 +142,7 @@ def test_analytics_day_boundaries_are_not_advertised_as_configurable() -> None:
     assert 'variable "scheduler_time_zone"' in variables
 
 
-@pytest.mark.parametrize(
-    ("current_image", "fallback_image", "expected_image"),
-    [
-        ("runtime@sha256:" + "a" * 64, "runtime@sha256:" + "b" * 64, "runtime@sha256:" + "a" * 64),
-        ("", "runtime@sha256:" + "b" * 64, "runtime@sha256:" + "b" * 64),
-        ("", "runtime:latest", None),
-    ],
-)
-def test_plan_resolves_the_v1_job_image_before_using_a_fallback(
-    tmp_path: Path,
-    current_image: str,
-    fallback_image: str,
-    expected_image: str | None,
-) -> None:
-    script = _workflow_step_script(
-        ".github/workflows/terraform-plan.yml", "Resolve current runtime image"
-    )
-    gcloud = tmp_path / "gcloud"
-    gcloud.write_text(
-        "#!/bin/bash\n"
-        'for argument in "$@"; do\n'
-        '  if [[ "${argument}" == '
-        "'--format=value(spec.template.spec.template.spec.containers[0].image)' ]]; then\n"
-        "    printf '%s\\n' \"${CURRENT_IMAGE}\"\n"
-        "    exit 0\n"
-        "  fi\n"
-        "done\n"
-        "exit 1\n",
-        encoding="utf-8",
-    )
-    gcloud.chmod(0o755)
-    github_env = tmp_path / "github-env"
-    environment = {
-        **os.environ,
-        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-        "CURRENT_IMAGE": current_image,
-        "GITHUB_ENV": str(github_env),
-        "TF_VAR_project_id": "example-project",
-        "TF_VAR_region": "us-central1",
-        "TF_VAR_image_uri": fallback_image,
-    }
-
-    result = subprocess.run(
-        ["bash", "-c", script],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    if expected_image is None:
-        assert result.returncode != 0
-        assert not github_env.exists()
-    else:
-        assert result.returncode == 0, result.stderr
-        assert github_env.read_text(encoding="utf-8") == f"TF_VAR_image_uri={expected_image}\n"
-
-
-@pytest.mark.parametrize(
-    ("job", "actions", "expected"),
-    [
-        ("dbt", ["create"], "true"),
-        ("dbt", ["delete", "create"], "true"),
-        ("dbt", ["update"], "false"),
-        ("dbt", ["no-op"], "false"),
-        ("loader", ["create"], "false"),
-        (None, [], "false"),
-    ],
-)
-def test_deploy_detects_initial_dbt_job_before_apply(
-    tmp_path: Path, job: str | None, actions: list[str], expected: str
-) -> None:
-    script = _workflow_step_script(".github/workflows/terraform-deploy.yml", "Plan runtime changes")
-    terraform = tmp_path / "terraform"
-    terraform.write_text(
-        "#!/bin/bash\n"
-        'if [[ "$2" == "plan" ]]; then exit 0; fi\n'
-        'if [[ "$2" == "show" ]]; then printf \'%s\\n\' "$PLAN_JSON"; exit 0; fi\n'
-        "exit 1\n",
-        encoding="utf-8",
-    )
-    terraform.chmod(0o755)
-    changes = (
-        [{"address": f'google_cloud_run_v2_job.runtime["{job}"]', "change": {"actions": actions}}]
-        if job
-        else []
-    )
-    github_output = tmp_path / "github-output"
-
-    result = subprocess.run(
-        ["bash", "-c", script],
-        env={
-            **os.environ,
-            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-            "PLAN_JSON": json.dumps({"resource_changes": changes}),
-            "GITHUB_OUTPUT": str(github_output),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert github_output.read_text(encoding="utf-8") == f"first_deployment={expected}\n"
-
-
-@pytest.mark.parametrize(
-    ("first_deployment", "requested", "event", "changed_path", "expected"),
-    [
-        ("true", "false", "push", "infra/terraform/jobs.tf", "true"),
-        ("false", "true", "workflow_dispatch", "", "true"),
-        ("false", "false", "workflow_dispatch", "", "false"),
-        ("false", "false", "push", "dbt/models/screen_time.sql", "true"),
-        ("false", "false", "push", "src/personal_data_platform/migrations/002_new.sql", "true"),
-        ("false", "false", "push", "src/personal_data_platform/cli.py", "false"),
-        ("false", "false", "push", "infra/terraform/jobs.tf", "false"),
-        ("false", "false", "push", "", "false"),
-    ],
-)
-def test_deploy_runs_dbt_only_when_initial_requested_or_models_changed(
-    tmp_path: Path,
-    first_deployment: str,
-    requested: str,
-    event: str,
-    changed_path: str,
-    expected: str,
-) -> None:
-    script = _workflow_step_script(
-        ".github/workflows/terraform-deploy.yml", "Determine whether to run dbt"
-    )
-    git = tmp_path / "git"
-    git.write_text(
-        "#!/bin/bash\n"
-        'for argument in "$@"; do\n'
-        '  if [[ "$argument" == */ && "$CHANGED_PATH" == "$argument"* ]]; then exit 1; fi\n'
-        "done\n"
-        "exit 0\n",
-        encoding="utf-8",
-    )
-    git.chmod(0o755)
-    github_output = tmp_path / "github-output"
-
-    result = subprocess.run(
-        ["bash", "-c", script],
-        env={
-            **os.environ,
-            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-            "FIRST_DEPLOYMENT": first_deployment,
-            "REQUESTED": requested,
-            "GITHUB_EVENT_NAME": event,
-            "BEFORE_SHA": "before",
-            "GITHUB_SHA": "after",
-            "CHANGED_PATH": changed_path,
-            "GITHUB_OUTPUT": str(github_output),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert github_output.read_text(encoding="utf-8") == f"run={expected}\n"
-
-
-def test_deploy_initializes_models_only_after_apply_and_preflight() -> None:
-    workflow = _read(".github/workflows/terraform-deploy.yml")
-
-    assert workflow.index("name: Plan runtime changes") < workflow.index(
-        "name: Apply runtime changes"
-    )
-    assert workflow.index("name: Apply runtime changes") < workflow.index(
-        "name: Run isolated deployment preflight"
-    )
-    assert workflow.index("name: Run isolated deployment preflight") < workflow.index(
-        "name: Initialize or update dbt models"
-    )
-    assert "FIRST_DEPLOYMENT: ${{ steps.plan.outputs.first_deployment }}" in workflow
-    assert "if: ${{ steps.dbt.outputs.run == 'true' }}" in workflow
-
-
-IMAGE_PATH = "us-central1-docker.pkg.dev/example-project/runtime/runtime"
+IMAGE_PATH = "us-west1-docker.pkg.dev/example-project/runtime/runtime"
 CURRENT_DIGEST = f"{IMAGE_PATH}@sha256:" + "a" * 64
 
 
@@ -469,157 +151,6 @@ def _runtime_job(name: str, image: str) -> dict:
         "metadata": {"name": name},
         "spec": {"template": {"spec": {"template": {"spec": {"containers": [{"image": image}]}}}}},
     }
-
-
-@pytest.mark.parametrize(
-    ("changed_path", "event", "current_image", "before_kind", "expected_build"),
-    [
-        ("infra/terraform/jobs.tf", "push", CURRENT_DIGEST, "valid", "false"),
-        (".github/workflows/terraform-deploy.yml", "push", CURRENT_DIGEST, "valid", "false"),
-        ("src/personal_data_platform/cli.py", "push", CURRENT_DIGEST, "valid", "true"),
-        ("dbt/models/test.sql", "push", CURRENT_DIGEST, "valid", "true"),
-        ("Dockerfile", "push", CURRENT_DIGEST, "valid", "true"),
-        (".dockerignore", "push", CURRENT_DIGEST, "valid", "true"),
-        ("pyproject.toml", "push", CURRENT_DIGEST, "valid", "true"),
-        ("infra/terraform/jobs.tf", "workflow_dispatch", CURRENT_DIGEST, "empty", "true"),
-        ("infra/terraform/jobs.tf", "push", "", "valid", "true"),
-        ("infra/terraform/jobs.tf", "push", CURRENT_DIGEST, "zero", "true"),
-        ("infra/terraform/jobs.tf", "push", CURRENT_DIGEST, "missing", None),
-        ("infra/terraform/jobs.tf", "push", "runtime:latest", "valid", None),
-    ],
-)
-def test_deploy_selects_existing_digest_only_for_unchanged_image_inputs(
-    tmp_path: Path,
-    changed_path: str,
-    event: str,
-    current_image: str,
-    before_kind: str,
-    expected_build: str | None,
-) -> None:
-    def git(*args: str) -> str:
-        return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
-
-    git("init", "--quiet")
-    git("config", "user.name", "Test")
-    git("config", "user.email", "test@example.com")
-    git("commit", "--quiet", "--allow-empty", "-m", "base")
-    before = git("rev-parse", "HEAD")
-    changed = tmp_path / changed_path
-    changed.parent.mkdir(parents=True, exist_ok=True)
-    changed.write_text("changed\n")
-    git("add", ".")
-    git("commit", "--quiet", "-m", "change")
-    after = git("rev-parse", "HEAD")
-    before = {"zero": "0" * 40, "empty": "", "missing": "f" * 40}.get(before_kind, before)
-    gcloud = tmp_path / "gcloud"
-    gcloud.write_text(
-        '#!/bin/bash\n[[ "$1 $2 $3" == "run jobs list" ]] || exit 90\nprintf "%s\\n" "$JOBS_JSON"\n'
-    )
-    gcloud.chmod(0o755)
-    output = tmp_path / "output"
-    github_env = tmp_path / "env"
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            _workflow_step_script(".github/workflows/terraform-deploy.yml", "Select runtime image"),
-        ],
-        cwd=tmp_path,
-        env={
-            **os.environ,
-            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-            "JOBS_JSON": json.dumps(
-                [_runtime_job("screen-time-loader", current_image)] if current_image else []
-            ),
-            "GITHUB_EVENT_NAME": event,
-            "BEFORE_SHA": before,
-            "GITHUB_SHA": after,
-            "GCP_PROJECT_ID": "example-project",
-            "GCP_REGION": "us-central1",
-            "ARTIFACT_REPOSITORY": "runtime",
-            "IMAGE_NAME": "runtime",
-            "GITHUB_OUTPUT": str(output),
-            "GITHUB_ENV": str(github_env),
-            "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if expected_build is None:
-        assert result.returncode != 0
-        assert not github_env.exists()
-    else:
-        assert result.returncode == 0, result.stderr
-        assert output.read_text() == f"build={expected_build}\n"
-        if expected_build == "false":
-            assert github_env.read_text() == f"TF_VAR_image_uri={CURRENT_DIGEST}\n"
-        else:
-            assert not github_env.exists()
-
-
-@pytest.mark.parametrize("failure", ["", "list", "tag", "invalid-digest"])
-def test_cleanup_protects_all_current_jobs_before_replacing_the_candidate_tag(
-    tmp_path: Path, failure: str
-) -> None:
-    previous_digest = f"{IMAGE_PATH}@sha256:" + "b" * 64
-    candidate_digest = f"{IMAGE_PATH}@sha256:" + "c" * 64
-    jobs = [
-        _runtime_job("screen-time-loader", CURRENT_DIGEST),
-        _runtime_job("dbt-runner", previous_digest),
-        _runtime_job("other-repository", "us-central1-docker.pkg.dev/other/image:latest"),
-    ]
-    if failure == "invalid-digest":
-        jobs[0] = _runtime_job("screen-time-loader", f"{IMAGE_PATH}:latest")
-    gcloud = tmp_path / "gcloud"
-    gcloud.write_text(
-        "#!/bin/bash\n"
-        'if [[ "$1 $2 $3" == "run revisions list" ]]; then echo "[]"; exit 0; fi\n'
-        'if [[ "$1 $2 $3" == "run jobs list" ]]; then\n'
-        '  [[ "$FAILURE" == "list" ]] && exit 1\n'
-        '  printf "%s\\n" "$JOBS_JSON"; exit 0\n'
-        "fi\n"
-        'if [[ "$1 $2 $3 $4" == "artifacts docker tags add" ]]; then\n'
-        '  [[ "$FAILURE" == "tag" ]] && exit 1\n'
-        '  printf "%s %s\\n" "$5" "$6" >> "$TAG_LOG"; exit 0\n'
-        "fi\nexit 90\n"
-    )
-    gcloud.chmod(0o755)
-    tag_log = tmp_path / "tags"
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            _workflow_step_script(
-                ".github/workflows/terraform-deploy.yml", "Protect deployed and candidate images"
-            ),
-        ],
-        env={
-            **os.environ,
-            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-            "FAILURE": failure,
-            "JOBS_JSON": json.dumps(jobs),
-            "TAG_LOG": str(tag_log),
-            "GCP_PROJECT_ID": "example-project",
-            "GCP_REGION": "us-central1",
-            "ARTIFACT_REPOSITORY": "runtime",
-            "IMAGE_NAME": "runtime",
-            "TF_VAR_image_uri": candidate_digest,
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if failure:
-        assert result.returncode != 0
-        assert not tag_log.exists()
-    else:
-        assert result.returncode == 0, result.stderr
-        assert tag_log.read_text().splitlines() == [
-            f"{CURRENT_DIGEST} {IMAGE_PATH}:deployed-job-screen-time-loader",
-            f"{previous_digest} {IMAGE_PATH}:deployed-job-dbt-runner",
-            f"{candidate_digest} {IMAGE_PATH}:deployed-candidate",
-        ]
 
 
 def test_west_parallel_resources_preserve_legacy_and_pause_schedulers() -> None:
@@ -654,16 +185,6 @@ def test_west_pubsub_and_receiver_access_are_separate() -> None:
     assert "PDP_FITBIT_OAUTH_CONFIG" not in receiver
     assert "MOTHERDUCK_TOKEN" not in receiver
     assert "GCS_BUCKET" not in receiver
-
-
-def test_ci_preparation_does_not_run_west_production_jobs() -> None:
-    workflow = _read(".github/workflows/terraform-deploy.yml")
-    assert "WEST_REGION: us-west1" in workflow
-    assert "TF_VAR_west_schedulers_enabled: 'false'" in workflow
-    assert "GCP_WEST_RUNTIME_IMAGE_URI" in _read(".github/workflows/terraform-plan.yml")
-    assert "execute reconciliation-west" not in workflow
-    assert "execute fitbit-hourly-west" not in workflow
-    assert "execute dbt-runner-west" not in workflow
 
 
 WEST_SECRET_VERSIONS = {
@@ -712,9 +233,9 @@ def test_west_workflows_require_numeric_pins_before_cloud_work(
             **os.environ,
             **dict.fromkeys(
                 [
-                    "ARTIFACT_REPOSITORY",
+                    "WEST_ARTIFACT_REPOSITORY",
                     "GCP_PROJECT_ID",
-                    "GCP_REGION",
+                    "WEST_REGION",
                     "IMAGE_NAME",
                     "GCP_PLAN_SERVICE_ACCOUNT",
                     "TF_STATE_BUCKET",
@@ -722,7 +243,7 @@ def test_west_workflows_require_numeric_pins_before_cloud_work(
                     "TF_VAR_collector_impersonator_member",
                     "TF_VAR_deployer_service_account_email",
                     "TF_VAR_project_id",
-                    "TF_VAR_region",
+                    "WEST_REGION",
                 ],
                 "example",
             ),
@@ -733,13 +254,14 @@ def test_west_workflows_require_numeric_pins_before_cloud_work(
         text=True,
         check=False,
     )
-    assert (result.returncode == 0) is accepted, result.stderr
+    assert (result.returncode == 0) is (
+        accepted and (workflow == "terraform-plan.yml" or enabled == "true")
+    ), result.stderr
 
 
 def test_deploy_protects_job_and_service_images_during_migration(tmp_path: Path) -> None:
     revision_image = f"{IMAGE_PATH}@sha256:" + "b" * 64
     rollback_image = f"{IMAGE_PATH}@sha256:" + "c" * 64
-    candidate_image = f"{IMAGE_PATH}@sha256:" + "d" * 64
     gcloud = tmp_path / "gcloud"
     gcloud.write_text(
         "#!/bin/bash\n"
@@ -758,28 +280,35 @@ def test_deploy_protects_job_and_service_images_during_migration(tmp_path: Path)
             "bash",
             "-c",
             _workflow_step_script(
-                ".github/workflows/terraform-deploy.yml", "Protect deployed and candidate images"
+                ".github/workflows/terraform-deploy.yml", "Prepare west runtime image"
             ),
         ],
         env={
             **os.environ,
             "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-            "JOBS_JSON": json.dumps([_runtime_job("screen-time-loader", CURRENT_DIGEST)]),
+            "JOBS_JSON": json.dumps([_runtime_job("reconciliation-west", CURRENT_DIGEST)]),
             "REVISIONS_JSON": json.dumps(
                 [
                     {
-                        "metadata": {"name": "pdp-fitbit-00001"},
+                        "metadata": {"name": "pdp-fitbit-west-00001"},
                         "status": {"imageDigest": revision_image},
                     }
                 ]
             ),
             "TAG_LOG": str(tags),
             "GCP_PROJECT_ID": "example-project",
-            "GCP_REGION": "us-central1",
-            "ARTIFACT_REPOSITORY": "runtime",
+            "WEST_REGION": "us-west1",
+            "WEST_ARTIFACT_REPOSITORY": "runtime",
             "IMAGE_NAME": "runtime",
-            "TF_VAR_image_uri": candidate_image,
-            "ROLLBACK_IMAGE_URI": rollback_image,
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SHA": subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+            ).strip(),
+            "BEFORE_SHA": subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+            ).strip(),
+            "GITHUB_ENV": str(tmp_path / "github-env"),
+            "WEST_ROLLBACK_IMAGE_URI": rollback_image,
         },
         capture_output=True,
         text=True,
@@ -787,10 +316,10 @@ def test_deploy_protects_job_and_service_images_during_migration(tmp_path: Path)
     )
     assert result.returncode == 0, result.stderr
     assert tags.read_text().splitlines() == [
-        f"{CURRENT_DIGEST} {IMAGE_PATH}:deployed-job-screen-time-loader",
-        f"{revision_image} {IMAGE_PATH}:deployed-revision-pdp-fitbit-00001",
+        f"{CURRENT_DIGEST} {IMAGE_PATH}:deployed-job-reconciliation-west",
+        f"{revision_image} {IMAGE_PATH}:deployed-revision-pdp-fitbit-west-00001",
         f"{rollback_image} {IMAGE_PATH}:deployed-rollback",
-        f"{candidate_image} {IMAGE_PATH}:deployed-candidate",
+        f"{CURRENT_DIGEST} {IMAGE_PATH}:deployed-candidate",
     ]
 
 

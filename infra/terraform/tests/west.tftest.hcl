@@ -8,7 +8,6 @@ variables {
   project_id                     = "example-project"
   deployer_service_account_email = "github-tf-deploy@example-project.iam.gserviceaccount.com"
   collector_impersonator_member  = "user:operator@example.com"
-  image_uri                      = "us-central1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   west_image_uri                 = "us-west1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   alert_email                    = "operator@example.com"
   fitbit_subject_key             = "owner"
@@ -21,6 +20,18 @@ variables {
     heartbeat_config           = "17"
   }
 }
+run "minimum_normal_runtime" {
+  command = plan
+  variables { west_schedulers_enabled = true }
+  assert {
+    condition     = toset(keys(output.runtime_jobs)) == toset(["hourly", "daily"]) && toset(keys(output.scheduler_jobs)) == toset(["hourly", "daily"])
+    error_message = "Normal deployment must expose only hourly Fitbit and the combined daily job, with two schedules."
+  }
+  assert {
+    condition     = alltrue([for job in google_cloud_scheduler_job.west : !job.paused]) && alltrue([for policy in google_monitoring_alert_policy.west_job_failed : policy.enabled]) && google_monitoring_alert_policy.west_pubsub_backlog[0].enabled
+    error_message = "Cutover must enable both schedules and native monitoring together."
+  }
+}
 run "west_disabled_without_secret_versions" {
   command = plan
   variables {
@@ -28,8 +39,8 @@ run "west_disabled_without_secret_versions" {
     west_secret_versions = {}
   }
   assert {
-    condition     = length(google_cloud_run_v2_job.west) == 0 && length(google_cloud_run_v2_service.west) == 0 && length(google_secret_manager_secret.west) == 0 && length(google_cloud_scheduler_job.west) == 0 && length(google_cloud_run_v2_job.runtime) == 4
-    error_message = "Disabled preparation must accept an empty secret version map and retain the legacy jobs."
+    condition     = length(google_cloud_run_v2_job.west) == 0 && length(google_cloud_run_v2_service.west) == 0 && length(google_secret_manager_secret.west) == 0 && length(google_cloud_scheduler_job.west) == 0
+    error_message = "Disabled preparation must accept an empty secret version map and create no processing resources."
   }
 }
 run "west_requires_secret_versions" {
@@ -121,8 +132,8 @@ run "west_parallel_contract" {
     error_message = "Legacy storage must remain in place while west uses distinct buckets."
   }
   assert {
-    condition     = length(google_cloud_run_v2_job.runtime) == 4 && length(google_cloud_run_v2_job.west) == 2 && length(google_cloud_scheduler_job.west) == 2 && alltrue([for scheduler in google_cloud_scheduler_job.west : scheduler.paused && scheduler.region == "us-west1" && scheduler.time_zone == "Asia/Tokyo"])
-    error_message = "Preparation adds separate west jobs and exactly two paused schedules."
+    condition     = length(google_cloud_run_v2_job.west) == 2 && length(google_cloud_scheduler_job.west) == 2 && alltrue([for scheduler in google_cloud_scheduler_job.west : scheduler.paused && scheduler.region == "us-west1" && scheduler.time_zone == "Asia/Tokyo"])
+    error_message = "Preparation creates west jobs and exactly two paused schedules."
   }
   assert {
     condition     = google_cloud_run_v2_job.west["hourly"].template[0].template[0].timeout == "3000s" && google_cloud_run_v2_job.west["daily"].template[0].template[0].timeout == "6000s" && alltrue([for job in google_cloud_run_v2_job.west : job.location == "us-west1" && job.template[0].task_count == 1 && job.template[0].parallelism == 1 && job.template[0].template[0].containers[0].image == var.west_image_uri])
@@ -138,8 +149,8 @@ run "west_parallel_contract" {
   }
   assert {
     condition = alltrue([for job_key, expected in {
-      hourly    = { MOTHERDUCK_TOKEN = "7", PDP_FITBIT_OAUTH_CONFIG = "11" }
-      daily     = { MOTHERDUCK_TOKEN = "7", PDP_FITBIT_OAUTH_CONFIG = "11", PDP_HEARTBEAT_CONFIG = "17" }
+      hourly = { MOTHERDUCK_TOKEN = "7", PDP_FITBIT_OAUTH_CONFIG = "11" }
+      daily  = { MOTHERDUCK_TOKEN = "7", PDP_FITBIT_OAUTH_CONFIG = "11", PDP_HEARTBEAT_CONFIG = "17" }
       } : tomap({
         for env in google_cloud_run_v2_job.west[job_key].template[0].template[0].containers[0].env : env.name => env.value_source[0].secret_key_ref[0].version if length(env.value_source) > 0
     }) == tomap(expected)])
@@ -183,11 +194,11 @@ run "west_storage_and_monitoring_are_separate" {
     }
   }
   override_resource {
-    target = google_service_account.west[0]
+    target          = google_service_account.west[0]
     override_during = plan
     values = {
       email = "runtime@example-project.iam.gserviceaccount.com"
-      name = "projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com"
+      name  = "projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com"
     }
   }
   override_resource {
@@ -215,21 +226,21 @@ run "west_storage_and_monitoring_are_separate" {
 }
 
 run "west_only_runtime_pins_and_shared_identity" {
- command = plan
- override_resource {
-  target = google_service_account.west[0]
-  override_during = plan
-  values = { email="runtime@example-project.iam.gserviceaccount.com", name="projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com" }
- }
- variables {
-  west_secret_versions = { motherduck_token="7",fitbit_oauth_config="11",fitbit_webhook_config="13",heartbeat_config="17" }
- }
- assert {
-  condition = length(google_service_account.west)==1 && google_cloud_run_v2_job.west["hourly"].template[0].template[0].service_account == google_cloud_run_v2_job.west["daily"].template[0].template[0].service_account && google_cloud_scheduler_job.west["daily"].schedule=="10 4 * * *"
-  error_message = "Only two processing jobs with one runtime identity and non-overlapping daily schedule are required."
- }
- assert {
-  condition = length(google_monitoring_alert_policy.west_job_failed)==1 && google_monitoring_alert_policy.west_pubsub_backlog[0].conditions[0].condition_threshold[0].threshold_value==86400
-  error_message = "Failure and24h backlog policies must be consolidated."
- }
+  command = plan
+  override_resource {
+    target          = google_service_account.west[0]
+    override_during = plan
+    values          = { email = "runtime@example-project.iam.gserviceaccount.com", name = "projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com" }
+  }
+  variables {
+    west_secret_versions = { motherduck_token = "7", fitbit_oauth_config = "11", fitbit_webhook_config = "13", heartbeat_config = "17" }
+  }
+  assert {
+    condition     = length(google_service_account.west) == 1 && google_cloud_run_v2_job.west["hourly"].template[0].template[0].service_account == google_cloud_run_v2_job.west["daily"].template[0].template[0].service_account && google_cloud_scheduler_job.west["daily"].schedule == "10 4 * * *"
+    error_message = "Only two processing jobs with one runtime identity and non-overlapping daily schedule are required."
+  }
+  assert {
+    condition     = length(google_monitoring_alert_policy.west_job_failed) == 1 && google_monitoring_alert_policy.west_pubsub_backlog[0].conditions[0].condition_threshold[0].threshold_value == 86400
+    error_message = "Failure and24h backlog policies must be consolidated."
+  }
 }

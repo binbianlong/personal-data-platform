@@ -34,19 +34,16 @@ jobs:
       TF_VAR_alert_email: ${{ vars.GCP_ALERT_EMAIL }}
       TF_VAR_collector_impersonator_member: ${{ vars.GCP_COLLECTOR_IMPERSONATOR_MEMBER }}
       TF_VAR_deployer_service_account_email: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
-      TF_VAR_enable_fitbit_runtime: ${{ vars.PDP_FITBIT_ENABLED || 'false' }}
-      TF_VAR_fitbit_processing_paused: ${{ vars.PDP_FITBIT_PROCESSING_PAUSED || 'true' }}
       TF_VAR_fitbit_subject_key: ${{ vars.PDP_FITBIT_SUBJECT_KEY }}
-      TF_VAR_fitbit_secret_ids: ${{ vars.PDP_FITBIT_SECRET_IDS || '{}' }}
-      TF_VAR_image_uri: ${{ vars.GCP_RUNTIME_IMAGE_URI }}
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
-      TF_VAR_region: us-central1
       WEST_REGION: us-west1
       WEST_ENABLED: ${{ vars.PDP_WEST_ENABLED || 'false' }}
       WEST_ARTIFACT_REPOSITORY: ${{ vars.GCP_WEST_ARTIFACT_REPOSITORY || vars.GCP_ARTIFACT_REPOSITORY }}
       TF_VAR_enable_west_runtime: ${{ vars.PDP_WEST_ENABLED || 'false' }}
       TF_VAR_west_region: us-west1
-      TF_VAR_west_schedulers_enabled: 'false'
+      TF_VAR_west_schedulers_enabled: ${{ vars.PDP_WEST_SCHEDULERS_ENABLED || 'false' }}
+      TF_VAR_west_logging_enabled: ${{ vars.PDP_WEST_LOGGING_ENABLED || 'false' }}
+      TF_VAR_west_logging_exclusions: ${{ vars.PDP_WEST_LOGGING_EXCLUSIONS || '{}' }}
       TF_VAR_west_image_uri: ${{ vars.GCP_WEST_RUNTIME_IMAGE_URI }}
       TF_VAR_west_secret_versions: ${{ vars.PDP_WEST_SECRET_VERSIONS || '{}' }}
       TF_VAR_west_motherduck_database: ${{ vars.PDP_WEST_MOTHERDUCK_DATABASE || 'personal_data_platform_west' }}
@@ -59,7 +56,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in GCP_PLAN_SERVICE_ACCOUNT TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_collector_impersonator_member TF_VAR_deployer_service_account_email TF_VAR_project_id TF_VAR_region; do
+          for name in GCP_PLAN_SERVICE_ACCOUNT TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_collector_impersonator_member TF_VAR_deployer_service_account_email TF_VAR_project_id WEST_REGION; do
             test -n "${!name}"
           done
           if [[ "${WEST_ENABLED}" == "true" ]]; then
@@ -82,23 +79,6 @@ jobs:
 
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
-
-      - name: Resolve current runtime image
-        shell: bash
-        run: |
-          set -euo pipefail
-          current_image="$(gcloud run jobs describe screen-time-loader \
-            --project="${TF_VAR_project_id}" \
-            --region="${TF_VAR_region}" \
-            --format='value(spec.template.spec.template.spec.containers[0].image)' 2>/dev/null || true)"
-          if [[ ! "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
-            current_image="${TF_VAR_image_uri}"
-          fi
-          if [[ ! "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
-            echo "A digest-pinned runtime image is required for planning." >&2
-            exit 1
-          fi
-          echo "TF_VAR_image_uri=${current_image}" >> "${GITHUB_ENV}"
 
       - name: Resolve west runtime image
         if: ${{ env.WEST_ENABLED == 'true' }}

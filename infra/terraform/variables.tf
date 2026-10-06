@@ -9,13 +9,13 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "Google Cloud region for Cloud Run and Cloud Scheduler."
+  description = "Region of retained legacy storage; normal compute uses west_region."
   type        = string
   default     = "us-central1"
 
   validation {
     condition     = var.region == "us-central1"
-    error_message = "region is fixed to us-central1 for the runtime, Raw storage, and Artifact Registry."
+    error_message = "Legacy storage stays in us-central1 to avoid replacing retained backups."
   }
 }
 
@@ -39,16 +39,6 @@ variable "collector_impersonator_member" {
   }
 }
 
-variable "image_uri" {
-  description = "Immutable Artifact Registry image URI used by every Cloud Run Job."
-  type        = string
-
-  validation {
-    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.image_uri))
-    error_message = "image_uri must be immutable and end with @sha256:<64 lowercase hex characters>."
-  }
-}
-
 variable "alert_email" {
   description = "Email address registered as a Cloud Monitoring notification channel."
   type        = string
@@ -60,43 +50,19 @@ variable "alert_email" {
   }
 }
 
-variable "loader_schedule" {
-  description = "Cron schedule for the hourly Screen Time loader."
-  type        = string
-  default     = "15 * * * *"
-}
-
-variable "reconciliation_schedule" {
-  description = "Cron schedule for twice-daily reconciliation, within the Cloud Monitoring absence window."
-  type        = string
-  default     = "30 4,16 * * *"
-}
-
 variable "scheduler_time_zone" {
   description = "IANA time zone used by Cloud Scheduler."
   type        = string
   default     = "Asia/Tokyo"
 }
 
-variable "motherduck_database" {
-  description = "Production MotherDuck database name."
-  type        = string
-  default     = "personal_data_platform"
-}
-
-variable "preflight_motherduck_database" {
-  description = "Isolated MotherDuck database used by deployment preflight."
-  type        = string
-  default     = "personal_data_platform_test"
-}
-
 variable "enable_west_runtime" {
-  description = "Provision the parallel west deployment after its isolated dependencies are ready."
+  description = "Provision the normal west deployment after its isolated dependencies are ready."
   type        = bool
   default     = false
 }
 variable "west_region" {
-  description = "Region for the parallel deployment; legacy region remains unchanged."
+  description = "Region for normal compute, Raw and Pub/Sub."
   type        = string
   default     = "us-west1"
   validation {
@@ -105,7 +71,7 @@ variable "west_region" {
   }
 }
 variable "west_image_uri" {
-  description = "Separate west Artifact Registry digest; never falls back to the legacy image."
+  description = "Immutable image digest in the us-west1 Artifact Registry."
   type        = string
   default     = ""
   validation {

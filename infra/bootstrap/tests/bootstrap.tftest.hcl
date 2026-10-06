@@ -2,10 +2,20 @@ mock_provider "google" {}
 
 run "secure_bootstrap_contract" {
   command = plan
+  override_resource {
+    target          = google_artifact_registry_repository.runtime_west
+    override_during = plan
+    values          = { name = "projects/example-project/locations/us-west1/repositories/personal-data-platform" }
+  }
 
   variables {
     project_id        = "example-project"
     state_bucket_name = "example-project-personal-data-platform-tfstate"
+  }
+
+  assert {
+    condition     = output.artifact_repository == google_artifact_registry_repository.runtime_west.name && !contains(local.deploy_project_roles, "roles/cloudtasks.admin")
+    error_message = "Normal deployment must use the west registry without Cloud Tasks administration."
   }
 
   assert {
@@ -29,13 +39,13 @@ run "secure_bootstrap_contract" {
   }
 
   assert {
-    condition     = google_artifact_registry_repository.runtime_us.format == "DOCKER" && google_artifact_registry_repository.runtime_us.location == "us-central1"
+    condition     = google_artifact_registry_repository.runtime_west.format == "DOCKER" && google_artifact_registry_repository.runtime_west.location == "us-west1"
     error_message = "The runtime registry must be a Docker repository."
   }
 
   assert {
     condition = anytrue([
-      for policy in google_artifact_registry_repository.runtime_us.cleanup_policies :
+      for policy in google_artifact_registry_repository.runtime_west.cleanup_policies :
       policy.action == "KEEP" && try(
         policy.condition[0].tag_state == "TAGGED" &&
         contains(policy.condition[0].tag_prefixes, "deployed-"), false
@@ -46,15 +56,15 @@ run "secure_bootstrap_contract" {
 
   assert {
     condition = anytrue([
-      for policy in google_artifact_registry_repository.runtime_us.cleanup_policies :
+      for policy in google_artifact_registry_repository.runtime_west.cleanup_policies :
       policy.action == "KEEP" && try(policy.most_recent_versions[0].keep_count >= 5, false)
     ])
     error_message = "Cleanup must retain recent image versions for rollback."
   }
 
   assert {
-    condition = !google_artifact_registry_repository.runtime_us.cleanup_policy_dry_run && anytrue([
-      for policy in google_artifact_registry_repository.runtime_us.cleanup_policies :
+    condition = !google_artifact_registry_repository.runtime_west.cleanup_policy_dry_run && anytrue([
+      for policy in google_artifact_registry_repository.runtime_west.cleanup_policies :
       policy.action == "DELETE" && try(
         policy.condition[0].tag_state == "ANY" &&
         policy.condition[0].older_than == "2592000s", false
@@ -134,7 +144,7 @@ run "west_bootstrap_preserves_legacy" {
     error_message = "West state must use a distinct protected bucket while legacy state stays in place."
   }
   assert {
-    condition     = google_artifact_registry_repository.runtime_us.location == "us-central1" && google_artifact_registry_repository.runtime_west.location == "us-west1" && contains(local.deploy_project_roles, "roles/pubsub.admin") && local.plan_project_roles == toset(["roles/viewer"])
-    error_message = "West registry must be separate and only deploy may administer Pub/Sub."
+    condition     = google_artifact_registry_repository.runtime_west.location == "us-west1" && contains(local.deploy_project_roles, "roles/pubsub.admin") && local.plan_project_roles == toset(["roles/viewer"])
+    error_message = "Normal registry must be in west and only deploy may administer Pub/Sub."
   }
 }

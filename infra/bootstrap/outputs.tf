@@ -5,7 +5,7 @@ output "state_bucket_name" {
 
 output "artifact_repository" {
   description = "Artifact Registry repository resource name."
-  value       = google_artifact_registry_repository.runtime_us.name
+  value       = google_artifact_registry_repository.runtime_west.name
 }
 
 output "storage_custom_roles" {

@@ -1,14 +1,14 @@
 output "runtime_jobs" {
   description = "Cloud Run Job names by logical role."
   value = {
-    for key, job in google_cloud_run_v2_job.runtime : key => job.name
+    for key, job in google_cloud_run_v2_job.west : key => job.name
   }
 }
 
 output "runtime_service_accounts" {
-  description = "Dedicated Service Account email addresses by logical role."
+  description = "Shared processing Service Account email address."
   value = {
-    for key, account in google_service_account.runtime : key => account.email
+    for key, account in google_service_account.west : key => account.email
   }
 }
 
@@ -23,7 +23,7 @@ output "rebuild_operator_service_account" {
 }
 
 output "storage_buckets" {
-  description = "Production Raw and isolated preflight bucket names."
+  description = "Retained legacy backup bucket names; normal storage is in west_resources."
   value = {
     raw       = google_storage_bucket.raw.name
     preflight = google_storage_bucket.preflight.name
@@ -33,7 +33,7 @@ output "storage_buckets" {
 output "scheduler_jobs" {
   description = "Cloud Scheduler job names and schedules."
   value = {
-    for key, job in local.scheduled_jobs : key => {
+    for key, job in google_cloud_scheduler_job.west : key => {
       name      = job.name
       schedule  = job.schedule
       time_zone = var.scheduler_time_zone
@@ -44,7 +44,7 @@ output "scheduler_jobs" {
 output "secret_ids" {
   description = "Secret Manager resources that require out-of-band secret versions."
   value = {
-    for key in keys(local.runtime_secrets) : key => google_secret_manager_secret.runtime[key].secret_id
+    for key, secret in google_secret_manager_secret.west : key => secret.secret_id
   }
 }
 
@@ -54,7 +54,7 @@ output "notification_channel" {
 }
 
 output "west_resources" {
-  description = "Parallel west resources; legacy outputs remain available until cutover."
+  description = "Normal west resources and cutover state."
   value = var.enable_west_runtime ? {
     region              = var.west_region
     raw_bucket          = google_storage_bucket.raw_west[0].name

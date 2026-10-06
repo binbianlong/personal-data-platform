@@ -11,7 +11,6 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict
 
-from personal_data_platform.config import schema_profile
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import (
     RawRepository,
@@ -89,7 +88,6 @@ def run_loader_objects(
     # All source streams share one warehouse write lease. Source selection does not
     # change the database's concurrency contract.
     own_lease = _lease_owner is None
-    west = schema_profile() == "west" or os.environ.get("PDP_FITBIT_DELIVERY_MODE") == "pubsub"
     deadline = _deadline if _deadline is not None else time.monotonic() + 50 * 60
     if own_lease and not warehouse.acquire_job_lock(
         "loader", run_id, lease_seconds=LOADER_LEASE_SECONDS
@@ -103,16 +101,14 @@ def run_loader_objects(
     scope_details = {"source_id": source.source_id, "stream": source.stream}
 
     def guard() -> None:
-        if west:
-            seconds = int(deadline - time.monotonic())
-            if seconds <= 0:
-                raise TimeoutError("loader execution deadline exceeded")
-            warehouse.require_job_lock(_lease_owner or run_id, remaining_seconds=seconds)
+        seconds = int(deadline - time.monotonic())
+        if seconds <= 0:
+            raise TimeoutError("loader execution deadline exceeded")
+        warehouse.require_job_lock(_lease_owner or run_id, remaining_seconds=seconds)
 
     try:
         guard()
-        if west:
-            timer = interrupt_after(warehouse, deadline - time.monotonic())
+        timer = interrupt_after(warehouse, deadline - time.monotonic())
         warehouse.begin_job(f"loader:{source.source_id}:{source.stream}", run_id)
         job_started = True
         already_loaded = warehouse.succeeded_keys_for(refs, parser_version=source.parser_version)
