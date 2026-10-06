@@ -1,111 +1,77 @@
 # アーキテクチャ
 
-## 構成
+GCP `us-west1`で取得・Raw保存・Jobを実行し、MotherDuck `us-west-2`へ長期分析履歴を保存する。
 
 ```text
-Screen Time Collector -> GCS Raw -> 日次JobのLoader
+Screen Time Collector -> GCS Raw -> 日次Job
 Google Health Webhook -> receiver -> Pub/Sub -> 毎時Job
-  -> API完全取得 -> 変更時だけGCS Raw -> Loader -> commit後ack
+  -> API完全取得 -> 変更時だけGCS Raw -> Loader -> DB commit後ack
 
-共通Loader
-  -> MotherDuckの型付きbase
-  -> dbt View
-  -> MotherDuck Remote MCP（read-only）
-  -> ChatGPT
-
-日次Cloud Run Job
-  -> Screen Time両streamと保存済みFitbit Rawの取込
-  -> Fitbit直近7完了日の再照合 -> dbt -> 両streamの監査
-  -> 全段階成功時だけdaily heartbeatを1回送信
+Loader -> MotherDuck base -> dbt View -> read-only share / Remote MCP
+日次Job -> 両sourceの取得・補修 -> dbt -> 両Screen Time監査 -> daily heartbeat
 ```
 
-Macへ同期されたiPhoneの`App.InFocus`とMac自身の`ScreenTime.AppUsage`は
-[`Screen Time`](../sources/screen-time/)に属し、
-`source_id=screen_time`、`stream=app-in-focus`または`app-usage`でRaw schema v1/v2を扱う。
-Fitbitは`fitbit / health`としてWebhook受信・API取得・Raw v3保存・取込・分析を行う。
-GCP `us-west1`の通知専用receiver、Pub/Sub、毎時15分の取得Job、日次04:10 Asia/TokyoのJobと、
-MotherDuck `us-west-2`を使う。通常のJobは同じimageとruntime Service Accountを共有し、receiverの権限を分ける。
-定期実行・監視・leaseの契約は[Platform運用](operations.md)を参照する。
-複数source、同じsource内の別stream、複数schema versionを扱う共通処理はsynthetic fixtureで検証する。
+| source / stream | 取得元 | Raw |
+|---|---|---|
+| `screen_time / app-in-focus` | Macへ同期されたiPhoneのApp.InFocus | v1/v2 SEGB |
+| `screen_time / app-usage` | Mac自身のScreenTime.AppUsage | v1/v2 SEGB |
+| `fitbit / health` | Google Health API | v3 JSON |
 
-単一GCP project内で本番と検証を運用する。本番とは別のRawを使う検証ではGCS bucket、MotherDuck database、
-Service Accountとcredentialを分離する。各sourceのRaw prefixは契約で固定し、prefixの変更で環境を切り替えない。
-接続確認用preflightは専用bucketの`test/preflight/`と検証用databaseを使う。
+receiverは通知の認証とPub/Sub発行だけを担当し、API取得やDB書込を行わない。
+毎時・日次Jobは同じimageとruntime Service Accountを共有する。時刻・lease・監視・復旧は
+[Platform運用](operations.md)、アクセス境界は[セキュリティ](security.md)に従う。
 
 ## 共通処理とsourceの責任
 
-| 境界 | 責任 | 実装 |
-|---|---|---|
-| Raw identity | source、stream、schema版、subject、logical key、観測時刻、内容hash、GCS generation | `raw/models.py` |
-| Source adapter | key codec、対応schema版、decode、型付きbatch、稼働監査、必須relation、保持期限、dbt selector | `sources/contracts.py` |
-| Registry | 明示登録されたsourceとstreamの組合せを解決 | `sources/registry.py` |
-| GCS | 全page listing、選択namespaceの検証、generation指定read、create-only upload | `storage/gcs.py` |
-| Loader / Warehouse | hash検証、順序制御、再試行、transaction、共通取込状態 | `loader/`、`storage/motherduck.py` |
-| Reconciliation / Rebuild | 選択scopeの照合・期限切れ判定、固定inventoryのscratch再生 | `reconciliation/`、`recovery/` |
-| 取得・型付きデータ | source固有の認証、取得state、control object、decoder、baseへの書込 | `sources/<source>/` |
+実装は`src/personal_data_platform/`内に置く。
 
-実装pathは`src/personal_data_platform/`からの相対pathである。sourceの追加はregistryへの明示登録で行い、
-外部pluginの自動探索や、未登録sourceを既存decoderへ流すfallbackは行わない。
+| 境界 | 責任 |
+|---|---|
+| `sources/contracts.py`・`sources/registry.py` | 登録済みsource/stream、Raw codec、decode、型付きbatch、監査、保持期限、dbt selector |
+| `storage/gcs.py` | 全page listing、namespace検証、generation指定read、create-only upload |
+| `loader/`・`storage/motherduck.py` | hash検証、再試行、object単位transaction、共通取込台帳 |
+| `reconciliation/`・`recovery/` | Rawと台帳の照合、期限切れ判定、scratchへの再生 |
+| `sources/<source>/` | 認証・取得、control/pending状態、wire format、正規化、baseへの書込 |
+| `dbt/` | interval、日境界、日次集計、source横断JOINをViewとして提供 |
 
-Source adapterは一つの`source_id / stream`を担当し、そのstreamの複数schema versionを同時に受け付けられる。
-Loader、Reconciliation、Rebuildは対応する全Raw prefixを走査し、source・stream・schema版とkeyから復元した
-identityが一致することを確認する。別sourceまたは別streamの取込状態を、選択scopeの失敗数や期限切れ対象へ
-混ぜない。schema版が増えても古いRawを再生できるよう、保持中のversionのdecoderを残す。
+adapterは一つのsource/streamを担当し、保持中の全Raw schema版を再生できるようにする。
+Raw schema版とparser versionは別で、parser versionを更新すると保持中の旧parser成功分も再解析する。
+取得状態・controlの意味はsourceが所有し、共通処理は他sourceへCollectorのreceiptを要求しない。
+未知のsource/streamを既存decoderへ流すfallbackは設けない。
 
-取得側のcheckpoint、cursor、pending upload、control objectの意味はsourceが持つ。共通repositoryはRawの
-list / generation指定readだけを要求し、iPhoneのdevice manifestやscan receiptを他sourceへ要求しない。
-source固有の稼働監査は`SourceHealth`として成功可否と詳細を共通Reconciliationへ返す。
+## Rawと保持期限
 
-## データ境界
+- Rawはcreate-onlyの決定的gzip。展開後bytesのSHA-256と観測時刻をkeyへ含め、同じkeyのretryには同じbytesを使う。
+- 連続する同一内容は省くが、`A -> B -> A`を過去のhashだけで除外しない。source固有の比較条件は各データモデルに従う。
+- Screen Time v1/v2の`.segb.gz`、Fitbit v3の`.json.gz`は90日保持。control JSONをLifecycle削除対象へ混ぜない。
+- 保持起点は`retention_started_at`、なければGCSの`storage_created_at`。コピー済みScreen Time RawのCustom-Timeにも元の保持起点を保存する。
+- Terraformは`age=90`とScreen Timeの`days_since_custom_time=90`を使う。Soft DeleteとObject Versioningは無効で、削除後のRawを復元できない。
+- 期限前の欠損、保持起点不明、93日を超える残存は監査失敗。90日ちょうどの削除は保証しない。
 
-- GCS Rawを保持期間内の再生可能な正本、MotherDuck baseを長期分析履歴とする。
-- 取得処理はRawの保存までを担当し、分析のinterval生成や日次集計を行わない。
-- Source adapterはRawを型付きbatchへdecodeし、Warehouseがobject単位のtransactionを管理する。
-- Screen Timeは取り込み側で重複・削除を判定し、MotherDuckにはイベントを1件ずつ保存する。
-  判定状態は原文を含まないMotherDuckの補助tableへ保存し、Rawの取込成功と同じtransactionで確定する。
-- dbtはinterval、日境界、集計、source横断JOINをViewとして提供する。
-- ChatGPTは本番DBのrestricted read-only shareを分析アカウントから参照する。公開範囲は
-  [`ChatGPT接続`](chatgpt-mcp.md)に従う。
+Rawは保持期間内の再生用正本で、MotherDuckは期限切れ後も分析履歴を保持する。
+全期間のDB復元をRawだけで保証しない。keyとpayloadは
+[Screen Timeデータモデル](../sources/screen-time/data-model.md)と[Fitbitデータモデル](../sources/fitbit/data-model.md)を参照する。
 
-詳細は[`raw-data.md`](raw-data.md)、[`analytics.md`](analytics.md)、[`security.md`](security.md)を正本とする。
-source間の処理分離はアプリケーションの契約である。同じRaw bucketとMotherDuck databaseを使うruntimeの
-アクセス権自体がsourceごとに完全分離されることを意味しない。
+## Loaderと永続化
 
-## Core guarantees
+Loaderは選択scopeの全prefix・全pageを走査し、重複key、namespace外、未対応schema、keyとmetadataの不一致を拒否する。
+`(observed_at, object_key)`順にgenerationを固定して取得し、gzip展開・SHA-256検証後にdecodeする。
+`ops.ingestion_metadata`のRaw identity・generation・parser versionが一致する成功だけをskipする。
 
-1. downstreamが失敗しても、sourceの保持期間内に残るGCS Rawを再試行できる。iPhone Screen Timeは90日保持とする。
-2. 取得処理は同一scopeの無意味な連続重複を省きつつ、`A -> B -> A`の観測順序を保持する。
-3. 同じRaw identityとgenerationの再実行で分析行を重複生成しない。
-4. 後着・訂正の分析上の扱いはsourceの型付きmodelで定義し、取込済み履歴をMotherDuckへ保持する。
-5. GCSに残る選択source / streamの保持範囲を、明示的なpartial historyとしてscratch databaseへ再構築できる。
-6. 日次の全取得・dbt・両Screen Time監査が成功した後だけ外部daily heartbeatを送信する。確定順序と制約は
-   [`analytics.md`](analytics.md)に従う。
-7. Screen Timeは日次Jobで取り込む。Collectorは30分ごとに走査するが、最新の未完了segmentは
-   後続segmentが現れるまで保留するため、event発生からの即時反映を保証しない。
+型付き行、sourceの補助状態、取込成功はWarehouseが所有する1 transactionでcommitする。
+書込失敗はrollbackして別transactionに失敗記録を残す。commit結果不明・rollback失敗では接続を閉じ、
+後続Rawや失敗記録を書き込まず、再接続後の台帳から再試行を判断する。
+Fitbitは手元の保存bytesをLoaderへ渡し、保存済みRawの再生で取得後の障害から回復する。
+
+日次はstreamごとの監査成功時に期限切れ記録をcommitする。全体の成功記録と外部pingはその後であり、
+後続失敗で先に確定した期限切れ記録は巻き戻さない。DBと外部HTTPはatomicではないため、外部送信失敗はJob失敗として扱う。
 
 ## Source・stream追加手順
 
-1. `docs/sources/<source>/`に取得対象、Raw identity、型付きmodel、運用契約を定義する。
-   同じsourceの別streamでも、取得stateとcontrol objectの所有範囲を分ける。
-2. `sources/<source>/`へ取得処理とadapterを実装し、`sources/registry.py`へ`source_id / stream`を登録する。
-   対応schema versionと全prefix、parser version、decode、型付きbatch、稼働監査、保持期限、dbt selectorを定義する。
-   `SourceAdapter.parser_version`は必須とし、decodeが返すbatchの版と一致させる。
-   解析結果を変更するときは版を更新し、保持中のRawを再取り込みの対象にする。
-3. 新しい型付きbaseは既存SQLを書き換えずforward migrationで追加する。batchの書込はWarehouseが開始した
-   transaction内で行い、batch自身でcommit / rollbackしない。
-4. dbtにscope別modelとtestを追加し、adapterのselectorで対象のmodelとtestを実行できるようtagを付ける。
-   source横断分析は各sourceのbaseが存在することを別途前提にする。
-5. fixtureで別source・別stream・schema版の混入拒否、object単位rollback、監査の分離、rebuildのgeneration固定を
-   検証する。実providerの認証、取得、更新、停止検出はfixture検証とは別に受け入れる。
-6. [`Terraform runtime`](../../infra/terraform/)へ取得方式に応じたJobまたはServiceを設定し、取得identity、Raw create権限、保持期限、
-   定期補修と監視を用意する。source独自のcontrol更新権限やprovider認証は取得方式に合わせて追加する。
-7. [`DBの初期化と更新`](operations.md#dbの初期化と更新)に従い、既存runtimeをすべて更新して旧実行の終了を確認した後に、
-   新sourceの取得と定期実行を有効にする。
+1. `sources/<source>/`へ取得・codec・型付きbatch・監査を実装し、`sources/registry.py`へ登録する。
+2. 保持中の全Raw prefix/schema、parser version、必須relation、保持期限、dbt selectorを定義する。
+3. baseの変更は新しいwest forward migrationへ追加する。適用済みSQLを書き換えず、batch内でcommitしない。
+4. dbtのmodel/testへselector用tagを付け、scope混入拒否、再実行、rollback、generation固定を検証する。
+5. Terraformで取得identity・Raw権限・Lifecycle・定期処理・監視を設定し、[DB更新手順](operations.md#dbの初期化と更新)で有効にする。
 
-## 対象外
-
-- ZIP取り込みの常設機能
-- 独自UI、独自MCP server、データ更新ごとのdbt実行
-- RawのObject Lock、永続Parquet中間層
-
-Screen Time固有の対象範囲は[`Screen Time仕様`](../sources/screen-time/)を正本とする。
+独自UI/MCP server、ZIP取り込み、RawのObject Lock、永続Parquet中間層は設けない。
