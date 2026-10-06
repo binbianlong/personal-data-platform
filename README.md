@@ -3,7 +3,7 @@
 個人データの取得、Raw保存、MotherDuckへの取込、dbt分析を行うPythonプロジェクト。
 
 Loader、監査、再構築はsourceとstreamを選んで実行する。Screen TimeはiPhoneの`App.InFocus`と
-Macの`ScreenTime.AppUsage`を扱う。FitbitはGoogle Health Webhook経由の取り込みを実装し、本番導入は準備段階である。共通処理とsourceの分離・追加手順は
+Macの`ScreenTime.AppUsage`を扱う。FitbitはGoogle Health Webhook経由の取り込みを実装し、西部で継続収集する。共通処理とsourceの分離・追加手順は
 [`アーキテクチャ`](docs/platform/architecture.md)を参照する。
 
 ## 開発環境
@@ -41,11 +41,10 @@ pdp preflight
 pdp fitbit serve
 pdp fitbit ingest-notifications
 pdp fitbit sync --from 2026-09-20 --to 2026-09-27
-pdp fitbit sync --resume-id <cursor-id>
-pdp fitbit repair
 ```
 
-`loader`、`reconciliation`、`rebuild`は指定を省略すると既存iPhoneの`screen_time / app-in-focus`を対象にする。
+`loader`、`rebuild`は指定を省略するとiPhoneの`screen_time / app-in-focus`を対象にする。
+`reconciliation`はScreen Time両stream・Fitbitの直近7完了日・dbt・監査をまとめた日次処理である。
 両端末を処理する場合は`--source screen_time --all-streams`、単一streamなら
 `--source screen_time --stream app-in-focus`または`--stream app-usage`を付ける。
 未登録の組合せは拒否する。`pdp dbt`は指定なしでは全model、source / stream指定時は対応するmodelとtestを実行する。

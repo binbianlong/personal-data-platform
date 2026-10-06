@@ -5,15 +5,8 @@
 OAuth refresh tokenからaccess tokenを得て、Google Health v4のreconcileを呼ぶ。
 データソース指定は`google-wearables`。必要な環境変数は[運用](operations.md#環境変数)を参照する。
 
-既存のReconciliation Jobは`pairedDevices.list`を全ページ取得し、`deviceType=TRACKER`の
-`lastSyncTime`が最も新しい端末を選ぶ。機種名を固定せず、時刻はナノ秒まで解釈する。
-同期時刻の進展は対象期間をAPIで照合する契機であり、データが既にAPIへ到着した証明ではない。
-端末がない、同期時刻がない、権限不足の場合はcheckpointを進めず、取得失敗として報告する。
-初回の端末同期ではTokyoの直近7完了日を対象とする。その後は前回成功した同期日から新しい同期日までを対象とし、
-7日超の空白も自動で補完する。対象はTokyoの1日・1種別の受付に分け、1回の補修で最大90日分を発行する。
-全対象の完了後にのみ端末同期checkpointを進める。同日再同期でも`lastSyncTime`の進展は扱う。
-週1回、直近7完了日を5種別すべて照合し、週単位の一意受付で重複作成を防ぐ。
-初回取得と同じ週には週次照合を重ねない。追加のSchedulerは使わない。
+Webhook通知と日次の直近7完了日をTokyoの1日・1種別へ分割して取得する。
+長期停止や広い期間には明示的な期間指定を使い、端末の同期checkpointは保存しない。
 
 | data type | フィルターに使う値 | 置換cursor |
 |---|---|---|
@@ -36,33 +29,23 @@ OAuth refresh tokenからaccess tokenを得て、Google Health v4のreconcileを
 公式REST型とガイドの応答例に差があるため、point IDは`dataPointName`/`name`、
 睡眠の主睡眠フラグは`mainSleep`/`main`の両方を受理する。同時に存在して矛盾する場合は停止する。
 
-## Webhookとタスク
+## WebhookとPub/Sub
 
 `POST /webhooks/fitbit`でAuthorizationの共有値とGoogle HealthのTink署名を検証する。
-署名鍵は公式の公開keysetから取得してcacheし、署名不一致時に再取得する。
-購読登録用の検証要求は共有値を検証して200を返し、通常通知は対象health user IDと5 data typeを検証する。
-認証不正は401、不正payloadは400、永続化またはキュー登録失敗は503。
+署名鍵は公式keysetから取得してcacheし、署名不一致時には一度だけ鍵を再取得する。
+購読の検証は認証後に201、通常通知は全件検証・Pub/Sub発行後に204を返す。
+部分的な発行失敗は503として再送を受ける。再配信は範囲更新と取得順位で安全に処理する。
 
-同一通知内の同種・重複範囲を統合し、小さなGCS受付記録を先に保存する。
-Cloud Tasksへの登録成功後に204を返す。キューに登録できなくても受付記録は残る。
-受信処理はワーカーと並行して応答でき、リクエスト本文は1 MiBまで。
-
-`POST /internal/tasks/fitbit`はGoogle署名のOIDC ID tokenを検証する。
-issuer、audience、タスク用サービスアカウントemail、`email_verified=true`が一致する必要がある。
-Cloud Run Service自体の公開設定を内部処理の認証として扱わない。
-
-ワーカーは1日・1種別ずつ取得する。歩数とアクティブゾーン時間は分境界と既存区間の重なりへ範囲を広げる。
-取得後、同じ完全な範囲の現在内容と一致し未解決のRaw保存予定がなければ、Rawを増やさず受付を完了する。
-保存が必要ならDBにRaw保存予定を先に確定し、GCSへcreate-onlyで書く。keyとgenerationを受付記録へ確定し、
-そのRawだけを共有Loaderへ渡す。停止後の再試行では受付・保存予定・GCS・取込台帳を照合する。
-複数区間の続きは次のタスクへ渡す。通常通知の処理でGCS全件listingやmigrationを実行しない。
-停止中もWebhook受付は続けるが、ワーカーのAPI取得と定期受付の作成はしない。
+1 MiBまでのbodyを、1日・1種別の最大1,000単位へ分割する。
+毎時Jobは最大500通知を120秒まで集め、50分の実行予算内で処理する。
+初回pullが空でも収集期限までは再試行する。Raw保存・DB commitが確認できた単位だけackし、
+API失敗・未処理・commit不明の単位は再配信に任せる。
+通知の保持は7日。処理停止中もreceiverは発行を続け、7日を超える空白は期間指定で補う。
 
 ## 参考仕様
 
 - [Webhook](https://developers.google.com/health/webhooks)
 - [reconcile API](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/reconcile)
-- [pairedDevices.list](https://developers.google.com/health/reference/rest/v4/users.pairedDevices/list)
 - [日時フィルター](https://developers.google.com/health/filters)
 - [データの統合方針](https://developers.google.com/health/data-management)
 - [睡眠データ](https://developers.google.com/health/data-types/sleep)

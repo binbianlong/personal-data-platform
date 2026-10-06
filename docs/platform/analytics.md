@@ -36,7 +36,7 @@ commit後の再実行は既存の成功判定でskipする。commitの応答が�
 
 Loaderはsource横断JOIN、interval生成、日次集計を行わない。これらはdbt Viewで行う。
 
-FitbitのWebhook workerは指定key/generationだけを`run_loader_objects`へ渡す。
+Fitbitの取得Jobは保存Rawのkey/generationを`run_loader_objects`へ渡す。
 共通Loaderと同じ取込台帳・transaction・leaseを使い、通知ごとの一覧取得とmigrationを省く。
 完全取得範囲の置換・削除・順位管理は[`Fitbitデータモデル`](../sources/fitbit/data-model.md)に従う。
 
@@ -100,22 +100,21 @@ LoaderとReconciliationの多重実行を防ぐ期限付きleaseである。`job
 `expires_at`を保持する。未期限切れleaseを持つ別ownerがいる場合は処理を開始しない。正常終了・失敗時は
 自分のleaseだけを解放し、異常終了時は期限切れ後に次の実行が引き継ぐ。
 
-lease名はsourceごとに分けず、`loader`と`reconciliation`を共有する。異なるsourceの同じroleも同時には
-走らない。source数を増やす場合はJobの所要時間とscheduleの重なりを確認する。
+毎時・日次・手動取得・Loader・dbtは単一の`loader` leaseを共有する。期限は125分で、
+日次の100分・毎時の50分予算を上回る。競合時は処理と外部成功pingを延期する。
 
 ### 実行記録
 
 `ops.job_run`、`ops.reconciliation_run`、`ops.heartbeat`にJobの結果を記録し、detailsにsourceとstreamを含める。
-Reconciliationのheartbeatはadapterのmonitor名とscopeごとの外部URLを使う。iPhoneの既存monitor名は
-`screen_time_reconciliation`を保持する。Collector receiptの集計はsource固有detailsに置き、既存の結果参照用属性でも
-同じ集計値を返す。Collectorの概念を持たないsourceにreceiptを要求しない。
+両Screen Time streamのmonitor名は`screen_time_reconciliation`と
+`screen_time_app_usage_reconciliation`を維持する。Collectorの概念を持たないsourceへreceiptを要求しない。
 
-Reconciliationは監査に成功したら
-`running`の監査記録を先に保存する。次にtransaction内でwarehouse heartbeatを更新し、外部heartbeat送信が
-成功した後で成功auditを記録してcommitする。送信や更新に失敗した場合はrollbackし、失敗auditを記録する。
+日次はすべての取得・dbt・両stream監査が成功した後、内部daily/両stream heartbeatと
+完了対象日を同じtransactionでcommitする。その後にHealthchecksへ外部1 pingを送る。
+commit前の失敗・lease競合では外部成功を送らない。
 
-外部HTTP送信とDB commitはatomicではない。送信後の最終commit失敗や送信応答の喪失では、外部に成功pingが
-届いていてもDBに成功が確定しない場合がある。復旧時は`run_id`と実行log、監査記録を照合する。
+外部HTTP送信とDB commitはatomicではない。commit後のHTTP失敗・応答喪失ではDB成功と
+外部状態が一致しない場合がある。Jobは失敗として通知し、復旧時はrun_id・log・監査を照合する。
 
 ## dbt
 

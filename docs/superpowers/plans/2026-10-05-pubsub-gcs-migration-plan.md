@@ -8,7 +8,7 @@
 
 **設計:** [最小構成の設計書](../specs/2026-10-05-pubsub-gcs-migration-design.md)
 
-**状態:** 2026-10-06改訂。通知分割・Raw v3・台帳なし取得を実装済み。2 Job/日次処理/1外部heartbeatへの改修をローカル検証済み。本番切替は未完了。旧計画の実装完了は、この計画の完了を意味しない。
+**状態:** 2026-10-06、本番切替完了。通知分割・Raw v3・台帳なし取得・2 Job・日次1外部heartbeatを実装し、手動成功後に定期実行と西部Loggingを有効化した。保全・整理・検証結果は[西部移行記録](../../platform/west-migration-2026-10-05.md)に記録する。7日・30日の定常使用量とメール到達は継続運用の確認項目である。
 
 ## 共通条件
 
@@ -44,7 +44,7 @@
 | Healthchecksのaccount/APIキー | 日次1件の設定に使用。runtimeへ管理キーを渡さない |
 | 旧設計のimage `66a090…` | 準備時点の証拠として保管。Raw v3のrollbackには最小構成の新imageを使う |
 
-旧2 Schedulerは停止中、西部Jobは0件、provider URLとMac collectorと分析/MCPは旧接続先のまま。データ削除・最終切替は未実施。初回backupを最終差分として扱わない。
+計画開始時は旧2 Schedulerが停止中、西部Jobは0件で、provider URLとMac collectorと分析/MCPは旧接続先だった。初回backupからwriter/collector停止後の最終差分を再取得し、切替を完了した。
 
 ## Task 1: 通知を小さい処理単位へ分割する
 
@@ -112,13 +112,13 @@
 **変更:** 旧receiverの一時設定、collector plist/runtime、Terraform/CIの定常参照、`src/personal_data_platform/sources/fitbit/service.py`、`src/personal_data_platform/sources/fitbit/runtime.py`、`src/personal_data_platform/sources/fitbit/receipts.py`、`src/personal_data_platform/sources/fitbit/sync_state.py`と旧依存/fixture/docs、`scripts/cleanup_fitbit_legacy.py`。
 **成果:** 最小経路だけで収集・分析でき、旧writerは停止、旧Fitbit資産は範囲限定で整理される。
 
-- [ ] 旧URLも最小releaseのreceiverへ更新し、Task 1と同じ日付×種別の単位で西部Pub/Subへ発行する。認証/handshakeを確認してprovider URLを西部へ切り替える。新定期writerはまだ開始しない。Pub/Sub保持7日を超える停止には期間指定の再取得を使う。
-- [ ] 旧writerの終了とlease 0を確認してcollectorを停止する。Raw・warehouse・SQLiteを再backupし、最終Rawをコピー、source exportとtarget importを別processで行う。Screen Time9表の全値・期間・generationを照合する。
-- [ ] collectorを西部へ向けてcontrolを強制公開し再開する。本番DB ownerの資格情報で同じ所有者の分析アカウントへrestricted read-only shareを付与し、分析/MCPを切り替える。preflightには本番shareを付与しない。手動で毎時と日次の成功、scope commit後ack、両streamの監査、1 heartbeatを確認して2 Schedulerを有効化する。通常Loggingを西部へ向ける。
-- [ ] 最小releaseでの復元経路と保存済みRaw再生を確認する。旧imageをRaw v3へ使わない。writerを二重稼働させない。
-- [ ] 使用元を照合してCloud Tasks、旧receipt/checkpoint、legacy worker/decoder/mode、永続cursor、不要なenv/secret version/常設資産を整理する。旧Fitbit削除はinventoryのtable/prefix/queueだけに限定し、Screen Time・共通台帳・新Pub/Sub/Rawを対象から外す。旧組織の削除を含めない。
-- [ ] 適用済みmigrationを保全したまま通常runtimeのmigration/profileをwestだけへ揃える。migration用の一時分岐と旧registry参照は撤去条件を確認して整理する。remoteの西部対応revisionが反映されるまで停止中のTerraform workflowを再開しない。
-- [ ] 関連テスト、全Python suite、変更したTerraform rootを確認し、撤去とdocs更新を別commitへ分ける。`refactor: Fitbitの旧経路と不要な運用資産を撤去`、`docs: 最小構成の運用と移行結果を更新`を候補とする。
+- [x] 旧URLも最小releaseのreceiverへ更新し、Task 1と同じ日付×種別の単位で西部Pub/Subへ発行する。認証/handshakeを確認してprovider URLを西部へ切り替える。新定期writerはまだ開始しない。Pub/Sub保持7日を超える停止には期間指定の再取得を使う。
+- [x] 旧writerの終了とlease 0を確認してcollectorを停止する。Raw・warehouse・SQLiteを再backupし、最終Rawをコピー、source exportとtarget importを別processで行う。Screen Time9表の全値・期間・generationを照合する。
+- [x] collectorを西部へ向けてcontrolを強制公開し再開する。本番DB ownerの資格情報で同じ所有者の分析アカウントへrestricted read-only shareを付与し、分析/MCPを切り替える。preflightには本番shareを付与しない。手動で毎時と日次の成功、scope commit後ack、両streamの監査、1 heartbeatを確認して2 Schedulerを有効化する。通常Loggingを西部へ向ける。
+- [x] 最小releaseでの復元経路と保存済みRaw再生を確認する。旧imageをRaw v3へ使わない。writerを二重稼働させない。
+- [x] 使用元を照合してCloud Tasks、旧receipt/checkpoint、legacy worker/decoder/mode、永続cursor、不要なenv/secret version/常設資産を整理する。旧Fitbit削除はinventoryのtable/prefix/queueだけに限定し、Screen Time・共通台帳・新Pub/Sub/Rawを対象から外す。旧組織の削除を含めない。
+- [x] 適用済みmigrationを保全したまま通常runtimeのmigration/profileをwestだけへ揃える。migration用の一時分岐と旧registry参照は撤去条件を確認して整理する。remoteの西部対応revisionが反映されるまで停止中のTerraform workflowを再開しない。
+- [x] 関連テスト、全Python suite、変更したTerraform rootを確認し、撤去とdocs更新を別commitへ分ける。`refactor: Fitbitの旧経路と不要な運用資産を撤去`、`docs: 最小構成の運用と移行結果を更新`を候補とする。
 
 ## 継続運用の確認
 

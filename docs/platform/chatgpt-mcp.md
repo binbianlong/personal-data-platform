@@ -11,17 +11,21 @@ https://api.motherduck.com/mcp
 独自MCP server、Loader用token、dbt writer tokenは使用しない。ChatGPTで認証するMotherDuck userには、
 分析へ公開してよいdatabase/shareだけをread-onlyで付与する。
 
-MotherDuckのaccess controlは契約によってdatabase単位、またはtable/schemaを限定したshareになる。後者を
-利用できない場合、`marts`だけを含む専用databaseを用意するまで本番接続を有効にしない。同じdatabaseに
-`base`と`ops`が見えている状態で「`marts`だけを参照する」という指示をsecurity boundaryにしてはならない。
+個人の分析用接続には、本番ownerから同じ所有者の分析アカウントへrestricted read-onlyの
+自動更新share `pdp_analytics_west`を付与する。公開範囲は本番DB全体で、base・opsも読める。
+複数人向けのmarts限定公開には使わない。Raw bucketと取得用tokenはこの接続へ渡さない。
+preflightには本番DB/shareへの接続を許可しない。
+
+2026-10-06に「MotherDuck 西部」接続でshareの読取と本番shareへの書込拒否を確認した。
+同じ分析userの所有するmy_dbなどへの権限と、本番shareのread-only権限を区別する。
 
 ## ChatGPT設定
 
-ChatGPT workspaceでcustom MCP appを作成できる管理者または許可済みdeveloperが次を行う。
+新規接続が必要な場合、ChatGPT workspaceの管理者または許可済みdeveloperが次を行う。
 
 1. SettingsのSecurity and loginでDeveloper modeを有効にする。
 2. ChatGPT Pluginsの＋から上記endpointを登録する。
-3. OAuthで専用MotherDuck readerとして認証し、tool scanを完了する。
+3. OAuthでshareを付与した分析アカウントとして認証し、tool scanを完了する。
 4. app設定の詳細画面で`query`とcatalog参照に必要なread toolだけを有効にする。
 5. `query_rw`などのwrite toolが無効であることを確認し、会話のDeveloper modeから対象appを選ぶ。
 
@@ -41,9 +45,8 @@ MotherDuck endpointとOAuth、tool制限の現行仕様は
 - SELECTで日次利用秒数を取得できる
 
 拒否されること:
-- query_rwを選択または実行できない
-- INSERT / UPDATE / DELETE / CREATE / DROPを実行できない
-- 非公開database、base、ops、Raw payloadを参照できない
+- 本番shareへINSERT / UPDATE / DELETE / CREATE / DROPできない
+- preflight databaseやGCS Raw payloadを参照できない
 ```
 
 SQL結果には必要な列と期間だけを含める。Raw bytesや全履歴を会話へ無条件に展開しない。

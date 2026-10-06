@@ -5,24 +5,21 @@ source / streamは`fitbit / health`。Webhookを契機にGoogle Health APIから
 
 ```mermaid
 flowchart TD
-    H[Google Health Webhook] --> R[認証・署名・対象の検証]
-    R --> P[GCS受付記録]
-    P --> Q[Cloud Tasks]
-    Q --> W[通知期間をAPIから完全取得]
-    W --> D{現在内容と同一で安全に省略可能?}
-    D -->|いいえ| G[GCS圧縮Raw]
-    D -->|はい| S[受付完了・Raw保存を省略]
-    G --> L[指定Rawだけ取り込み]
-    L --> M[MotherDuck]
-    C[端末同期進展・週次照合・未完了受付] --> Q
-    C --> L
-    M --> V[dbt分析ビュー]
-    V --> A[既存read-only MCP]
+    H[Google Health Webhook] --> R[認証・署名・日付と種別の分割]
+    R --> Q[西部Pub/Sub]
+    Q --> W[毎時JobでAPI完全取得]
+    W --> G[変更時だけRaw v3を保存]
+    G --> M[MotherDuckへcommit後にack]
+    D[日次Job] --> S[Screen Time両streamと保存Raw]
+    S --> F[Fitbit直近7完了日の再照合]
+    F --> V[dbtと両stream監査]
+    V --> P[全完了後に1 heartbeat]
+    M --> A[read-only分析share・MCP]
 ```
 
-Macの常時稼働を必要とせず、PDP専用のCloud Run ServiceとCloud Tasks queueを1つずつ使う。
-アプリは継続取り込み・復旧・分析を担当し、過去分のZIP投入は一時スクリプトによる別作業とする。
-旧health-data-pipelineのJob・queue・Schedulerは再開せず、Notion・SVG出力や全履歴コピーは扱わない。
+GCP us-west1の通知専用Service・Pub/Sub・毎時Job・日次Jobを使い、MotherDuckはus-west-2へ保存する。
+Mac collectorはScreen TimeのRawを公開する。Fitbitには通知台帳・自動再開cursorを設けず、
+7日を超える補修は期間指定で行う。
 
 | 文書 | 内容 |
 |---|---|
@@ -30,4 +27,4 @@ Macの常時稼働を必要とせず、PDP専用のCloud Run ServiceとCloud Tas
 | [data-model.md](data-model.md) | Raw、テーブル、範囲更新、分析ビュー |
 | [operations.md](operations.md) | CLI、導入、停止、復旧、検証状況 |
 
-ローカル実装・検証済み。本番導入と実使用量の確認は[導入前の確認事項](operations.md#導入前の確認事項)に従う。
+切替と検証結果は[西部移行記録](../../platform/west-migration-2026-10-05.md)、停止・復旧は[運用](operations.md)を参照する。
