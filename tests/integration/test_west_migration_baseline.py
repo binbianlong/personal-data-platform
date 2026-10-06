@@ -132,6 +132,29 @@ def test_existing_unprofiled_legacy_receipts_reject_west_without_mutation(wareho
     assert len(warehouse.query_rows("DESCRIBE ops.schema_migration")) == 3
 
 
+@pytest.mark.parametrize("attached_profile", ["legacy", "west"])
+def test_fresh_target_migration_ignores_unrelated_attached_ledger(warehouse, attached_profile):
+    warehouse.connection.execute("ATTACH ':memory:' AS unrelated")
+    warehouse.connection.execute(
+        "CREATE SCHEMA unrelated.ops; CREATE TABLE unrelated.ops.schema_migration "
+        "(migration_id VARCHAR, checksum VARCHAR, applied_at TIMESTAMPTZ, schema_profile VARCHAR)"
+    )
+    warehouse.connection.execute(
+        "INSERT INTO unrelated.ops.schema_migration VALUES ('unrelated.sql','preserved',now(),?)",
+        [attached_profile],
+    )
+    before = warehouse.query_rows("SELECT * FROM unrelated.ops.schema_migration")
+
+    warehouse.migrate(profile="west")
+    warehouse.migrate(profile="west")
+
+    assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 5
+    assert warehouse.query_rows("SELECT DISTINCT schema_profile FROM ops.schema_migration") == [
+        ("west",)
+    ]
+    assert warehouse.query_rows("SELECT * FROM unrelated.ops.schema_migration") == before
+
+
 def test_schema_profile_validates_runtime_selection(monkeypatch):
     from personal_data_platform import config
 

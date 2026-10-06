@@ -110,7 +110,8 @@ class Warehouse:
             raise RuntimeError("migration path does not match the selected profile")
         columns = self.connection.execute(
             "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema='ops' AND table_name='schema_migration'"
+            "WHERE table_catalog=current_database() AND table_schema='ops' "
+            "AND table_name='schema_migration'"
         ).fetchall()
         if columns:
             if ("schema_profile",) in columns:
