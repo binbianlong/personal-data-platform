@@ -1,4 +1,4 @@
-"""Apply the current immutable schema history to an empty or initialized database."""
+"""Apply immutable schema migrations to an empty or initialized database."""
 
 from __future__ import annotations
 
@@ -39,7 +39,10 @@ def _read_applied(connection: DuckDBPyConnection, checksums: dict[str, str]) -> 
         if migration_id not in checksums:
             raise RuntimeError(_REBUILD)
         if checksums[migration_id] != checksum:
-            raise RuntimeError(f"applied migration changed: {migration_id}")
+            raise RuntimeError(
+                f"applied migration changed: {migration_id}; "
+                "restore its SQL or rebuild into an empty target database"
+            )
     return applied
 
 

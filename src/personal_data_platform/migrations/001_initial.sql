@@ -1,4 +1,4 @@
--- Current schema for fresh databases.
+-- Initial platform schema.
 
 CREATE SCHEMA IF NOT EXISTS ops;
 CREATE SCHEMA IF NOT EXISTS base;

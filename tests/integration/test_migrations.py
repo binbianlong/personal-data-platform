@@ -80,7 +80,7 @@ def test_applied_sql_changes_stop_before_applying_later_migrations(warehouse, tm
         shutil.copyfile(path, tmp_path / path.name)
     warehouse.migrate(tmp_path)
     before = warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
-    initial = tmp_path / "001_current.sql"
+    initial = tmp_path / "001_initial.sql"
     initial.write_text(initial.read_text() + "\nSELECT 1;\n")
     (tmp_path / "002_later.sql").write_text("CREATE TABLE base.later (id INTEGER);")
     with pytest.raises(RuntimeError, match="applied migration changed"):
@@ -100,13 +100,13 @@ def test_applied_sql_changes_stop_before_applying_later_migrations(warehouse, tm
 @pytest.mark.parametrize("initial", [True, False], ids=["initial", "forward"])
 def test_failed_migration_rolls_back_schema_data_and_ledger(warehouse, tmp_path, initial):
     if initial:
-        path = tmp_path / "001_current.sql"
+        path = tmp_path / "001_initial.sql"
         sql = (DEFAULT_MIGRATIONS / path.name).read_text()
         before = []
     else:
         warehouse.migrate()
         before = warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
-        shutil.copyfile(DEFAULT_MIGRATIONS / "001_current.sql", tmp_path / "001_current.sql")
+        shutil.copyfile(DEFAULT_MIGRATIONS / "001_initial.sql", tmp_path / "001_initial.sql")
         path = tmp_path / "002_next.sql"
         sql = "CREATE TABLE base.next (id INTEGER); INSERT INTO base.next VALUES (1);"
     path.write_text(sql + "\nSELECT error('interrupted migration');")
@@ -135,7 +135,7 @@ def test_failed_migration_rolls_back_schema_data_and_ledger(warehouse, tmp_path,
     )
 
 
-def test_current_schema_sets_iphone_and_mac_platform(warehouse):
+def test_initialization_sets_iphone_and_mac_platform(warehouse):
     warehouse.migrate()
     iphone_raw = _raw()
     warehouse.load_object(iphone_raw, byte_size=10, batch=ScreenTimeBatch([_record(iphone_raw)]))

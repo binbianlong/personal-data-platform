@@ -1,6 +1,6 @@
 # マイグレーション整理の実装計画
 
-Spec: `docs/superpowers/specs/2026-10-07-current-schema.md`
+Spec: `docs/superpowers/specs/2026-10-07-schema-rebuild.md`
 
 ## Global Constraints
 
@@ -8,12 +8,12 @@ Spec: `docs/superpowers/specs/2026-10-07-current-schema.md`
 
 ### Task 1: 現行スキーマを単一のDDLとCLIで初期化
 
-Interfaces: Produces `001_current.sql`, profile引数のない `Warehouse.migrate()`, `pdp migrate`。Task 2はこのDDLのFitbit部分を置換する。
+Interfaces: Produces `001_initial.sql`, profile引数のない `Warehouse.migrate()`, `pdp migrate`。Task 2はこのDDLのFitbit部分を置換する。
 
 - [x] 空のDB、旧DBの拒否、再実行、チェックサム、rollback、並行起動、別catalogの履歴についてテストを書く。
-- [x] `.venv/bin/pytest -q tests/integration/test_current_schema.py` を実行。Expected: 新しい履歴とCLIの未実装により失敗。
+- [x] `.venv/bin/pytest -q tests/integration/test_schema_initialization.py` を実行。Expected: 新しい履歴とCLIの未実装により失敗。
 - [x] 現行のScreen Time定義を1本へまとめ、旧SQLを撤去する。profile設定・引数とFitbit専用migrateを撤去し、共通CLIを追加する。
-- [x] 関連テストを現行履歴へ更新し、`.venv/bin/pytest -q tests/integration/test_migrations.py tests/integration/test_current_schema.py tests/unit/test_fitbit_cli.py tests/unit/test_dbt_runner.py tests/unit/test_preflight.py tests/unit/test_container_contract.py` を実行。Expected: 全件成功。
+- [x] 関連テストを現行履歴へ更新し、`.venv/bin/pytest -q tests/integration/test_migrations.py tests/integration/test_schema_initialization.py tests/unit/test_fitbit_cli.py tests/unit/test_dbt_runner.py tests/unit/test_preflight.py tests/unit/test_container_contract.py` を実行。Expected: 全件成功。
 - [x] `refactor: 現行スキーマの初期化を1本に統一` としてコミット。
 
 ### Task 2: Fitbitの5テーブルとcoverageに整理

@@ -14,10 +14,10 @@ def warehouse():
     value.close()
 
 
-def test_current_schema_has_one_receipt_and_no_profile(warehouse):
+def test_initialization_records_one_migration_without_a_profile(warehouse):
     warehouse.migrate()
     assert warehouse.query_rows("SELECT migration_id FROM ops.schema_migration") == [
-        ("001_current.sql",)
+        ("001_initial.sql",)
     ]
     assert [row[0] for row in warehouse.query_rows("DESCRIBE ops.schema_migration")] == [
         "migration_id",
@@ -93,7 +93,7 @@ def test_platform_migrate_initializes_a_local_database(tmp_path):
     assert main(["migrate", "--database", str(database)]) == 0
     with duckdb.connect(str(database)) as connection:
         assert connection.execute("SELECT migration_id FROM ops.schema_migration").fetchall() == [
-            ("001_current.sql",)
+            ("001_initial.sql",)
         ]
 
 
