@@ -32,7 +32,7 @@ def test_dockerfile_includes_the_dbt_project_at_the_configured_root() -> None:
 
 def test_default_warehouse_migrations_are_packaged_with_the_application() -> None:
     assert DEFAULT_MIGRATIONS.name == "migrations"
-    assert (DEFAULT_MIGRATIONS / "001_initial.sql").is_file()
+    assert (DEFAULT_MIGRATIONS / "001_current.sql").is_file()
 
 
 def test_dockerfile_drops_root_before_runtime() -> None:

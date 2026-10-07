@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import google.cloud.storage as storage
 
-from personal_data_platform.config import GCSConfig, schema_profile
+from personal_data_platform.config import GCSConfig
 from personal_data_platform.recovery.rebuild import validate_rebuild_target
 from personal_data_platform.storage.gcs_types import GCSClient
 from personal_data_platform.storage.motherduck import WarehouseConfig, connect
@@ -91,7 +91,6 @@ def probe_warehouse(connection: DuckDBPyConnection) -> dict[str, object]:
 
 
 def run_preflight_from_env() -> int:
-    profile = schema_profile()
     gcs = GCSConfig.from_env()
     preflight_bucket = os.environ.get("GCS_PREFLIGHT_BUCKET", "").strip()
     if not preflight_bucket:
@@ -117,5 +116,5 @@ def run_preflight_from_env() -> int:
         results["motherduck"] = probe_warehouse(warehouse_connection)
     finally:
         warehouse_connection.close()
-    print(json.dumps({"schema_profile": profile, **results}, sort_keys=True))
+    print(json.dumps(results, sort_keys=True))
     return 0

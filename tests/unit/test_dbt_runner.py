@@ -19,7 +19,7 @@ def test_cloud_dbt_migrates_before_models(monkeypatch) -> None:
     monkeypatch.setattr(warehouse, "close", lambda: None)
 
     def run_models(**kwargs):
-        assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 5
+        assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 1
         assert (
             warehouse.query_value("SELECT count(*) FROM ops.job_lock WHERE expires_at > now()") == 1
         )
@@ -103,7 +103,7 @@ def test_all_writers_share_loader_lease(monkeypatch):
     from personal_data_platform.storage.motherduck import Warehouse
 
     warehouse = Warehouse(duckdb.connect(":memory:"))
-    warehouse.migrate(profile="west")
+    warehouse.migrate()
     assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
@@ -125,7 +125,7 @@ def test_inherited_dbt_lease_is_checked_and_not_released(monkeypatch):
     from personal_data_platform.storage.motherduck import Warehouse
 
     warehouse = Warehouse(duckdb.connect(":memory:"))
-    warehouse.migrate(profile="west")
+    warehouse.migrate()
     assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")

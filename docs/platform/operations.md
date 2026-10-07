@@ -26,15 +26,16 @@ source・dbt・依存・Dockerfileに変更がないpushでは現行日次Jobの
 
 ## DBの初期化と更新
 
-通常runtimeとscratch DBは`PDP_SCHEMA_PROFILE=west`を使い、SQLは`src/personal_data_platform/migrations/west/`を正本とする。
+通常runtimeとscratch DBは共通の現行スキーマを使い、SQLは`src/personal_data_platform/migrations/`を正本とする。
 
 ```bash
-pdp fitbit migrate --database /private/path/west-scratch.duckdb --profile west
+pdp migrate --database /private/path/scratch.duckdb
 ```
 
 `--database`を省略すると`MOTHERDUCK_DATABASE`・`MOTHERDUCK_TOKEN`の接続先へ適用する。
 各SQLとchecksum記録は同じtransactionで確定する。再実行は適用済みの一致を確認し、変更は新しいforward migrationへ追加する。
-既存SQLや旧DBの台帳は変更しない。
+既存SQLや旧DBの台帳は変更しない。旧地域・旧取得方式のmigrationを持つDBには適用を拒否する。
+空の移行先DBへ[Rebuild](#rebuild)し、FitbitをAPIから再取得してから接続先を切り替える。
 
 スキーマ更新は両Schedulerを止め、実行中Jobの終了を確認してからruntime・migration・dbtを反映する。
 独立環境のpreflightと、対象DBの日次全段階の成功を確認してSchedulerを再開する。

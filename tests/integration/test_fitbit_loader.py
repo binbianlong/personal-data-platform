@@ -161,7 +161,7 @@ def test_raw_object_failure_preserves_all_acquisitions(monkeypatch):
     first = Window("steps", when, when + timedelta(days=1))
     second = Window("steps", when + timedelta(days=1), when + timedelta(days=2))
     warehouse = Warehouse(duckdb.connect())
-    warehouse.migrate(profile="west")
+    warehouse.migrate()
     old = Snapshot(
         "self",
         first,

@@ -1,3 +1,5 @@
+-- Current schema for fresh databases.
+
 CREATE SCHEMA IF NOT EXISTS ops;
 CREATE SCHEMA IF NOT EXISTS base;
 CREATE SCHEMA IF NOT EXISTS marts;
@@ -22,7 +24,8 @@ CREATE TABLE IF NOT EXISTS ops.ingestion_metadata (
     retry_count UINTEGER NOT NULL DEFAULT 0,
     storage_created_at TIMESTAMPTZ,
     storage_generation UBIGINT,
-    retention_expired_at TIMESTAMPTZ
+    retention_expired_at TIMESTAMPTZ,
+    retention_started_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS ops.job_run (
@@ -189,7 +192,7 @@ JOIN ops.screen_time_record r ON r.device_key = n.device_key AND r.source_stream
 WHERE t.is_valid AND r.is_valid AND t.deletion_reason IN (1, 2)
 );
 
--- Restrict keys before any ranking/aggregation, including when invoked during a load.
+-- Resolve platform from each record's source stream.
 CREATE MACRO ops.screen_time_resolve(keys) AS TABLE (
     WITH records AS (
         SELECT * FROM ops.screen_time_record WHERE event_key IN (SELECT unnest(keys))
@@ -218,7 +221,13 @@ CREATE MACRO ops.screen_time_resolve(keys) AS TABLE (
             ORDER BY active DESC, observed_at DESC, object_key DESC, record_metadata_offset DESC
         ) = 1
     )
-    SELECT event_key, device_key, 'ios' AS platform, source_stream, bundle_id, event_at, state,
+    SELECT event_key, device_key,
+           CASE
+               WHEN source_stream IN ('app-in-focus', 'App.InFocus') THEN 'ios'
+               WHEN source_stream = 'app-usage' THEN 'macos'
+               ELSE error('unsupported Screen Time source stream')
+           END AS platform,
+           source_stream, bundle_id, event_at, state,
            transition_reason, kind, app_version, app_build, platform_flag, object_key, segment_key,
            segment_filename, record_offset, record_metadata_offset, observed_at, parser_version,
            unknown_field_count, greatest(copy_count - 1, 0)::UINTEGER AS duplicate_occurrence_count,
@@ -228,3 +237,201 @@ CREATE MACRO ops.screen_time_resolve(keys) AS TABLE (
 
 CREATE VIEW base.screen_time_transition AS
 SELECT * EXCLUDE (is_active, loaded_at) FROM base.screen_time_event WHERE is_active;
+
+-- Fitbit metrics and acquisition coverage; all times are UTC.
+
+CREATE TABLE IF NOT EXISTS base.fitbit_steps (
+    subject_key VARCHAR NOT NULL,
+    record_id VARCHAR NOT NULL,
+    cursor_at TIMESTAMPTZ NOT NULL,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ,
+    value DOUBLE,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    source_date DATE,
+    parent_id VARCHAR,
+    category VARCHAR,
+    is_main_sleep BOOLEAN,
+    origin VARCHAR NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, record_id),
+    CHECK (end_at IS NULL OR end_at > start_at),
+    CHECK (value IS NULL OR (isfinite(value) AND value >= 0))
+);
+
+CREATE TABLE IF NOT EXISTS base.fitbit_resting_heart_rate (
+    subject_key VARCHAR NOT NULL,
+    record_id VARCHAR NOT NULL,
+    cursor_at TIMESTAMPTZ NOT NULL,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ,
+    value DOUBLE,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    source_date DATE,
+    parent_id VARCHAR,
+    category VARCHAR,
+    is_main_sleep BOOLEAN,
+    origin VARCHAR NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, record_id),
+    CHECK (end_at IS NULL OR end_at > start_at),
+    CHECK (value IS NULL OR (isfinite(value) AND value >= 0))
+);
+
+CREATE TABLE IF NOT EXISTS base.fitbit_active_zone (
+    subject_key VARCHAR NOT NULL,
+    record_id VARCHAR NOT NULL,
+    cursor_at TIMESTAMPTZ NOT NULL,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ,
+    value DOUBLE,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    source_date DATE,
+    parent_id VARCHAR,
+    category VARCHAR,
+    is_main_sleep BOOLEAN,
+    origin VARCHAR NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, record_id),
+    CHECK (end_at IS NULL OR end_at > start_at),
+    CHECK (value IS NULL OR (isfinite(value) AND value >= 0))
+);
+
+CREATE TABLE IF NOT EXISTS base.fitbit_sleep (
+    subject_key VARCHAR NOT NULL,
+    record_id VARCHAR NOT NULL,
+    cursor_at TIMESTAMPTZ NOT NULL,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ,
+    value DOUBLE,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    source_date DATE,
+    parent_id VARCHAR,
+    category VARCHAR,
+    is_main_sleep BOOLEAN,
+    origin VARCHAR NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, record_id),
+    CHECK (end_at IS NULL OR end_at > start_at),
+    CHECK (value IS NULL OR (isfinite(value) AND value >= 0))
+);
+
+CREATE TABLE IF NOT EXISTS base.fitbit_sleep_stage (
+    subject_key VARCHAR NOT NULL,
+    record_id VARCHAR NOT NULL,
+    cursor_at TIMESTAMPTZ NOT NULL,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ,
+    value DOUBLE,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    source_date DATE,
+    parent_id VARCHAR,
+    category VARCHAR,
+    is_main_sleep BOOLEAN,
+    origin VARCHAR NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, record_id),
+    CHECK (end_at IS NULL OR end_at > start_at),
+    CHECK (value IS NULL OR (isfinite(value) AND value >= 0))
+);
+
+CREATE TABLE IF NOT EXISTS base.fitbit_sleep_wake (
+    subject_key VARCHAR NOT NULL,
+    record_id VARCHAR NOT NULL,
+    cursor_at TIMESTAMPTZ NOT NULL,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ,
+    value DOUBLE,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    source_date DATE,
+    parent_id VARCHAR,
+    category VARCHAR,
+    is_main_sleep BOOLEAN,
+    origin VARCHAR NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, record_id),
+    CHECK (end_at IS NULL OR end_at > start_at),
+    CHECK (value IS NULL OR (isfinite(value) AND value >= 0))
+);
+
+
+CREATE TABLE IF NOT EXISTS ops.fitbit_coverage (
+    subject_key VARCHAR NOT NULL,
+    data_type VARCHAR NOT NULL,
+    range_start TIMESTAMPTZ NOT NULL,
+    range_end TIMESTAMPTZ NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    origin VARCHAR NOT NULL,
+    source_key VARCHAR NOT NULL,
+    content_sha256 VARCHAR NOT NULL,
+    source_sha256 VARCHAR DEFAULT '',
+    PRIMARY KEY (subject_key, data_type, range_start),
+    CHECK (range_end > range_start)
+);
+
+-- Keep ordering after an ID moves between ranges and is later deleted.
+CREATE TABLE IF NOT EXISTS ops.fitbit_deleted_record (
+    subject_key VARCHAR NOT NULL,
+    data_type VARCHAR NOT NULL,
+    record_id VARCHAR NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    origin VARCHAR NOT NULL,
+    source_key VARCHAR NOT NULL,
+    PRIMARY KEY (subject_key, data_type, record_id)
+);
+
+-- Complete UTC minute windows from the Google wearables heart rate rollup.
+CREATE TABLE IF NOT EXISTS base.fitbit_heart_rate_minute (
+    subject_key VARCHAR NOT NULL,
+    data_source_family VARCHAR NOT NULL,
+    start_at TIMESTAMPTZ NOT NULL,
+    aggregation_version VARCHAR NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+    average DOUBLE NOT NULL,
+    minimum DOUBLE NOT NULL,
+    maximum DOUBLE NOT NULL,
+    sample_count BIGINT,
+    origin VARCHAR NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, data_source_family, start_at, aggregation_version),
+    CHECK (end_at = start_at + INTERVAL '1 minute'),
+    CHECK (date_trunc('minute', start_at) = start_at),
+    CHECK (isfinite(average) AND isfinite(minimum) AND isfinite(maximum)),
+    CHECK (minimum >= 0 AND minimum <= average AND average <= maximum),
+    CHECK (sample_count IS NULL OR sample_count > 0)
+);
+
+CREATE TABLE IF NOT EXISTS ops.fitbit_minute_coverage (
+    subject_key VARCHAR NOT NULL,
+    data_source_family VARCHAR NOT NULL,
+    aggregation_version VARCHAR NOT NULL,
+    range_start TIMESTAMPTZ NOT NULL,
+    range_end TIMESTAMPTZ NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    origin VARCHAR NOT NULL,
+    source_key VARCHAR NOT NULL,
+    content_sha256 VARCHAR NOT NULL,
+    source_sha256 VARCHAR NOT NULL,
+    PRIMARY KEY (subject_key, data_source_family, aggregation_version, range_start),
+    CHECK (range_end > range_start)
+);

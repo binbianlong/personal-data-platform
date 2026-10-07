@@ -48,7 +48,7 @@ def test_daily_repair_uses_seven_completed_days_without_device_cursor(monkeypatc
     from personal_data_platform.storage.motherduck import Warehouse
 
     warehouse = Warehouse(duckdb.connect())
-    warehouse.migrate(profile="west")
+    warehouse.migrate()
     warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
     calls = []
 

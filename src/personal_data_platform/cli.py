@@ -11,6 +11,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pdp", description="Run Personal Data Platform")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    migrate = commands.add_parser("migrate", help="initialize or update the current schema")
+    migrate.add_argument("--database", help="local .duckdb or .db file; defaults to MotherDuck")
+
     from personal_data_platform.sources.fitbit.cli import configure as configure_fitbit
     from personal_data_platform.sources.screen_time.cli import configure as configure_screen_time
 
@@ -65,6 +68,18 @@ def _print_error(error: Exception) -> None:
 
 
 def _dispatch(args: argparse.Namespace) -> int:
+    if args.command == "migrate":
+        from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+
+        if args.database is not None and not args.database.endswith((".duckdb", ".db")):
+            raise ValueError("--database must name a local .duckdb or .db file")
+        config = WarehouseConfig(args.database) if args.database else WarehouseConfig.from_env()
+        warehouse = Warehouse(connect(config))
+        try:
+            warehouse.migrate()
+        finally:
+            warehouse.close()
+        return 0
     if args.command == "fitbit":
         from personal_data_platform.sources.fitbit.cli import run
 

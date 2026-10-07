@@ -9,7 +9,6 @@ import time
 import uuid
 from pathlib import Path
 
-from personal_data_platform.config import schema_profile
 from personal_data_platform.loader.job import LOADER_LEASE_SECONDS, JobAlreadyRunning
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
@@ -97,7 +96,7 @@ def run_dbt_from_env(
     owner = lease_owner or str(uuid.uuid4())
     acquired = False
     try:
-        warehouse.migrate(profile=schema_profile())
+        warehouse.migrate()
         if lease_owner is None:
             acquired = warehouse.acquire_job_lock(
                 "loader", owner, lease_seconds=LOADER_LEASE_SECONDS

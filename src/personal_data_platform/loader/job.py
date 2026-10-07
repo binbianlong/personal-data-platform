@@ -217,9 +217,7 @@ def run_loader_from_env(
         validate_runtime_policy(source)
     warehouse = Warehouse(connect(WarehouseConfig.from_env()))
     try:
-        from personal_data_platform.config import schema_profile
-
-        warehouse.migrate(profile=schema_profile())
+        warehouse.migrate()
         try:
             if all_streams:
                 summary = run_loader_all(

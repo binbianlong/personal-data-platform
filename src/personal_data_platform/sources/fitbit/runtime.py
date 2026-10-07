@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 import uvicorn
 
-from personal_data_platform.config import schema_profile, secret_config
+from personal_data_platform.config import secret_config
 from personal_data_platform.loader.job import JobAlreadyRunning
 from personal_data_platform.storage.gcs import GCSRawRepository
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
@@ -69,7 +69,6 @@ def run_notification_job(
     from .notifications import PubSubNotifications
 
     configure_logging()
-    schema_profile()
     return _acquisition_runner().ingest(
         PubSubNotifications.from_env(),
         max_messages=max_messages,
@@ -82,7 +81,6 @@ def run_serve_from_env() -> int:
     from .notifications import PubSubNotifications
 
     configure_logging()
-    schema_profile()
     if os.environ.get("PDP_FITBIT_WEBHOOK_AUTHORIZATION") or os.environ.get(
         "PDP_FITBIT_HEALTH_USER_ID"
     ):
@@ -141,7 +139,7 @@ def run_sync_from_env(
         "data_types": list(data_types),
     }
     try:
-        warehouse.migrate(profile=schema_profile())
+        warehouse.migrate()
         acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=LOADER_LEASE_SECONDS)
         if not acquired:
             raise JobAlreadyRunning("loader already has an unexpired job lease")

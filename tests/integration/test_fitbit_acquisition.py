@@ -52,7 +52,7 @@ def setup(tmp_path, *, states=("A", "A", "B", "A"), fail_kind=None):
 
     path = str(tmp_path / "acquisition.duckdb")
     warehouse = Warehouse(duckdb.connect(path))
-    warehouse.migrate(profile="west")
+    warehouse.migrate()
     warehouse.close()
     connections = []
 

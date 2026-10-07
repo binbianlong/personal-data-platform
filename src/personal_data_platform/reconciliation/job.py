@@ -8,7 +8,6 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
-from personal_data_platform.config import schema_profile
 from personal_data_platform.loader.deadline import interrupt_after
 from personal_data_platform.loader.job import (
     LOADER_LEASE_SECONDS,
@@ -304,7 +303,6 @@ def run_reconciliation(
 
 
 def run_reconciliation_from_env() -> int:
-    schema_profile()
     return _run_daily_reconciliation()
 
 
@@ -339,7 +337,7 @@ def _run_daily_reconciliation() -> int:
         return seconds
 
     try:
-        warehouse.migrate(profile=schema_profile())
+        warehouse.migrate()
         acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=LOADER_LEASE_SECONDS)
         if not acquired:
             LOGGER.info(
