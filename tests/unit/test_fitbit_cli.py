@@ -7,7 +7,9 @@ def test_migrate_can_initialize_an_explicit_local_database(tmp_path):
     database = tmp_path / "local.duckdb"
     assert main(["migrate", "--database", str(database)]) == 0
     with duckdb.connect(str(database)) as connection:
-        assert connection.execute("select count(*) from base.fitbit_steps").fetchone() == (0,)
+        assert connection.execute(
+            "select count(*) from base.fitbit_activity_interval"
+        ).fetchone() == (0,)
 
 
 def test_sync_requires_explicit_range_and_rejects_resume_id():

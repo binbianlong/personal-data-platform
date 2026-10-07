@@ -67,7 +67,7 @@ def test_manual_retry_records_first_unfinished_day_and_preserves_committed_data(
     assert first["first_incomplete"]["start"] == str(failed_day)
     warehouse = manual_env.warehouse()
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 2
-    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_steps") > 0
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") > 0
     warehouse.close()
 
     monkeypatch.setattr(manual_env.api, "fetch_captured", fetch)

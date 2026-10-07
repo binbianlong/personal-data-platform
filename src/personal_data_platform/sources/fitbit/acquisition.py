@@ -23,7 +23,6 @@ from .adapter import FitbitSource
 from .api import HealthClient
 from .models import (
     DATE_TYPES,
-    GOOGLE_WEARABLES,
     CapturedSnapshot,
     FitbitBundle,
     HeartRateMinuteSnapshot,
@@ -31,7 +30,7 @@ from .models import (
 )
 from .notifications import Delivery
 from .raw import decode_bundle, encode_bundle
-from .writer import FitbitBatch, FitbitMinuteBatch
+from .writer import FitbitBatch, FitbitMinuteBatch, coverage_scope
 
 LOGGER = logging.getLogger(__name__)
 
@@ -330,23 +329,21 @@ class AcquisitionRunner:
         deadline: float,
     ) -> bool:
         window = acquisition.window
+        version = acquisition.aggregation_version
+        rows = warehouse.query_rows(
+            "SELECT source_key,source_sha256,range_start,range_end FROM ops.fitbit_coverage "
+            "WHERE subject_key=? AND data_type=? AND data_source_family=? AND aggregation_version=? "
+            "AND range_start < ? AND range_end > ?",
+            [
+                *coverage_scope(self.subject_key, window.data_type, version),
+                window.end,
+                window.start,
+            ],
+        )
+        batch: FitbitBatch | FitbitMinuteBatch
         if isinstance(acquisition, HeartRateMinuteSnapshot):
-            rows = warehouse.query_rows(
-                "SELECT source_key, source_sha256, range_start, range_end FROM ops.fitbit_minute_coverage WHERE subject_key=? AND data_source_family=? AND aggregation_version=? AND range_start < ? AND range_end > ?",
-                [
-                    self.subject_key,
-                    GOOGLE_WEARABLES,
-                    acquisition.aggregation_version,
-                    window.end,
-                    window.start,
-                ],
-            )
-            batch: FitbitBatch | FitbitMinuteBatch = FitbitMinuteBatch(acquisition)
+            batch = FitbitMinuteBatch(acquisition)
         else:
-            rows = warehouse.query_rows(
-                "SELECT source_key, source_sha256, range_start, range_end FROM ops.fitbit_coverage WHERE subject_key=? AND data_type=? AND origin='api' AND range_start < ? AND range_end > ?",
-                [self.subject_key, window.data_type, window.end, window.start],
-            )
             batch = FitbitBatch(acquisition.snapshot, source_digest=acquisition.source_sha256())
         if len(rows) != 1 or rows[0][1:] != (acquisition.source_sha256(), window.start, window.end):
             return False

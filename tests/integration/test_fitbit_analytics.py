@@ -36,7 +36,7 @@ def test_health_views_split_tokyo_days_preserve_missing_and_keep_devices_separat
                     cursor,
                     sleep_start,
                     sleep_start + timedelta(hours=1),
-                    60,
+                    45,
                     source_date=cursor.date(),
                 ),
                 Record(
@@ -105,7 +105,7 @@ def test_health_views_split_tokyo_days_preserve_missing_and_keep_devices_separat
                 "select sleep_minutes from marts.daily_fitbit_health where activity_date=?",
                 [date(2026, 9, 2)],
             )
-            == 60
+            == 45
         )
         assert warehouse.query_rows(
             "select device_key,platform,screen_time_seconds from marts.fitbit_sleep_screen_time order by device_key"
@@ -298,8 +298,8 @@ def test_scalar_v3_bundle_preserves_rows_on_unchanged_write(tmp_path):
         batch.write(
             warehouse.connection, raw, byte_size=len(payload), loaded_at=base + timedelta(hours=1)
         )
-        assert warehouse.query_rows("SELECT value,source_key,loaded_at FROM base.fitbit_steps") == [
-            (10, raw.key, base)
-        ]
+        assert warehouse.query_rows(
+            "SELECT value,source_key,loaded_at FROM base.fitbit_activity_interval"
+        ) == [(10, raw.key, base)]
     finally:
         warehouse.close()

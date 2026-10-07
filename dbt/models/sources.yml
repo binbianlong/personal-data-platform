@@ -4,13 +4,11 @@ sources:
   - name: fitbit_base
     schema: base
     tables:
-      - name: fitbit_steps
+      - name: fitbit_activity_interval
+      - name: fitbit_resting_heart_rate_daily
+      - name: fitbit_sleep_session
+      - name: fitbit_sleep_detail
       - name: fitbit_heart_rate_minute
-      - name: fitbit_resting_heart_rate
-      - name: fitbit_active_zone
-      - name: fitbit_sleep
-      - name: fitbit_sleep_stage
-      - name: fitbit_sleep_wake
   - name: screen_time_base
     schema: base
     tables:

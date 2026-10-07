@@ -37,8 +37,23 @@ pdp migrate --database /private/path/scratch.duckdb
 既存SQLや旧DBの台帳は変更しない。旧地域・旧取得方式のmigrationを持つDBには適用を拒否する。
 空の移行先DBへ[Rebuild](#rebuild)し、FitbitをAPIから再取得してから接続先を切り替える。
 
-スキーマ更新は両Schedulerを止め、実行中Jobの終了を確認してからruntime・migration・dbtを反映する。
-独立環境のpreflightと、対象DBの日次全段階の成功を確認してSchedulerを再開する。
+現行履歴内の追加DDLは両Schedulerを止め、実行中Jobの終了を確認してから適用する。
+日次全段階の成功を確認してSchedulerを再開する。
+
+### 旧スキーマからの切替
+
+1. 両Schedulerを停止し、実行中Jobと`loader` leaseの終了を確認する。receiverは通知を蓄積できる。
+2. 旧DBを保持したまま、空の移行先DBを用意する。新imageを旧DBへ接続して稼働させない。
+3. 下記Rebuildの手順でScreen Timeの両streamを移行先へ再生する。
+4. `MOTHERDUCK_DATABASE`を移行先へ向け、`pdp fitbit sync --from <開始日> --to <終了日の翌日>`で必要なFitbit全期間を取得する。
+   途中で止まった場合は出力された最初の未完了日から続ける。
+5. `pdp dbt --source fitbit`で両sourceの集計・検証を実行し、Screen Timeのイベント・補助状態・集計を旧DBと比較する。
+6. 新DBのread-only shareと分析用接続を設定し、処理JobのDB設定とimageを同時に切り替える。
+   旧imageを新DBに向けるrollbackは行わず、戻す場合は旧DB・旧imageの組み合わせへ戻す。
+7. 独立環境のpreflightと新DBの日次全段階を確認してSchedulerを再開する。旧DBの削除は切替確認後に行う。
+
+Raw保持範囲だけで復元できないデータは再取得できる期間を確認する。
+新DBでの再構築が終わるまで、旧DBのtableとmigration台帳を削除しない。
 
 ## 収集・日次処理
 

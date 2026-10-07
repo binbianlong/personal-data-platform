@@ -1,10 +1,7 @@
 {{ config(tags=['fitbit']) }}
 with intervals as (
-    select subject_key, start_at, end_at, value, 'steps' as metric
-    from {{ source('fitbit_base', 'fitbit_steps') }}
-    union all
-    select subject_key, start_at, end_at, value, 'active_zone_minutes' as metric
-    from {{ source('fitbit_base', 'fitbit_active_zone') }}
+    select subject_key, start_at, end_at, value, metric
+    from {{ source('fitbit_base', 'fitbit_activity_interval') }}
 ), parts as (
     select subject_key, metric, cast(day_start as date) as activity_date,
         value * epoch(least(end_at, timezone('Asia/Tokyo', day_start + interval '1 day'))
@@ -19,13 +16,13 @@ with intervals as (
 ), daily as (
     select subject_key, activity_date,
         sum(value) filter (where metric = 'steps') as steps,
-        sum(value) filter (where metric = 'active_zone_minutes') as active_zone_minutes
+        sum(value) filter (where metric = 'active-zone-minutes') as active_zone_minutes
     from parts group by subject_key, activity_date
 ), heart as (
     select * from {{ ref('daily_fitbit_heart_rate_minute') }}
 ), resting as (
-    select subject_key, source_date as activity_date, value as resting_heart_rate
-    from {{ source('fitbit_base', 'fitbit_resting_heart_rate') }}
+    select subject_key, source_date as activity_date, beats_per_minute as resting_heart_rate
+    from {{ source('fitbit_base', 'fitbit_resting_heart_rate_daily') }}
 ), sleep as (
     select subject_key, activity_date, sum(sleep_minutes) as sleep_minutes,
         count(*) as sleep_sessions

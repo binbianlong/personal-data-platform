@@ -180,7 +180,7 @@ def test_a_b_a_and_empty_complete_keep_changed_raw_and_delete(tmp_path):
         assert runner.ingest(Broker([(delivery(str(i)),)]), collect_seconds=0).ok
     assert store.puts == 4
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_steps") == 0
+        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
         assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_deleted_record") == 1
 
 
@@ -204,7 +204,7 @@ def test_saved_raw_recovers_without_attempt_tables(tmp_path):
     assert runner.ingest(retry, collect_seconds=0).ok
     assert retry.acked == ["ack-n"] and store.puts == 1 and len(api.calls) == 2
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT value FROM base.fitbit_steps") == 10
+        assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 10
 
 
 def test_pending_raw_is_loaded_before_unchanged_fetch(tmp_path):
@@ -215,7 +215,7 @@ def test_pending_raw_is_loaded_before_unchanged_fetch(tmp_path):
     assert runner.ingest(Broker([(delivery("again"),)]), collect_seconds=0).ok
     assert store.puts == 3
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT value FROM base.fitbit_steps") == 10
+        assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 10
         assert (
             warehouse.query_value(
                 "SELECT count(*) FROM ops.ingestion_metadata WHERE status='succeeded'"
@@ -248,7 +248,7 @@ def test_unchanged_fetch_prevents_stale_raw_replay(tmp_path):
     )
     with closing(factory()) as warehouse:
         FitbitBatch(stale).write_snapshot(warehouse.connection, source_key="stale", loaded_at=NOW)
-        assert warehouse.query_value("SELECT value FROM base.fitbit_steps") == 10
+        assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 10
     assert store.puts == 1 and len(api.calls) == 2
 
 
@@ -261,7 +261,7 @@ def test_redelivery_after_unknown_commit_is_idempotent(tmp_path):
     assert runner.ingest(retry, collect_seconds=0).ok
     assert retry.acked == ["ack-n"] and store.puts == 1 and len(api.calls) == 2
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_steps") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 1
 
 
 def test_slow_scope_budget_commits_prefix_before_redelivery(tmp_path):

@@ -191,7 +191,7 @@ def test_raw_object_failure_preserves_all_acquisitions(monkeypatch):
                 object(), warehouse, (reference,), source=source, buffered_payloads=dict(objects)
             )
         assert not result.ok
-        assert warehouse.query_value("SELECT sum(value) FROM base.fitbit_steps") == 10.0
+        assert warehouse.query_value("SELECT sum(value) FROM base.fitbit_activity_interval") == 10.0
         assert (
             warehouse.query_value(
                 "SELECT count(*) FROM ops.ingestion_metadata WHERE status='succeeded'"
@@ -201,6 +201,6 @@ def test_raw_object_failure_preserves_all_acquisitions(monkeypatch):
         assert run_loader_objects(
             object(), warehouse, (reference,), source=source, buffered_payloads=dict(objects)
         ).ok
-        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_steps") == 0
+        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
     finally:
         warehouse.close()
