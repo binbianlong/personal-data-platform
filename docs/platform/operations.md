@@ -8,9 +8,10 @@
 | Terraform state | `health-data-pipeline-503813-personal-data-platform-tfstate-west`、prefix `personal-data-platform/runtime` |
 | Raw / Logging | `health-data-pipeline-503813-pdp-raw-west` / `pdp-west` |
 | 毎時 / 日次Job | `fitbit-hourly-west` / `reconciliation-west` |
-| MotherDuck production | `us-west-2`、`personal_data_platform_west`、owner `pdp_west_prod` |
+| MotherDuck production | `us-west-2`、`personal_data_platform`、owner `pdp_west_prod` |
 
-MotherDuckはPulse/Pulse・read scaling 1、分析接続はrestricted read-only share `pdp_analytics_west`を使う。
+MotherDuckはPulse/Pulse・read scaling 1、分析接続はrestricted read-only share `pdp_analytics`を使う。
+分析アカウントの接続名も`personal_data_platform`にそろえ、view・macro内のDB参照を解決する。
 preflightは独立したbucket・DB・tokenで手動実行し、本番DB/shareを付与しない。
 
 ## Deploy
@@ -55,6 +56,15 @@ pdp migrate --database /private/path/scratch.duckdb
 Raw保持範囲だけで復元できないデータは再取得できる期間を確認する。
 新DBでの再構築が終わるまで、旧DBのtableとmigration台帳を削除しない。
 
+2026-10-07に`personal_data_platform_west`から`personal_data_platform`へ切り替えた。
+runtime imageのソースは`5cd09e2`で、移行台帳は`001_initial.sql`の1件。
+旧DB時点のScreen Time 80,386イベント・補助状態・日次集計の一致を確認してから、最新Raw 2件も反映した。
+Fitbitは2026-09-29〜2026-10-07の5種別をAPIから取得し、Cloud Runの日次全段階・dbt 39件・外部成功pingを確認した。
+分析接続では全10 viewの参照と書き込み拒否、preflightでは本番DB・shareへの接続拒否を確認した。
+旧DBと`deployed-rollback`タグの旧imageを保持し、戻す場合は両方を組にして接続設定を戻す。
+切替時の比較結果・image digest・Terraform state backupは`var/schema-cutover/2026-10-07/`に保存する。
+自動Deployの再開前に、`main`へ新スキーマと切替後の接続設定を反映する。
+
 ## 収集・日次処理
 
 毎時15分のJobは通知を集め、完全取得したRawとDBが確定した単位だけackする。
@@ -91,7 +101,7 @@ Collectorのwrite-only ADCを再利用せず、Terraform output `rebuild_operato
 ```bash
 export GOOGLE_CLOUD_PROJECT="health-data-pipeline-503813"
 export GCS_BUCKET="${GOOGLE_CLOUD_PROJECT}-pdp-raw-west"
-export MOTHERDUCK_DATABASE="personal_data_platform_west"
+export MOTHERDUCK_DATABASE="personal_data_platform"
 export PDP_REBUILD_SERVICE_ACCOUNT_EMAIL="raw-rebuild-operator@${GOOGLE_CLOUD_PROJECT}.iam.gserviceaccount.com"
 export CLOUDSDK_CONFIG="$HOME/Library/Application Support/personal-data-platform/gcloud-rebuild"
 mkdir -p "$CLOUDSDK_CONFIG"

@@ -43,7 +43,7 @@ jobs:
       TF_VAR_west_logging_exclusions: ${{ vars.PDP_WEST_LOGGING_EXCLUSIONS || '{}' }}
       TF_VAR_west_image_uri: ${{ vars.GCP_WEST_RUNTIME_IMAGE_URI }}
       TF_VAR_west_secret_versions: ${{ vars.PDP_WEST_SECRET_VERSIONS || '{}' }}
-      TF_VAR_west_motherduck_database: ${{ vars.PDP_WEST_MOTHERDUCK_DATABASE || 'personal_data_platform_west' }}
+      TF_VAR_west_motherduck_database: ${{ vars.PDP_WEST_MOTHERDUCK_DATABASE || 'personal_data_platform' }}
       TF_VAR_west_preflight_motherduck_database: ${{ vars.PDP_WEST_PREFLIGHT_MOTHERDUCK_DATABASE || 'personal_data_platform_west_preflight' }}
     steps:
       - name: Check out repository

@@ -12,10 +12,18 @@ https://api.motherduck.com/mcp
 分析へ公開してよいdatabase/shareだけをread-onlyで付与する。
 
 個人の分析用接続には、本番ownerから同じ所有者の分析アカウントへrestricted read-onlyの
-自動更新share `pdp_analytics_west`を付与する。公開範囲は本番DB全体で、base・opsも読める。
+自動更新share `pdp_analytics`を付与する。公開範囲は本番DB全体で、base・opsも読める。
 複数人向けのmarts限定公開には使わない。Raw bucketと取得用tokenはこの接続へ渡さない。
 preflightには本番DB/shareへの接続を許可しない。
 
+共有は元DBと同じ名前`personal_data_platform`でattachする。dbtのview・macroがこのDB名を参照するため、
+share名を接続名にすると集計の参照が失敗する。shareを作成した際に返されるURLを使う。
+
+```sql
+ATTACH '<pdp_analyticsのshare URL>' AS personal_data_platform;
+```
+
+この別名の制約は[MotherDuckの共有仕様](https://motherduck.com/docs/key-tasks/sharing-data/sharing-overview/#views-and-fully-qualified-table-references)に従う。
 同じ分析userの所有するmy_dbなどへの権限と、本番shareのread-only権限を区別する。
 
 ## ChatGPT設定
@@ -40,7 +48,7 @@ MotherDuck endpointとOAuth、tool制限の現行仕様は
 
 ```text
 成功すること:
-- catalogから公開対象databaseとmarts.daily_screen_timeを発見できる
+- catalogからpersonal_data_platformとmarts.daily_screen_timeを発見できる
 - SELECTで日次利用秒数を取得できる
 
 拒否されること:

@@ -101,7 +101,7 @@ variable "west_logging_exclusions" {
 variable "west_motherduck_database" {
   description = "Production database in the separate us-west-2 MotherDuck organization."
   type        = string
-  default     = "personal_data_platform_west"
+  default     = "personal_data_platform"
 }
 variable "west_preflight_motherduck_database" {
   description = "Isolated preflight database in the west organization."
