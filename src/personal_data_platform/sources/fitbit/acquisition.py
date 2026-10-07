@@ -190,6 +190,7 @@ class AcquisitionRunner:
         acquired = False
         timer = None
         try:
+            warehouse.migrate()
             acquired = warehouse.acquire_job_lock(
                 "loader", owner, lease_seconds=LOADER_LEASE_SECONDS
             )

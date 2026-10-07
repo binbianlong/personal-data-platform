@@ -48,6 +48,6 @@ Fitbitのbaseは次の5テーブルとする。
 | アプリ別 / 端末別の日次集計 | 1,195 / 66行、キー・件数が一致。最大数値差は約1.46e-11秒 |
 | Screen Time dbt | 4ビューの生成、33検証に成功 |
 
-Python 3.14の全624テスト、Ruff、mypy、Terraform validate・18個のmock testが成功した。
+Python 3.14の全626テスト、Ruff、mypy、Terraform validate・18個のmock testが成功した。
 クリーンなディレクトリで構築したwheelには`001_current.sql`だけを収録し、隔離したPython 3.13環境へのインストール後に共通CLIの初期化・5テーブル作成・再実行を確認した。
 FitbitはローカルのAPI fixtureとRaw再生で検証し、実APIからの全期間再取得と本番接続先の切替は未実施である。

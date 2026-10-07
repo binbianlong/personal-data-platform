@@ -2,6 +2,7 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
 import duckdb
+import pytest
 
 from personal_data_platform.sources.fitbit.models import (
     CapturedSnapshot,
@@ -130,6 +131,39 @@ def test_empty_pull_opens_no_warehouse(tmp_path):
     runner, _, _, _, connections = setup(tmp_path)
     assert runner.ingest(Broker([]), collect_seconds=0).ok
     assert connections == []
+
+
+def test_notification_ingestion_rejects_old_schema_before_any_write(tmp_path):
+    runner, store, api, factory, _ = setup(tmp_path)
+    with closing(factory()) as warehouse:
+        warehouse.connection.execute(
+            "UPDATE ops.schema_migration SET migration_id='001_initial.sql'"
+        )
+        warehouse.connection.execute(
+            "ALTER TABLE ops.schema_migration ADD COLUMN schema_profile VARCHAR DEFAULT 'west'"
+        )
+        receipts = warehouse.query_rows("SELECT * FROM ops.schema_migration")
+    broker = Broker([(delivery(),)])
+    with pytest.raises(RuntimeError, match="rebuild.*empty"):
+        runner.ingest(broker, collect_seconds=0)
+    with closing(factory()) as warehouse:
+        assert warehouse.query_rows("SELECT * FROM ops.schema_migration") == receipts
+        assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+        assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 0
+        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
+    assert api.calls == [] and store.puts == 0 and store.lists == 0
+    assert broker.acked == []
+
+
+def test_notification_ingestion_initializes_an_empty_database(tmp_path):
+    runner, _, _, _, _ = setup(tmp_path)
+    database = str(tmp_path / "empty.duckdb")
+    runner.warehouse_factory = lambda: Warehouse(duckdb.connect(database))
+    result = runner.ingest(Broker([(delivery(),)]), collect_seconds=0)
+    assert result.ok and result.acked_notifications == 1
+    with closing(Warehouse(duckdb.connect(database))) as warehouse:
+        assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 1
+        assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 10
 
 
 def test_initial_empty_pull_retries_within_collection_budget(tmp_path):
