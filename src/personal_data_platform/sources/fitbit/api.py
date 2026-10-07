@@ -35,11 +35,11 @@ DATA_SOURCE_FAMILY = "users/me/dataSourceFamilies/google-wearables"
 LOGGER = logging.getLogger(__name__)
 _FIELDS = {
     "steps": ("steps", "steps.interval.start_time"),
-    "heart-rate": ("heartRate", "heart_rate.sample_time.physical_time"),
     "daily-resting-heart-rate": ("dailyRestingHeartRate", "daily_resting_heart_rate.date"),
     "active-zone-minutes": ("activeZoneMinutes", "active_zone_minutes.interval.start_time"),
     "sleep": ("sleep", "sleep.interval.civil_end_time"),
 }
+_POINT_FIELDS = {field for field, _ in _FIELDS.values()} | {"heartRate"}
 
 
 class HealthError(RuntimeError):
@@ -145,10 +145,12 @@ def request_json(
     if not 200 <= response.status < 300:
         raise HealthError(f"Google Health request failed ({response.status})")
     try:
-        payload: object = json.loads(response.body)
-        return object_dict(payload)
+        payload = object_dict(json.loads(response.body))
     except (ValueError, UnicodeDecodeError):
         raise InvalidResponseError("Google Health response must be a JSON object") from None
+    if "error" in payload:
+        raise InvalidResponseError("Google Health response contains an error")
+    return payload
 
 
 def _utc_text(value: datetime) -> str:
@@ -197,17 +199,9 @@ class HealthClient:
         remaining = self.request_guard() if self.request_guard is not None else None
         return self._timeout if remaining is None else min(self._timeout, remaining)
 
-    def fetch(self, window: Window, *, subject_key: str) -> Snapshot:
-        return self._fetch_captured(window, subject_key=subject_key, strict_pages=True).snapshot
-
     def fetch_captured(self, window: Window, *, subject_key: str) -> CapturedSnapshot:
         if window.data_type == "heart-rate":
             raise ValueError("heart rate requires the minute aggregation API")
-        return self._fetch_captured(window, subject_key=subject_key, strict_pages=False)
-
-    def _fetch_captured(
-        self, window: Window, *, subject_key: str, strict_pages: bool
-    ) -> CapturedSnapshot:
         snapshot = Snapshot(subject_key, window, self._clock(), ())
         points: list[dict[str, object]] = []
         pages: list[dict[str, object]] = []
@@ -225,8 +219,6 @@ class HealthClient:
                 if self.request_guard is not None:
                     self.request_guard()
                 page = self._page(chunk, page_token)
-                if strict_pages and set(page) - {"dataPoints", "nextPageToken"}:
-                    raise InvalidResponseError("Unexpected Google Health page fields")
                 pages.append(page)
                 raw_points = page.get("dataPoints", [])
                 if not isinstance(raw_points, list):
@@ -513,7 +505,7 @@ def _interval(fields: dict[str, object]) -> tuple[datetime, datetime, int, int]:
 
 def _normalize(data_type: str, point: dict[str, object], subject_key: str) -> tuple[Record, ...]:
     field, _ = _FIELDS[data_type]
-    if any(other != field and other in point for other, _ in _FIELDS.values()):
+    if any(other != field and other in point for other in _POINT_FIELDS):
         raise ValueError("data point contains multiple union fields")
     payload = object_dict(point[field])
     point_id = _point_id(point, data_type)
@@ -531,21 +523,6 @@ def _normalize(data_type: str, point: dict[str, object], subject_key: str) -> tu
                 cursor=cursor,
                 start=cursor,
                 source_date=source_date,
-                value=float(_integer(payload["beatsPerMinute"], minimum=1, maximum=300)),
-            ),
-        )
-    if data_type == "heart-rate":
-        sample = object_dict(payload["sampleTime"])
-        start = _timestamp(sample["physicalTime"])
-        offset = _offset(sample["utcOffset"])
-        return (
-            Record(
-                kind=data_type,
-                record_id=point_id or _identity(subject_key, data_type, _utc_text(start)),
-                cursor=start,
-                start=start,
-                offset_seconds=offset,
-                source_date=_source_date(sample.get("civilTime"), start, offset),
                 value=float(_integer(payload["beatsPerMinute"], minimum=1, maximum=300)),
             ),
         )

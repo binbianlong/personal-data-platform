@@ -24,16 +24,6 @@ def steps(count="12", **times):
     return {"steps": {"interval": interval(**times), "count": count}}
 
 
-def heart_rate(when="2026-09-01T00:00:00Z", value="60"):
-    return {
-        "heartRate": {
-            "sampleTime": {"physicalTime": when, "utcOffset": "32400s"},
-            "beatsPerMinute": value,
-            "metadata": {"motionContext": "SEDENTARY", "sensorLocation": "WRIST"},
-        }
-    }
-
-
 class FakeTransport:
     def __init__(self, responses, *, before_request=None):
         self.responses = iter(responses)
@@ -91,15 +81,19 @@ def test_unbounded_unique_pagination_stops_without_returning_partial_data():
 
     transport = FakeTransport([{"nextPageToken": "page2"}, {"nextPageToken": "page3"}])
     with pytest.raises(InvalidResponseError, match="limit"):
-        client(transport, max_pages=2).fetch(
+        client(transport, max_pages=2).fetch_captured(
             Window("steps", START, START + timedelta(days=1)), subject_key="self"
         )
     assert len(transport.calls) == 2
 
 
 def fetch_points(data_type, points, *, subject_key="owner"):
-    return client(FakeTransport([{"dataPoints": points}])).fetch(
-        Window(data_type, START, START + timedelta(days=1)), subject_key=subject_key
+    return (
+        client(FakeTransport([{"dataPoints": points}]))
+        .fetch_captured(
+            Window(data_type, START, START + timedelta(days=1)), subject_key=subject_key
+        )
+        .snapshot
     )
 
 
@@ -117,7 +111,7 @@ def test_fetch_completes_all_pages_and_keeps_fetch_start_and_original_points():
         before_request=lambda: events.append("request"),
     )
     window = Window("steps", START, START + timedelta(days=1))
-    result = client(transport, clock=clock).fetch(window, subject_key="owner")
+    result = client(transport, clock=clock).fetch_captured(window, subject_key="owner").snapshot
 
     assert events == ["clock", "request", "request"]
     assert result.fetched_at == datetime(2026, 9, 3, tzinfo=UTC)
@@ -144,13 +138,6 @@ def test_fetch_completes_all_pages_and_keeps_fetch_start_and_original_points():
     ("data_type", "field", "start", "end", "page_size"),
     [
         (
-            "heart-rate",
-            "heart_rate.sample_time.physical_time",
-            "2026-09-01T00:00:00Z",
-            "2026-09-02T00:00:00Z",
-            "10000",
-        ),
-        (
             "active-zone-minutes",
             "active_zone_minutes.interval.start_time",
             "2026-09-01T00:00:00Z",
@@ -169,8 +156,10 @@ def test_fetch_completes_all_pages_and_keeps_fetch_start_and_original_points():
 )
 def test_query_uses_the_data_types_own_filter_cursor(data_type, field, start, end, page_size):
     transport = FakeTransport([{}])
-    snapshot = client(transport).fetch(
-        Window(data_type, START, START + timedelta(days=1)), subject_key="owner"
+    snapshot = (
+        client(transport)
+        .fetch_captured(Window(data_type, START, START + timedelta(days=1)), subject_key="owner")
+        .snapshot
     )
     query = parse_qs(urlsplit(transport.calls[0][1]).query)
     assert query["filter"] == [f'{field} >= "{start}" AND {field} < "{end}"']
@@ -183,12 +172,14 @@ def test_query_uses_the_data_types_own_filter_cursor(data_type, field, start, en
 
 @pytest.mark.parametrize(
     ("data_type", "days", "boundary"),
-    [("heart-rate", 15, "2026-09-15T00:00:00Z"), ("sleep", 91, "2026-11-30")],
+    [("steps", 91, "2026-11-30T00:00:00Z"), ("sleep", 91, "2026-11-30")],
 )
 def test_large_ranges_are_split_without_reusing_previous_page_tokens(data_type, days, boundary):
     transport = FakeTransport([{"nextPageToken": "p2"}, {}, {}])
-    snapshot = client(transport).fetch(
-        Window(data_type, START, START + timedelta(days=days)), subject_key="owner"
+    snapshot = (
+        client(transport)
+        .fetch_captured(Window(data_type, START, START + timedelta(days=days)), subject_key="owner")
+        .snapshot
     )
     queries = [parse_qs(urlsplit(call[1]).query) for call in transport.calls]
     assert len(queries) == 3
@@ -217,7 +208,7 @@ def test_malformed_page_cannot_become_an_empty_complete_snapshot(payload):
     from personal_data_platform.sources.fitbit.api import InvalidResponseError
 
     with pytest.raises(InvalidResponseError) as caught:
-        client(FakeTransport([payload])).fetch(
+        client(FakeTransport([payload])).fetch_captured(
             Window("steps", START, START + timedelta(days=1)), subject_key="owner"
         )
     assert "synthetic-sensitive-text" not in str(caught.value)
@@ -233,7 +224,7 @@ def test_repeated_page_token_is_rejected_before_completing():
         ]
     )
     with pytest.raises(InvalidResponseError, match="page token"):
-        client(transport).fetch(
+        client(transport).fetch_captured(
             Window("steps", START, START + timedelta(days=1)), subject_key="owner"
         )
 
@@ -259,7 +250,7 @@ def test_later_page_http_failure_is_classified_without_health_or_token_text(stat
         ]
     )
     with pytest.raises(getattr(api, expected)) as caught:
-        client(transport).fetch(
+        client(transport).fetch_captured(
             Window("steps", START, START + timedelta(days=1)), subject_key="owner"
         )
     assert "synthetic-token" not in str(caught.value)
@@ -272,7 +263,7 @@ def test_network_failure_is_transient_and_has_a_sanitized_message():
     from personal_data_platform.sources.fitbit.api import TransientError
 
     with pytest.raises(TransientError) as caught:
-        client(FakeTransport([TimeoutError("synthetic-token")])).fetch(
+        client(FakeTransport([TimeoutError("synthetic-token")])).fetch_captured(
             Window("steps", START, START + timedelta(days=1)), subject_key="owner"
         )
     assert "synthetic-token" not in str(caught.value)
@@ -281,10 +272,12 @@ def test_network_failure_is_transient_and_has_a_sanitized_message():
 def test_each_response_is_checked_against_its_chunk_not_only_total_window():
     from personal_data_platform.sources.fitbit.api import InvalidResponseError
 
-    transport = FakeTransport([{"dataPoints": [heart_rate("2026-09-15T00:00:00Z")]}])
+    transport = FakeTransport(
+        [{"dataPoints": [steps(start="2026-11-30T00:00:00Z", end="2026-11-30T00:01:00Z")]}]
+    )
     with pytest.raises(InvalidResponseError, match="range"):
-        client(transport).fetch(
-            Window("heart-rate", START, START + timedelta(days=15)), subject_key="owner"
+        client(transport).fetch_captured(
+            Window("steps", START, START + timedelta(days=91)), subject_key="owner"
         )
 
 
@@ -295,6 +288,14 @@ def test_steps_true_zero_is_a_record_while_off_wrist_remains_missing():
     assert result.records[0].value == 0
     assert result.source_payload == (point,)
     assert fetch_points("steps", []).records == ()
+
+
+def test_scalar_point_rejects_conflicting_heart_rate_field():
+    from personal_data_platform.sources.fitbit.api import InvalidResponseError
+
+    point = {**steps(), "heartRate": {"beatsPerMinute": "60"}}
+    with pytest.raises(InvalidResponseError):
+        fetch_points("steps", [point])
 
 
 def test_steps_keep_physical_start_cursor_and_both_offsets_and_provider_date():
@@ -317,15 +318,15 @@ def test_steps_keep_physical_start_cursor_and_both_offsets_and_provider_date():
     assert record.source_date == date(2026, 9, 1)
 
 
-def test_heart_rate_key_uses_instant_and_subject_and_does_not_change_with_value():
-    (original,) = fetch_points("heart-rate", [heart_rate()]).records
-    (changed,) = fetch_points("heart-rate", [heart_rate(value="65")]).records
-    (other,) = fetch_points("heart-rate", [heart_rate()], subject_key="other").records
+def test_steps_key_uses_interval_and_subject_and_does_not_change_with_value():
+    (original,) = fetch_points("steps", [steps()]).records
+    (changed,) = fetch_points("steps", [steps(count="65")]).records
+    (other,) = fetch_points("steps", [steps()], subject_key="other").records
     assert original.cursor == original.start == START
-    assert original.end is None
+    assert original.end == START + timedelta(minutes=1)
     assert original.record_id == changed.record_id
     assert original.record_id != other.record_id
-    assert original.value == 60
+    assert original.value == 12
 
 
 def test_resting_heart_rate_uses_civil_date_not_a_timezone_shifted_instant():
@@ -363,11 +364,11 @@ def test_invalid_steps_values_fail_instead_of_selecting_or_coercing_data(bad_val
         fetch_points("steps", [steps(bad_value)])
 
 
-def test_conflicting_same_instant_points_are_rejected_instead_of_picking_one():
+def test_conflicting_same_interval_points_are_rejected_instead_of_picking_one():
     from personal_data_platform.sources.fitbit.api import InvalidResponseError
 
     with pytest.raises(InvalidResponseError, match="duplicate"):
-        fetch_points("heart-rate", [heart_rate(value="60"), heart_rate(value="65")])
+        fetch_points("steps", [steps(count="60"), steps(count="65")])
 
 
 def sleep_point():
