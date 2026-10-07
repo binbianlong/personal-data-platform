@@ -57,16 +57,19 @@ def test_old_history_is_rejected_without_modifying_it(warehouse, profile):
     )
 
 
-def test_untracked_existing_schema_requires_rebuild(warehouse):
+@pytest.mark.parametrize("empty_ledger", [False, True])
+def test_untracked_existing_schema_requires_rebuild(warehouse, empty_ledger):
     warehouse.connection.execute("CREATE SCHEMA base; CREATE TABLE base.previous (id INTEGER)")
+    if empty_ledger:
+        warehouse.connection.execute(
+            "CREATE SCHEMA ops; CREATE TABLE ops.schema_migration "
+            "(migration_id VARCHAR, checksum VARCHAR, applied_at TIMESTAMPTZ)"
+        )
     with pytest.raises(RuntimeError, match="rebuild.*empty"):
         warehouse.migrate()
-    assert (
-        warehouse.query_value(
-            "SELECT count(*) FROM information_schema.tables WHERE table_name='schema_migration'"
-        )
-        == 0
-    )
+    assert warehouse.query_value(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name='schema_migration'"
+    ) == int(empty_ledger)
 
 
 def test_fresh_target_ignores_an_attached_old_database(warehouse):

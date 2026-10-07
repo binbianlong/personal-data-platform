@@ -20,19 +20,21 @@ def _read_applied(connection: DuckDBPyConnection, checksums: dict[str, str]) -> 
         "WHERE table_catalog=current_database() AND table_schema='ops' "
         "AND table_name='schema_migration'"
     ).fetchall()
-    if not columns:
+    applied: dict[str, str] = {}
+    if columns:
+        if {row[0] for row in columns} != {"migration_id", "checksum", "applied_at"}:
+            raise RuntimeError(_REBUILD)
+        applied = dict(
+            connection.execute("SELECT migration_id, checksum FROM ops.schema_migration").fetchall()
+        )
+    if not applied:
         existing = connection.execute(
             "SELECT count(*) FROM information_schema.tables "
-            "WHERE table_catalog=current_database() AND table_schema IN ('base','ops')"
+            "WHERE table_catalog=current_database() AND table_schema IN ('base','ops') "
+            "AND NOT (table_schema='ops' AND table_name='schema_migration')"
         ).fetchone()
         if existing and existing[0]:
             raise RuntimeError(_REBUILD)
-        return {}
-    if {row[0] for row in columns} != {"migration_id", "checksum", "applied_at"}:
-        raise RuntimeError(_REBUILD)
-    applied = dict(
-        connection.execute("SELECT migration_id, checksum FROM ops.schema_migration").fetchall()
-    )
     for migration_id, checksum in applied.items():
         if migration_id not in checksums:
             raise RuntimeError(_REBUILD)
