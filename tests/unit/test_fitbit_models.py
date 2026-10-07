@@ -3,6 +3,14 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 
+def test_scalar_records_reject_second_level_heart_rate():
+    from personal_data_platform.sources.fitbit.models import Record
+
+    start = datetime(2026, 9, 1, tzinfo=UTC)
+    with pytest.raises(ValueError, match="supported kind"):
+        Record("heart-rate", "sample", start, start, value=60)
+
+
 def test_snapshot_roundtrip_and_incomplete_rejected():
     from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window
 

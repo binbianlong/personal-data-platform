@@ -19,6 +19,11 @@ run "secure_bootstrap_contract" {
   }
 
   assert {
+    condition     = output.state_bucket_name == google_storage_bucket.terraform_state_west.name
+    error_message = "The runtime backend output must point to the active west state bucket."
+  }
+
+  assert {
     condition     = google_storage_bucket.terraform_state.uniform_bucket_level_access
     error_message = "Terraform state must use uniform bucket-level access."
   }

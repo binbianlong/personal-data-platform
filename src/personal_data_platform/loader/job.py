@@ -64,9 +64,7 @@ def run_loader(
 ) -> LoadSummary:
     """Load pending observations for one source and stream across supported schemas."""
     source = source or get_source()
-    refs = sorted(
-        list_source_raw(repository, source, prefix), key=lambda raw: (raw.observed_at, raw.key)
-    )
+    refs = list_source_raw(repository, source, prefix)
     return run_loader_objects(
         repository, warehouse, refs, source=source, _lease_owner=_lease_owner, _deadline=_deadline
     )
@@ -113,34 +111,28 @@ def run_loader_objects(
         job_started = True
         already_loaded = warehouse.succeeded_keys_for(refs, parser_version=source.parser_version)
         pending = [raw for raw in refs if raw.key not in already_loaded]
-        groups = [(raw,) for raw in pending]
-        for group in groups:
+        for raw in pending:
             guard()
-            sizes: dict[str, int] = {}
+            byte_size = 0
             try:
-                payloads = []
-                for raw in group:
-                    stored = (
-                        buffered_payloads[raw.key]
-                        if buffered_payloads is not None and raw.key in buffered_payloads
-                        else repository.get_raw(raw.key, generation=raw.storage_generation)
-                    )
-                    payload = _decompress_and_verify(raw, stored)
-                    sizes[raw.key] = len(payload)
-                    payloads.append(payload)
-                raw = group[0]
-                batch = source.decode(raw, payloads[0])
+                stored = (
+                    buffered_payloads[raw.key]
+                    if buffered_payloads is not None and raw.key in buffered_payloads
+                    else repository.get_raw(raw.key, generation=raw.storage_generation)
+                )
+                payload = _decompress_and_verify(raw, stored)
+                byte_size = len(payload)
+                batch = source.decode(raw, payload)
                 guard()
-                record_count += warehouse.load_object(raw, byte_size=sizes[raw.key], batch=batch)
-                succeeded += len(group)
+                record_count += warehouse.load_object(raw, byte_size=byte_size, batch=batch)
+                succeeded += 1
             except (WarehouseConnectionError, TimeoutError):
                 raise
             except Exception as error:
                 guard()
-                failed += len(group)
-                LOGGER.exception("failed to load raw group %s", [raw.key for raw in group])
-                for raw in group:
-                    warehouse.mark_failed(raw, byte_size=sizes.get(raw.key, 0), error=error)
+                failed += 1
+                LOGGER.exception("failed to load raw object %s", raw.key)
+                warehouse.mark_failed(raw, byte_size=byte_size, error=error)
         summary = LoadSummary(
             discovered=len(refs),
             skipped=len(refs) - len(pending),

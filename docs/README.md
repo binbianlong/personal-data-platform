@@ -1,18 +1,14 @@
 # ドキュメント
 
-Personal Data Platformの設計、データ仕様、運用手順を管理する。
+西部での通常運用と、取得・分析の現行仕様を管理する。
 
-## 構成
+| 用途 | 文書 |
+|---|---|
+| 全体構成・Raw/Loader契約・source追加 | [アーキテクチャ](platform/architecture.md) |
+| Deploy・DB更新・日次処理・監視・Rebuild | [Platform運用](platform/operations.md) |
+| IAM・secret・個人情報 | [セキュリティ](platform/security.md) |
+| 分析接続・SQL例 | [ChatGPT/MCP](platform/chatgpt-mcp.md)・[クエリ例](analytics/README.md) |
+| Fitbit | [取得](sources/fitbit/acquisition.md)・[データモデル](sources/fitbit/data-model.md)・[運用](sources/fitbit/operations.md) |
+| Screen Time | [取得](sources/screen-time/acquisition.md)・[データモデル](sources/screen-time/data-model.md)・[運用](sources/screen-time/operations.md) |
 
-- [`platform/`](platform/)
-- [`sources/`](sources/)
-- [`analytics/`](analytics/)
-
-## 移行設計
-
-- [Pub/Sub・GCSを使う西部リージョンへの移行設計](superpowers/specs/2026-10-05-pubsub-gcs-migration-design.md): Screen Time・Fitbitの収集、Raw 90日保持、心拍の1分集約、リージョン切替の設計案。実装・本番反映は未実施。
-- [Pub/Sub・GCS西部リージョン移行計画](superpowers/plans/2026-10-05-pubsub-gcs-migration-plan.md): 実装単位、検証、GCP配置、Screen Time移行とFitbit初期化、マイグレーション整理、切替・rollback・費用確認、最後の全体整理・リファクタリング。
-
-## 管理ルール
-
-- 同じ情報を複数の文書に書かず、正本となる文書へリンクする。
+同じ仕様や操作は正本の文書へまとめ、他の文書からは参照する。

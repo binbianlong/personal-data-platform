@@ -21,7 +21,6 @@ def test_pubsub_oauth_requires_json_and_rejects_legacy_conflicts():
     from personal_data_platform.sources.fitbit.oauth import GoogleOAuth
 
     values = {
-        "PDP_FITBIT_DELIVERY_MODE": "pubsub",
         "PDP_FITBIT_OAUTH_CONFIG": '{"client_id":"id","client_secret":"secret","refresh_token":"refresh","health_user_id":"owner"}',
     }
     assert isinstance(GoogleOAuth.from_env(values), GoogleOAuth)

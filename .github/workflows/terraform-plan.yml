@@ -37,12 +37,9 @@ jobs:
       TF_VAR_fitbit_subject_key: ${{ vars.PDP_FITBIT_SUBJECT_KEY }}
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
       WEST_REGION: us-west1
-      WEST_ENABLED: ${{ vars.PDP_WEST_ENABLED || 'false' }}
       WEST_ARTIFACT_REPOSITORY: ${{ vars.GCP_WEST_ARTIFACT_REPOSITORY || vars.GCP_ARTIFACT_REPOSITORY }}
-      TF_VAR_enable_west_runtime: ${{ vars.PDP_WEST_ENABLED || 'false' }}
       TF_VAR_west_region: us-west1
-      TF_VAR_west_schedulers_enabled: ${{ vars.PDP_WEST_SCHEDULERS_ENABLED || 'false' }}
-      TF_VAR_west_logging_enabled: ${{ vars.PDP_WEST_LOGGING_ENABLED || 'false' }}
+      TF_VAR_west_schedulers_enabled: ${{ vars.PDP_WEST_SCHEDULERS_ENABLED || 'true' }}
       TF_VAR_west_logging_exclusions: ${{ vars.PDP_WEST_LOGGING_EXCLUSIONS || '{}' }}
       TF_VAR_west_image_uri: ${{ vars.GCP_WEST_RUNTIME_IMAGE_URI }}
       TF_VAR_west_secret_versions: ${{ vars.PDP_WEST_SECRET_VERSIONS || '{}' }}
@@ -59,17 +56,15 @@ jobs:
           for name in GCP_PLAN_SERVICE_ACCOUNT TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_collector_impersonator_member TF_VAR_deployer_service_account_email TF_VAR_project_id WEST_REGION; do
             test -n "${!name}"
           done
-          if [[ "${WEST_ENABLED}" == "true" ]]; then
-            jq -e '
-              type == "object" and
-              (["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_token"] - keys | length == 0) and
-              (keys - ["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_preflight_token", "motherduck_token"] | length == 0) and
-              all(.[]; type == "string" and test("^[1-9][0-9]*\\z"))
-            ' <<< "${TF_VAR_west_secret_versions}" > /dev/null || {
-              echo "Enabled west deployment requires four runtime numeric secret version pins in PDP_WEST_SECRET_VERSIONS." >&2
-              exit 1
-            }
-          fi
+          jq -e '
+            type == "object" and
+            (["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_token"] - keys | length == 0) and
+            (keys - ["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_preflight_token", "motherduck_token"] | length == 0) and
+            all(.[]; type == "string" and test("^[1-9][0-9]*\\z"))
+          ' <<< "${TF_VAR_west_secret_versions}" > /dev/null || {
+            echo "Deployment requires four runtime numeric secret version pins in PDP_WEST_SECRET_VERSIONS." >&2
+            exit 1
+          }
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -81,7 +76,6 @@ jobs:
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: Resolve west runtime image
-        if: ${{ env.WEST_ENABLED == 'true' }}
         shell: bash
         run: |
           set -euo pipefail

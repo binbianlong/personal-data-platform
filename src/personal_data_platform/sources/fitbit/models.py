@@ -13,14 +13,12 @@ DATA_TYPES = ("steps", "heart-rate", "daily-resting-heart-rate", "active-zone-mi
 DATE_TYPES = ("daily-resting-heart-rate", "sleep")
 TABLES = {
     "steps": "fitbit_steps",
-    "heart-rate": "fitbit_heart_rate",
     "daily-resting-heart-rate": "fitbit_resting_heart_rate",
     "active-zone-minutes": "fitbit_active_zone",
     "sleep": "fitbit_sleep",
     "sleep-stage": "fitbit_sleep_stage",
     "sleep-wake": "fitbit_sleep_wake",
 }
-PARSER_VERSION = "fitbit-v1"
 
 
 def aware(value: datetime) -> datetime:
@@ -99,7 +97,7 @@ class Record:
                 raise ValueError("invalid UTC offset")
         if self.kind in ("sleep-stage", "sleep-wake") and not self.parent_id:
             raise ValueError("sleep detail needs a parent")
-        if self.kind in ("steps", "heart-rate", "active-zone-minutes"):
+        if self.kind in ("steps", "active-zone-minutes"):
             if self.cursor != self.start:
                 raise ValueError("record cursor must match its physical start")
         if self.kind in DATE_TYPES:
@@ -170,6 +168,8 @@ class Snapshot:
     source_payload: tuple[dict[str, object], ...] = ()
 
     def __post_init__(self) -> None:
+        if self.window.data_type == "heart-rate":
+            raise ValueError("heart rate requires a minute snapshot")
         if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.subject_key) is None:
             raise ValueError("invalid pseudonymous subject key")
         if self.origin != "api":

@@ -4,7 +4,6 @@ import duckdb
 
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.storage.motherduck import Warehouse
-from tests.integration.test_dbt_models import dbt_project  # noqa: F401
 
 
 def test_targeted_loader_never_lists_or_migrates():
@@ -42,7 +41,7 @@ def test_targeted_loader_never_lists_or_migrates():
 def test_fitbit_reconciliation_checks_schema_and_expires_old_raw(
     tmp_path,
     monkeypatch,
-    dbt_project,  # noqa: F811
+    dbt_project,
 ):
     from personal_data_platform.loader.job import run_loader_objects
     from personal_data_platform.reconciliation.job import run_reconciliation

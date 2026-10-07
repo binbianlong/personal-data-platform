@@ -87,12 +87,6 @@ def test_loader_command_lazily_calls_job(monkeypatch) -> None:
     [
         ("loader", "personal_data_platform.loader.job", "run_loader_from_env", []),
         (
-            "reconciliation",
-            "personal_data_platform.reconciliation.job",
-            "run_reconciliation_from_env",
-            [],
-        ),
-        (
             "rebuild",
             "personal_data_platform.recovery.rebuild",
             "run_rebuild_from_env",
@@ -156,9 +150,7 @@ def test_operational_command_lazily_calls_job(
     fake_module = types.ModuleType(module_name)
 
     def run_job(**kwargs) -> int:
-        assert kwargs == (
-            {"source_id": None, "stream": None} if command == "reconciliation" else {}
-        )
+        assert kwargs == {}
         calls.append(command)
         return 0
 
@@ -167,6 +159,15 @@ def test_operational_command_lazily_calls_job(
 
     assert main([command]) == 0
     assert calls == [command]
+
+
+@pytest.mark.parametrize(
+    "args", [["--source", "screen_time"], ["--stream", "app-usage"], ["--all-streams"]]
+)
+def test_daily_command_rejects_scope_options(args):
+    with pytest.raises(SystemExit) as error:
+        cli.build_parser().parse_args(["reconciliation", *args])
+    assert error.value.code == 2
 
 
 def test_rebuild_passes_selected_mode(monkeypatch) -> None:
@@ -199,12 +200,6 @@ def test_rebuild_passes_selected_mode(monkeypatch) -> None:
     ("command", "module_name", "function_name", "mode"),
     [
         ("loader", "personal_data_platform.loader.job", "run_loader_from_env", []),
-        (
-            "reconciliation",
-            "personal_data_platform.reconciliation.job",
-            "run_reconciliation_from_env",
-            [],
-        ),
         (
             "rebuild",
             "personal_data_platform.recovery.rebuild",

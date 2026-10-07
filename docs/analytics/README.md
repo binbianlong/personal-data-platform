@@ -1,15 +1,4 @@
-# Analytics
-
-データソースを横断するmartとmetricを管理する。
-
-扱う内容:
-
-- source横断JOINとtimezone統一
-- 日次集約と分析用mart
-- 複数sourceを比較・統合するmetric
-- metricの単位、計算方法、欠損時の意味
-
-source単独で完結する派生値と品質定義は[`sources/`](../sources/)を正本とする。
+# 分析クエリ例
 
 睡眠開始前2時間の端末別使用時間は`marts.fitbit_sleep_screen_time`を使う。
 重複区間・欠測・日付・端末分離の定義は[Fitbitデータモデル](../sources/fitbit/data-model.md#分析ビュー)に従う。

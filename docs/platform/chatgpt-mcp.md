@@ -16,7 +16,6 @@ https://api.motherduck.com/mcp
 複数人向けのmarts限定公開には使わない。Raw bucketと取得用tokenはこの接続へ渡さない。
 preflightには本番DB/shareへの接続を許可しない。
 
-2026-10-06に「MotherDuck 西部」接続でshareの読取と本番shareへの書込拒否を確認した。
 同じ分析userの所有するmy_dbなどへの権限と、本番shareのread-only権限を区別する。
 
 ## ChatGPT設定

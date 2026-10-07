@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from collections.abc import Iterable
@@ -14,11 +13,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.models import ReconciliationResult
 from personal_data_platform.sources.contracts import DecodedBatch
+from personal_data_platform.storage.migrations import DEFAULT_MIGRATIONS as DEFAULT_MIGRATIONS
+from personal_data_platform.storage.migrations import apply_migrations
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
-
-DEFAULT_MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,85 +91,9 @@ class Warehouse:
         self.connection.close()
 
     def migrate(
-        self, migrations: Path | None = None, *, profile: Literal["legacy", "west"] = "legacy"
+        self, migrations: Path | None = None, *, profile: Literal["legacy", "west"] = "west"
     ) -> None:
-        if profile not in ("legacy", "west"):
-            raise ValueError("migration profile must be legacy or west")
-        migrations = migrations or (
-            DEFAULT_MIGRATIONS / "west" if profile == "west" else DEFAULT_MIGRATIONS
-        )
-        paths = sorted(migrations.glob("*.sql"))
-        if not paths:
-            raise ValueError(f"no migrations found: {migrations}")
-        migration_ids = {path.name for path in paths}
-        if (profile == "legacy" and "003_fitbit_baseline.sql" in migration_ids) or (
-            profile == "west"
-            and migration_ids.intersection({"003_fitbit.sql", "004_fitbit_acquisition.sql"})
-        ):
-            raise RuntimeError("migration path does not match the selected profile")
-        columns = self.connection.execute(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_catalog=current_database() AND table_schema='ops' "
-            "AND table_name='schema_migration'"
-        ).fetchall()
-        if columns:
-            if ("schema_profile",) in columns:
-                profiles = {
-                    row[0]
-                    for row in self.connection.execute(
-                        "SELECT DISTINCT schema_profile FROM ops.schema_migration"
-                    ).fetchall()
-                }
-            else:
-                profiles = {"legacy"}
-            if profiles and profiles != {profile}:
-                raise RuntimeError(f"migration profile mismatch: requested {profile}")
-        # Validate all applied checksums before executing any new SQL.
-        prepared = [(path, path.read_text(encoding="utf-8")) for path in paths]
-        checksums = {path.name: hashlib.sha256(sql.encode()).hexdigest() for path, sql in prepared}
-        if columns:
-            for migration_id, checksum in self.connection.execute(
-                "SELECT migration_id, checksum FROM ops.schema_migration"
-            ).fetchall():
-                if migration_id in checksums and checksums[migration_id] != checksum:
-                    raise RuntimeError(f"applied migration changed: {migration_id}")
-        self.connection.execute("CREATE SCHEMA IF NOT EXISTS ops")
-        self.connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ops.schema_migration (
-                migration_id VARCHAR PRIMARY KEY,
-                checksum VARCHAR NOT NULL,
-                applied_at TIMESTAMPTZ NOT NULL,
-                schema_profile VARCHAR NOT NULL DEFAULT 'legacy'
-            )
-            """
-        )
-        if columns and ("schema_profile",) not in columns:
-            self.connection.execute(
-                "ALTER TABLE ops.schema_migration ADD COLUMN schema_profile "
-                "VARCHAR DEFAULT 'legacy'"
-            )
-        for path, sql in prepared:
-            checksum = checksums[path.name]
-            existing = self.connection.execute(
-                "SELECT checksum FROM ops.schema_migration WHERE migration_id = ?", [path.name]
-            ).fetchone()
-            if existing:
-                if existing[0] != checksum:
-                    raise RuntimeError(f"applied migration changed: {path.name}")
-                continue
-            self.connection.execute("BEGIN TRANSACTION")
-            try:
-                self.connection.execute(sql)
-                self.connection.execute(
-                    "INSERT INTO ops.schema_migration "
-                    "(migration_id, checksum, applied_at, schema_profile) VALUES (?, ?, ?, ?)",
-                    [path.name, checksum, datetime.now(UTC), profile],
-                )
-                self.connection.execute("COMMIT")
-            except Exception:
-                self.connection.execute("ROLLBACK")
-                raise
+        apply_migrations(self.connection, migrations, profile=profile)
 
     def succeeded_keys(self, *, source_id: str, stream: str) -> set[str]:
         rows = self.connection.execute(

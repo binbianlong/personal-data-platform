@@ -153,7 +153,7 @@ def _runtime_job(name: str, image: str) -> dict:
     }
 
 
-def test_west_parallel_resources_preserve_legacy_and_pause_schedulers() -> None:
+def test_runtime_resources_preserve_backups_and_support_pausing() -> None:
     bootstrap = _read("infra/bootstrap/main.tf")
     west = _read("infra/terraform/west.tf")
     assert 'resource "google_storage_bucket" "terraform_state"' in bootstrap
@@ -198,12 +198,10 @@ WEST_SECRET_VERSIONS = {
 
 @pytest.mark.parametrize("workflow", ["terraform-plan.yml", "terraform-deploy.yml"])
 @pytest.mark.parametrize(
-    ("enabled", "versions", "accepted"),
+    ("versions", "accepted"),
     [
-        ("false", {}, True),
-        ("true", WEST_SECRET_VERSIONS, True),
+        (WEST_SECRET_VERSIONS, True),
         (
-            "true",
             {
                 key: value
                 for key, value in WEST_SECRET_VERSIONS.items()
@@ -211,17 +209,17 @@ WEST_SECRET_VERSIONS = {
             },
             True,
         ),
-        ("true", {}, False),
-        ("true", {"motherduck_token": "7"}, False),
-        ("true", {**WEST_SECRET_VERSIONS, "unknown_secret": "19"}, False),
+        ({}, False),
+        ({"motherduck_token": "7"}, False),
+        ({**WEST_SECRET_VERSIONS, "unknown_secret": "19"}, False),
     ]
     + [
-        ("true", {**WEST_SECRET_VERSIONS, "motherduck_token": version}, False)
+        ({**WEST_SECRET_VERSIONS, "motherduck_token": version}, False)
         for version in ("latest", "0", "-1", "1.5", "", "01", " 1", "1\n", 1, None)
     ],
 )
 def test_west_workflows_require_numeric_pins_before_cloud_work(
-    workflow: str, enabled: str, versions: dict[str, object], accepted: bool
+    workflow: str, versions: dict[str, object], accepted: bool
 ) -> None:
     result = subprocess.run(
         [
@@ -247,19 +245,16 @@ def test_west_workflows_require_numeric_pins_before_cloud_work(
                 ],
                 "example",
             ),
-            "WEST_ENABLED": enabled,
             "TF_VAR_west_secret_versions": json.dumps(versions),
         },
         capture_output=True,
         text=True,
         check=False,
     )
-    assert (result.returncode == 0) is (
-        accepted and (workflow == "terraform-plan.yml" or enabled == "true")
-    ), result.stderr
+    assert (result.returncode == 0) is accepted, result.stderr
 
 
-def test_deploy_protects_job_and_service_images_during_migration(tmp_path: Path) -> None:
+def test_deploy_protects_current_job_service_and_rollback_images(tmp_path: Path) -> None:
     revision_image = f"{IMAGE_PATH}@sha256:" + "b" * 64
     rollback_image = f"{IMAGE_PATH}@sha256:" + "c" * 64
     gcloud = tmp_path / "gcloud"

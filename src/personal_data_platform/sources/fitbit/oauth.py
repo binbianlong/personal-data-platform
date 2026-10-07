@@ -44,13 +44,11 @@ class GoogleOAuth:
         cls, environ: Mapping[str, str] | None = None, *, transport: HttpTransport | None = None
     ) -> GoogleOAuth:
         values = os.environ if environ is None else environ
-        if values.get("PDP_FITBIT_DELIVERY_MODE", "pubsub") != "pubsub":
-            raise ValueError("PDP_FITBIT_DELIVERY_MODE must be pubsub")
         if any(
             values.get("PDP_FITBIT_OAUTH_" + key)
             for key in ("CLIENT_ID", "CLIENT_SECRET", "REFRESH_TOKEN")
         ):
-            raise ValueError("legacy OAuth settings conflict with pubsub configuration")
+            raise ValueError("split OAuth settings conflict with bundled configuration")
         bundled = secret_config(
             "PDP_FITBIT_OAUTH_CONFIG",
             ("client_id", "client_secret", "refresh_token", "health_user_id"),

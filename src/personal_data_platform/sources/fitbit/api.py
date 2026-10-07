@@ -35,11 +35,11 @@ DATA_SOURCE_FAMILY = "users/me/dataSourceFamilies/google-wearables"
 LOGGER = logging.getLogger(__name__)
 _FIELDS = {
     "steps": ("steps", "steps.interval.start_time"),
-    "heart-rate": ("heartRate", "heart_rate.sample_time.physical_time"),
     "daily-resting-heart-rate": ("dailyRestingHeartRate", "daily_resting_heart_rate.date"),
     "active-zone-minutes": ("activeZoneMinutes", "active_zone_minutes.interval.start_time"),
     "sleep": ("sleep", "sleep.interval.civil_end_time"),
 }
+_POINT_FIELDS = {field for field, _ in _FIELDS.values()} | {"heartRate"}
 
 
 class HealthError(RuntimeError):
@@ -64,51 +64,6 @@ class RateLimitError(TransientError):
 
 class InvalidResponseError(HealthError):
     """The response cannot establish a complete, unambiguous replacement range."""
-
-
-_SYNC_TIME = re.compile(
-    r"(?P<second>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
-    r"(?:\.(?P<fraction>\d{1,9}))?(?P<zone>Z|[+-]\d{2}:\d{2})\Z"
-)
-
-
-@dataclass(frozen=True, order=True, slots=True)
-class SyncTime:
-    """RFC 3339 provider timestamp ordered without losing nanoseconds."""
-
-    utc_second: datetime
-    nanosecond: int
-
-    @classmethod
-    def parse(cls, value: str) -> SyncTime:
-        match = _SYNC_TIME.fullmatch(value)
-        if match is None:
-            raise ValueError("invalid tracker sync time")
-        fraction = match.group("fraction") or ""
-        try:
-            point = datetime.fromisoformat(
-                match.group("second") + match.group("zone").replace("Z", "+00:00")
-            ).astimezone(UTC)
-        except ValueError:
-            raise ValueError("invalid tracker sync time") from None
-        return cls(point, int(fraction.ljust(9, "0")) if fraction else 0)
-
-    @classmethod
-    def from_datetime(cls, value: datetime) -> SyncTime:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("sync time must be timezone-aware")
-        utc = value.astimezone(UTC)
-        return cls(utc.replace(microsecond=0), utc.microsecond * 1000)
-
-    @property
-    def text(self) -> str:
-        head = self.utc_second.strftime("%Y-%m-%dT%H:%M:%S")
-        return f"{head}.{self.nanosecond:09d}Z" if self.nanosecond else head + "Z"
-
-    def tokyo_date(self) -> date:
-        from zoneinfo import ZoneInfo
-
-        return self.utc_second.astimezone(ZoneInfo("Asia/Tokyo")).date()
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,10 +145,12 @@ def request_json(
     if not 200 <= response.status < 300:
         raise HealthError(f"Google Health request failed ({response.status})")
     try:
-        payload: object = json.loads(response.body)
-        return object_dict(payload)
+        payload = object_dict(json.loads(response.body))
     except (ValueError, UnicodeDecodeError):
         raise InvalidResponseError("Google Health response must be a JSON object") from None
+    if "error" in payload:
+        raise InvalidResponseError("Google Health response contains an error")
+    return payload
 
 
 def _utc_text(value: datetime) -> str:
@@ -214,9 +171,8 @@ def _chunks(window: Window) -> Iterator[Window]:
 class HealthClient:
     """Return a snapshot only after every chunk and page has been validated.
 
-    ``window`` is the actual cursor range to replace. The caller expands interval
-    boundaries against existing records before invoking this method. Retries are
-    completed by the acquisition runner, so a failed page never produces a snapshot.
+    ``window`` is the actual cursor range to replace. Retries are completed by the
+    acquisition runner, so a failed page never produces a snapshot.
     """
 
     def __init__(
@@ -243,64 +199,9 @@ class HealthClient:
         remaining = self.request_guard() if self.request_guard is not None else None
         return self._timeout if remaining is None else min(self._timeout, remaining)
 
-    def latest_tracker_sync(self) -> SyncTime | None:
-        """Read every paired-device page and take the newest tracker sync."""
-        latest: SyncTime | None = None
-        page_token = ""
-        seen_tokens: set[str] = set()
-        for _ in range(self._max_pages):
-            if self.request_guard is not None:
-                self.request_guard()
-            token = self._access_token()
-            if not isinstance(token, str) or not token.strip():
-                raise AuthenticationError("Google Health access token is missing")
-            query = {"pageSize": "100"}
-            if page_token:
-                query["pageToken"] = page_token
-            LOGGER.info("fitbit api_request endpoint=pairedDevices count=1")
-            page = request_json(
-                self._transport,
-                "GET",
-                f"https://health.googleapis.com/v4/users/me/pairedDevices?{urlencode(query)}",
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                timeout=self._request_timeout(),
-            )
-            devices = page.get("pairedDevices", [])
-            if not isinstance(devices, list):
-                raise InvalidResponseError("Google Health pairedDevices must be an array")
-            for device in devices:
-                try:
-                    item = object_dict(device)
-                    if item.get("deviceType") != "TRACKER" or item.get("lastSyncTime") is None:
-                        continue
-                    candidate = SyncTime.parse(string(item["lastSyncTime"]))
-                except (ValueError, TypeError):
-                    raise InvalidResponseError(
-                        "Malformed Google Health tracker sync time"
-                    ) from None
-                latest = max(latest, candidate) if latest else candidate
-            next_token = page.get("nextPageToken", "")
-            if not isinstance(next_token, str):
-                raise InvalidResponseError("Google Health page token must be a string")
-            if not next_token:
-                return latest
-            if next_token in seen_tokens:
-                raise InvalidResponseError("Google Health repeated a page token")
-            seen_tokens.add(next_token)
-            page_token = next_token
-        raise InvalidResponseError("Google Health paired device page limit exceeded")
-
-    def fetch(self, window: Window, *, subject_key: str) -> Snapshot:
-        return self._fetch_captured(window, subject_key=subject_key, strict_pages=True).snapshot
-
     def fetch_captured(self, window: Window, *, subject_key: str) -> CapturedSnapshot:
         if window.data_type == "heart-rate":
             raise ValueError("heart rate requires the minute aggregation API")
-        return self._fetch_captured(window, subject_key=subject_key, strict_pages=False)
-
-    def _fetch_captured(
-        self, window: Window, *, subject_key: str, strict_pages: bool
-    ) -> CapturedSnapshot:
         snapshot = Snapshot(subject_key, window, self._clock(), ())
         points: list[dict[str, object]] = []
         pages: list[dict[str, object]] = []
@@ -318,8 +219,6 @@ class HealthClient:
                 if self.request_guard is not None:
                     self.request_guard()
                 page = self._page(chunk, page_token)
-                if strict_pages and set(page) - {"dataPoints", "nextPageToken"}:
-                    raise InvalidResponseError("Unexpected Google Health page fields")
                 pages.append(page)
                 raw_points = page.get("dataPoints", [])
                 if not isinstance(raw_points, list):
@@ -606,7 +505,7 @@ def _interval(fields: dict[str, object]) -> tuple[datetime, datetime, int, int]:
 
 def _normalize(data_type: str, point: dict[str, object], subject_key: str) -> tuple[Record, ...]:
     field, _ = _FIELDS[data_type]
-    if any(other != field and other in point for other, _ in _FIELDS.values()):
+    if any(other != field and other in point for other in _POINT_FIELDS):
         raise ValueError("data point contains multiple union fields")
     payload = object_dict(point[field])
     point_id = _point_id(point, data_type)
@@ -624,21 +523,6 @@ def _normalize(data_type: str, point: dict[str, object], subject_key: str) -> tu
                 cursor=cursor,
                 start=cursor,
                 source_date=source_date,
-                value=float(_integer(payload["beatsPerMinute"], minimum=1, maximum=300)),
-            ),
-        )
-    if data_type == "heart-rate":
-        sample = object_dict(payload["sampleTime"])
-        start = _timestamp(sample["physicalTime"])
-        offset = _offset(sample["utcOffset"])
-        return (
-            Record(
-                kind=data_type,
-                record_id=point_id or _identity(subject_key, data_type, _utc_text(start)),
-                cursor=start,
-                start=start,
-                offset_seconds=offset,
-                source_date=_source_date(sample.get("civilTime"), start, offset),
                 value=float(_integer(payload["beatsPerMinute"], minimum=1, maximum=300)),
             ),
         )

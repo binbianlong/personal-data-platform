@@ -1,5 +1,5 @@
 locals {
-  runtime_services = toset(concat([
+  runtime_services = toset([
     "cloudscheduler.googleapis.com",
     "iam.googleapis.com",
     "logging.googleapis.com",
@@ -7,7 +7,8 @@ locals {
     "run.googleapis.com",
     "secretmanager.googleapis.com",
     "storage.googleapis.com",
-  ], var.enable_west_runtime ? ["pubsub.googleapis.com"] : []))
+    "pubsub.googleapis.com",
+  ])
 }
 
 resource "google_project_service" "runtime" {

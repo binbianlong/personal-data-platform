@@ -391,7 +391,6 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
     successes = []
     phases = []
     inventories = {}
-    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "test")
     monkeypatch.setenv(
         "PDP_HEARTBEAT_CONFIG",
@@ -457,9 +456,7 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
             "previous", succeeded=True, details={"last_completed_target_date": "2026-09-01"}
         )
     try:
-        assert job.run_reconciliation_from_env(all_streams=True) == int(
-            failure not in ("none", "gap", "busy")
-        )
+        assert job.run_reconciliation_from_env() == int(failure not in ("none", "gap", "busy"))
         assert len(successes) == (1 if failure in ("none", "gap") else 0)
         assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == (
             3 if failure in ("none", "gap") else 0

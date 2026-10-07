@@ -11,18 +11,9 @@ def test_normal_runtime_uses_only_west_profile(monkeypatch):
         schema_profile()
 
 
-def test_legacy_delivery_mode_is_rejected(monkeypatch):
-    from personal_data_platform.sources.fitbit.runtime import delivery_mode
-
-    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "legacy")
-    with pytest.raises(ValueError):
-        delivery_mode()
-
-
 def test_raw_adapter_rejects_legacy_decoding(monkeypatch):
     from personal_data_platform.sources.fitbit.adapter import FitbitSource
 
-    monkeypatch.delenv("PDP_FITBIT_DELIVERY_MODE", raising=False)
     monkeypatch.delenv("PDP_SCHEMA_PROFILE", raising=False)
     assert FitbitSource().schema_versions == (3,)
     with pytest.raises(ValueError):

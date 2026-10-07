@@ -184,10 +184,17 @@ def test_changed_dense_day_uses_bounded_sql_statements(warehouse):
 
     at = datetime(2026, 9, 1, tzinfo=UTC)
     records = tuple(
-        Record("heart-rate", str(i), at + timedelta(seconds=i), at + timedelta(seconds=i), value=60)
+        Record(
+            "steps",
+            str(i),
+            at + timedelta(minutes=i),
+            at + timedelta(minutes=i),
+            at + timedelta(minutes=i + 1),
+            value=60,
+        )
         for i in range(100)
     )
-    data = Snapshot("self", Window("heart-rate", at, at + timedelta(days=1)), at, records)
+    data = Snapshot("self", Window("steps", at, at + timedelta(days=1)), at, records)
     apply(warehouse, data)
     statements = []
 
@@ -204,5 +211,5 @@ def test_changed_dense_day_uses_bounded_sql_statements(warehouse):
     FitbitBatch(updated).write_snapshot(
         Connection(), source_key="updated", loaded_at=updated.fetched_at
     )
-    assert warehouse.query_value("select max(value) from base.fitbit_heart_rate") == 61
+    assert warehouse.query_value("select max(value) from base.fitbit_steps") == 61
     assert len(statements) < 20

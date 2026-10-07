@@ -6,9 +6,11 @@ output "runtime_jobs" {
 }
 
 output "runtime_service_accounts" {
-  description = "Shared processing Service Account email address."
+  description = "Service Account email addresses by runtime role."
   value = {
-    for key, account in google_service_account.west : key => account.email
+    processing = google_service_account.west.email
+    receiver   = google_service_account.west_receiver.email
+    scheduler  = google_service_account.west_scheduler.email
   }
 }
 
@@ -23,10 +25,10 @@ output "rebuild_operator_service_account" {
 }
 
 output "storage_buckets" {
-  description = "Retained legacy backup bucket names; normal storage is in west_resources."
+  description = "Production Raw and isolated preflight bucket names."
   value = {
-    raw       = google_storage_bucket.raw.name
-    preflight = google_storage_bucket.preflight.name
+    raw       = google_storage_bucket.raw_west.name
+    preflight = google_storage_bucket.preflight_west.name
   }
 }
 
@@ -36,7 +38,7 @@ output "scheduler_jobs" {
     for key, job in google_cloud_scheduler_job.west : key => {
       name      = job.name
       schedule  = job.schedule
-      time_zone = var.scheduler_time_zone
+      time_zone = job.time_zone
     }
   }
 }
@@ -54,18 +56,18 @@ output "notification_channel" {
 }
 
 output "west_resources" {
-  description = "Normal west resources and cutover state."
-  value = var.enable_west_runtime ? {
+  description = "Runtime resources and scheduled processing status."
+  value = {
     region              = var.west_region
-    raw_bucket          = google_storage_bucket.raw_west[0].name
-    preflight_bucket    = google_storage_bucket.preflight_west[0].name
+    raw_bucket          = google_storage_bucket.raw_west.name
+    preflight_bucket    = google_storage_bucket.preflight_west.name
     jobs                = { for key, job in google_cloud_run_v2_job.west : key => job.name }
-    receiver_url        = "${google_cloud_run_v2_service.west[0].uri}/webhooks/fitbit"
+    receiver_url        = "${google_cloud_run_v2_service.west.uri}/webhooks/fitbit"
     secrets             = { for key, secret in google_secret_manager_secret.west : key => secret.secret_id }
-    pubsub_topic        = google_pubsub_topic.west[0].id
-    pubsub_subscription = google_pubsub_subscription.west[0].id
+    pubsub_topic        = google_pubsub_topic.west.id
+    pubsub_subscription = google_pubsub_subscription.west.id
     pubsub_endpoint     = "pubsub.us-west1.rep.googleapis.com"
-    logging_bucket      = google_logging_project_bucket_config.west[0].id
+    logging_bucket      = google_logging_project_bucket_config.west.id
     schedulers_enabled  = var.west_schedulers_enabled
-  } : null
+  }
 }

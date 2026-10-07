@@ -17,13 +17,13 @@
 | 実行主体 | capability |
 |---|---|
 | Local Collector | 固定Raw prefixへのcreateとscan receipt prefix・固定manifest keyへのcreate / deleteだけ |
-| Loader | production bucketへのlist / read |
-| Reconciliation | production bucketへのlist / read |
+| 共通runtime Service Account | 両sourceのRaw list / readとFitbit v3 Rawのcreate。毎時・日次Jobで共有 |
 | Preflight | preflight bucketへのwrite / read / listと作成generationのdeleteだけ |
 | Rebuild operator | 専用read-only Service Accountでproduction bucketへのlist / read |
 
 CollectorへRawのread、list、deleteを許可しない。control JSONの同名上書きに必要なdeleteはreceipt prefixと
-`raw/screen_time/v1/_control/collector/active.json`の完全一致だけへIAM conditionで限定する。bucket IAM policyは
+両streamの固定manifest keyだけへIAM conditionで限定する。keyの正本は
+[Screen Timeデータモデル](../sources/screen-time/data-model.md#collector-scan-receipt)を参照する。bucket IAM policyは
 Terraformでauthoritativeに管理し、projectの
 Viewer / Editor / Owner convenience valueによるobject accessを残さない。
 
@@ -37,9 +37,11 @@ project専用ADCを使い、Service Account keyを発行しない。ADCはmode `
 `GOOGLE_APPLICATION_CREDENTIALS`からだけ参照する。疑似化secretやcredentialをSQLite state、shell履歴、
 Git管理ファイルへ平文で保存しない。
 
-Cloud Run Jobsは各Service AccountのADCでGCSへ接続する。MotherDuck writer tokenとHealthchecks.io ping URLは
-Secret Managerへ保存し、secret値をTerraform variable、Terraform state、container image、GitHub Actions
-outputへ含めない。
+Cloud Runの毎時・日次Jobは共通runtime Service AccountのADCでGCSへ接続する。
+receiverは別Service Accountで、Webhook検証secretとPub/Sub publisherだけを持つ。
+MotherDuck、OAuth、Webhook、日次heartbeatの4 payloadはSecret Managerへ保存し、正の数値versionへ固定する。
+各Jobへ渡す環境変数とsecret pinは[Runtime Terraform](../../infra/terraform/README.md#secretと資格情報)を正本とする。
+secret値をTerraform variable、Terraform state、container image、GitHub Actions outputへ含めない。
 
 ChatGPT接続にはMotherDuckのread-only user/shareを使い、Loader / dbt writer tokenを再利用しない。toolの
 `query_rw`無効化はwrite防止の追加境界であり、database visibilityの代わりにはならない。公開範囲は
@@ -50,7 +52,8 @@ ChatGPT接続にはMotherDuckのread-only user/shareを使い、Loader / dbt wri
 - GitHub ActionsからGCPへはWorkload Identity Federationを使用し、長期Service Account keyを作らない。
 - deploy用federationは対象repository、`main` ref、対象workflowへattribute conditionで限定する。
 - Terraform plan用とdeploy用のService Accountを分離する。
-- Cloud Run JobごとにService Accountを分け、Secret Manager accessと実行権限を必要なresourceだけへ与える。
+- 毎時・日次Jobは共通Service Accountを使う。receiver、Collector、Rebuild operatorは別identityとし、
+  Secret Manager accessと実行権限を必要なresourceへ限定する。共有runtime SAの権限は2 Jobの合計であり、Job間のIAM分離を保証しない。
 - Cloud Schedulerには対象Cloud Run Jobを起動する権限だけを与える。
 
 ## インシデント時
