@@ -38,7 +38,7 @@ Fitbitのbaseは次の5テーブルとする。
 
 ## 再構築検証（2026-10-07）
 
-2026-10-06時点の保存済みGCS inventoryとDBスナップショットを用い、Raw 56件（iPhone 31件、Mac 25件）のSHA-256を検証して新しいローカルDBへ再生した。本番DBとGCSへの書き込みは行っていない。
+2026-10-06時点の保存済みGCS inventoryとDBスナップショットを用い、Raw 56件（iPhone 31件、Mac 25件）のSHA-256を検証して新しいローカルDBへ再生した。このローカル再構築では本番DBとGCSへの書き込みは行っていない。
 
 | 比較対象 | 結果 |
 | --- | --- |
@@ -50,4 +50,4 @@ Fitbitのbaseは次の5テーブルとする。
 
 Python 3.14の全626テスト、Ruff、mypy、Terraform validate・18個のmock testが成功した。
 クリーンなディレクトリで構築したwheelには`001_initial.sql`だけを収録し、隔離したPython 3.13環境へのインストール後に共通CLIの初期化・5テーブル作成・再実行を確認した。
-FitbitはローカルのAPI fixtureとRaw再生で検証し、実APIからの全期間再取得と本番接続先の切替は未実施である。
+ローカル検証後、2026-10-07に本番DBを`personal_data_platform`へ切り替えた。Fitbitの5種別は2026-09-29〜2026-10-07を実APIから再取得し、日次・毎時Job、dbt 39検証、分析接続の読み取り専用、Schedulerと監視の再開を確認した。旧DBの台帳を保持した切替結果は[運用記録](../../platform/operations.md#旧スキーマからの切替)を参照。

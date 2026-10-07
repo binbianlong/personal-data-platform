@@ -4,7 +4,7 @@ Spec: `docs/superpowers/specs/2026-10-07-schema-rebuild.md`
 
 ## Global Constraints
 
-ブランチは `refactor/migration-cleanup`、開始点は `702be47`。ローカルの実装・検証・コミットまでを対象とする。旧履歴を書き換える互換移行は作らず、Screen Timeの取得・保留規則、Raw形式、既存の書き込みleaseは維持する。
+ブランチは `refactor/migration-cleanup`、開始点は `702be47`。旧履歴を書き換える互換移行は作らず、Screen Timeの取得・保留規則、Raw形式、既存の書き込みleaseは維持する。
 
 ### Task 1: 現行スキーマを単一のDDLとCLIで初期化
 
