@@ -1,4 +1,4 @@
-"""Explicit schema and webhook-runtime command boundaries."""
+"""Webhook and synchronization commands."""
 
 from __future__ import annotations
 
@@ -8,16 +8,11 @@ from dataclasses import asdict
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-
 from .models import DATA_TYPES, parse_time
 
 
 def configure(parser: argparse.ArgumentParser) -> None:
     commands = parser.add_subparsers(dest="fitbit_command", required=True)
-    migrate = commands.add_parser("migrate", help="apply additive schema migrations explicitly")
-    migrate.add_argument("--database")
-    migrate.add_argument("--profile", choices=("west",))
     sync = commands.add_parser(
         "sync", help="repair a half-open physical range; dates use Asia/Tokyo"
     )
@@ -33,12 +28,6 @@ def configure(parser: argparse.ArgumentParser) -> None:
     commands.add_parser("serve", help="start the webhook notification receiver")
 
 
-def _database(value: str | None) -> Warehouse:
-    if value is not None and not value.endswith((".duckdb", ".db")):
-        raise ValueError("--database must name a local .duckdb or .db file")
-    return Warehouse(connect(WarehouseConfig(value) if value else WarehouseConfig.from_env()))
-
-
 def _physical(value: str) -> datetime:
     if len(value) == 10:
         return datetime.combine(
@@ -49,15 +38,6 @@ def _physical(value: str) -> datetime:
 
 def run(args: argparse.Namespace) -> int:
     command = args.fitbit_command
-    if command == "migrate":
-        migration_warehouse = _database(args.database)
-        try:
-            from personal_data_platform.config import schema_profile
-
-            migration_warehouse.migrate(profile=args.profile or schema_profile())
-        finally:
-            migration_warehouse.close()
-        return 0
     from .runtime import run_serve_from_env, run_sync_from_env
 
     if command == "ingest-notifications":

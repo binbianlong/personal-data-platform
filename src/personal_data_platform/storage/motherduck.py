@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.models import ReconciliationResult
@@ -90,10 +90,8 @@ class Warehouse:
     def close(self) -> None:
         self.connection.close()
 
-    def migrate(
-        self, migrations: Path | None = None, *, profile: Literal["legacy", "west"] = "west"
-    ) -> None:
-        apply_migrations(self.connection, migrations, profile=profile)
+    def migrate(self, migrations: Path | None = None) -> None:
+        apply_migrations(self.connection, migrations)
 
     def succeeded_keys(self, *, source_id: str, stream: str) -> set[str]:
         rows = self.connection.execute(

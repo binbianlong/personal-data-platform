@@ -1,3 +1,5 @@
+-- Initial platform schema.
+
 CREATE SCHEMA IF NOT EXISTS ops;
 CREATE SCHEMA IF NOT EXISTS base;
 CREATE SCHEMA IF NOT EXISTS marts;
@@ -22,7 +24,8 @@ CREATE TABLE IF NOT EXISTS ops.ingestion_metadata (
     retry_count UINTEGER NOT NULL DEFAULT 0,
     storage_created_at TIMESTAMPTZ,
     storage_generation UBIGINT,
-    retention_expired_at TIMESTAMPTZ
+    retention_expired_at TIMESTAMPTZ,
+    retention_started_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS ops.job_run (
@@ -189,7 +192,7 @@ JOIN ops.screen_time_record r ON r.device_key = n.device_key AND r.source_stream
 WHERE t.is_valid AND r.is_valid AND t.deletion_reason IN (1, 2)
 );
 
--- Restrict keys before any ranking/aggregation, including when invoked during a load.
+-- Resolve platform from each record's source stream.
 CREATE MACRO ops.screen_time_resolve(keys) AS TABLE (
     WITH records AS (
         SELECT * FROM ops.screen_time_record WHERE event_key IN (SELECT unnest(keys))
@@ -218,7 +221,13 @@ CREATE MACRO ops.screen_time_resolve(keys) AS TABLE (
             ORDER BY active DESC, observed_at DESC, object_key DESC, record_metadata_offset DESC
         ) = 1
     )
-    SELECT event_key, device_key, 'ios' AS platform, source_stream, bundle_id, event_at, state,
+    SELECT event_key, device_key,
+           CASE
+               WHEN source_stream IN ('app-in-focus', 'App.InFocus') THEN 'ios'
+               WHEN source_stream = 'app-usage' THEN 'macos'
+               ELSE error('unsupported Screen Time source stream')
+           END AS platform,
+           source_stream, bundle_id, event_at, state,
            transition_reason, kind, app_version, app_build, platform_flag, object_key, segment_key,
            segment_filename, record_offset, record_metadata_offset, observed_at, parser_version,
            unknown_field_count, greatest(copy_count - 1, 0)::UINTEGER AS duplicate_occurrence_count,
@@ -228,3 +237,122 @@ CREATE MACRO ops.screen_time_resolve(keys) AS TABLE (
 
 CREATE VIEW base.screen_time_transition AS
 SELECT * EXCLUDE (is_active, loaded_at) FROM base.screen_time_event WHERE is_active;
+
+-- Physical activity intervals; metric is part of the record identity.
+CREATE TABLE base.fitbit_activity_interval (
+    subject_key VARCHAR NOT NULL,
+    metric VARCHAR NOT NULL CHECK (metric IN ('steps', 'active-zone-minutes')),
+    record_id VARCHAR NOT NULL,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+    value DOUBLE NOT NULL,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    source_date DATE,
+    category VARCHAR,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, metric, record_id),
+    CHECK (end_at > start_at),
+    CHECK (isfinite(value) AND value >= 0)
+);
+
+-- A provider civil date is not a physical UTC timestamp.
+CREATE TABLE base.fitbit_resting_heart_rate_daily (
+    subject_key VARCHAR NOT NULL,
+    record_id VARCHAR NOT NULL,
+    source_date DATE NOT NULL,
+    beats_per_minute DOUBLE NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, record_id),
+    CHECK (isfinite(beats_per_minute) AND beats_per_minute >= 0)
+);
+
+CREATE TABLE base.fitbit_sleep_session (
+    subject_key VARCHAR NOT NULL,
+    record_id VARCHAR NOT NULL,
+    source_date DATE NOT NULL,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+    sleep_minutes DOUBLE,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    sleep_type VARCHAR,
+    is_main_sleep BOOLEAN,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, record_id),
+    CHECK (end_at > start_at),
+    CHECK (sleep_minutes IS NULL OR (isfinite(sleep_minutes) AND sleep_minutes >= 0))
+);
+
+-- Stages and short wake intervals can overlap and have independent identities.
+CREATE TABLE base.fitbit_sleep_detail (
+    subject_key VARCHAR NOT NULL,
+    kind VARCHAR NOT NULL CHECK (kind IN ('sleep-stage', 'sleep-wake')),
+    record_id VARCHAR NOT NULL,
+    sleep_id VARCHAR NOT NULL,
+    source_date DATE NOT NULL,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    category VARCHAR,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, kind, record_id),
+    CHECK (end_at > start_at)
+);
+
+-- Complete UTC minute windows from the Google wearables heart rate rollup.
+CREATE TABLE base.fitbit_heart_rate_minute (
+    subject_key VARCHAR NOT NULL,
+    data_source_family VARCHAR NOT NULL,
+    start_at TIMESTAMPTZ NOT NULL,
+    aggregation_version VARCHAR NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+    average DOUBLE NOT NULL,
+    minimum DOUBLE NOT NULL,
+    maximum DOUBLE NOT NULL,
+    sample_count BIGINT,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (subject_key, data_source_family, start_at, aggregation_version),
+    CHECK (end_at = start_at + INTERVAL '1 minute'),
+    CHECK (date_trunc('minute', start_at) = start_at),
+    CHECK (isfinite(average) AND isfinite(minimum) AND isfinite(maximum)),
+    CHECK (minimum >= 0 AND minimum <= average AND average <= maximum),
+    CHECK (sample_count IS NULL OR sample_count > 0)
+);
+
+-- Complete acquisition ranges for every metric, including empty responses.
+CREATE TABLE ops.fitbit_coverage (
+    subject_key VARCHAR NOT NULL,
+    data_type VARCHAR NOT NULL,
+    data_source_family VARCHAR NOT NULL,
+    aggregation_version VARCHAR NOT NULL,
+    range_start TIMESTAMPTZ NOT NULL,
+    range_end TIMESTAMPTZ NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    content_sha256 VARCHAR NOT NULL,
+    source_sha256 VARCHAR NOT NULL,
+    PRIMARY KEY (subject_key, data_type, data_source_family, aggregation_version, range_start),
+    CHECK (range_end > range_start)
+);
+
+-- Keep ordering after an ID moves between ranges and is later deleted.
+CREATE TABLE ops.fitbit_deleted_record (
+    subject_key VARCHAR NOT NULL,
+    data_type VARCHAR NOT NULL,
+    record_id VARCHAR NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source_key VARCHAR NOT NULL,
+    PRIMARY KEY (subject_key, data_type, record_id)
+);

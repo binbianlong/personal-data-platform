@@ -32,7 +32,6 @@ command = sys.argv[1]
 if command == "serve":
     runtime.run_serve_from_env()
 elif command == "sync":
-    os.environ["PDP_SCHEMA_PROFILE"] = "west"
     runtime._warehouse = lambda: Warehouse(duckdb.connect())
     runtime._acquisition_runner = lambda: SimpleNamespace(
         run_windows=lambda *args, **kwargs: AcquisitionSummary(completed_scopes=1)

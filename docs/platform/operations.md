@@ -8,9 +8,10 @@
 | Terraform state | `health-data-pipeline-503813-personal-data-platform-tfstate-west`、prefix `personal-data-platform/runtime` |
 | Raw / Logging | `health-data-pipeline-503813-pdp-raw-west` / `pdp-west` |
 | 毎時 / 日次Job | `fitbit-hourly-west` / `reconciliation-west` |
-| MotherDuck production | `us-west-2`、`personal_data_platform_west`、owner `pdp_west_prod` |
+| MotherDuck production | `us-west-2`、`personal_data_platform`、owner `pdp_west_prod` |
 
-MotherDuckはPulse/Pulse・read scaling 1、分析接続はrestricted read-only share `pdp_analytics_west`を使う。
+MotherDuckはPulse/Pulse・read scaling 1、分析接続はrestricted read-only share `pdp_analytics`を使う。
+分析アカウントの接続名も`personal_data_platform`にそろえ、view・macro内のDB参照を解決する。
 preflightは独立したbucket・DB・tokenで手動実行し、本番DB/shareを付与しない。
 
 ## Deploy
@@ -26,18 +27,43 @@ source・dbt・依存・Dockerfileに変更がないpushでは現行日次Jobの
 
 ## DBの初期化と更新
 
-通常runtimeとscratch DBは`PDP_SCHEMA_PROFILE=west`を使い、SQLは`src/personal_data_platform/migrations/west/`を正本とする。
+通常runtimeとscratch DBは共通の現行スキーマを使い、SQLは`src/personal_data_platform/migrations/`を正本とする。
 
 ```bash
-pdp fitbit migrate --database /private/path/west-scratch.duckdb --profile west
+pdp migrate --database /private/path/scratch.duckdb
 ```
 
 `--database`を省略すると`MOTHERDUCK_DATABASE`・`MOTHERDUCK_TOKEN`の接続先へ適用する。
 各SQLとchecksum記録は同じtransactionで確定する。再実行は適用済みの一致を確認し、変更は新しいforward migrationへ追加する。
-既存SQLや旧DBの台帳は変更しない。
+既存SQLや旧DBの台帳は変更しない。旧地域・旧取得方式のmigrationを持つDBには適用を拒否する。
+空の移行先DBへ[Rebuild](#rebuild)し、FitbitをAPIから再取得してから接続先を切り替える。
 
-スキーマ更新は両Schedulerを止め、実行中Jobの終了を確認してからruntime・migration・dbtを反映する。
-独立環境のpreflightと、対象DBの日次全段階の成功を確認してSchedulerを再開する。
+現行履歴内の追加DDLは両Schedulerを止め、実行中Jobの終了を確認してから適用する。
+日次全段階の成功を確認してSchedulerを再開する。
+
+### 旧スキーマからの切替
+
+1. 両Schedulerを停止し、実行中Jobと`loader` leaseの終了を確認する。receiverは通知を蓄積できる。
+2. 旧DBを保持したまま、空の移行先DBを用意する。新imageを旧DBへ接続して稼働させない。
+3. 下記Rebuildの手順でScreen Timeの両streamを移行先へ再生する。
+4. `MOTHERDUCK_DATABASE`を移行先へ向け、`pdp fitbit sync --from <開始日> --to <終了日の翌日>`で必要なFitbit全期間を取得する。
+   途中で止まった場合は出力された最初の未完了日から続ける。
+5. `pdp dbt --source fitbit`で両sourceの集計・検証を実行し、Screen Timeのイベント・補助状態・集計を旧DBと比較する。
+6. 新DBのread-only shareと分析用接続を設定し、処理JobのDB設定とimageを同時に切り替える。
+   旧imageを新DBに向けるrollbackは行わず、戻す場合は旧DB・旧imageの組み合わせへ戻す。
+7. 独立環境のpreflightと新DBの日次全段階を確認してSchedulerを再開する。旧DBの削除は切替確認後に行う。
+
+Raw保持範囲だけで復元できないデータは再取得できる期間を確認する。
+新DBでの再構築が終わるまで、旧DBのtableとmigration台帳を削除しない。
+
+2026-10-07に`personal_data_platform_west`から`personal_data_platform`へ切り替えた。
+runtime imageのソースは`5cd09e2`で、移行台帳は`001_initial.sql`の1件。
+旧DB時点のScreen Time 80,386イベント・補助状態・日次集計の一致を確認してから、最新Raw 2件も反映した。
+Fitbitは2026-09-29〜2026-10-07の5種別をAPIから取得し、Cloud Runの日次全段階・dbt 39件・外部成功pingを確認した。
+分析接続では全10 viewの参照と書き込み拒否、preflightでは本番DB・shareへの接続拒否を確認した。
+旧DBと`deployed-rollback`タグの旧imageを保持し、戻す場合は両方を組にして接続設定を戻す。
+切替時の比較結果・image digest・Terraform state backupは`var/schema-cutover/2026-10-07/`に保存する。
+自動Deployの再開前に、`main`へ新スキーマと切替後の接続設定を反映する。
 
 ## 収集・日次処理
 
@@ -75,7 +101,7 @@ Collectorのwrite-only ADCを再利用せず、Terraform output `rebuild_operato
 ```bash
 export GOOGLE_CLOUD_PROJECT="health-data-pipeline-503813"
 export GCS_BUCKET="${GOOGLE_CLOUD_PROJECT}-pdp-raw-west"
-export MOTHERDUCK_DATABASE="personal_data_platform_west"
+export MOTHERDUCK_DATABASE="personal_data_platform"
 export PDP_REBUILD_SERVICE_ACCOUNT_EMAIL="raw-rebuild-operator@${GOOGLE_CLOUD_PROJECT}.iam.gserviceaccount.com"
 export CLOUDSDK_CONFIG="$HOME/Library/Application Support/personal-data-platform/gcloud-rebuild"
 mkdir -p "$CLOUDSDK_CONFIG"

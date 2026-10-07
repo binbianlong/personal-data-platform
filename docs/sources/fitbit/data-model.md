@@ -15,30 +15,36 @@ Raw v3は完全取得単位の直接gzip JSON配列で、gzip後最大16 MiB。�
 
 ## テーブルと単位
 
-| base table | 行とvalueの単位 |
+| base table | 保存する意味 |
 |---|---|
-| `fitbit_steps` | 歩数区間・歩数 |
-| `fitbit_heart_rate_minute` | UTC分ごとの平均・最小・最大bpm、sample countはNULL |
-| `fitbit_resting_heart_rate` | 提供元の日付ごとの安静時心拍・bpm |
-| `fitbit_active_zone` | アクティブゾーン区間・既に重み付けされた分 |
-| `fitbit_sleep` | 選択済み睡眠セッション・summaryの睡眠分 |
-| `fitbit_sleep_stage` | 親睡眠に含まれる段階区間・秒 |
-| `fitbit_sleep_wake` | 段階と重なる短い覚醒等の区間・秒 |
+| `fitbit_activity_interval` | `metric`で歩数とAZMを区別。開始・終了、歩数または重み付け済み分、zone |
+| `fitbit_resting_heart_rate_daily` | `source_date`と`beats_per_minute`。提供元の日付をDATEで保存 |
+| `fitbit_sleep_session` | 開始・終了、API summaryの`sleep_minutes`、種別、main sleep区分、提供元の日付 |
+| `fitbit_sleep_detail` | `kind`で段階と短い覚醒を区別。`sleep_id`、親の日付、区間、category |
+| `fitbit_heart_rate_minute` | UTC分ごとの平均・最小・最大bpm、未知のsample countはNULL |
 
-分心拍以外の共通列はsubject、record ID、置換cursor、UTC開始/終了、value、元UTCオフセット、提供元日付、親ID、
-category、main sleep区分、origin、取得時刻、入力key、取込時刻。主キーは`(subject_key, record_id)`。
+全テーブルはsubject・取得時刻・入力key・取込時刻を保持する。
+区間には元UTCオフセットを残す。取得元はGoogle wearables APIに統一し、origin列は持たない。
 IDのないサンプルはsubject・種別・時刻/区間から決定的なIDを作る。
-日付cursorはcivil dateをUTC午前0時で表した比較用の値であり、実時刻ではない。
-睡眠明細のcursorは親と一致し、物理区間は親の範囲内でなければならない。
+歩数/AZMの主キーは`(subject_key, metric, record_id)`、睡眠詳細は`(subject_key, kind, record_id)`、
+日次心拍と睡眠セッションは`(subject_key, record_id)`。metricやkindの異なる同じIDは別の記録として保持する。
+
+安静時心拍と睡眠はproviderのDATEで取得範囲を判定する。
+日付を比較するときだけUTC午前0時に変換し、物理時刻の開始として保存しない。
+睡眠詳細の提供元日付は親と一致し、物理区間は親の範囲内でなければならない。
+段階と短い覚醒は重なりを保持し、秒数は開始・終了から算出する。
+睡眠分数はAPI summaryを使い、セッションの経過分数で代用しない。
 
 分心拍は`average`・`minimum`・`maximum`とUTC分の開始/終了を持ち、主キーは
 `(subject_key, data_source_family, start_at, aggregation_version)`である。
-取得順位・入力key・取込時刻を保持し、`sample_count`はNULLのままとする。
+`sample_count`はNULLのままとする。
 
 ## 範囲置換と再実行
 
 全ページ取得済みのcursor範囲だけを置き換え、空結果も反映済み範囲として残す。
-`ops.fitbit_coverage`、分心拍の`ops.fitbit_minute_coverage`が重ならない範囲の取得順位と現在内容のhashを保持する。
+`ops.fitbit_coverage`が全種別の取得順位と現在内容のhashを保持する。
+subject・種別・data source family・aggregation versionごとに範囲を管理する。
+通常記録は`records-v1`、分心拍は`heart-rate-minute-v1`で区別する。
 順位は`(fetched_at, source_key)`で、新しい範囲を保護し、古い取得は未反映部分だけを更新する。
 
 保存済みRawを先に再生する。取得範囲が完全に覆われ、未知フィールドを含む内容hashが一致する場合だけ新しいRawを省く。
@@ -60,7 +66,6 @@ Raw省略期間は元Rawの期限切れ後にRawだけの完全再構築を保�
 | `daily_fitbit_heart_rate_minute` | 分平均の平均、分最小値の最小、分最大値の最大、観測分数の日次集計 |
 | `fitbit_steps_time_series` | 歩数区間 |
 | `fitbit_heart_rate_minute_time_series` | 分心拍の平均・最小・最大 |
-| `fitbit_heart_rate_time_series` | 分心拍時系列と同じ列を公開する互換View |
 | `fitbit_sleep_sessions` | 睡眠セッションとsummary |
 | `fitbit_sleep_screen_time` | 睡眠開始前2時間の端末別Screen Time |
 

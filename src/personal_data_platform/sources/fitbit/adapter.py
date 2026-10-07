@@ -30,10 +30,9 @@ class FitbitSource:
     parser_version = "fitbit-v3"
     dbt_selector = "tag:fitbit tag:screen_time"
     monitor_name = "fitbit"
-    required_relations = tuple(f"base.{name}" for name in TABLES.values()) + (
+    required_relations = tuple(f"base.{name}" for name in dict.fromkeys(TABLES.values())) + (
         "base.fitbit_heart_rate_minute",
         "ops.fitbit_coverage",
-        "ops.fitbit_minute_coverage",
         "ops.fitbit_deleted_record",
         "marts.daily_fitbit_health",
         "marts.fitbit_heart_rate_minute_time_series",

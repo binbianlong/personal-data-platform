@@ -9,7 +9,6 @@ import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 from urllib.parse import unquote, urlsplit
 
 DEFAULT_REBUILD_ADC_PATH = (
@@ -20,14 +19,6 @@ DEFAULT_REBUILD_ADC_PATH = (
 
 class ConfigurationError(ValueError):
     """Raised when required runtime configuration is absent or invalid."""
-
-
-def schema_profile() -> Literal["west"]:
-    """Choose one migration history consistently across jobs and recovery commands."""
-    value = os.environ.get("PDP_SCHEMA_PROFILE", "west")
-    if value != "west":
-        raise ConfigurationError("PDP_SCHEMA_PROFILE must be west")
-    return "west"
 
 
 @dataclass(frozen=True, slots=True)

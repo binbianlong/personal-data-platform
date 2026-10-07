@@ -6,7 +6,6 @@ locals {
     GOOGLE_CLOUD_PROJECT           = var.project_id
     GCS_BUCKET                     = local.west_raw_bucket_name
     MOTHERDUCK_DATABASE            = var.west_motherduck_database
-    PDP_SCHEMA_PROFILE             = "west"
     PDP_FITBIT_SUBJECT_KEY         = var.fitbit_subject_key
     PDP_FITBIT_PROCESSING_PAUSED   = tostring(!var.west_schedulers_enabled)
     PDP_FITBIT_PUBSUB_ENDPOINT     = "pubsub.us-west1.rep.googleapis.com"

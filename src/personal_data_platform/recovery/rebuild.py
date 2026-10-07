@@ -9,7 +9,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from personal_data_platform.config import RebuildADCConfig, schema_profile
+from personal_data_platform.config import RebuildADCConfig
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.loader.job import run_loader, run_loader_all
 from personal_data_platform.raw.models import RawObject
@@ -119,7 +119,7 @@ def run_rebuild(
     warehouse = Warehouse(connect(WarehouseConfig(database=target_db, token=token)))
     try:
         require_empty_rebuild_target(warehouse)
-        warehouse.migrate(profile=schema_profile())
+        warehouse.migrate()
         summary = run_loader(
             _SnapshotRawRepository(repository=repository, observations=snapshot),
             warehouse,
@@ -162,7 +162,7 @@ def run_rebuild_all(
     warehouse = Warehouse(connect(WarehouseConfig(database=target_db, token=token)))
     try:
         require_empty_rebuild_target(warehouse)
-        warehouse.migrate(profile=schema_profile())
+        warehouse.migrate()
         summary = run_loader_all(
             (source for source, _, _ in inventories),
             warehouse=warehouse,

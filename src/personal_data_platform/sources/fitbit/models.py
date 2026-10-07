@@ -11,13 +11,14 @@ from datetime import UTC, date, datetime, time
 
 DATA_TYPES = ("steps", "heart-rate", "daily-resting-heart-rate", "active-zone-minutes", "sleep")
 DATE_TYPES = ("daily-resting-heart-rate", "sleep")
+RECORD_AGGREGATION_VERSION = "records-v1"
 TABLES = {
-    "steps": "fitbit_steps",
-    "daily-resting-heart-rate": "fitbit_resting_heart_rate",
-    "active-zone-minutes": "fitbit_active_zone",
-    "sleep": "fitbit_sleep",
-    "sleep-stage": "fitbit_sleep_stage",
-    "sleep-wake": "fitbit_sleep_wake",
+    "steps": "fitbit_activity_interval",
+    "daily-resting-heart-rate": "fitbit_resting_heart_rate_daily",
+    "active-zone-minutes": "fitbit_activity_interval",
+    "sleep": "fitbit_sleep_session",
+    "sleep-stage": "fitbit_sleep_detail",
+    "sleep-wake": "fitbit_sleep_detail",
 }
 
 
@@ -289,7 +290,7 @@ class Notification:
     def __post_init__(self) -> None:
         if not self.notification_id or len(self.notification_id) > 256 or not self.windows:
             raise ValueError("notification needs an identity and acquisition windows")
-        AcquisitionScope(self.subject_key, self.windows[0], "fitbit-v2")
+        AcquisitionScope(self.subject_key, self.windows[0], RECORD_AGGREGATION_VERSION)
         if len(set(self.windows)) != len(self.windows):
             raise ValueError("duplicate notification windows")
         object.__setattr__(self, "received_at", aware(self.received_at))
@@ -337,7 +338,7 @@ class CapturedSnapshot:
 
     @property
     def aggregation_version(self) -> str:
-        return "fitbit-v2"
+        return RECORD_AGGREGATION_VERSION
 
     @property
     def subject_key(self) -> str:

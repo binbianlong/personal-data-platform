@@ -54,16 +54,20 @@ def apply(warehouse, data):
 def test_replace_empty_and_a_b_a(warehouse):
     for number, version in [(10, 1), (20, 2), (10, 3)]:
         apply(warehouse, snapshot(number, version=version))
-        assert warehouse.query_value("select sum(value) from base.fitbit_steps") == number
+        assert (
+            warehouse.query_value("select sum(value) from base.fitbit_activity_interval") == number
+        )
     apply(warehouse, snapshot(None, version=4))
-    assert warehouse.query_value("select count(*) from base.fitbit_steps") == 0
+    assert warehouse.query_value("select count(*) from base.fitbit_activity_interval") == 0
 
 
 def test_old_overlapping_acquisition_cannot_erase_newer_empty_range(warehouse):
     apply(warehouse, snapshot(None, hour=12, version=3))
     apply(warehouse, snapshot(5, hour=0, version=2))
     apply(warehouse, snapshot(99, hour=12, version=1))
-    assert warehouse.query_rows("select record_id, value from base.fitbit_steps") == [("0", 5.0)]
+    assert warehouse.query_rows("select record_id, value from base.fitbit_activity_interval") == [
+        ("0", 5.0)
+    ]
 
 
 def test_writer_does_not_commit_its_callers_transaction(warehouse):
@@ -75,7 +79,7 @@ def test_writer_does_not_commit_its_callers_transaction(warehouse):
         warehouse.connection, source_key="test", loaded_at=data.fetched_at
     )
     warehouse.connection.execute("ROLLBACK")
-    assert warehouse.query_value("select count(*) from base.fitbit_steps") == 0
+    assert warehouse.query_value("select count(*) from base.fitbit_activity_interval") == 0
 
 
 def test_newer_middle_range_preserves_both_sides_of_an_older_snapshot(warehouse):
@@ -86,7 +90,7 @@ def test_newer_middle_range_preserves_both_sides_of_an_older_snapshot(warehouse)
     apply(warehouse, replace(left, records=left.records + right.records))
 
     assert warehouse.query_rows(
-        "SELECT record_id, value FROM base.fitbit_steps ORDER BY cursor_at"
+        "SELECT record_id, value FROM base.fitbit_activity_interval ORDER BY start_at"
     ) == [("0", 10.0), ("8", 20.0), ("16", 30.0)]
     assert warehouse.query_rows(
         "SELECT range_start, range_end FROM ops.fitbit_coverage ORDER BY range_start"
@@ -112,11 +116,13 @@ def test_rollback_restores_records_deletions_and_coverage_after_replacement(ware
     FitbitBatch(deletion).write_snapshot(
         warehouse.connection, source_key="deleted", loaded_at=deletion.fetched_at
     )
-    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_steps") == 0
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_deleted_record") == 1
     warehouse.connection.execute("ROLLBACK")
 
-    assert warehouse.query_rows("SELECT record_id, value FROM base.fitbit_steps") == [("0", 10.0)]
+    assert warehouse.query_rows("SELECT record_id, value FROM base.fitbit_activity_interval") == [
+        ("0", 10.0)
+    ]
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_deleted_record") == 0
     assert warehouse.query_rows("SELECT * FROM ops.fitbit_coverage") == coverage
 
@@ -158,13 +164,16 @@ def sleep_snapshot(day, version, *, child="stage", origin="api"):
 def test_moving_sleep_session_replaces_its_children_across_date_ranges(warehouse, stale_child):
     apply(warehouse, sleep_snapshot(1, 1, child="old"))
     apply(warehouse, sleep_snapshot(2, 3, child="new"))
-    assert warehouse.query_rows("select record_id from base.fitbit_sleep_stage") == [("new",)]
+    assert warehouse.query_rows("select record_id from base.fitbit_sleep_detail") == [("new",)]
     apply(warehouse, sleep_snapshot(1, 2, child=stale_child))
-    assert warehouse.query_rows("select record_id from base.fitbit_sleep_stage") == [("new",)]
+    assert warehouse.query_rows("select record_id from base.fitbit_sleep_detail") == [("new",)]
     # Returning to an earlier date/content is a real update, not a cached no-op.
     apply(warehouse, sleep_snapshot(1, 4, child="old"))
-    assert warehouse.query_rows("select record_id from base.fitbit_sleep_stage") == [("old",)]
-    assert warehouse.query_value("select extract(day from cursor_at) from base.fitbit_sleep") == 1
+    assert warehouse.query_rows("select record_id from base.fitbit_sleep_detail") == [("old",)]
+    assert (
+        warehouse.query_value("select extract(day from source_date) from base.fitbit_sleep_session")
+        == 1
+    )
 
 
 def test_old_range_cannot_resurrect_a_moved_then_deleted_id(warehouse):
@@ -172,10 +181,20 @@ def test_old_range_cannot_resurrect_a_moved_then_deleted_id(warehouse):
     apply(warehouse, sleep_snapshot(2, 3, child="new"))
     apply(warehouse, replace(sleep_snapshot(2, 4), records=()))
     apply(warehouse, sleep_snapshot(1, 2, child="old"))
-    assert warehouse.query_value("select count(*) from base.fitbit_sleep") == 0
-    assert warehouse.query_value("select count(*) from base.fitbit_sleep_stage") == 0
+    assert warehouse.query_value("select count(*) from base.fitbit_sleep_session") == 0
+    assert warehouse.query_value("select count(*) from base.fitbit_sleep_detail") == 0
     apply(warehouse, sleep_snapshot(1, 5, child="restored"))
-    assert warehouse.query_rows("select record_id from base.fitbit_sleep_stage") == [("restored",)]
+    assert warehouse.query_rows("select record_id from base.fitbit_sleep_detail") == [("restored",)]
+
+
+def test_repeated_old_ranges_keep_the_newer_deletion_order(warehouse):
+    apply(warehouse, sleep_snapshot(1, 1))
+    apply(warehouse, sleep_snapshot(2, 4))
+    apply(warehouse, replace(sleep_snapshot(2, 5), records=()))
+    apply(warehouse, sleep_snapshot(1, 2))
+    apply(warehouse, sleep_snapshot(1, 3))
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_sleep_session") == 0
+    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_deleted_record") == 1
 
 
 def test_changed_dense_day_uses_bounded_sql_statements(warehouse):
@@ -211,5 +230,5 @@ def test_changed_dense_day_uses_bounded_sql_statements(warehouse):
     FitbitBatch(updated).write_snapshot(
         Connection(), source_key="updated", loaded_at=updated.fetched_at
     )
-    assert warehouse.query_value("select max(value) from base.fitbit_steps") == 61
+    assert warehouse.query_value("select max(value) from base.fitbit_activity_interval") == 61
     assert len(statements) < 20

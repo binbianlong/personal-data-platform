@@ -32,7 +32,6 @@ def manual_env(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(api, "fetch_captured", daily_records)
-    monkeypatch.setenv("PDP_SCHEMA_PROFILE", "west")
     monkeypatch.setenv("PDP_FITBIT_SUBJECT_KEY", "self")
     monkeypatch.setenv("PDP_FITBIT_PROCESSING_PAUSED", "false")
     monkeypatch.setattr(runtime, "_warehouse", factory)
@@ -68,7 +67,7 @@ def test_manual_retry_records_first_unfinished_day_and_preserves_committed_data(
     assert first["first_incomplete"]["start"] == str(failed_day)
     warehouse = manual_env.warehouse()
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 2
-    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_steps") > 0
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") > 0
     warehouse.close()
 
     monkeypatch.setattr(manual_env.api, "fetch_captured", fetch)

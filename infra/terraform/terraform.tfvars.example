@@ -15,7 +15,7 @@ west_secret_versions = {
   heartbeat_config     = "1"
 }
 west_schedulers_enabled           = true
-west_motherduck_database           = "personal_data_platform_west"
+west_motherduck_database           = "personal_data_platform"
 west_preflight_motherduck_database = "personal_data_platform_west_preflight"
 # Preserve existing _Default sink exclusions.
 west_logging_exclusions = {}
