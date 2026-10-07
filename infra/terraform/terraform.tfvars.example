@@ -2,23 +2,20 @@ project_id                     = "example-project"
 deployer_service_account_email = "github-tf-deploy@example-project.iam.gserviceaccount.com"
 collector_impersonator_member  = "user:operator@example.com"
 alert_email                    = "operator@example.com"
-region                         = "us-central1"
+fitbit_subject_key             = "owner"
+region                         = "us-central1" # Retained backup storage only.
 
-# Normal west deployment: create isolated MotherDuck databases and secret versions first.
-enable_west_runtime  = false
-west_region          = "us-west1"
-west_image_uri       = ""
-west_secret_versions = {}
-# Before enabling, replace the empty map with each registered numeric version:
-# west_secret_versions = {
-#   motherduck_token           = "1"
-#   fitbit_oauth_config        = "1"
-#   fitbit_webhook_config      = "1"
-#   heartbeat_config           = "1"
-# }
-west_schedulers_enabled            = false
-west_logging_enabled               = false
+west_region    = "us-west1"
+west_image_uri = "us-west1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# Replace these pins with registered numeric secret versions.
+west_secret_versions = {
+  motherduck_token      = "1"
+  fitbit_oauth_config   = "1"
+  fitbit_webhook_config = "1"
+  heartbeat_config     = "1"
+}
+west_schedulers_enabled           = true
 west_motherduck_database           = "personal_data_platform_west"
 west_preflight_motherduck_database = "personal_data_platform_west_preflight"
-# Preserve existing _Default exclusions before enabling the west logging route.
+# Preserve existing _Default sink exclusions.
 west_logging_exclusions = {}

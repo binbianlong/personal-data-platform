@@ -12,10 +12,9 @@ terraform plan -var-file=<非公開tfvars> -out=runtime.tfplan
 terraform apply runtime.tfplan
 ```
 
-通常は`enable_west_runtime=true`。`west_image_uri`には西部registryのdigestを指定し、
-MotherDuck production/preflightには独立DBを指定する。接続先・実行順・監視・復旧は[Platform運用](../../docs/platform/operations.md)に従う。
-backend bucketはGitHubの`TF_STATE_BUCKET`、運用フラグは`PDP_WEST_ENABLED`・`PDP_WEST_SCHEDULERS_ENABLED`・`PDP_WEST_LOGGING_ENABLED`へ揃える。
-`west_schedulers_enabled=false`は両Schedulerとnative警報を停止する。
+`west_image_uri`には西部registryのdigest、MotherDuck production/preflightには独立DBを指定する。
+backend bucketはGitHubの`TF_STATE_BUCKET`へ設定する。接続先・実行順・監視・復旧は[Platform運用](../../docs/platform/operations.md)に従う。
+通常は両Schedulerとnative警報が有効。`west_schedulers_enabled=false`とGitHubの`PDP_WEST_SCHEDULERS_ENABLED=false`で一時停止し、Fitbit処理も延期する。
 Logging変更時は既存_Defaultの除外を`west_logging_exclusions`と`PDP_WEST_LOGGING_EXCLUSIONS`へ引き継ぐ。
 
 ## Secretと資格情報

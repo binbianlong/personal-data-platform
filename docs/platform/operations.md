@@ -17,7 +17,7 @@ preflightは独立したbucket・DB・tokenで手動実行し、本番DB/share�
 
 [bootstrap](../../infra/bootstrap/README.md)でstate・registry・WIFを作り、[runtime Terraform](../../infra/terraform/README.md)で通常資産を管理する。
 secret payloadはTerraform外で登録し、数値versionに固定する。常設preflight/dbt Jobは作らない。
-GitHubの`PDP_WEST_ENABLED`・`PDP_WEST_SCHEDULERS_ENABLED`・`PDP_WEST_LOGGING_ENABLED`を運用状態に揃える。
+通常はScheduler・監視が有効で、`PDP_WEST_SCHEDULERS_ENABLED=false`で一時停止する。
 
 CIは現行Job・receiverのimageをdeployedタグで保護してからcandidate digestへ更新する。
 source・dbt・依存・Dockerfileに変更がないpushでは現行日次Jobのdigestを再利用する。
@@ -42,7 +42,7 @@ pdp fitbit migrate --database /private/path/west-scratch.duckdb --profile west
 ## 収集・日次処理
 
 毎時15分のJobは通知を集め、完全取得したRawとDBが確定した単位だけackする。
-`pdp reconciliation`はsource/stream引数で対象を狭めず、日次04:10 Asia/Tokyoの処理全体を実行する。
+`pdp reconciliation`は日次04:10 Asia/Tokyoの処理全体を実行する。
 
 1. Screen Time両streamのRawをgeneration指定で取り込む。
 2. 未取込Fitbit Rawを再生し、5種別のTokyo直近7完了日を再照合する。

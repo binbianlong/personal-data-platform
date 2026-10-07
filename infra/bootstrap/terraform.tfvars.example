@@ -1,7 +1,5 @@
 project_id        = "example-project"
 state_bucket_name = "example-project-personal-data-platform-tfstate"
-region            = "us-central1"
+region            = "us-west1"
 
-# A separate us-west1 state bucket is created as ${state_bucket_name}-west.
-# Migrate backend state only after backing it up and verifying lock permissions.
-# A separate us-west1 registry uses artifact_repository_id; the legacy registry stays.
+# Runtime state uses ${state_bucket_name}-west; the original bucket is retained as backup.

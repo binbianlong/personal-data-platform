@@ -1,16 +1,14 @@
 locals {
   raw_bucket_name           = "${var.project_id}-pdp-raw"
   preflight_bucket_name     = "${var.project_id}-pdp-preflight"
-  raw_object_prefix         = "raw/screen_time/v1/"
   receipt_object_prefix     = "raw/screen_time/v1/_control/collector/latest/"
   device_manifest_key       = "raw/screen_time/v1/_control/collector/active.json"
   mac_receipt_object_prefix = "raw/screen_time/v1/_control/collector/app-usage/latest/"
   mac_device_manifest_key   = "raw/screen_time/v1/_control/collector/app-usage/active.json"
 
   storage_roles = {
-    collector_raw_creator     = "projects/${var.project_id}/roles/pdpCollectorRawCreator"
-    collector_receipt_writer  = "projects/${var.project_id}/roles/pdpCollectorReceiptWriter"
-    preflight_object_operator = "projects/${var.project_id}/roles/pdpPreflightObjectOperator"
+    collector_raw_creator    = "projects/${var.project_id}/roles/pdpCollectorRawCreator"
+    collector_receipt_writer = "projects/${var.project_id}/roles/pdpCollectorReceiptWriter"
   }
 }
 

@@ -91,7 +91,7 @@ locals {
 }
 # Secret versions are provisioned outside Terraform so payloads never enter state.
 resource "google_secret_manager_secret" "west" {
-  for_each  = var.enable_west_runtime ? local.west_secret_ids : {}
+  for_each  = local.west_secret_ids
   project   = var.project_id
   secret_id = each.value
   replication {

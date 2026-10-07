@@ -7,13 +7,12 @@ variables {
   deployer_service_account_email = "github-tf-deploy@example-project.iam.gserviceaccount.com"
   collector_impersonator_member  = "user:operator@example.com"
   alert_email                    = "operator@example.com"
+  fitbit_subject_key             = "owner"
+  west_image_uri                 = "us-west1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  west_secret_versions           = { motherduck_token = "7", fitbit_oauth_config = "11", fitbit_webhook_config = "13", heartbeat_config = "17" }
 }
-run "disabled_runtime_keeps_backups" {
+run "runtime_keeps_backups" {
   command = plan
-  assert {
-    condition     = length(output.runtime_jobs) == 0 && length(output.scheduler_jobs) == 0 && length(google_cloud_run_v2_service.west) == 0
-    error_message = "Disabling west must not provision an old runtime instead."
-  }
   assert {
     condition     = google_storage_bucket.raw.location == "us-central1" && !google_storage_bucket.raw.force_destroy && google_storage_bucket.raw.soft_delete_policy[0].retention_duration_seconds == 0 && one(one(google_storage_bucket.raw.lifecycle_rule).condition).age == 90
     error_message = "Retained legacy Screen Time Raw must stay in place with bounded retention."

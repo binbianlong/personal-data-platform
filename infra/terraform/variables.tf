@@ -56,11 +56,6 @@ variable "scheduler_time_zone" {
   default     = "Asia/Tokyo"
 }
 
-variable "enable_west_runtime" {
-  description = "Provision the normal west deployment after its isolated dependencies are ready."
-  type        = bool
-  default     = false
-}
 variable "west_region" {
   description = "Region for normal compute, Raw and Pub/Sub."
   type        = string
@@ -75,8 +70,8 @@ variable "west_image_uri" {
   type        = string
   default     = ""
   validation {
-    condition     = !var.enable_west_runtime || can(regex("^us-west1-docker\\.pkg\\.dev/${var.project_id}/[^/]+/[^@]+@sha256:[0-9a-f]{64}$", var.west_image_uri))
-    error_message = "Enabled west deployment requires its own digest in the us-west1 repository."
+    condition     = can(regex("^us-west1-docker\\.pkg\\.dev/${var.project_id}/[^/]+/[^@]+@sha256:[0-9a-f]{64}$", var.west_image_uri))
+    error_message = "Runtime requires its own digest in the us-west1 repository."
   }
 }
 variable "west_secret_versions" {
@@ -89,23 +84,14 @@ variable "west_secret_versions" {
     error_message = "west_secret_versions must use existing west secret keys and positive numeric version strings; aliases such as latest are not allowed."
   }
   validation {
-    condition     = !var.enable_west_runtime || length(setsubtract(toset(["motherduck_token", "fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config"]), toset(keys(var.west_secret_versions)))) == 0
-    error_message = "Enabled west deployment requires version pins for motherduck_token, fitbit_oauth_config, fitbit_webhook_config, and heartbeat_config."
+    condition     = length(setsubtract(toset(["motherduck_token", "fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config"]), toset(keys(var.west_secret_versions)))) == 0
+    error_message = "Runtime requires version pins for motherduck_token, fitbit_oauth_config, fitbit_webhook_config, and heartbeat_config."
   }
 }
 variable "west_schedulers_enabled" {
-  description = "Explicit cutover gate; all west schedules are paused during preparation."
+  description = "Run scheduled processing and its native alerts; false pauses both schedules and Fitbit processing."
   type        = bool
-  default     = false
-  validation {
-    condition     = !var.west_schedulers_enabled || var.enable_west_runtime
-    error_message = "West schedules cannot be enabled before the west deployment exists."
-  }
-}
-variable "west_logging_enabled" {
-  description = "Redirect the existing _Default sink to west after reviewing existing exclusions."
-  type        = bool
-  default     = false
+  default     = true
 }
 variable "west_logging_exclusions" {
   description = "Existing _Default sink exclusions to preserve when routing ordinary logs west."

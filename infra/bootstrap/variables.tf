@@ -9,18 +9,18 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "Google Cloud region used for the Artifact Registry repository."
+  description = "Region of the runtime Artifact Registry repository."
   type        = string
-  default     = "us-central1"
+  default     = "us-west1"
 
   validation {
-    condition     = var.region == "us-central1"
-    error_message = "region is fixed to us-central1 for the Artifact Registry repository."
+    condition     = var.region == "us-west1"
+    error_message = "region is fixed to us-west1 for the Artifact Registry repository."
   }
 }
 
 variable "state_bucket_name" {
-  description = "Globally unique GCS bucket name for runtime Terraform state."
+  description = "Retained state bucket name; the runtime backend uses the corresponding -west bucket."
   type        = string
 
   validation {
@@ -30,7 +30,7 @@ variable "state_bucket_name" {
 }
 
 variable "state_bucket_location" {
-  description = "Location for the Terraform state bucket."
+  description = "Location of the retained state backup bucket."
   type        = string
   default     = "ASIA"
 }
