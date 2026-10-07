@@ -7,7 +7,7 @@ import logging
 import os
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -50,19 +50,10 @@ def _warehouse() -> Warehouse:
     return Warehouse(connect(WarehouseConfig.from_env()))
 
 
-def delivery_mode() -> Literal["pubsub"]:
-    schema_profile()
-    if os.environ.get("PDP_FITBIT_DELIVERY_MODE", "pubsub") != "pubsub":
-        raise ValueError("PDP_FITBIT_DELIVERY_MODE must be pubsub")
-    return "pubsub"
-
-
 def _acquisition_runner() -> AcquisitionRunner:
     from .acquisition import AcquisitionRunner
 
-    values = dict(os.environ)
-    values["PDP_FITBIT_DELIVERY_MODE"] = "pubsub"
-    oauth = GoogleOAuth.from_env(values)
+    oauth = GoogleOAuth.from_env()
     return AcquisitionRunner(
         repository=GCSRawRepository.from_env(source=FitbitSource(version=3)),
         client=HealthClient(access_token=oauth),
@@ -78,7 +69,7 @@ def run_notification_job(
     from .notifications import PubSubNotifications
 
     configure_logging()
-    delivery_mode()
+    schema_profile()
     return _acquisition_runner().ingest(
         PubSubNotifications.from_env(),
         max_messages=max_messages,
@@ -91,11 +82,11 @@ def run_serve_from_env() -> int:
     from .notifications import PubSubNotifications
 
     configure_logging()
-    delivery_mode()
+    schema_profile()
     if os.environ.get("PDP_FITBIT_WEBHOOK_AUTHORIZATION") or os.environ.get(
         "PDP_FITBIT_HEALTH_USER_ID"
     ):
-        raise ValueError("legacy webhook settings conflict with pubsub configuration")
+        raise ValueError("split webhook settings conflict with bundled configuration")
     config = secret_config("PDP_FITBIT_WEBHOOK_CONFIG", ("authorization", "health_user_id"))
     app = create_pubsub_app(
         authenticator=GoogleHealthAuthenticator(

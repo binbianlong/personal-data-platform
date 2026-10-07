@@ -33,7 +33,6 @@ def manual_env(monkeypatch, tmp_path):
 
     monkeypatch.setattr(api, "fetch_captured", daily_records)
     monkeypatch.setenv("PDP_SCHEMA_PROFILE", "west")
-    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
     monkeypatch.setenv("PDP_FITBIT_SUBJECT_KEY", "self")
     monkeypatch.setenv("PDP_FITBIT_PROCESSING_PAUSED", "false")
     monkeypatch.setattr(runtime, "_warehouse", factory)

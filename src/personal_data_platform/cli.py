@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     loader = commands.add_parser("loader", help="load pending GCS Raw into MotherDuck")
     dbt = commands.add_parser("dbt", help="apply analytics models")
-    reconciliation = commands.add_parser("reconciliation", help="reconcile GCS and MotherDuck")
+    commands.add_parser("reconciliation", help="run all daily ingestion, repair and audit stages")
     commands.add_parser("preflight", help="validate cloud runtime connectivity")
     rebuild = commands.add_parser("rebuild", help="rebuild a scratch MotherDuck database")
     rebuild_mode = rebuild.add_mutually_exclusive_group(required=True)
@@ -33,10 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="acknowledge that only currently retained Raw can be rebuilt",
     )
-    for command in (loader, dbt, reconciliation, rebuild):
+    for command in (loader, dbt, rebuild):
         command.add_argument("--source", dest="source_id", help="registered data source")
         command.add_argument("--stream", help="registered stream within the selected source")
-    for command in (loader, reconciliation, rebuild):
+    for command in (loader, rebuild):
         command.add_argument(
             "--all-streams",
             action="store_true",
@@ -89,12 +89,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "reconciliation":
         from personal_data_platform.reconciliation.job import run_reconciliation_from_env
 
-        return _run_job(
-            run_reconciliation_from_env,
-            source_id=args.source_id,
-            stream=args.stream,
-            **({"all_streams": True} if args.all_streams else {}),
-        )
+        return _run_job(run_reconciliation_from_env)
     if args.command == "preflight":
         from personal_data_platform.preflight import run_preflight_from_env
 

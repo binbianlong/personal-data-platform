@@ -303,9 +303,7 @@ def run_reconciliation(
     return result
 
 
-def run_reconciliation_from_env(
-    *, source_id: str | None = None, stream: str | None = None, all_streams: bool = False
-) -> int:
+def run_reconciliation_from_env() -> int:
     schema_profile()
     return _run_daily_reconciliation()
 

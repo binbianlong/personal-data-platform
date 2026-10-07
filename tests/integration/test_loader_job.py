@@ -499,7 +499,6 @@ def test_inherited_loader_lease_stops_after_owner_loss(monkeypatch):
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate()
     assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
-    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
     try:
         with pytest.raises(RuntimeError, match="lease"):
             run_loader_objects(
@@ -539,7 +538,6 @@ def test_loader_deadline_interrupts_database_work(monkeypatch):
 
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate()
-    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
     monkeypatch.setattr(
         warehouse,
         "succeeded_keys_for",

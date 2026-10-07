@@ -14,7 +14,6 @@ def isolated_runtime_logger(monkeypatch):
 def test_pubsub_receiver_uses_only_webhook_config(monkeypatch):
     import personal_data_platform.sources.fitbit.runtime as runtime
 
-    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "pubsub")
     monkeypatch.setenv("PDP_FITBIT_SUBJECT_KEY", "self")
     monkeypatch.setenv(
         "PDP_FITBIT_WEBHOOK_CONFIG", '{"authorization":"header","health_user_id":"owner"}'
@@ -37,16 +36,6 @@ def test_pubsub_receiver_uses_only_webhook_config(monkeypatch):
     assert runtime.run_serve_from_env() == 0
     assert len(apps) == 1
     assert "/internal/tasks/fitbit" not in {route.path for route in apps[0].routes}
-
-
-def test_delivery_mode_rejects_invalid_configuration(monkeypatch):
-    import pytest
-
-    import personal_data_platform.sources.fitbit.runtime as runtime
-
-    monkeypatch.setenv("PDP_FITBIT_DELIVERY_MODE", "unsupported")
-    with pytest.raises(ValueError, match="PDP_FITBIT_DELIVERY_MODE"):
-        runtime.delivery_mode()
 
 
 def test_daily_repair_uses_seven_completed_days_without_device_cursor(monkeypatch):
