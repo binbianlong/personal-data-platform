@@ -37,7 +37,7 @@ class ScreenTimeSource:
         "marts.daily_screen_time",
         "marts.daily_screen_time_total",
     )
-    retention_days = 90
+    retention_days: int | None = None
     lifecycle_grace_days = 3
     dbt_selector = "tag:screen_time"
     monitor_name = "screen_time_reconciliation"
@@ -89,9 +89,9 @@ class ScreenTimeSource:
         )
 
     def repository_from_env(self) -> RawRepository:
-        from .storage import ScreenTimeGCSRepository
+        from .storage import ScreenTimeLocalRepository
 
-        return ScreenTimeGCSRepository.from_env(source=self)
+        return ScreenTimeLocalRepository.from_env(source=self)
 
     def audit(
         self, repository: RawRepository, observations: Sequence[RawObject], now: datetime

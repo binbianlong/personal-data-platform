@@ -37,6 +37,7 @@ def _environment(tmp_path: Path) -> dict[str, str]:
     )
     os.chmod(adc_path, 0o600)
     return {
+        "MOTHERDUCK_DATABASE": "production",
         "GCS_BUCKET": "screen-time-raw",
         "GOOGLE_APPLICATION_CREDENTIALS": str(adc_path),
         "GOOGLE_CLOUD_PROJECT": "synthetic-project",
@@ -82,15 +83,29 @@ def test_builds_secret_free_keepalive_launch_agent(tmp_path) -> None:
     environment = decoded["EnvironmentVariables"]
     assert environment["PDP_SCREEN_TIME_DEVICE_ALLOWLIST"] == f"{'a' * 64},{'b' * 64}"
     assert environment["PDP_COLLECTOR_POLL_SECONDS"] == "60"
-    assert environment["GOOGLE_CLOUD_PROJECT"] == "synthetic-project"
-    assert environment["GCS_BUCKET"] == "screen-time-raw"
-    assert environment["GOOGLE_APPLICATION_CREDENTIALS"] == str(
-        settings.google_application_credentials
-    )
-    assert environment["PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL"] == (
-        "collector@synthetic-project.iam.gserviceaccount.com"
-    )
+    assert environment["MOTHERDUCK_DATABASE"] == "production"
+    assert "GCS_BUCKET" not in environment
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in environment
+    assert "PDP_SCREEN_TIME_MOTHERDUCK_TOKEN" not in environment
     assert "PDP_PSEUDONYM_KEY_HEX" not in environment
+
+
+def test_local_collector_plist_needs_only_database_and_does_not_embed_token(tmp_path):
+    environment = _environment(tmp_path)
+    environment["MOTHERDUCK_DATABASE"] = "production"
+    environment["PDP_SCREEN_TIME_MOTHERDUCK_TOKEN"] = "synthetic-secret"
+    for name in (
+        "GOOGLE_CLOUD_PROJECT",
+        "GCS_BUCKET",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL",
+    ):
+        environment.pop(name)
+    settings = _settings(tmp_path, environ=environment)
+    emitted = plistlib.loads(build_launch_agent(settings))["EnvironmentVariables"]
+    assert emitted["MOTHERDUCK_DATABASE"] == "production"
+    assert "PDP_SCREEN_TIME_MOTHERDUCK_TOKEN" not in emitted
+    assert "GCS_BUCKET" not in emitted
 
 
 def test_preserves_collector_paths_in_launch_agent(tmp_path) -> None:
@@ -133,9 +148,9 @@ def test_writes_private_plist_and_log_directory(tmp_path) -> None:
     ("name", "value", "message"),
     [
         (
-            "PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL",
-            "other@synthetic-project.iam.gserviceaccount.com",
-            "target does not match",
+            "MOTHERDUCK_DATABASE",
+            "",
+            "MOTHERDUCK_DATABASE is required",
         ),
         ("PDP_SCREEN_TIME_DEVICE_ALLOWLIST", "raw-device-id", "HMAC-SHA-256"),
         ("PDP_COLLECTOR_POLL_SECONDS", "nan", "finite value"),
@@ -168,14 +183,6 @@ def test_python_executable_must_be_runnable(tmp_path) -> None:
             python_executable=not_executable,
             environ=_environment(tmp_path),
         )
-
-
-def test_collector_adc_file_must_be_private(tmp_path) -> None:
-    environment = _environment(tmp_path)
-    os.chmod(environment["GOOGLE_APPLICATION_CREDENTIALS"], 0o644)
-
-    with pytest.raises(ConfigurationError, match="mode 0600"):
-        _settings(tmp_path, environ=environment)
 
 
 def test_python_executable_preserves_virtual_environment_path(tmp_path, monkeypatch) -> None:

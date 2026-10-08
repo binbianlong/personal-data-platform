@@ -58,7 +58,10 @@ class SourceHealth:
 class SourceAdapter(RawCodec, Protocol):
     parser_version: str
     required_relations: tuple[str, ...]
-    retention_days: int
+
+    @property
+    def retention_days(self) -> int | None: ...
+
     lifecycle_grace_days: int
     dbt_selector: str
     monitor_name: str
@@ -135,7 +138,7 @@ def validate_runtime_policy(source: SourceAdapter) -> None:
         ("PDP_LIFECYCLE_GRACE_DAYS", source.lifecycle_grace_days),
     ):
         value = os.environ.get(name)
-        if value is not None and value != str(expected):
+        if source.retention_days is not None and value is not None and value != str(expected):
             raise ValueError(
                 f"{name} does not match {source.source_id}/{source.stream}: {expected}"
             )

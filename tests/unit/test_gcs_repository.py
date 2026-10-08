@@ -9,105 +9,12 @@ import google_crc32c
 import pytest
 from google.api_core.exceptions import Forbidden, NotFound, PreconditionFailed
 
+from personal_data_platform.sources.registry import get_source
 from personal_data_platform.sources.screen_time.raw import (
-    SCAN_MANIFEST_KEY,
-    CollectorDeviceManifest,
-    CollectorScanReceipt,
     ScreenTimeRawIdentity,
     sha256_hex,
 )
-from personal_data_platform.sources.screen_time.storage import ScreenTimeGCSRepository
-
-
-def test_mac_audit_requires_its_own_receipt_even_when_iphone_is_fresh() -> None:
-    from personal_data_platform.sources.registry import get_source
-    from personal_data_platform.sources.screen_time.audit import audit_source
-
-    now = datetime(2026, 9, 26, tzinfo=UTC)
-    client = FakeGCSClient()
-    phone_repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
-    mac_repository = ScreenTimeGCSRepository(
-        client=client,
-        bucket="synthetic-bucket",
-        source=get_source("screen_time", "app-usage"),
-    )
-    phone_receipt = CollectorScanReceipt("a" * 64, now, 1)
-    mac_receipt = CollectorScanReceipt("b" * 64, now, 1, stream="app-usage")
-    phone_repository.put_scan_receipt(phone_receipt)
-    phone_repository.put_device_manifest(CollectorDeviceManifest(("a" * 64,), now))
-    client.list_pages = [[_ListedBlob(phone_receipt.key, now)]]
-    mac_source = get_source("screen_time", "app-usage")
-    assert mac_source.audit(mac_repository, [], now).ok
-
-    mac_repository.put_device_manifest(
-        CollectorDeviceManifest(("b" * 64,), now, stream="app-usage")
-    )
-
-    health = audit_source(mac_repository, [], now)
-    assert not health.ok and health.details["missing_collector_receipt_count"] == 1
-
-    mac_repository.put_scan_receipt(mac_receipt)
-    client.list_pages[0].append(_ListedBlob(mac_receipt.key, now))
-    assert audit_source(mac_repository, [], now).ok
-
-
-def test_mac_audit_distinguishes_missing_manifest_from_explicit_deactivation() -> None:
-    from datetime import timedelta
-
-    from personal_data_platform.sources.registry import get_source
-
-    now = datetime(2026, 9, 26, tzinfo=UTC)
-    client = FakeGCSClient()
-    source = get_source("screen_time", "app-usage")
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket", source=source)
-    receipt = CollectorScanReceipt("b" * 64, now, 1, stream="app-usage")
-    repository.put_scan_receipt(receipt)
-    client.list_pages = [[_ListedBlob(receipt.key, now)]]
-    assert not source.audit(repository, [], now).ok
-
-    repository.put_device_manifest(
-        CollectorDeviceManifest((), now - timedelta(days=2), stream="app-usage")
-    )
-    health = source.audit(repository, [], now)
-    assert health.ok
-    assert health.details["collector_inactive"] is True
-
-
-def test_iphone_requires_manifest_until_explicitly_marked_inactive() -> None:
-    from datetime import timedelta
-
-    from personal_data_platform.sources.registry import get_source
-
-    now = datetime(2026, 9, 26, tzinfo=UTC)
-    client = FakeGCSClient()
-    source = get_source("screen_time", "app-in-focus")
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket", source=source)
-    assert not source.audit(repository, [], now).ok
-
-    repository.put_device_manifest(CollectorDeviceManifest((), now - timedelta(days=2)))
-    health = source.audit(repository, [], now)
-    assert health.ok
-    assert health.details["collector_inactive"] is True
-
-
-def test_mac_raw_without_manifest_is_not_treated_as_never_activated() -> None:
-    from personal_data_platform.sources.registry import get_source
-
-    now = datetime(2026, 9, 26, tzinfo=UTC)
-    source = get_source("screen_time", "app-usage")
-    repository = ScreenTimeGCSRepository(
-        client=FakeGCSClient(), bucket="synthetic-bucket", source=source
-    )
-    raw_key = ScreenTimeRawIdentity(
-        device_key="b" * 64,
-        stream="app-usage",
-        segment_key="c" * 64,
-        observed_at=now,
-        sha256="d" * 64,
-        schema_version=2,
-    ).object_key
-    raw = source.parse_raw_key(raw_key, storage_created_at=now, storage_generation=1)
-    assert not source.audit(repository, [raw], now).ok
+from personal_data_platform.storage.gcs import GCSRawRepository
 
 
 class _ListedBlob:
@@ -209,9 +116,9 @@ def _identity(observed_at: datetime, marker: str = "a") -> ScreenTimeRawIdentity
     )
 
 
-def test_store_raw_is_create_only_and_marks_precompressed_gzip() -> None:
+def test_put_compressed_raw_is_create_only_and_marks_precompressed_gzip() -> None:
     client = FakeGCSClient()
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
     raw_bytes = b"synthetic-segb"
     identity = ScreenTimeRawIdentity(
         device_key="1" * 64,
@@ -221,10 +128,9 @@ def test_store_raw_is_create_only_and_marks_precompressed_gzip() -> None:
         sha256=sha256_hex(raw_bytes),
     )
 
-    stored_key = repository.store_raw(identity, raw_bytes)
-
-    assert stored_key == identity.object_key
+    repository.put_compressed_raw(identity.object_key, gzip.compress(raw_bytes, mtime=0))
     assert len(client.bucket_ref.upload_calls) == 1
+    assert client.bucket_ref.upload_calls[0]["name"] == identity.object_key
     call = client.bucket_ref.upload_calls[0]
     assert gzip.decompress(call["data"]) == raw_bytes
     assert call["content_encoding"] == "gzip"
@@ -240,7 +146,7 @@ def test_store_raw_is_create_only_and_marks_precompressed_gzip() -> None:
 
 def test_put_raw_object_uses_upload_generation_without_get_or_list():
     client = FakeGCSClient()
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
     raw = b"synthetic-segb"
     identity = ScreenTimeRawIdentity(
         device_key="1" * 64,
@@ -258,7 +164,7 @@ def test_put_raw_object_uses_upload_generation_without_get_or_list():
 
 def test_create_precondition_failure_is_the_only_idempotent_existing_result() -> None:
     client = FakeGCSClient()
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
     key = _identity(datetime(2026, 8, 27, tzinfo=UTC)).object_key
     client.bucket_ref.upload_error = PreconditionFailed("already exists")
 
@@ -274,7 +180,7 @@ def test_get_raw_disables_gcs_content_transcoding() -> None:
     compressed = gzip.compress(b"synthetic-segb", mtime=0)
     identity = _identity(datetime(2026, 8, 27, tzinfo=UTC))
     client.bucket_ref.objects[identity.object_key] = compressed
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
 
     downloaded = repository.get_raw(identity.object_key, generation=7)
 
@@ -302,7 +208,7 @@ def test_list_raw_follows_pages_ignores_other_objects_and_sorts_replay_order() -
         ],
         [_ListedBlob(earlier.object_key, earlier_created)],
     ]
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
 
     observations = repository.list_raw()
 
@@ -319,7 +225,7 @@ def test_list_raw_rejects_missing_gcs_creation_time() -> None:
     client = FakeGCSClient()
     identity = _identity(datetime(2026, 8, 27, tzinfo=UTC))
     client.list_pages = [[_ListedBlob(identity.object_key, None)]]
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
 
     with pytest.raises(RuntimeError, match="time_created"):
         repository.list_raw()
@@ -335,7 +241,7 @@ def test_list_raw_rejects_noncanonical_segment_objects() -> None:
             )
         ]
     ]
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
 
     with pytest.raises(RuntimeError, match="noncanonical"):
         repository.list_raw()
@@ -347,53 +253,10 @@ def test_list_raw_rejects_missing_gcs_generation() -> None:
     client.list_pages = [
         [_ListedBlob(identity.object_key, datetime(2026, 8, 27, tzinfo=UTC), None)]
     ]
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
 
     with pytest.raises(RuntimeError, match="generation"):
         repository.list_raw()
-
-
-def test_scan_receipt_replaces_fixed_key_and_reads_latest_blob_by_name() -> None:
-    client = FakeGCSClient()
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
-    receipt = CollectorScanReceipt(
-        device_key="1" * 64,
-        completed_at=datetime(2026, 8, 27, tzinfo=UTC),
-        segment_count=3,
-    )
-
-    repository.put_scan_receipt(receipt)
-
-    call = client.bucket_ref.upload_calls[0]
-    assert call["name"] == receipt.key
-    assert call["content_type"] == "application/json"
-    assert "if_generation_match" not in call
-    assert b"synthetic" not in call["data"]
-
-    client.list_pages = [[_ListedBlob(receipt.key, datetime(2026, 8, 27, tzinfo=UTC))]]
-    assert repository.list_scan_receipts() == [receipt]
-    assert client.bucket_ref.download_calls[-1] == {
-        "name": receipt.key,
-        "generation": None,
-        "raw_download": True,
-    }
-
-
-def test_device_manifest_replaces_fixed_key_and_missing_is_explicit() -> None:
-    client = FakeGCSClient()
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
-    manifest = CollectorDeviceManifest(
-        device_keys=("1" * 64,),
-        completed_at=datetime(2026, 8, 27, tzinfo=UTC),
-    )
-
-    assert repository.get_device_manifest() is None
-    repository.put_device_manifest(manifest)
-
-    call = client.bucket_ref.upload_calls[-1]
-    assert call["name"] == SCAN_MANIFEST_KEY
-    assert call["content_type"] == "application/json"
-    assert repository.get_device_manifest() == manifest
 
 
 def test_registered_screen_time_stream_is_filtered_without_failing_selected_stream(
@@ -418,7 +281,7 @@ def test_registered_screen_time_stream_is_filtered_without_failing_selected_stre
             _ListedBlob(selected.object_key, selected.observed_at),
         ]
     ]
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
 
     assert [raw.key for raw in repository.list_raw()] == [selected.object_key]
     source = registry.get_source()
@@ -437,7 +300,7 @@ def test_gcs_rejects_unregistered_stream_and_unknown_schema() -> None:
     for key in source_keys:
         client = FakeGCSClient()
         client.list_pages = [[_ListedBlob(key, identity.observed_at)]]
-        repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+        repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
         with pytest.raises(RuntimeError, match="noncanonical"):
             repository.list_raw()
 
@@ -452,7 +315,7 @@ def test_raw_codec_rejects_unknown_schema() -> None:
 
 def test_gcs_rejects_foreign_listing_prefix_before_cloud_access() -> None:
     client = FakeGCSClient()
-    repository = ScreenTimeGCSRepository(client=client, bucket="synthetic-bucket")
+    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
     with pytest.raises(ValueError, match="selected source namespace"):
         repository.list_raw("raw/another_source/v1/")
     assert client.list_calls == []

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -12,12 +13,12 @@ from personal_data_platform.loader.deadline import interrupt_after
 from personal_data_platform.loader.job import (
     LOADER_LEASE_SECONDS,
     run_loader,
-    run_loader_objects,
 )
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import (
     RawRepository,
     SourceAdapter,
+    SourceHealth,
     list_source_raw,
     selected_prefixes,
     validate_runtime_policy,
@@ -101,8 +102,14 @@ def run_reconciliation(
     source = source or get_source()
     if selected_prefixes(source, prefix) != source.raw_prefixes:
         raise ValueError("reconciliation must audit every canonical prefix for the source stream")
-    raw_retention = timedelta(days=source.retention_days)
-    lifecycle_overdue = timedelta(days=source.retention_days + source.lifecycle_grace_days)
+    raw_retention = (
+        timedelta(days=source.retention_days) if source.retention_days is not None else None
+    )
+    lifecycle_overdue = (
+        timedelta(days=source.retention_days + source.lifecycle_grace_days)
+        if source.retention_days is not None
+        else None
+    )
     started_at = _aware_utc(now or datetime.now(UTC))
     if started_at is None:
         raise ValueError("reconciliation time must be timezone-aware")
@@ -147,6 +154,19 @@ def run_reconciliation(
         raw_keys = set(raw_by_key)
         states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
 
+    if raw_retention is None:
+        current_keys = {
+            row[0]
+            for row in warehouse.query_rows(
+                "SELECT object_key FROM ops.screen_time_segment WHERE source_stream = ?",
+                [source.stream],
+            )
+        }
+        states = {
+            key: value
+            for key, value in states.items()
+            if key in raw_keys or key in current_keys or value.status != "succeeded"
+        }
     checked_at = started_at if now is not None else datetime.now(UTC)
     succeeded_keys = warehouse.succeeded_keys_for(raw_refs, parser_version=parser_version)
     failed_keys = _active_status_keys(states, "failed")
@@ -168,7 +188,7 @@ def run_reconciliation(
             unrecoverable_uningested.add(key)
         elif created_at is None:
             unknown_creation_time.add(key)
-        elif created_at <= checked_at - raw_retention:
+        elif raw_retention is not None and created_at <= checked_at - raw_retention:
             expected_expired.add(key)
         else:
             premature_missing.add(key)
@@ -179,9 +199,9 @@ def run_reconciliation(
         created_at = _aware_utc(value.retention_origin)
         if created_at is None:
             unknown_creation_time.add(key)
-        elif created_at <= checked_at - lifecycle_overdue:
+        elif lifecycle_overdue is not None and created_at <= checked_at - lifecycle_overdue:
             overdue_deletion.add(key)
-        elif created_at <= checked_at - raw_retention:
+        elif raw_retention is not None and created_at <= checked_at - raw_retention:
             lifecycle_lag.add(key)
 
     source_health = source.audit(repository, raw_refs, checked_at)
@@ -302,6 +322,38 @@ def run_reconciliation(
     return result
 
 
+def _audit_screen_time_heartbeat(
+    warehouse: Warehouse, source: SourceAdapter, now: datetime
+) -> SourceHealth:
+    """Cloud jobs check only collector-owned success; they never renew it."""
+    from personal_data_platform.sources.screen_time.audit import COLLECTOR_FRESHNESS, MAX_CLOCK_SKEW
+
+    rows = warehouse.query_rows(
+        "SELECT succeeded_at, details FROM ops.heartbeat WHERE monitor_name = ?",
+        [source.monitor_name],
+    )
+    if not rows:
+        return SourceHealth(False, {"collector_heartbeat_missing": True})
+    succeeded_at, serialized = rows[0]
+    try:
+        details = json.loads(str(serialized))
+        scan_at = _aware_utc(datetime.fromisoformat(details["scan_completed_at"]))
+        loaded_at = _aware_utc(succeeded_at)
+        ok = all(
+            value is not None and now - COLLECTOR_FRESHNESS <= value <= now + MAX_CLOCK_SKEW
+            for value in (scan_at, loaded_at)
+        )
+        return SourceHealth(
+            ok,
+            {
+                "collector_inactive": details.get("collector_inactive") is True,
+                "collector_heartbeat_stale": not ok,
+            },
+        )
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return SourceHealth(False, {"collector_heartbeat_invalid": True})
+
+
 def run_reconciliation_from_env() -> int:
     return _run_daily_reconciliation()
 
@@ -364,17 +416,6 @@ def _run_daily_reconciliation() -> int:
                     "manual Fitbit repair required",
                     extra={"event": "fitbit_manual_repair", **gap},
                 )
-        inventories = []
-        for source in sources:
-            stage = "loader:" + source.stream
-            remaining()
-            repository = source.repository_from_env()
-            refs = tuple(list_source_raw(repository, source))
-            inventories.append((source, repository, refs))
-            if not run_loader_objects(
-                repository, warehouse, refs, source=source, _lease_owner=owner, _deadline=deadline
-            ).ok:
-                return 1
         stage = "fitbit"
         repair = run_daily_repair(
             now=now, warehouse=warehouse, lease_owner=owner, timeout_seconds=remaining()
@@ -384,20 +425,17 @@ def _run_daily_reconciliation() -> int:
         stage = "dbt"
         if run_dbt_from_env(lease_owner=owner, timeout_seconds=remaining()):
             return 1
-        for source, repository, refs in inventories:
+        for source in sources:
             stage = "audit:" + source.stream
             remaining()
-            result = run_reconciliation(
-                repository,
-                warehouse,
-                source=source,
-                raw_objects=refs,
-                repair_missing=False,
-                heartbeat=_no_external_heartbeat,
-                _lease_owner=owner,
-                publish_success=False,
-            )
-            if not result.ok:
+            health = _audit_screen_time_heartbeat(warehouse, source, datetime.now(UTC))
+            relations = _relation_names(warehouse)
+            if (
+                not health.ok
+                or set(source.required_relations) - relations
+                or _failed_relation_queries(warehouse, relations, source.required_relations)
+            ):
+                LOGGER.error("Screen Time audit failed: %s", source.stream)
                 return 1
         remaining()
         payload: dict[str, object] = {
@@ -410,8 +448,7 @@ def _run_daily_reconciliation() -> int:
         details["last_completed_target_date"] = target_date.isoformat()
         warehouse.connection.execute("BEGIN TRANSACTION")
         try:
-            for name in ("daily", *(source.monitor_name for source in sources)):
-                warehouse.publish_heartbeat(name, owner, payload)
+            warehouse.publish_heartbeat("daily", owner, payload)
             warehouse.finish_job(owner, succeeded=True, details=details)
             remaining()
             warehouse.connection.execute("COMMIT")

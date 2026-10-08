@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     configure_screen_time(commands.add_parser("screen-time", help="inspect or collect Screen Time"))
 
-    loader = commands.add_parser("loader", help="load pending GCS Raw into MotherDuck")
+    loader = commands.add_parser("loader", help="load saved Raw into MotherDuck")
     dbt = commands.add_parser("dbt", help="apply analytics models")
     commands.add_parser("reconciliation", help="run all daily ingestion, repair and audit stages")
     commands.add_parser("preflight", help="validate cloud runtime connectivity")

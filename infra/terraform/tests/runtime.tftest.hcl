@@ -14,7 +14,7 @@ variables {
 run "runtime_keeps_backups" {
   command = plan
   assert {
-    condition     = google_storage_bucket.raw.location == "us-central1" && !google_storage_bucket.raw.force_destroy && google_storage_bucket.raw.soft_delete_policy[0].retention_duration_seconds == 0 && one(one(google_storage_bucket.raw.lifecycle_rule).condition).age == 90
+    condition     = google_storage_bucket.raw.location == "us-central1" && !google_storage_bucket.raw.force_destroy && google_storage_bucket.raw.soft_delete_policy[0].retention_duration_seconds == 0 && length(google_storage_bucket.raw.lifecycle_rule) == 0
     error_message = "Retained legacy Screen Time Raw must stay in place with bounded retention."
   }
 }

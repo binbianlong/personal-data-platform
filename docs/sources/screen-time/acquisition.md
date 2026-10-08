@@ -24,15 +24,16 @@ Macは`platform = 3 AND me = 1`の行がちょうど1件あることを確認し
 `PDP_PSEUDONYM_KEY_HEX`を設定した場合は環境変数を優先する。32 bytes以上のhex値を使う。
 secretの変更は過去のdevice / segment keyとの同一性を失うため、通常のcredential更新では変更しない。
 
-GCS認証は専用Collector Service AccountをimpersonateするADCを使う。[運用](operations.md#launchagent)に従って設定する。
+MotherDuck writer tokenはKeychain service `personal-data-platform`、account `screen-time-motherduck-token`から読む。
+一時overrideは`PDP_SCREEN_TIME_MOTHERDUCK_TOKEN`。接続先は`MOTHERDUCK_DATABASE`で指定し、CollectorにGCS認証は不要である。
 
 ## SEGB container
 
 SEGB segmentはrecord metadata（data offset・state・creation time）とprotobuf payloadを持つ。
 MIT Licenseの`ccl-segb`互換decoderをcommit `23c3f7d3d969a79627b738ba0a2486c31d675753`へ固定し、parser versionとともに記録する。
 
-同じ端末・親directoryに数値名がより大きい後続segmentがある場合だけ完成扱いにする。
-通常directoryと`tombstone`を含む各子directoryは独立に判定する。OSの完成通知ではなく、最新segmentは数日以上待つ場合もある。
+Collectorは最新segmentも毎回読み取る。read前後のinode・size・mtimeが一致したbytesを既存decoderで検査し、
+構造不整合・書込途中のCRC不一致があるsnapshotは保存・取り込みを見送る。次の30分周期に再試行する。
 
 元bytesとsegment名・種別をv2 envelopeへ格納する。envelope全体のSHA-256と`mtime=0`のgzipを使う。
 object keyと疑似化keyは[データモデル](data-model.md)に従う。
@@ -56,7 +57,8 @@ event_at_unix = cf_absolute_time + 978307200
 
 表示用アプリ名はpayloadに含まれない場合がある。Bundle IDと表示名の対応は取得処理とは別に管理する。
 
-未知protobuf fieldはRawに保持する。削除済み・CRC不一致は本文を要求せず、元bytesとメタデータを保持する。
+未知protobuf fieldはRawに保持する。削除済みrecordは元bytesとメタデータを保持する。
+既存のCRC不一致RawはLoaderの互換処理を維持するが、Collectorは新しいCRC不一致snapshotを保存しない。
 CRC正常の通常イベント・tombstoneの既知fieldやSEGB構造をdecodeできなければ、観測全体を取込失敗とする。
 
 SEGB v2のtrailerはdecode前にrecord stateを検査する。未知stateは既存の有効状態を維持して観測全体を失敗させる。
@@ -74,7 +76,7 @@ SEGB v2のtrailerはdecode前にrecord stateを検査する。未知stateは既�
 | 5 | uint32、省略可 | 意味が未確定のfield。正規化せずRawに保持 |
 
 `app-usage-v1`をparser versionとして記録する。削除済みrecord、CRC不一致、tombstone、
-最新segmentの待機はiPhoneと同じ処理を使う。Webサイト利用とmacOS設定画面の数値一致は対象外である。
+最新segmentの検査はiPhoneと同じ処理を使う。Webサイト利用とmacOS設定画面の数値一致は対象外である。
 
 ### App.InFocus診断command
 

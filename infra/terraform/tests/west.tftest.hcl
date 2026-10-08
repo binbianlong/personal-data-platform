@@ -151,8 +151,8 @@ run "runtime_storage_and_execution_contract" {
     error_message = "Receiver credentials and publisher access must be isolated from acquisition OAuth and subscriber access."
   }
   assert {
-    condition     = anytrue([for rule in google_storage_bucket.raw_west.lifecycle_rule : one(rule.condition).days_since_custom_time == 90]) && google_storage_bucket.raw_west.soft_delete_policy[0].retention_duration_seconds == 0 && google_storage_bucket.preflight_west.soft_delete_policy[0].retention_duration_seconds == 0
-    error_message = "Raw expiration must honor retained custom times without soft-delete storage."
+    condition     = length(google_storage_bucket.raw_west.lifecycle_rule) == 1 && alltrue([for rule in google_storage_bucket.raw_west.lifecycle_rule : one(rule.condition).age == 90 && one(one(rule.condition).matches_prefix) == "raw/fitbit/v3/"]) && google_storage_bucket.raw_west.soft_delete_policy[0].retention_duration_seconds == 0 && google_storage_bucket.preflight_west.soft_delete_policy[0].retention_duration_seconds == 0
+    error_message = "Only Fitbit Raw uses GCS expiration; soft-delete storage must remain disabled."
   }
 }
 run "reject_legacy_image_in_west" {

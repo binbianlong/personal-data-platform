@@ -151,7 +151,7 @@ def test_rebuild_inventory_is_order_independent() -> None:
     assert inventory["first_observed_at"] == first.isoformat()
     assert inventory["first_storage_created_at"] == (first + timedelta(hours=1)).isoformat()
     assert inventory["last_storage_created_at"] == (first + timedelta(days=2)).isoformat()
-    assert inventory["retention_days"] == 90
+    assert inventory["retention_days"] is None
     assert inventory["full_history_rebuild_guaranteed"] is False
 
 
@@ -192,7 +192,7 @@ def test_rebuild_ignores_tables_in_other_attached_databases() -> None:
 
 def test_rebuild_dry_run_uses_canonical_raw_prefix(tmp_path, monkeypatch) -> None:
     prefixes = []
-    rebuild_adc = _configure_rebuild_adc(tmp_path, monkeypatch)
+    _configure_rebuild_adc(tmp_path, monkeypatch)
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "ambient-collector-adc.json")
 
     class Repository:
@@ -203,28 +203,17 @@ def test_rebuild_dry_run_uses_canonical_raw_prefix(tmp_path, monkeypatch) -> Non
     monkeypatch.setenv("GCS_RAW_PREFIX", "test/not-screen-time/")
 
     def repository_from_env(**_):
-        assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == str(rebuild_adc.resolve())
+        assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == "ambient-collector-adc.json"
         return Repository()
 
     monkeypatch.setattr(
-        "personal_data_platform.sources.screen_time.storage.ScreenTimeGCSRepository.from_env",
+        "personal_data_platform.sources.screen_time.storage.ScreenTimeLocalRepository.from_env",
         repository_from_env,
     )
 
     assert run_rebuild_from_env(dry_run=True, target_db=None) == 0
     assert prefixes == ["raw/screen_time/v1/", "raw/screen_time/v2/"]
     assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == "ambient-collector-adc.json"
-
-
-def test_rebuild_rejects_adc_for_a_different_service_account(tmp_path, monkeypatch) -> None:
-    _configure_rebuild_adc(tmp_path, monkeypatch)
-    monkeypatch.setenv(
-        "PDP_REBUILD_SERVICE_ACCOUNT_EMAIL",
-        "different@synthetic-project.iam.gserviceaccount.com",
-    )
-
-    with pytest.raises(ValueError, match="target does not match"):
-        run_rebuild_from_env(dry_run=True, target_db=None)
 
 
 @pytest.mark.parametrize("dbt_fails", [False, True])
@@ -434,6 +423,9 @@ def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(mon
 )
 def test_rebuild_rejects_deployment_retention_drift_before_cloud_access(monkeypatch, name, value):
     monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        "personal_data_platform.sources.screen_time.adapter.ScreenTimeSource.retention_days", 90
+    )
     monkeypatch.setattr(
         "personal_data_platform.sources.screen_time.adapter.ScreenTimeSource.repository_from_env",
         lambda _: pytest.fail("repository must not open with mismatched retention"),

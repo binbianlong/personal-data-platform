@@ -1,51 +1,32 @@
-import gzip
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
-from personal_data_platform.sources.screen_time.cli import _collect_all
+from personal_data_platform.sources.registry import get_source
+from personal_data_platform.sources.screen_time.cli import _collect_all, _load_pending
 from personal_data_platform.sources.screen_time.collector import (
     BiomeMacAppUsageSource,
     BiomeScreenTimeSource,
     ScreenTimeCollector,
 )
-from personal_data_platform.sources.screen_time.raw import build_device_key, decode_segment_envelope
+from personal_data_platform.sources.screen_time.raw import build_device_key
 from personal_data_platform.sources.screen_time.state import CollectorState
+from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
+from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from tests.screen_time_helpers import event, mac_usage_event, segb
 
+NOW = datetime(2026, 10, 8, tzinfo=UTC)
 SECRET = b"x" * 32
-NOW = datetime(2026, 9, 26, tzinfo=UTC)
 
 
-class Uploader:
-    def __init__(self):
-        self.raw = []
-        self.receipts = []
-        self.manifests = []
-        self.fail_stream = None
-        self.fail_manifest_stream = None
-
-    def put_compressed_raw(self, key, compressed_bytes):
-        self.raw.append((key, compressed_bytes))
-        if self.fail_stream and f"/{self.fail_stream}/" in key:
-            raise RuntimeError("synthetic upload failure")
-
-    def put_scan_receipt(self, receipt):
-        self.receipts.append(receipt)
-
-    def put_device_manifest(self, manifest):
-        if self.fail_manifest_stream == manifest.stream:
-            raise RuntimeError("synthetic manifest failure")
-        self.manifests.append(manifest)
-
-
-def _collectors(tmp_path, *, clock=lambda: NOW):
-    sync_db = tmp_path / "sync.db"
-    with sqlite3.connect(sync_db) as connection:
-        connection.execute(
+def _collectors(tmp_path):
+    sync = tmp_path / "sync.db"
+    with sqlite3.connect(sync) as c:
+        c.execute(
             "CREATE TABLE DevicePeer (device_identifier TEXT, name TEXT, model TEXT, platform INT, me INT)"
         )
-        connection.executemany(
+        c.executemany(
             "INSERT INTO DevicePeer VALUES (?, ?, ?, ?, ?)",
             [("phone", "Phone", "P", 2, 0), ("mac", "Mac", "M", 3, 1)],
         )
@@ -53,177 +34,73 @@ def _collectors(tmp_path, *, clock=lambda: NOW):
     local = tmp_path / "local"
     remote.mkdir(parents=True)
     local.mkdir()
-    for directory in (remote, local):
-        (directory / "100").write_bytes(b"complete")
-        (directory / "200").write_bytes(b"active")
+    (remote / "100").write_bytes(segb(event("phone.app"))[0])
+    (local / "100").write_bytes(segb(mac_usage_event("mac.app", 1000, start=True))[0])
     state = CollectorState(tmp_path / "state.db")
-    uploader = Uploader()
-    phone = ScreenTimeCollector(
-        source=BiomeScreenTimeSource(sync_db_path=sync_db, remote_dir=remote.parent),
-        state=state,
-        uploader=uploader,
-        pseudonym_key=SECRET,
-        allowed_device_keys=frozenset({build_device_key(SECRET, "phone")}),
-        destination="synthetic-bucket",
-        clock=clock,
-    )
-    mac = ScreenTimeCollector(
-        source=BiomeMacAppUsageSource(sync_db_path=sync_db, local_dir=local),
-        state=state,
-        uploader=uploader,
-        pseudonym_key=SECRET,
-        allowed_device_keys=frozenset({build_device_key(SECRET, "mac")}),
-        destination="synthetic-bucket",
-        clock=clock,
-    )
-    return phone, mac, uploader, state
+    repo = ScreenTimeLocalRepository(state=state, source=get_source())
+    collectors = [
+        ScreenTimeCollector(
+            source=source,
+            state=state,
+            uploader=repo,
+            pseudonym_key=SECRET,
+            allowed_device_keys=frozenset({build_device_key(SECRET, device)}),
+            destination=str(state.path),
+            clock=lambda: NOW,
+        )
+        for device, source in [
+            ("phone", BiomeScreenTimeSource(sync_db_path=sync, remote_dir=remote.parent)),
+            ("mac", BiomeMacAppUsageSource(sync_db_path=sync, local_dir=local)),
+        ]
+    ]
+    return collectors, state, repo
 
 
-def test_mac_and_iphone_upload_separate_streams_and_control_keys(tmp_path) -> None:
-    phone, mac, uploader, state = _collectors(tmp_path)
-    assert _collect_all([phone, mac]).uploaded == 2
-    assert {key.split("/")[4] for key, _ in uploader.raw} == {"app-in-focus", "app-usage"}
-    assert all(
-        decode_segment_envelope(gzip.decompress(body))[0] == b"complete" for _, body in uploader.raw
-    )
-    assert {receipt.stream for receipt in uploader.receipts} == {"app-in-focus", "app-usage"}
-    assert {manifest.key for manifest in uploader.manifests} == {
-        "raw/screen_time/v1/_control/collector/active.json",
-        "raw/screen_time/v1/_control/collector/app-usage/active.json",
-    }
-    assert state.pending() == []
-    assert _collect_all([phone, mac]).skipped == 2
+def test_mac_and_iphone_share_state_and_keep_event_scopes_separate(tmp_path):
+    collectors, state, _ = _collectors(tmp_path)
+    assert _collect_all(collectors).deferred == 0
+    assert {p.identity.stream for p in state.pending()} == {"app-in-focus", "app-usage"}
+    wh = Warehouse(connect(WarehouseConfig(":memory:")))
+    wh.migrate()
+    try:
+        _load_pending(state, wh, now=NOW)
+        assert wh.query_rows(
+            "SELECT platform,count(*) FROM base.screen_time_event GROUP BY platform ORDER BY platform"
+        ) == [("ios", 1), ("macos", 1)]
+        assert state.pending() == []
+        assert _collect_all(collectors).skipped == 2
+    finally:
+        wh.close()
 
 
-def test_failed_mac_upload_does_not_prevent_phone_and_retries_only_mac(tmp_path) -> None:
-    phone, mac, uploader, state = _collectors(tmp_path)
-    uploader.fail_stream = "app-usage"
+def test_missing_mac_directory_does_not_prevent_phone_capture(tmp_path):
+    collectors, state, _ = _collectors(tmp_path)
+    (tmp_path / "local" / "100").unlink()
+    (tmp_path / "local").rmdir()
     with pytest.raises(ExceptionGroup):
-        _collect_all([mac, phone])
-    assert uploader.receipts[-1].stream == "app-in-focus"
-    pending = state.pending()
-    assert len(pending) == 1 and pending[0].identity.stream == "app-usage"
-    failed_key, failed_body = uploader.raw[0]
-
-    uploader.fail_stream = None
-    assert _collect_all([phone, mac]).retried == 1
-    assert (failed_key, failed_body) in uploader.raw
-    assert state.pending() == []
+        _collect_all(list(reversed(collectors)))
+    assert len(state.pending()) == 1
+    assert state.pending()[0].identity.stream == "app-in-focus"
 
 
-def test_disabled_mac_manifest_is_published_even_if_iphone_collection_fails(tmp_path) -> None:
-    phone, _, uploader, state = _collectors(tmp_path)
-    uploader.fail_stream = "app-in-focus"
-
-    with pytest.raises(ExceptionGroup, match="Screen Time collection failed") as error:
-        _collect_all(
-            [phone],
-            inactive_streams=("app-usage",),
-            inactive_uploader=uploader,
-            inactive_state=state,
-            destination="synthetic-bucket",
-        )
-
-    assert "app-in-focus" in str(error.value.exceptions[0])
-    assert uploader.manifests[-1].stream == "app-usage"
-    assert uploader.manifests[-1].device_keys == ()
-
-
-def test_mac_only_collection_marks_iphone_explicitly_inactive(tmp_path) -> None:
-    _, mac, uploader, state = _collectors(tmp_path)
-
-    assert (
-        _collect_all(
-            [mac],
-            inactive_streams=("app-in-focus",),
-            inactive_uploader=uploader,
-            inactive_state=state,
-            destination="synthetic-bucket",
-        ).uploaded
-        == 1
-    )
-    assert uploader.manifests[-1].stream == "app-in-focus"
-    assert uploader.manifests[-1].device_keys == ()
-
-
-def test_mac_source_requires_exactly_one_local_device(tmp_path) -> None:
-    sync_db = tmp_path / "sync.db"
-    with sqlite3.connect(sync_db) as connection:
-        connection.execute(
-            "CREATE TABLE DevicePeer (device_identifier TEXT, name TEXT, model TEXT, platform INT, me INT)"
-        )
-    source = BiomeMacAppUsageSource(sync_db_path=sync_db, local_dir=tmp_path)
-    with pytest.raises(RuntimeError, match="exactly one"):
-        source.list_devices()
-
-
-def test_both_streams_keep_control_clocks_across_sleep_and_preserve_newest_segment(tmp_path):
-    now = [NOW]
-    phone, mac, uploader, _ = _collectors(tmp_path, clock=lambda: now[0])
-    assert _collect_all([phone, mac]).deferred == 2
-    now[0] += timedelta(hours=23, minutes=59)
-    for path in (tmp_path / "remote" / "phone" / "100", tmp_path / "local" / "100"):
-        path.write_bytes(b"changed")
-    stats = _collect_all([phone, mac])
-    assert stats.uploaded == stats.deferred == 2
-    assert len(uploader.receipts) == len(uploader.manifests) == 2
-    now[0] = NOW + timedelta(hours=24)
-    _collect_all([phone, mac])
-    assert len(uploader.receipts) == len(uploader.manifests) == 4
-    now[0] += timedelta(days=7)
-    assert _collect_all([phone, mac]).deferred == 2
-    assert len(uploader.receipts) == len(uploader.manifests) == 6
-    assert all(receipt.completed_at == now[0] for receipt in uploader.receipts[-2:])
-
-
-@pytest.mark.parametrize("stream", ["app-in-focus", "app-usage"])
-def test_inactive_manifest_is_durable_and_reactivation_publishes_immediately(tmp_path, stream):
-    now = [NOW]
-    phone, mac, uploader, state = _collectors(tmp_path, clock=lambda: now[0])
-    collector = phone if stream == "app-in-focus" else mac
-    collector.collect_once()
-    pending = state.prepare(
-        device_key="f" * 64,
-        stream=stream,
-        segment_key="b" * 64,
-        raw_bytes=b"pending",
-        observed_at=NOW,
-    )
-    now[0] += timedelta(minutes=30)
-    kwargs = dict(
-        inactive_streams=(stream,),
-        inactive_uploader=uploader,
-        inactive_state=CollectorState(state.path),
-        destination="synthetic-bucket",
-        clock=lambda: now[0],
-    )
-    _collect_all([], **kwargs)
-    assert uploader.manifests[-1].device_keys == ()
-    assert state.pending()[0].compressed_payload == pending.compressed_payload
-    _collect_all([], **kwargs)
-    assert len(uploader.manifests) == 2
-    now[0] += timedelta(minutes=30)
-    assert collector.collect_once().retried == 1
-    assert uploader.manifests[-1].device_keys
-    assert uploader.receipts[-1].completed_at == now[0]
-    assert len(uploader.manifests) == 3
-    assert len(uploader.receipts) == 2
-
-
-def test_inactive_publication_failure_retries_next_scan(tmp_path):
-    _, _, uploader, state = _collectors(tmp_path)
-    kwargs = dict(
-        inactive_streams=("app-usage",),
-        inactive_uploader=uploader,
+def test_mac_only_collection_records_explicit_iphone_inactivity(tmp_path):
+    collectors, state, repo = _collectors(tmp_path)
+    _collect_all(
+        [collectors[1]],
+        inactive_streams=("app-in-focus",),
+        inactive_uploader=repo,
         inactive_state=state,
-        destination="synthetic-bucket",
+        destination=str(state.path),
         clock=lambda: NOW,
     )
-    uploader.fail_manifest_stream = "app-usage"
-    with pytest.raises(ExceptionGroup):
-        _collect_all([], **kwargs)
-    uploader.fail_manifest_stream = None
-    _collect_all([], **kwargs)
-    assert len(uploader.manifests) == 1
-    _collect_all([], **kwargs)
-    assert len(uploader.manifests) == 1
+    assert repo.get_device_manifest().device_keys == ()
+
+
+def test_mac_source_requires_exactly_one_local_device(tmp_path):
+    sync = tmp_path / "sync.db"
+    with sqlite3.connect(sync) as c:
+        c.execute(
+            "CREATE TABLE DevicePeer (device_identifier TEXT, name TEXT, model TEXT, platform INT, me INT)"
+        )
+    with pytest.raises(RuntimeError, match="exactly one"):
+        BiomeMacAppUsageSource(sync_db_path=sync, local_dir=tmp_path).list_devices()

@@ -35,47 +35,25 @@ pdp migrate --database /private/path/scratch.duckdb
 
 `--database`を省略すると`MOTHERDUCK_DATABASE`・`MOTHERDUCK_TOKEN`の接続先へ適用する。
 各SQLとchecksum記録は同じtransactionで確定する。再実行は適用済みの一致を確認し、変更は新しいforward migrationへ追加する。
-既存SQLや旧DBの台帳は変更しない。旧地域・旧取得方式のmigrationを持つDBには適用を拒否する。
-空の移行先DBへ[Rebuild](#rebuild)し、FitbitをAPIから再取得してから接続先を切り替える。
+適用済みSQLや台帳は変更しない。checksumの不一致や未対応のスキーマ履歴があるDBへの適用は拒否する。
+再構築には空のscratch DBを使い、[Rebuild](#rebuild)の保持範囲を確認する。
 
-現行履歴内の追加DDLは両Schedulerを止め、実行中Jobの終了を確認してから適用する。
-日次全段階の成功を確認してSchedulerを再開する。
-
-### 旧スキーマからの切替
-
-1. 両Schedulerを停止し、実行中Jobと`loader` leaseの終了を確認する。receiverは通知を蓄積できる。
-2. 旧DBを保持したまま、空の移行先DBを用意する。新imageを旧DBへ接続して稼働させない。
-3. 下記Rebuildの手順でScreen Timeの両streamを移行先へ再生する。
-4. `MOTHERDUCK_DATABASE`を移行先へ向け、`pdp fitbit sync --from <開始日> --to <終了日の翌日>`で必要なFitbit全期間を取得する。
-   途中で止まった場合は出力された最初の未完了日から続ける。
-5. `pdp dbt --source fitbit`で両sourceの集計・検証を実行し、Screen Timeのイベント・補助状態・集計を旧DBと比較する。
-6. 新DBのread-only shareと分析用接続を設定し、処理JobのDB設定とimageを同時に切り替える。
-   旧imageを新DBに向けるrollbackは行わず、戻す場合は旧DB・旧imageの組み合わせへ戻す。
-7. 独立環境のpreflightと新DBの日次全段階を確認してSchedulerを再開する。旧DBの削除は切替確認後に行う。
-
-Raw保持範囲だけで復元できないデータは再取得できる期間を確認する。
-新DBでの再構築が終わるまで、旧DBのtableとmigration台帳を削除しない。
-
-2026-10-07に`personal_data_platform_west`から`personal_data_platform`へ切り替えた。
-runtime imageのソースは`5cd09e2`で、移行台帳は`001_initial.sql`の1件。
-旧DB時点のScreen Time 80,386イベント・補助状態・日次集計の一致を確認してから、最新Raw 2件も反映した。
-Fitbitは2026-09-29〜2026-10-07の5種別をAPIから取得し、Cloud Runの日次全段階・dbt 39件・外部成功pingを確認した。
-分析接続では全10 viewの参照と書き込み拒否、preflightでは本番DB・shareへの接続拒否を確認した。
-旧DBと`deployed-rollback`タグの旧imageを保持し、戻す場合は両方を組にして接続設定を戻す。
-切替時の比較結果・image digest・Terraform state backupは`var/schema-cutover/2026-10-07/`に保存する。
-自動Deployの再開前に、`main`へ新スキーマと切替後の接続設定を反映する。
+追加DDLはCollectorと両Schedulerを止め、実行中Jobと`loader` leaseの終了を確認してから適用する。
+Collectorは起動後にスキーマを初期化し、成功後の周期では省略する。DDL・コード・接続設定の変更後は再起動し、
+取込成功と日次全段階の成功を確認して通常運用を再開する。
 
 ## 収集・日次処理
 
 毎時15分のJobは通知を集め、完全取得したRawとDBが確定した単位だけackする。
 `pdp reconciliation`は日次04:10 Asia/Tokyoの処理全体を実行する。
 
-1. Screen Time両streamのRawをgeneration指定で取り込む。
-2. 未取込Fitbit Rawを再生し、5種別のTokyo直近7完了日を再照合する。
-3. dbt run/testを実行する。
-4. Screen Time両streamのRaw・台帳・relation・48時間のcollector鮮度を監査する。
-5. 完了対象日と内部daily/両stream heartbeatを同じtransactionでcommitする。
-6. Healthchecksへ外部成功pingを1回送る。
+1. 未取込Fitbit Rawを再生し、5種別のTokyo直近7完了日を再照合する。
+2. dbt run/testを実行する。
+3. Macが更新したScreen Time両streamの取込成功heartbeatを48時間の鮮度とDB relationで監査する。
+4. 完了対象日と内部daily heartbeatを同じtransactionでcommitする。
+5. Healthchecksへ外部成功pingを1回送る。
+
+Screen Timeの収集・保存・取り込みはMacのCollectorが30分周期で実行する。日次Jobはstream heartbeatを更新しない。
 
 各Jobは1task/parallelism1。毎時50分・日次100分の予算で、単一`loader` leaseを125分保持する。
 競合はINFOで延期し、成功pingを送らない。dbt・手動取得・Loaderも同じleaseを使う。
@@ -95,8 +73,10 @@ gcloud logging read 'resource.type="cloud_run_job"' --project=<project-id> \
 
 ## Rebuild
 
-本番DBを空にせず、現在GCSに残るRawを別の空scratch DBへ再生する。
-Collectorのwrite-only ADCを再利用せず、Terraform output `rebuild_operator_service_account`のread-only SAを使う。
+本番DBを空にせず、保存中のRawを別の空scratch DBへ再生する。Screen TimeはMacのSQLiteを読むため、
+Collectorを停止してからinventoryを取得し、再生完了後に再開する。Screen TimeにGCS設定・ADCは不要である。
+
+FitbitのGCS RawをRebuildする場合だけ、Terraform output `rebuild_operator_service_account`のread-only SAを使う。
 
 ```bash
 export GOOGLE_CLOUD_PROJECT="health-data-pipeline-503813"
@@ -112,7 +92,7 @@ export PDP_REBUILD_GOOGLE_APPLICATION_CREDENTIALS="$CLOUDSDK_CONFIG/application_
 chmod 600 "$PDP_REBUILD_GOOGLE_APPLICATION_CREDENTIALS"
 ```
 
-ADCはimpersonated形式、現在user所有、mode 0600、指定SA一致を検証する。CollectorのADCは変更しない。
+Fitbit用ADCはimpersonated形式、現在user所有、mode 0600、指定SA一致を検証する。
 
 1. `pdp rebuild --source screen_time --all-streams --dry-run`で保持範囲とinventoryを確認する。
 2. writer tokenを安全なsecret sourceから`MOTHERDUCK_TOKEN`へ渡し、`pdp rebuild --source screen_time --all-streams --target-db <scratch-db> --allow-partial-history`を実行する。
@@ -126,5 +106,5 @@ ADCはimpersonated形式、現在user所有、mode 0600、指定SA一致を検�
 7日を超えたFitbitの空白は[Fitbitの期間指定補修](../sources/fitbit/operations.md)で補う。
 DB成功と外部pingが一致しない場合はrun_id・log・監査を照合する。外部送信失敗で先に確定した取込・期限切れ記録は巻き戻らない。
 
-復旧用backupは`var/west-migration/2026-10-05/`。旧Raw bucket・state backupは通常deployで削除しない。
-Screen TimeのDB復元はイベント・補助状態・台帳を同じ時点へ戻し、Rawだけで90日より古い履歴を復元できるとはみなさない。
+Screen TimeのDB復元はイベント・補助状態・台帳を同じ時点へ戻す。Rawは各元ファイルの最新版だけを保存するため、
+更新前の再解析やRawだけからの全履歴復元を保証しない。復元元のDB・backupは検証が終わるまで保持する。
