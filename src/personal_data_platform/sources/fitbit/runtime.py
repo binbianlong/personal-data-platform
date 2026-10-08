@@ -15,10 +15,8 @@ import uvicorn
 
 from personal_data_platform.config import secret_config
 from personal_data_platform.loader.job import JobAlreadyRunning
-from personal_data_platform.storage.gcs import GCSRawRepository
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
-from .adapter import FitbitSource
 from .api import HealthClient
 from .logging import configure_logging
 from .models import DATA_TYPES, DATE_TYPES, Window, date_cursor
@@ -55,7 +53,6 @@ def _acquisition_runner() -> AcquisitionRunner:
 
     oauth = GoogleOAuth.from_env()
     return AcquisitionRunner(
-        repository=GCSRawRepository.from_env(source=FitbitSource(version=3)),
         client=HealthClient(access_token=oauth),
         warehouse_factory=_warehouse,
         subject_key=required("PDP_FITBIT_SUBJECT_KEY"),
@@ -123,7 +120,7 @@ def sync_windows(start: datetime, end: datetime, data_types: tuple[str, ...]) ->
 def run_sync_from_env(
     *, start: datetime, end: datetime, data_types: tuple[str, ...] = DATA_TYPES
 ) -> int:
-    """Acquire an explicit range; progress lives in completed Raw and coverage."""
+    """Acquire an explicit range; progress lives in committed ranges and coverage."""
     from personal_data_platform.loader.job import LOADER_LEASE_SECONDS
 
     configure_logging()
