@@ -1,6 +1,6 @@
 # Personal Data Platform
 
-Screen TimeとFitbitを取得し、GCS Raw、MotherDuck、dbtで保存・分析する個人データ基盤。
+Screen TimeとFitbitを取得し、ローカルSQLite Raw・GCS Raw、MotherDuck、dbtで保存・分析する個人データ基盤。
 GCPは`us-west1`、MotherDuckは`us-west-2`を使う。運用と仕様は[ドキュメント](docs/README.md)を参照する。
 
 ## 開発環境
@@ -33,9 +33,10 @@ pdp fitbit sync --from YYYY-MM-DD --to YYYY-MM-DD
 `loader`・`rebuild`は省略時にiPhoneの`screen_time / app-in-focus`を選ぶ。
 単一streamは`--source screen_time --stream app-in-focus`または`app-usage`を指定する。
 `pdp dbt`は指定なしで全model、source/stream指定時は対応model/testを実行する。
-`pdp reconciliation`は両Screen Time stream・Fitbit補修・dbt・監査をまとめた日次処理である。
+`pdp reconciliation`はFitbit補修・dbtとMacのScreen Time取込成功記録の監査を行う日次処理である。
 
-Collectorは疑似化keyと専用ADCを使い、未完了の最新segmentは後続segmentが現れるまで保留する。
+Collectorは専用Keychain tokenを使い、最新segmentも検査してSQLiteへ保存後にMotherDuckへ直接取り込む。
+各ファイルの最新成功RawとpendingだけをMacに保持する。
 初期設定・LaunchAgent・休止・復旧は[Screen Time運用](docs/sources/screen-time/operations.md)、
 通知・API補修は[Fitbit運用](docs/sources/fitbit/operations.md)、
 DB更新・監視・Rebuildは[Platform運用](docs/platform/operations.md)に従う。
@@ -45,8 +46,8 @@ DB更新・監視・Rebuildは[Platform運用](docs/platform/operations.md)に�
 workflowの回帰テストにはBashとjqも必要となる。mypyは`src`をstrictモードで検証する。
 
 ```bash
-ruff check src tests
-ruff format --check src tests
+ruff check src tests scripts
+ruff format --check src tests scripts
 mypy src
 pytest
 docker build --tag personal-data-platform:dev .

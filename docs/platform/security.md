@@ -5,7 +5,8 @@
 - GCS bucketはUniform Bucket-Level AccessとPublic Access Preventionを有効にし、Google管理鍵で暗号化する。
 - Raw object key、GCS metadata、ログに、端末identifierやBundle IDなどの直接値を含めない。
 - ログへ出してよい識別情報は疑似化key、object hash、件数、error codeに限定する。
-- Rawの通常削除権限をCollector、Loader、Reconciliationへ与えない。
+- GCS Rawの通常削除権限をCollector、Loader、Reconciliationへ与えない。
+- MacのSQLiteとKeychainは現在userの権限で保持し、SQLiteは最新成功Rawの整理だけを行う。
 - productionと別のRawを使うtestはGCS bucketとMotherDuck databaseを分離し、権限も共有しない。
   preflightは専用bucketの`test/preflight/`と検証用databaseに権限を限定する。
 
@@ -16,26 +17,18 @@
 
 | 実行主体 | capability |
 |---|---|
-| Local Collector | 固定Raw prefixへのcreateとscan receipt prefix・固定manifest keyへのcreate / deleteだけ |
-| 共通runtime Service Account | 両sourceのRaw list / readとFitbit v3 Rawのcreate。毎時・日次Jobで共有 |
+| Local Collector | GCS権限なし。SQLite RawとMotherDuck writer tokenを使う |
+| 共通runtime Service Account | Fitbit v3 Rawのlist / read / create。毎時・日次Jobで共有 |
 | Preflight | preflight bucketへのwrite / read / listと作成generationのdeleteだけ |
 | Rebuild operator | 専用read-only Service Accountでproduction bucketへのlist / read |
 
-CollectorへRawのread、list、deleteを許可しない。control JSONの同名上書きに必要なdeleteはreceipt prefixと
-両streamの固定manifest keyだけへIAM conditionで限定する。keyの正本は
-[Screen Timeデータモデル](../sources/screen-time/data-model.md#collector-scan-receipt)を参照する。bucket IAM policyは
-Terraformでauthoritativeに管理し、projectの
-Viewer / Editor / Owner convenience valueによるobject accessを残さない。
-
-ローカルrebuildはCollector ADCを再利用せず、別のRebuild Service Accountをimpersonateする専用ADCを使う。
-このService AccountはRaw bucketのobject Viewerだけを持ち、write / delete権限を持たない。
+bucket IAM policyはTerraformでauthoritativeに管理し、projectのViewer / Editor / Owner convenience valueによるobject accessを残さない。
+Screen Time RebuildはCollectorを止めてローカルSQLiteを読む。Fitbit Rebuildは別のread-only Service Accountを使う。
 
 ## Secret
 
-Macでは疑似化secretをmacOS Keychainへ保存する。GCSには専用Collector Service Accountをimpersonateする
-project専用ADCを使い、Service Account keyを発行しない。ADCはmode `0600`で保存し、LaunchAgentの
-`GOOGLE_APPLICATION_CREDENTIALS`からだけ参照する。疑似化secretやcredentialをSQLite state、shell履歴、
-Git管理ファイルへ平文で保存しない。
+Macでは疑似化secretと専用MotherDuck writer tokenをmacOS Keychainへ保存する。CollectorにADCは不要である。
+secretをSQLite state、plist、shell履歴、Git管理ファイルへ平文で保存しない。plistには接続先DB名と収集設定だけを含める。
 
 Cloud Runの毎時・日次Jobは共通runtime Service AccountのADCでGCSへ接続する。
 receiverは別Service Accountで、Webhook検証secretとPub/Sub publisherだけを持つ。

@@ -1,14 +1,14 @@
 # アーキテクチャ
 
-GCP `us-west1`で取得・Raw保存・Jobを実行し、MotherDuck `us-west-2`へ長期分析履歴を保存する。
+Screen TimeはMac、FitbitはGCP `us-west1`で取得・Raw保存を行い、MotherDuck `us-west-2`へ長期分析履歴を保存する。
 
 ```text
-Screen Time Collector -> GCS Raw -> 日次Job
+Screen Time Collector -> SQLite Raw -> Loader -> MotherDuck -> stream heartbeat
 Google Health Webhook -> receiver -> Pub/Sub -> 毎時Job
   -> API完全取得 -> 変更時だけGCS Raw -> Loader -> DB commit後ack
 
 Loader -> MotherDuck base -> dbt View -> read-only share / Remote MCP
-日次Job -> 両sourceの取得・補修 -> dbt -> 両Screen Time監査 -> daily heartbeat
+日次Job -> Fitbit補修 -> dbt -> Macの取込heartbeat・DB監査 -> daily heartbeat
 ```
 
 | source / stream | 取得元 | Raw |
@@ -43,12 +43,12 @@ Raw schema版とparser versionは別で、parser versionを更新すると保持
 
 - Rawはcreate-onlyの決定的gzip。展開後bytesのSHA-256と観測時刻をkeyへ含め、同じkeyのretryには同じbytesを使う。
 - 連続する同一内容は省くが、`A -> B -> A`を過去のhashだけで除外しない。source固有の比較条件は各データモデルに従う。
-- Screen Time v1/v2の`.segb.gz`、Fitbit v3の`.json.gz`は90日保持。control JSONをLifecycle削除対象へ混ぜない。
-- 保持起点は`retention_started_at`、なければGCSの`storage_created_at`。コピー済みScreen Time RawのCustom-Timeにも元の保持起点を保存する。
-- Terraformは`age=90`とScreen Timeの`days_since_custom_time=90`を使う。Soft DeleteとObject Versioningは無効で、削除後のRawを復元できない。
-- 期限前の欠損、保持起点不明、93日を超える残存は監査失敗。90日ちょうどの削除は保証しない。
+- Screen Timeは各元ファイルの最新成功版と未取込分だけを既存SQLiteに保持する。保存期限はなく、Biomeから消えたファイルも残す。
+- Fitbit v3の`.json.gz`はGCSで90日保持する。control JSONはLifecycle削除対象へ混ぜない。
+- GCSの保持起点は`retention_started_at`、なければ`storage_created_at`。Soft DeleteとObject Versioningは無効。
+- GCSの期限前欠損、保持起点不明、93日を超える残存は監査失敗。90日ちょうどの削除は保証しない。
 
-Rawは保持期間内の再生用正本で、MotherDuckは期限切れ後も分析履歴を保持する。
+Rawは保存中の版の再生用正本で、MotherDuckはRaw整理後も分析履歴を保持する。
 全期間のDB復元をRawだけで保証しない。keyとpayloadは
 [Screen Timeデータモデル](../sources/screen-time/data-model.md)と[Fitbitデータモデル](../sources/fitbit/data-model.md)を参照する。
 
@@ -63,8 +63,9 @@ Loaderは選択scopeの全prefix・全pageを走査し、重複key、namespace�
 後続Rawや失敗記録を書き込まず、再接続後の台帳から再試行を判断する。
 Fitbitは手元の保存bytesをLoaderへ渡し、保存済みRawの再生で取得後の障害から回復する。
 
-日次はstreamごとの監査成功時に期限切れ記録をcommitする。全体の成功記録と外部pingはその後であり、
-後続失敗で先に確定した期限切れ記録は巻き戻さない。DBと外部HTTPはatomicではないため、外部送信失敗はJob失敗として扱う。
+Macは全対象のローカル保存後に既存Loaderを同じprocessで実行し、DB成功確認後に旧成功Rawを整理する。
+pending・失敗・不完全snapshotがある回はstream heartbeatを更新しない。日次JobはMacの成功記録とDBを監査する。
+DBと外部HTTPはatomicではないため、外部送信失敗はJob失敗として扱う。
 
 ## Source・stream追加手順
 

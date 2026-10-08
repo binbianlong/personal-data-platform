@@ -70,12 +70,13 @@ Fitbitは2026-09-29〜2026-10-07の5種別をAPIから取得し、Cloud Runの�
 毎時15分のJobは通知を集め、完全取得したRawとDBが確定した単位だけackする。
 `pdp reconciliation`は日次04:10 Asia/Tokyoの処理全体を実行する。
 
-1. Screen Time両streamのRawをgeneration指定で取り込む。
-2. 未取込Fitbit Rawを再生し、5種別のTokyo直近7完了日を再照合する。
-3. dbt run/testを実行する。
-4. Screen Time両streamのRaw・台帳・relation・48時間のcollector鮮度を監査する。
-5. 完了対象日と内部daily/両stream heartbeatを同じtransactionでcommitする。
-6. Healthchecksへ外部成功pingを1回送る。
+1. 未取込Fitbit Rawを再生し、5種別のTokyo直近7完了日を再照合する。
+2. dbt run/testを実行する。
+3. Macが更新したScreen Time両streamの取込成功heartbeatを48時間の鮮度とDB relationで監査する。
+4. 完了対象日と内部daily heartbeatを同じtransactionでcommitする。
+5. Healthchecksへ外部成功pingを1回送る。
+
+Screen Timeの収集・保存・取り込みはMacのCollectorが30分周期で実行する。日次Jobはstream heartbeatを更新しない。
 
 各Jobは1task/parallelism1。毎時50分・日次100分の予算で、単一`loader` leaseを125分保持する。
 競合はINFOで延期し、成功pingを送らない。dbt・手動取得・Loaderも同じleaseを使う。
@@ -95,8 +96,10 @@ gcloud logging read 'resource.type="cloud_run_job"' --project=<project-id> \
 
 ## Rebuild
 
-本番DBを空にせず、現在GCSに残るRawを別の空scratch DBへ再生する。
-Collectorのwrite-only ADCを再利用せず、Terraform output `rebuild_operator_service_account`のread-only SAを使う。
+本番DBを空にせず、保存中のRawを別の空scratch DBへ再生する。Screen TimeはMacのSQLiteを読むため、
+Collectorを停止してからinventoryを取得し、再生完了後に再開する。Screen TimeにGCS設定・ADCは不要である。
+
+FitbitのGCS RawをRebuildする場合だけ、Terraform output `rebuild_operator_service_account`のread-only SAを使う。
 
 ```bash
 export GOOGLE_CLOUD_PROJECT="health-data-pipeline-503813"
@@ -112,7 +115,7 @@ export PDP_REBUILD_GOOGLE_APPLICATION_CREDENTIALS="$CLOUDSDK_CONFIG/application_
 chmod 600 "$PDP_REBUILD_GOOGLE_APPLICATION_CREDENTIALS"
 ```
 
-ADCはimpersonated形式、現在user所有、mode 0600、指定SA一致を検証する。CollectorのADCは変更しない。
+Fitbit用ADCはimpersonated形式、現在user所有、mode 0600、指定SA一致を検証する。
 
 1. `pdp rebuild --source screen_time --all-streams --dry-run`で保持範囲とinventoryを確認する。
 2. writer tokenを安全なsecret sourceから`MOTHERDUCK_TOKEN`へ渡し、`pdp rebuild --source screen_time --all-streams --target-db <scratch-db> --allow-partial-history`を実行する。
@@ -127,4 +130,5 @@ ADCはimpersonated形式、現在user所有、mode 0600、指定SA一致を検�
 DB成功と外部pingが一致しない場合はrun_id・log・監査を照合する。外部送信失敗で先に確定した取込・期限切れ記録は巻き戻らない。
 
 復旧用backupは`var/west-migration/2026-10-05/`。旧Raw bucket・state backupは通常deployで削除しない。
-Screen TimeのDB復元はイベント・補助状態・台帳を同じ時点へ戻し、Rawだけで90日より古い履歴を復元できるとはみなさない。
+Screen TimeのDB復元はイベント・補助状態・台帳を同じ時点へ戻す。Rawは各元ファイルの最新版だけを保存するため、
+更新前の再解析やRawだけからの全履歴復元を保証しない。[ローカルRawへの移行](../sources/screen-time/operations.md#gcsからの一度限りの移行)では既存DB履歴を保持する。

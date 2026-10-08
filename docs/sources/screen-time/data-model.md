@@ -1,8 +1,9 @@
 # データモデル
 
-## GCS Raw observation
+## Local Raw observation
 
-RawはSEGB segmentの観測版単位で、新規Collectorはv2を保存し、Loaderはv1/v2を読む。
+Rawは既存SQLite `collector.db`のgzip BLOBとして保存する。新規Collectorはv2を保存し、Loaderはv1/v2を読む。
+下記key形式は従来と共通で、移行したRawは元のkey・generation・保持起点を引き継ぐ。
 
 ```text
 raw/screen_time/v<1または2>/<device_key>/<app-in-focusまたはapp-usage>/<segment_key>/
@@ -54,14 +55,15 @@ segment_key = HMAC-SHA256(
 
 ## Observation semantics
 
-`device_key + stream + segment_key`をlogical scopeとする。直前の保存済み観測とSHA-256が同じ場合だけskipし、`A→B→A`は3観測を保存する。
-最新segmentの待機中は観測版を作らず、後続確認時のbytesを対象とする。予定object keyと決定的gzipをSQLiteへ先にcommitし、
-upload成功後だけ`uploaded`へ進める。再起動後も同じkeyとbytesを使う。Rawの90日保持とgeneration固定再生は[共通契約](../../platform/architecture.md)に従う。
+`device_key + stream + segment_key`をlogical scopeとする。直前の保存済み観測とSHA-256が同じ場合だけskipし、`A→B→A`は3回の観測として取り込む。
+最新segmentも検査済みbytesを観測版にする。予定keyと決定的gzipをSQLiteへ先にcommitし、MotherDuck台帳の
+成功確認後だけ`uploaded`へ進める。各logical scopeの最新成功版と全pendingを残し、古い成功版を整理する。
+元ファイルがBiomeから消えても最新保存版は無期限に残す。更新前Rawの再解析やRawだけからの全履歴復元は保証しない。
 
 ## Collector scan receipt
 
-pendingと完成扱いsegmentのRaw uploadがすべて成功したcomplete scanで、deviceごとのmutable receiptを公開する。
-完成待ちだけでも公開し、成功から24時間後か送信先・端末設定の変更時に更新する。失敗は次のscanで再試行する。
+全対象のローカル保存が成功したcomplete scanで、deviceごとのreceiptをSQLiteへ保存する。
+成功から24時間後か保存先・端末設定の変更時に更新する。下記keyのcontrol本文も同じSQLiteに保持する。
 
 ```text
 raw/screen_time/v1/_control/collector/latest/<device_key>.json
@@ -78,7 +80,9 @@ raw/screen_time/v1/_control/collector/app-usage/active.json
 
 本文は`schema_version`、sort済みの`device_keys`、UTCの`completed_at`、`status=succeeded`のみ。
 manifestは全allowlistを持つactive-device集合の正本で、空集合は明示的な休止状態である。
-manifestから外したdeviceのreceipt更新は要求しない。Rawは90日保持する。streamごとに独立し、片方のreceiptで他方の稼働を証明しない。
+manifestから外したdeviceのreceipt更新は要求しない。保存済み最新Rawは残す。streamごとに独立し、片方のreceiptで他方の稼働を証明しない。
+MotherDuckの既存stream別heartbeatは、全streamの取込成功・pending解消・ローカル監査成功後にMacが更新する。
+Cloud Runはその成功時刻と`scan_completed_at`が48時間以内であることを確認し、自身では更新しない。
 
 ## `base.screen_time_event`
 
@@ -101,7 +105,7 @@ v1で不明のsegment名は同じlogical segmentのv2から補完する。`sourc
 
 `ops.ingestion_metadata`にはparser versionと全record数（削除済み・CRC不一致・tombstoneを含む）を保存する。
 parser versionはiPhone `app-in-focus-v2`、Mac `app-usage-v1`。削除済み・CRC不一致は同じ物理位置の既存recordを無効化する。
-CRC正常の未知payloadや壊れたSEGB構造はobject全体を失敗させ、Rawが残る90日間は再解析できる。
+CRC正常の未知payloadや壊れたSEGB構造はobject全体を失敗させ、保存中の最新版Rawは再解析できる。
 
 ### Tombstone
 
