@@ -11,11 +11,11 @@ Loader -> MotherDuck base -> dbt View -> read-only share / Remote MCP
 日次Job -> Fitbit補修 -> dbt -> Macの取込heartbeat・DB監査 -> daily heartbeat
 ```
 
-| source / stream | 取得元 | Raw |
-|---|---|---|
-| `screen_time / app-in-focus` | Macへ同期されたiPhoneのApp.InFocus | v1/v2 SEGB |
-| `screen_time / app-usage` | Mac自身のScreenTime.AppUsage | v1/v2 SEGB |
-| `fitbit / health` | Google Health API | v3 JSON |
+| source / stream | 取得元 | Raw形式 | 保存先 |
+|---|---|---|---|
+| `screen_time / app-in-focus` | Macへ同期されたiPhoneのApp.InFocus | v1/v2 SEGB | MacのSQLite |
+| `screen_time / app-usage` | Mac自身のScreenTime.AppUsage | v1/v2 SEGB | MacのSQLite |
+| `fitbit / health` | Google Health API | v3 JSON | GCS |
 
 receiverは通知の認証とPub/Sub発行だけを担当し、API取得やDB書込を行わない。
 毎時・日次Jobは同じimageとruntime Service Accountを共有する。時刻・lease・監視・復旧は
@@ -71,7 +71,7 @@ DBと外部HTTPはatomicではないため、外部送信失敗はJob失敗と�
 
 1. `sources/<source>/`へ取得・codec・型付きbatch・監査を実装し、`sources/registry.py`へ登録する。
 2. 保持中の全Raw prefix/schema、parser version、必須relation、保持期限、dbt selectorを定義する。
-3. baseの変更は新しいwest forward migrationへ追加する。適用済みSQLを書き換えず、batch内でcommitしない。
+3. baseの変更は新しいforward migrationへ追加する。適用済みSQLを書き換えず、batch内でcommitしない。
 4. dbtのmodel/testへselector用tagを付け、scope混入拒否、再実行、rollback、generation固定を検証する。
 5. Terraformで取得identity・Raw権限・Lifecycle・定期処理・監視を設定し、[DB更新手順](operations.md#dbの初期化と更新)で有効にする。
 

@@ -6,7 +6,7 @@
 ~/Library/Application Support/personal-data-platform/collector.db
 ```
 
-既存SQLiteに疑似化scope・SHA-256・Raw key・状態・gzip bytesを保存する。DBはmode `0600`、専用directoryは`0700`。
+SQLiteに疑似化scope・SHA-256・Raw key・状態・gzip bytesを保存する。DBはmode `0600`、専用directoryは`0700`。
 各元ファイルの最新成功版を無期限に残し、未取込分だけ追加保持する。MotherDuckの台帳で成功を確認した後に、
 同じscopeの古い成功版を整理する。Biomeから元ファイルが消えても保存済みRawは残す。
 device identifierや絶対segment path、tokenは保存しない。
@@ -23,6 +23,8 @@ pdp screen-time collect --watch  同じ処理を1800秒間隔で反復
 read前後のinode・size・mtimeが変われば短く再読込し、構造不整合・CRC不一致のsnapshotは次回へ見送る。
 
 全対象の保存を終えてから、既存Loaderを同じprocess・共通leaseで実行する。成功版の整理はDB確認後だけ行う。
+スキーマ初期化は最初に成功した後の周期では省略する。初期化に失敗した場合は次周期に再試行する。
+接続は周期ごとに開き直す。追加DDLやCollectorのコード変更は、停止・更新後の再起動で反映する。
 JSONには`devices`、`segments`、`archived`、`skipped`、`retried`、`deferred`と、取込結果の`loaded`、`pending`を出す。
 保存だけ成功しても取込成功とはみなさない。不完全snapshotの回も保存済みpendingは取り込めるが、成功heartbeatは更新しない。
 
@@ -35,7 +37,7 @@ pendingには元のkeyとgzip bytesを保持する。再起動後も同じbytes�
 再接続後にMotherDuck台帳を確認する。削除処理・イベントkey・補助状態のtransactionは既存の契約を使う。
 片方のstreamが走査失敗しても他方を走査する。失敗した回は全体を成功として記録しない。
 
-ローカルreceipt・manifestは従来のkeyと本文でSQLiteへ保存する。未設定streamは空manifestで明示的に休止する。
+ローカルreceipt・manifestは[データモデル](data-model.md#collector-scan-receipt)の形式でSQLiteへ保存する。未設定streamは空manifestで明示的に休止する。
 端末をallowlistから外しても保存済みRawは残す。設定変更はLaunchAgentを再生成・再起動して反映する。
 
 全streamでpendingがなく、取込とローカル監査が成功した回だけ、MacがMotherDuckの
@@ -107,30 +109,4 @@ Rebuild中はCollectorを停止し、inventory取得から再生完了までRaw�
 別の空scratch DB、`--allow-partial-history`、dbt検証などは[Platform運用](../../platform/operations.md#rebuild)に従う。
 
 イベント・補助状態・台帳は同じ時点でバックアップ・復元する。保存するのは各ファイルの最新版であり、
-更新前Rawによる再解析とRawだけからの全履歴復元は保証しない。通常の切替ではMotherDuckの既存履歴を保持する。
-
-## GCSからの一度限りの移行
-
-旧Collectorと両Schedulerを止め、実行中Job・leaseがないことを確認し、DBのイベント・補助状態・集計を比較基準として記録する。
-既存SQLiteとplistを一時バックアップし、本番writer tokenを専用Keychain項目へ登録する。
-
-```bash
-.venv/bin/python scripts/migrate_screen_time_raw.py \
-  --project health-data-pipeline-503813 \
-  --bucket health-data-pipeline-503813-pdp-raw-west \
-  --bucket health-data-pipeline-503813-pdp-raw \
-  --state-db "$HOME/Library/Application Support/personal-data-platform/collector.db" \
-  --manifest var/screen-time-cutover/gcs-deletion-manifest.json
-```
-
-実行元のgcloud userには対象GCSのlist/read権限が必要である。現行bucketを最初に指定する。
-各objectをgeneration固定で読み、gzipとSHA-256を検証する。未取込Rawは既存Loaderで確定してから最新版を移す。
-既存pendingは保護し、再実行しても新しいローカルRawを巻き戻さない。payloadの中間ファイルは作らず、
-manifestにはbucket・疑似化key・generation・hash・圧縮byte数だけを記録する。
-
-新CollectorとCloud Runを反映し、30分周期を2回、履歴保持・最新event・pending解消・日次Job・dbtを確認する。
-すべて成功した後だけ、manifestに記録したgenerationを指定して両bucketのScreen Time Rawとcontrolを削除する。
-generationが変わっている場合や検証失敗時は削除しない。Fitbitやbucket自体は削除対象に含めない。
-最後に両prefixの空状態とScheduler再開を確認し、移行用の一時データと旧専用Collector ADCを整理する。
-
-2026-10-08の切替・検証・撤去結果は[切替記録](local-raw-cutover.md)を参照する。
+更新前Rawによる再解析とRawだけからの全履歴復元は保証しない。

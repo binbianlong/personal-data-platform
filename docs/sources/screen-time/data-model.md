@@ -2,8 +2,8 @@
 
 ## Local Raw observation
 
-Rawは既存SQLite `collector.db`のgzip BLOBとして保存する。新規Collectorはv2を保存し、Loaderはv1/v2を読む。
-下記key形式は従来と共通で、移行したRawは元のkey・generation・保持起点を引き継ぐ。
+RawはSQLite `collector.db`のgzip BLOBとして保存する。Collectorはv2を保存し、Loaderはv1/v2を読む。
+下記keyと保存metadataのgenerationを取込台帳との照合に使う。
 
 ```text
 raw/screen_time/v<1または2>/<device_key>/<app-in-focusまたはapp-usage>/<segment_key>/

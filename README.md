@@ -1,6 +1,6 @@
 # Personal Data Platform
 
-Screen TimeとFitbitを取得し、ローカルSQLite Raw・GCS Raw、MotherDuck、dbtで保存・分析する個人データ基盤。
+Screen TimeのRawをMacのSQLite、FitbitのRawをGCSへ保存し、MotherDuckとdbtで分析する個人データ基盤。
 GCPは`us-west1`、MotherDuckは`us-west-2`を使う。運用と仕様は[ドキュメント](docs/README.md)を参照する。
 
 ## 開発環境
