@@ -8,6 +8,24 @@ from personal_data_platform.sources.screen_time.state import CollectorState, Suc
 NOW = datetime(2026, 8, 27, 1, 2, 3, tzinfo=UTC)
 
 
+def test_raw_database_is_private(tmp_path):
+    path = tmp_path / "state" / "collector.db"
+    CollectorState(path)
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_legacy_uploaded_without_payload_is_archived_again(tmp_path):
+    state = CollectorState(tmp_path / "collector.db")
+    old = _prepare(state, b"still-readable")
+    with state._connect() as db:
+        db.execute("UPDATE segment_observation SET status='uploaded', compressed_payload=NULL")
+    fresh = _prepare(state, b"still-readable")
+    assert fresh is not None and fresh.created
+    assert fresh.identity.object_key != old.identity.object_key
+    assert gzip.decompress(fresh.compressed_payload) == b"still-readable"
+
+
 def _prepare(state: CollectorState, raw_bytes: bytes):
     return state.prepare(
         device_key="a" * 64,

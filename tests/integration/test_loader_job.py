@@ -479,6 +479,7 @@ def test_loader_runtime_rejects_retention_drift_before_cloud_access(
     from personal_data_platform.loader.job import run_loader_from_env
     from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
 
+    monkeypatch.setattr(ScreenTimeSource, "retention_days", 90)
     monkeypatch.setenv(name, value)
     monkeypatch.setattr(
         ScreenTimeSource,

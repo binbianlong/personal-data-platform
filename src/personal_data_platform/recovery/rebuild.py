@@ -6,7 +6,7 @@ import json
 import os
 import re
 from collections.abc import Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 
 from personal_data_platform.config import RebuildADCConfig
@@ -202,8 +202,13 @@ def run_rebuild_from_env(
     )
     for source in sources:
         validate_runtime_policy(source)
-    adc = RebuildADCConfig.from_env()
-    with _temporary_environment("GOOGLE_APPLICATION_CREDENTIALS", str(adc.credentials_path)):
+    credentials: AbstractContextManager[None] = nullcontext()
+    if sources[0].retention_days is not None:
+        adc = RebuildADCConfig.from_env()
+        credentials = _temporary_environment(
+            "GOOGLE_APPLICATION_CREDENTIALS", str(adc.credentials_path)
+        )
+    with credentials:
         inventories = tuple(
             (source, repository, tuple(list_source_raw(repository, source)))
             for source in sources

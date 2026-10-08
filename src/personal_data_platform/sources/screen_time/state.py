@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS collector_control_publication (
     published_at TEXT NOT NULL,
     PRIMARY KEY (stream, device_key, control_kind)
 );
+CREATE TABLE IF NOT EXISTS collector_control_object (
+    object_key TEXT PRIMARY KEY,
+    body BLOB NOT NULL
+);
 """
 
 CONTROL_PUBLICATION_INTERVAL = timedelta(hours=24)
@@ -80,9 +84,23 @@ class CollectorState:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.path.touch(mode=0o600, exist_ok=True)
+        self.path.chmod(0o600)
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(segment_observation)")
+            }
+            for name, definition in (
+                ("storage_created_at", "TEXT"),
+                ("storage_generation", "INTEGER NOT NULL DEFAULT 1"),
+                ("retention_started_at", "TEXT"),
+            ):
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE segment_observation ADD COLUMN {name} {definition}"
+                    )
 
     def prepare(
         self,
@@ -105,12 +123,16 @@ class CollectorState:
                 SELECT observed_at, sha256, object_key, compressed_payload, status
                 FROM segment_observation
                 WHERE device_key = ? AND stream = ? AND segment_key = ?
-                ORDER BY id DESC
+                ORDER BY observed_at DESC, object_key DESC
                 LIMIT 1
                 """,
                 (device_key, stream, segment_key),
             ).fetchone()
-            if latest is not None and latest[1] == content_sha256:
+            if (
+                latest is not None
+                and latest[1] == content_sha256
+                and (latest[4] == "pending" or latest[3] is not None)
+            ):
                 if latest[4] == "uploaded":
                     connection.commit()
                     return None
@@ -180,7 +202,7 @@ class CollectorState:
                        object_key, compressed_payload
                 FROM segment_observation
                 WHERE status = 'pending' AND (? IS NULL OR stream = ?)
-                ORDER BY id
+                ORDER BY observed_at, object_key
                 """,
                 (stream, stream),
             ).fetchall()
@@ -208,21 +230,34 @@ class CollectorState:
         return pending
 
     def mark_uploaded(self, object_key: str, uploaded_at: datetime) -> None:
-        """Atomically commit upload success and discard the staged local payload."""
+        """Retain the latest warehouse-confirmed Raw and all unconfirmed observations."""
         timestamp = format_observed_at(uploaded_at)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """
                 UPDATE segment_observation
-                SET status = 'uploaded', uploaded_at = ?, compressed_payload = NULL
-                WHERE object_key = ? AND status = 'pending'
+                SET status = 'uploaded', uploaded_at = ?
+                WHERE object_key = ?
                 """,
                 (timestamp, object_key),
             )
             if cursor.rowcount != 1:
                 connection.rollback()
                 raise RuntimeError(f"pending observation not found: {object_key}")
+            connection.execute(
+                """DELETE FROM segment_observation
+                WHERE status = 'uploaded' AND (device_key, stream, segment_key) = (
+                    SELECT device_key, stream, segment_key FROM segment_observation WHERE object_key = ?
+                ) AND (observed_at, object_key) < (
+                    SELECT observed_at, object_key FROM segment_observation WHERE status = 'uploaded'
+                    AND (device_key, stream, segment_key) = (
+                        SELECT device_key, stream, segment_key FROM segment_observation WHERE object_key = ?
+                    )
+                    ORDER BY observed_at DESC, object_key DESC LIMIT 1
+                )""",
+                (object_key, object_key),
+            )
             connection.commit()
 
     def record_successful_scan(self, scan: SuccessfulScan) -> None:

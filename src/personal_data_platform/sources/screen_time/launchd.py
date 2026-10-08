@@ -15,14 +15,14 @@ from pathlib import Path
 
 from personal_data_platform.config import (
     ConfigurationError,
-    GCSConfig,
 )
-from personal_data_platform.sources.screen_time.config import CollectorADCConfig
 
 LAUNCH_AGENT_LABEL = "com.personal-data-platform.screen-time-collector"
 _DEVICE_KEY = re.compile(r"^[0-9a-f]{64}$")
 _DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-_SENSITIVE_ENVIRONMENT_NAMES = frozenset({"PDP_PSEUDONYM_KEY_HEX"})
+_SENSITIVE_ENVIRONMENT_NAMES = frozenset(
+    {"PDP_PSEUDONYM_KEY_HEX", "PDP_SCREEN_TIME_MOTHERDUCK_TOKEN"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,10 +35,7 @@ class LaunchAgentSettings:
     sync_db_path: Path
     app_in_focus_remote_dir: Path
     state_db_path: Path
-    google_application_credentials: Path
-    google_cloud_project: str
-    gcs_bucket: str
-    collector_service_account_email: str
+    motherduck_database: str
     device_allowlist: tuple[str, ...]
     poll_seconds: str
     mac_device_key: str | None = None
@@ -69,8 +66,7 @@ class LaunchAgentSettings:
             raise ConfigurationError(f"project root does not contain pyproject.toml: {root}")
         _validate_python_runtime(executable, root)
 
-        gcs = GCSConfig.from_env(values)
-        adc = CollectorADCConfig.from_env(values)
+        database = _required(values, "MOTHERDUCK_DATABASE")
 
         allowlist = tuple(
             sorted(
@@ -124,10 +120,7 @@ class LaunchAgentSettings:
                 "PDP_COLLECTOR_STATE_DB_PATH",
                 library / "Application Support/personal-data-platform/collector.db",
             ),
-            google_application_credentials=adc.credentials_path,
-            google_cloud_project=gcs.project_id,
-            gcs_bucket=gcs.bucket,
-            collector_service_account_email=adc.service_account_email,
+            motherduck_database=database,
             device_allowlist=allowlist,
             poll_seconds=poll_seconds,
             mac_device_key=mac_device_key,
@@ -143,14 +136,11 @@ def build_launch_agent(settings: LaunchAgentSettings) -> bytes:
     """Serialize the collector LaunchAgent without embedding Keychain secrets."""
 
     environment = {
-        "GCS_BUCKET": settings.gcs_bucket,
-        "GOOGLE_APPLICATION_CREDENTIALS": str(settings.google_application_credentials),
-        "GOOGLE_CLOUD_PROJECT": settings.google_cloud_project,
+        "MOTHERDUCK_DATABASE": settings.motherduck_database,
         "PATH": _DEFAULT_PATH,
         "PDP_APP_IN_FOCUS_REMOTE_DIR": str(settings.app_in_focus_remote_dir),
         "PDP_COLLECTOR_POLL_SECONDS": settings.poll_seconds,
         "PDP_COLLECTOR_STATE_DB_PATH": str(settings.state_db_path),
-        "PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL": settings.collector_service_account_email,
         "PDP_SCREEN_TIME_DEVICE_ALLOWLIST": ",".join(settings.device_allowlist),
         "PDP_SYNC_DB_PATH": str(settings.sync_db_path),
         "PYTHONUNBUFFERED": "1",

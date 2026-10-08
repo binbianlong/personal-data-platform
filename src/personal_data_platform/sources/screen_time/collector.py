@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
 
+from personal_data_platform.loader.models import RawDecodeError
 from personal_data_platform.sources.screen_time.raw import (
     APP_IN_FOCUS_STREAM,
     APP_USAGE_STREAM,
@@ -28,6 +29,8 @@ from personal_data_platform.sources.screen_time.state import (
     PendingObservation,
     SuccessfulScan,
 )
+
+from .parser import validate_segb_snapshot
 
 
 class CollectorSourceError(RuntimeError):
@@ -249,7 +252,6 @@ class ScreenTimeCollector:
             # The observation was allowlisted when this durable upload intent was created.
             self._upload(pending_observation)
             retried += 1
-            uploaded += 1
 
         discovered_devices = self._source.list_devices()
         devices = [
@@ -278,10 +280,9 @@ class ScreenTimeCollector:
         for device in devices:
             device_key = build_device_key(self._pseudonym_key, device.identifier)
             segments = self._source.list_segments(device)
-            completed_segments = select_completed_segments(segments)
+            select_completed_segments(segments)  # Validate the numeric names in every directory.
             segment_count += len(segments)
-            deferred += len(segments) - len(completed_segments)
-            for path, relative_path in completed_segments:
+            for path, relative_path in segments:
                 raw_bytes = _read_stable_bytes(path)
                 segment_key = build_segment_key(
                     self._pseudonym_key,
@@ -289,23 +290,31 @@ class ScreenTimeCollector:
                     stream=self._source.segment_stream,
                     relative_path=relative_path,
                 )
+                observed_at = self._clock()
+                envelope = encode_segment_envelope(
+                    raw_bytes,
+                    name=path.name,
+                    kind="tombstones" if path.parent.name == "tombstone" else "events",
+                )
+                try:
+                    validate_segb_snapshot(raw_bytes)
+                except RawDecodeError:
+                    deferred += 1
+                    continue
                 observation = self._state.prepare(
                     device_key=device_key,
                     stream=self._source.raw_stream,
                     segment_key=segment_key,
-                    raw_bytes=encode_segment_envelope(
-                        raw_bytes,
-                        name=path.name,
-                        kind="tombstones" if path.parent.name == "tombstone" else "events",
-                    ),
+                    raw_bytes=envelope,
                     schema_version=2,
-                    observed_at=self._clock(),
+                    observed_at=observed_at,
                 )
                 if observation is None:
                     skipped += 1
                     continue
-                self._upload(observation)
-                uploaded += 1
+                if observation.created:
+                    self._upload(observation)
+                    uploaded += 1
             device_segment_counts[device_key] = len(segments)
 
         stats = CollectionStats(
@@ -316,6 +325,8 @@ class ScreenTimeCollector:
             retried=retried,
             deferred=deferred,
         )
+        if deferred:
+            return stats
         completed_at = self._clock()
         config_digest = sha256_hex(
             json.dumps(
@@ -394,7 +405,6 @@ class ScreenTimeCollector:
             observation.identity.object_key,
             observation.compressed_payload,
         )
-        self._state.mark_uploaded(observation.identity.object_key, self._clock())
 
 
 def _validate_device_identifier(identifier: object) -> None:

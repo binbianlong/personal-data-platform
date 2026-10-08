@@ -233,15 +233,8 @@ def _validate_segb2_record_states(segment: bytes) -> None:
             )
 
 
-def parse_segb_bytes(
-    raw: RawObject, segment: bytes, *, segment_kind: str | None = None
-) -> list[ParsedScreenTimeRecord]:
-    """Decode one complete uncompressed SEGB object.
-
-    ``ccl-segb`` currently accepts paths, so the immutable bytes are exposed
-    through a private temporary file for the duration of parsing.
-    """
-
+def _read_segb_records(segment: bytes) -> list[SegbRecord]:
+    """Expose immutable bytes privately to the existing path-based decoder."""
     try:
         from ccl_segb import read_segb_file
     except ImportError as error:  # pragma: no cover - packaging failure
@@ -255,7 +248,39 @@ def parse_segb_bytes(
             temporary.write(segment)
             temporary.flush()
             records: list[SegbRecord] = list(read_segb_file(temporary.name))
-        return parse_segb_records(raw, segment, records, segment_kind=segment_kind)
+        return records
+    except Exception as error:
+        raise SegmentDecodeError(f"failed to decode SEGB: {error}") from error
+
+
+def validate_segb_snapshot(segment: bytes) -> None:
+    """Reject partial containers/CRCs without requiring a known application schema."""
+    if segment.startswith(b"SEGB") and len(segment) >= 32:
+        count = struct.unpack_from("<i", segment, 4)[0]
+        trailer = len(segment) - 16 * count
+        if count < 0 or trailer < 32:
+            raise SegmentDecodeError("incomplete SEGB trailer")
+        for offset in range(trailer, len(segment), 16):
+            end, state = struct.unpack_from("<2i", segment, offset)
+            if state in {1, 3} and (end < 8 or 32 + end > trailer):
+                raise SegmentDecodeError("incomplete SEGB record")
+    for record in _read_segb_records(segment):
+        state = getattr(record, "state", None)
+        if (
+            getattr(state, "name", "").upper() == "WRITTEN"
+            and getattr(record, "crc_passed", None) is False
+        ):
+            raise SegmentDecodeError("snapshot has an incomplete record CRC")
+
+
+def parse_segb_bytes(
+    raw: RawObject, segment: bytes, *, segment_kind: str | None = None
+) -> list[ParsedScreenTimeRecord]:
+    """Decode one complete uncompressed SEGB object and its application payloads."""
+    try:
+        return parse_segb_records(
+            raw, segment, _read_segb_records(segment), segment_kind=segment_kind
+        )
     except PayloadDecodeError:
         raise
     except Exception as error:
