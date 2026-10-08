@@ -1,6 +1,6 @@
 # Runtime Terraform
 
-`us-west1`のreceiver・Pub/Sub・毎時/日次Job・Scheduler・監視・Logging・Raw/preflight bucketを管理する。
+`us-west1`のreceiver・Pub/Sub・push worker・日次Job・Scheduler・監視・Logging・Raw/preflight bucketを管理する。
 先に[bootstrap](../bootstrap/README.md)を適用し、`terraform.tfvars.example`から非公開入力を作る。
 
 ```bash
@@ -14,7 +14,7 @@ terraform apply runtime.tfplan
 
 `west_image_uri`には西部registryのdigest、MotherDuck production/preflightには独立DBを指定する。
 backend bucketはGitHubの`TF_STATE_BUCKET`へ設定する。接続先・実行順・監視・復旧は[Platform運用](../../docs/platform/operations.md)に従う。
-通常は両Schedulerとnative警報が有効。`west_schedulers_enabled=false`とGitHubの`PDP_WEST_SCHEDULERS_ENABLED=false`で一時停止し、Fitbit処理も延期する。
+通常はpush配信・日次Schedulerとnative警報が有効。`west_schedulers_enabled=false`とGitHubの`PDP_WEST_SCHEDULERS_ENABLED=false`で一時停止し、subscriptionをpullへ戻して通知を保持し、Fitbit処理も延期する。
 Logging変更時は既存_Defaultの除外を`west_logging_exclusions`と`PDP_WEST_LOGGING_EXCLUSIONS`へ引き継ぐ。
 
 ## Secretと資格情報
@@ -26,12 +26,13 @@ GitHubの`PDP_WEST_SECRET_VERSIONS`にも同じmapをJSONで設定する。`hear
 
 | key | Secret Manager ID | 利用先 |
 |---|---|---|
-| `motherduck_token` | `pdp-west-motherduck-token` | hourly・daily |
+| `motherduck_token` | `pdp-west-motherduck-token` | worker・daily |
 | `motherduck_preflight_token`（省略可） | `pdp-west-motherduck-preflight-token` | 手動preflightのみ |
-| `fitbit_oauth_config` | `pdp-west-fitbit-oauth-config` | hourly・daily |
+| `fitbit_oauth_config` | `pdp-west-fitbit-oauth-config` | worker・daily |
 | `fitbit_webhook_config` | `pdp-west-fitbit-webhook-config` | receiver |
 | `heartbeat_config` | `pdp-west-heartbeat-config` | daily |
 
+pushのOIDCには既存Scheduler SAを使う。workerは非公開で最大1instance・同時処理1、通知がなければ0instanceとなる。
 通常runtimeはpreflight以外の4 pinを必須とする。更新・rollbackはmapの番号を変更し、
 切替完了前に参照中versionを無効化・破棄しない。秘密値をtfvars・state・GitHub variablesへ含めない。
 JSON fieldは[Fitbit環境変数](../../docs/sources/fitbit/operations.md#環境変数)、権限境界は[セキュリティ](../../docs/platform/security.md)を参照する。

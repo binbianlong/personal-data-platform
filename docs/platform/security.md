@@ -18,19 +18,20 @@
 | 実行主体 | capability |
 |---|---|
 | Local Collector | GCS権限なし。SQLite RawとMotherDuck writer tokenを使う |
-| 共通runtime Service Account | Fitbit v3 Rawのlist / read / create。毎時・日次Jobで共有 |
+| 共通runtime Service Account | worker・日次JobのOAuth/DB secret access。Raw権限なし |
+| Trigger Service Account | 日次Jobと非公開workerのinvoke。Pub/Sub pushはOIDCで認証 |
 | Preflight | preflight bucketへのwrite / read / listと作成generationのdeleteだけ |
 | Rebuild operator | 専用read-only Service Accountでproduction bucketへのlist / read |
 
 bucket IAM policyはTerraformでauthoritativeに管理し、projectのViewer / Editor / Owner convenience valueによるobject accessを残さない。
-Screen Time RebuildはCollectorを止めてローカルSQLiteを読む。Fitbit Rebuildは別のread-only Service Accountを使う。
+Screen Time RebuildはCollectorを止めてローカルSQLiteを読む。FitbitはAPI再取得で復旧する。
 
 ## Secret
 
 Macでは疑似化secretと専用MotherDuck writer tokenをmacOS Keychainへ保存する。CollectorにADCは不要である。
 secretをSQLite state、plist、shell履歴、Git管理ファイルへ平文で保存しない。plistには接続先DB名と収集設定だけを含める。
 
-Cloud Runの毎時・日次Jobは共通runtime Service AccountのADCでGCSへ接続する。
+Cloud Runのworker・日次Jobは共通runtime Service Accountを使い、GCS Rawへ接続しない。
 receiverは別Service Accountで、Webhook検証secretとPub/Sub publisherだけを持つ。
 MotherDuck、OAuth、Webhook、日次heartbeatの4 payloadはSecret Managerへ保存し、正の数値versionへ固定する。
 各Jobへ渡す環境変数とsecret pinは[Runtime Terraform](../../infra/terraform/README.md#secretと資格情報)を正本とする。
@@ -45,9 +46,10 @@ ChatGPT接続にはMotherDuckのread-only user/shareを使い、Loader / dbt wri
 - GitHub ActionsからGCPへはWorkload Identity Federationを使用し、長期Service Account keyを作らない。
 - deploy用federationは対象repository、`main` ref、対象workflowへattribute conditionで限定する。
 - Terraform plan用とdeploy用のService Accountを分離する。
-- 毎時・日次Jobは共通Service Accountを使う。receiver、Collector、Rebuild operatorは別identityとし、
-  Secret Manager accessと実行権限を必要なresourceへ限定する。共有runtime SAの権限は2 Jobの合計であり、Job間のIAM分離を保証しない。
-- Cloud Schedulerには対象Cloud Run Jobを起動する権限だけを与える。
+- worker・日次Jobは共通Service Accountを使う。receiver、Collector、Rebuild operatorは別identityとし、
+  Secret Manager accessと実行権限を必要なresourceへ限定する。共有runtime SAの権限はworker・日次Jobの合計であり、両者のIAM分離を保証しない。
+- Trigger SAには日次Job・workerのinvoke権限を与え、Pub/Sub service agentのToken CreatorはそのSAへ限定する。
+- 非公開workerに`allUsers`を付与しない。OIDCのaudienceはworkerのCloud Run URIへ固定する。
 
 ## インシデント時
 

@@ -4,24 +4,12 @@ locals {
   west_common_environment = {
     APP_ENV                        = "production"
     GOOGLE_CLOUD_PROJECT           = var.project_id
-    GCS_BUCKET                     = local.west_raw_bucket_name
     MOTHERDUCK_DATABASE            = var.west_motherduck_database
     PDP_FITBIT_SUBJECT_KEY         = var.fitbit_subject_key
     PDP_FITBIT_PROCESSING_PAUSED   = tostring(!var.west_schedulers_enabled)
-    PDP_FITBIT_PUBSUB_ENDPOINT     = "pubsub.us-west1.rep.googleapis.com"
-    PDP_FITBIT_PUBSUB_TOPIC        = "projects/${var.project_id}/topics/pdp-fitbit-west"
     PDP_FITBIT_PUBSUB_SUBSCRIPTION = "projects/${var.project_id}/subscriptions/pdp-fitbit-west-pull"
-    PDP_RAW_RETENTION_DAYS         = "90"
-    PDP_LIFECYCLE_GRACE_DAYS       = "3"
   }
   west_jobs = {
-    hourly = {
-      name        = "fitbit-hourly-west"
-      args        = ["fitbit", "ingest-notifications"]
-      timeout     = "3000s"
-      environment = local.west_common_environment
-      secrets     = { MOTHERDUCK_TOKEN = "motherduck_token", PDP_FITBIT_OAUTH_CONFIG = "fitbit_oauth_config" }
-    }
     daily = {
       name        = "reconciliation-west"
       args        = ["reconciliation"]
@@ -31,8 +19,7 @@ locals {
     }
   }
   west_job_secret_access = { for key in toset(flatten([for job in values(local.west_jobs) : values(job.secrets)])) : key => key }
-  west_scheduled_jobs    = { hourly = "15 * * * *", daily = "10 4 * * *" }
-  west_raw_scopes        = { fitbit = { prefixes = ["raw/fitbit/v3/"], suffixes = [".json.gz"] } }
+  west_scheduled_jobs    = { daily = "10 4 * * *" }
 }
 
 resource "google_storage_bucket" "raw_west" {
@@ -43,17 +30,6 @@ resource "google_storage_bucket" "raw_west" {
   force_destroy               = false
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
-  dynamic "lifecycle_rule" {
-    for_each = local.west_raw_scopes
-    content {
-      action { type = "Delete" }
-      condition {
-        age            = 90
-        matches_prefix = lifecycle_rule.value.prefixes
-        matches_suffix = lifecycle_rule.value.suffixes
-      }
-    }
-  }
   soft_delete_policy { retention_duration_seconds = 0 }
   lifecycle { prevent_destroy = true }
   depends_on = [google_project_service.runtime]
@@ -135,7 +111,7 @@ resource "google_cloud_run_v2_job" "west" {
       }
     }
   }
-  depends_on = [google_service_account_iam_member.west_deployer, google_secret_manager_secret_iam_member.west_job, google_storage_bucket_iam_policy.raw_west, google_storage_bucket_iam_policy.preflight_west, google_pubsub_subscription_iam_member.west_hourly]
+  depends_on = [google_service_account_iam_member.west_deployer, google_secret_manager_secret_iam_member.west_job, google_storage_bucket_iam_policy.raw_west, google_storage_bucket_iam_policy.preflight_west]
 }
 resource "google_service_account" "west_receiver" {
   project      = var.project_id
@@ -260,22 +236,6 @@ data "google_iam_policy" "raw_west" {
   }
   binding {
     role    = "roles/storage.objectViewer"
-    members = ["serviceAccount:${google_service_account.west.email}"]
-    condition {
-      title      = "runtime_raw_read"
-      expression = "resource.name == 'projects/_/buckets/${local.west_raw_bucket_name}' || resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/fitbit/v3/')"
-    }
-  }
-  binding {
-    role    = local.storage_roles.collector_raw_creator
-    members = ["serviceAccount:${google_service_account.west.email}"]
-    condition {
-      title      = "fitbit_bundle_create_only"
-      expression = "resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/fitbit/v3/') && resource.name.endsWith('.json.gz')"
-    }
-  }
-  binding {
-    role    = "roles/storage.objectViewer"
     members = ["serviceAccount:${google_service_account.rebuild_operator.email}"]
   }
 }
@@ -293,4 +253,57 @@ data "google_iam_policy" "preflight_west" {
 resource "google_storage_bucket_iam_policy" "preflight_west" {
   bucket      = google_storage_bucket.preflight_west.name
   policy_data = data.google_iam_policy.preflight_west.policy_data
+}
+
+resource "google_cloud_run_v2_service" "fitbit_worker" {
+  project             = var.project_id
+  location            = var.west_region
+  name                = "pdp-fitbit-worker-west"
+  deletion_protection = true
+  ingress             = "INGRESS_TRAFFIC_ALL"
+  labels              = { application = "personal-data-platform", role = "worker" }
+  template {
+    service_account                  = google_service_account.west.email
+    timeout                          = "540s"
+    max_instance_request_concurrency = 1
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 1
+    }
+    containers {
+      image = var.west_image_uri
+      args  = ["fitbit", "serve-worker"]
+      resources {
+        limits   = { cpu = "1", memory = "2Gi" }
+        cpu_idle = true
+      }
+      dynamic "env" {
+        for_each = local.west_common_environment
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+      dynamic "env" {
+        for_each = { MOTHERDUCK_TOKEN = "motherduck_token", PDP_FITBIT_OAUTH_CONFIG = "fitbit_oauth_config" }
+        content {
+          name = env.key
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.west[env.value].secret_id
+              version = var.west_secret_versions[env.value]
+            }
+          }
+        }
+      }
+    }
+  }
+  depends_on = [google_service_account_iam_member.west_deployer, google_secret_manager_secret_iam_member.west_job]
+}
+resource "google_cloud_run_v2_service_iam_member" "fitbit_worker" {
+  project  = var.project_id
+  location = var.west_region
+  name     = google_cloud_run_v2_service.fitbit_worker.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.west_scheduler.email}"
 }

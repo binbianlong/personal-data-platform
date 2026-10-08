@@ -166,7 +166,7 @@ def test_runtime_resources_preserve_backups_and_support_pausing() -> None:
     assert re.search(r"paused\s*= !var.west_schedulers_enabled", west)
     assert "days_since_custom_time" not in west
     assert "raw/screen_time/" not in west
-    assert "raw/fitbit/v3/" in west
+    assert "raw/fitbit/v3/" not in west
     assert "retention_duration_seconds = 0" in west
     assert "prevent_destroy = true" in west
 
@@ -180,7 +180,8 @@ def test_west_pubsub_and_receiver_access_are_separate() -> None:
     assert re.search(r"retain_acked_messages\s*= false", queue)
     assert 'ttl = ""' in queue
     assert "roles/pubsub.publisher" in queue
-    assert "roles/pubsub.subscriber" in queue
+    assert "roles/pubsub.subscriber" not in queue
+    assert "push_config" in queue
     receiver = west.split('resource "google_cloud_run_v2_service" "west"', 1)[1]
     receiver = receiver.split('resource "google_cloud_run_v2_service_iam_member"', 1)[0]
     assert re.search(r"PDP_FITBIT_WEBHOOK_CONFIG\s*=", receiver)

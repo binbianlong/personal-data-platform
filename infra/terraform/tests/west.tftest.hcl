@@ -26,8 +26,8 @@ run "minimum_normal_runtime" {
     error_message = "The daily job must run every stage without ignored scope options."
   }
   assert {
-    condition     = toset(keys(output.runtime_jobs)) == toset(["hourly", "daily"]) && toset(keys(output.scheduler_jobs)) == toset(["hourly", "daily"])
-    error_message = "Normal deployment must expose only hourly Fitbit and the combined daily job, with two schedules."
+    condition     = toset(keys(output.runtime_jobs)) == toset(["daily"]) && toset(keys(output.scheduler_jobs)) == toset(["daily"])
+    error_message = "Normal deployment must retain only the combined daily Job and its schedule."
   }
   assert {
     condition     = alltrue([for job in google_cloud_scheduler_job.west : !job.paused]) && google_monitoring_alert_policy.west_job_failed.enabled && google_monitoring_alert_policy.west_pubsub_backlog.enabled
@@ -118,11 +118,11 @@ run "runtime_storage_and_execution_contract" {
     error_message = "Backup buckets must stay in place and be separate from active storage."
   }
   assert {
-    condition     = length(google_cloud_run_v2_job.west) == 2 && length(google_cloud_scheduler_job.west) == 2 && alltrue([for scheduler in google_cloud_scheduler_job.west : !scheduler.paused && scheduler.region == "us-west1" && scheduler.time_zone == "Asia/Tokyo"])
-    error_message = "Normal operation requires two running schedules in the configured region and time zone."
+    condition     = length(google_cloud_run_v2_job.west) == 1 && length(google_cloud_scheduler_job.west) == 1 && alltrue([for scheduler in google_cloud_scheduler_job.west : !scheduler.paused && scheduler.region == "us-west1" && scheduler.time_zone == "Asia/Tokyo"])
+    error_message = "Normal operation requires one daily schedule in the configured region and time zone."
   }
   assert {
-    condition     = google_cloud_run_v2_job.west["hourly"].template[0].template[0].timeout == "3000s" && google_cloud_run_v2_job.west["daily"].template[0].template[0].timeout == "6000s" && alltrue([for job in google_cloud_run_v2_job.west : job.location == "us-west1" && job.template[0].task_count == 1 && job.template[0].parallelism == 1 && job.template[0].template[0].containers[0].image == var.west_image_uri])
+    condition     = google_cloud_run_v2_job.west["daily"].template[0].template[0].timeout == "6000s" && alltrue([for job in google_cloud_run_v2_job.west : job.location == "us-west1" && job.template[0].task_count == 1 && job.template[0].parallelism == 1 && job.template[0].template[0].containers[0].image == var.west_image_uri])
     error_message = "West jobs need bounded serialized execution and a regional immutable image."
   }
   assert {
@@ -135,8 +135,7 @@ run "runtime_storage_and_execution_contract" {
   }
   assert {
     condition = alltrue([for job_key, expected in {
-      hourly = { MOTHERDUCK_TOKEN = "7", PDP_FITBIT_OAUTH_CONFIG = "11" }
-      daily  = { MOTHERDUCK_TOKEN = "7", PDP_FITBIT_OAUTH_CONFIG = "11", PDP_HEARTBEAT_CONFIG = "17" }
+      daily = { MOTHERDUCK_TOKEN = "7", PDP_FITBIT_OAUTH_CONFIG = "11", PDP_HEARTBEAT_CONFIG = "17" }
       } : tomap({
         for env in google_cloud_run_v2_job.west[job_key].template[0].template[0].containers[0].env : env.name => env.value_source[0].secret_key_ref[0].version if length(env.value_source) > 0
     }) == tomap(expected)])
@@ -147,12 +146,12 @@ run "runtime_storage_and_execution_contract" {
     error_message = "The west receiver must inject the specified numeric webhook secret version."
   }
   assert {
-    condition     = google_pubsub_topic_iam_member.west_receiver.role == "roles/pubsub.publisher" && google_pubsub_subscription_iam_member.west_hourly.role == "roles/pubsub.subscriber" && toset(keys(local.west_jobs.hourly.secrets)) == toset(["MOTHERDUCK_TOKEN", "PDP_FITBIT_OAUTH_CONFIG"]) && google_secret_manager_secret_iam_member.west_receiver.secret_id == google_secret_manager_secret.west["fitbit_webhook_config"].secret_id && !contains(keys(local.west_job_secret_access), "fitbit_webhook_config")
+    condition     = google_pubsub_topic_iam_member.west_receiver.role == "roles/pubsub.publisher" && !contains(keys(local.west_common_environment), "GCS_BUCKET") && google_secret_manager_secret_iam_member.west_receiver.secret_id == google_secret_manager_secret.west["fitbit_webhook_config"].secret_id && !contains(keys(local.west_job_secret_access), "fitbit_webhook_config")
     error_message = "Receiver credentials and publisher access must be isolated from acquisition OAuth and subscriber access."
   }
   assert {
-    condition     = length(google_storage_bucket.raw_west.lifecycle_rule) == 1 && alltrue([for rule in google_storage_bucket.raw_west.lifecycle_rule : one(rule.condition).age == 90 && one(one(rule.condition).matches_prefix) == "raw/fitbit/v3/"]) && google_storage_bucket.raw_west.soft_delete_policy[0].retention_duration_seconds == 0 && google_storage_bucket.preflight_west.soft_delete_policy[0].retention_duration_seconds == 0
-    error_message = "Only Fitbit Raw uses GCS expiration; soft-delete storage must remain disabled."
+    condition     = length(google_storage_bucket.raw_west.lifecycle_rule) == 0 && google_storage_bucket.raw_west.soft_delete_policy[0].retention_duration_seconds == 0 && google_storage_bucket.preflight_west.soft_delete_policy[0].retention_duration_seconds == 0
+    error_message = "Retained buckets must not retain a Fitbit Raw lifecycle rule or soft-delete storage."
   }
 }
 run "reject_legacy_image_in_west" {
@@ -202,7 +201,7 @@ run "west_storage_and_monitoring_are_separate" {
   }
   variables { west_schedulers_enabled = false }
   assert {
-    condition     = alltrue([for scheduler in google_cloud_scheduler_job.west : scheduler.paused]) && local.west_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "true" && !google_monitoring_alert_policy.west_receiver_failure.enabled
+    condition     = length(google_pubsub_subscription.west.push_config) == 0 && alltrue([for scheduler in google_cloud_scheduler_job.west : scheduler.paused]) && local.west_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "true" && !google_monitoring_alert_policy.west_receiver_failure.enabled
     error_message = "Pausing schedules must pause Fitbit processing and all native alerts."
   }
   assert {
@@ -230,11 +229,11 @@ run "west_only_runtime_pins_and_shared_identity" {
     west_secret_versions = { motherduck_token = "7", fitbit_oauth_config = "11", fitbit_webhook_config = "13", heartbeat_config = "17" }
   }
   assert {
-    condition     = google_cloud_run_v2_job.west["hourly"].template[0].template[0].service_account == google_cloud_run_v2_job.west["daily"].template[0].template[0].service_account && google_cloud_scheduler_job.west["daily"].schedule == "10 4 * * *"
-    error_message = "Only two processing jobs with one runtime identity and non-overlapping daily schedule are required."
+    condition     = google_cloud_run_v2_service.fitbit_worker.template[0].service_account == google_cloud_run_v2_job.west["daily"].template[0].template[0].service_account && google_cloud_scheduler_job.west["daily"].schedule == "10 4 * * *"
+    error_message = "Push and daily processing with one runtime identity and non-overlapping daily schedule are required."
   }
   assert {
-    condition     = google_monitoring_alert_policy.west_job_failed.enabled && google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 86400
-    error_message = "Failure and 24h backlog policies must be consolidated."
+    condition     = google_monitoring_alert_policy.west_job_failed.enabled && google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 900
+    error_message = "Failure and 15-minute backlog policies must be consolidated."
   }
 }

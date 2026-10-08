@@ -4,9 +4,9 @@ resource "google_monitoring_alert_policy" "west_job_failed" {
   combiner     = "OR"
   enabled      = var.west_schedulers_enabled
   conditions {
-    display_name = "Failed hourly or daily execution"
+    display_name = "Failed daily execution"
     condition_threshold {
-      filter          = "resource.type = \"cloud_run_job\" AND resource.labels.location = \"${var.west_region}\" AND resource.labels.project_id = \"${var.project_id}\" AND resource.labels.job_name = one_of(\"${local.west_jobs.hourly.name}\", \"${local.west_jobs.daily.name}\") AND metric.type = \"run.googleapis.com/job/completed_execution_count\" AND metric.labels.result != \"succeeded\""
+      filter          = "resource.type = \"cloud_run_job\" AND resource.labels.location = \"${var.west_region}\" AND resource.labels.project_id = \"${var.project_id}\" AND resource.labels.job_name = \"${local.west_jobs.daily.name}\" AND metric.type = \"run.googleapis.com/job/completed_execution_count\" AND metric.labels.result != \"succeeded\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -24,15 +24,15 @@ resource "google_monitoring_alert_policy" "west_job_failed" {
 resource "google_monitoring_alert_policy" "west_pubsub_backlog" {
   project      = var.project_id
   enabled      = var.west_schedulers_enabled
-  display_name = "Fitbit west: oldest unacked notification over 24 hours"
+  display_name = "Fitbit west: oldest unacked notification over 15 minutes"
   combiner     = "OR"
   conditions {
-    display_name = "Unacked message age exceeds 24 hours"
+    display_name = "Unacked message age exceeds 15 minutes"
     condition_threshold {
       filter          = "resource.type = \"pubsub_subscription\" AND resource.labels.subscription_id = \"${google_pubsub_subscription.west.name}\" AND metric.type = \"pubsub.googleapis.com/subscription/oldest_unacked_message_age\""
       comparison      = "COMPARISON_GT"
-      threshold_value = 86400
-      duration        = "600s"
+      threshold_value = 900
+      duration        = "300s"
       aggregations {
         alignment_period   = "60s"
         per_series_aligner = "ALIGN_MAX"
@@ -44,12 +44,12 @@ resource "google_monitoring_alert_policy" "west_pubsub_backlog" {
 resource "google_monitoring_alert_policy" "west_receiver_failure" {
   project      = var.project_id
   enabled      = var.west_schedulers_enabled
-  display_name = "Fitbit west receiver error"
+  display_name = "Fitbit west receiver or worker error"
   combiner     = "OR"
   conditions {
-    display_name = "Receiver ERROR log"
+    display_name = "Receiver or worker ERROR log"
     condition_matched_log {
-      filter = "resource.type=\"cloud_run_revision\" AND resource.labels.location=\"${var.west_region}\" AND resource.labels.service_name=\"pdp-fitbit-west\" AND severity>=ERROR"
+      filter = "resource.type=\"cloud_run_revision\" AND resource.labels.location=\"${var.west_region}\" AND resource.labels.service_name=(\"pdp-fitbit-west\" OR \"pdp-fitbit-worker-west\") AND severity>=ERROR"
     }
   }
   alert_strategy {
