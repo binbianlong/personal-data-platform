@@ -40,6 +40,13 @@ def _raw(storage_created_at: datetime) -> RawObject:
     )
 
 
+@pytest.fixture(autouse=True)
+def _ninety_day_source(monkeypatch):
+    monkeypatch.setattr(
+        "personal_data_platform.sources.screen_time.adapter.ScreenTimeSource.retention_days", 90
+    )
+
+
 def _warehouse() -> Warehouse:
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate()
@@ -376,7 +383,7 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
 
 @pytest.mark.parametrize(
     "failure",
-    ["loader", "fitbit", "dbt", "app-in-focus", "app-usage", "none", "gap", "busy", "marker"],
+    ["fitbit", "dbt", "app-in-focus", "app-usage", "none", "gap", "busy", "marker"],
 )
 def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, failure):
     from personal_data_platform import dbt_runner
@@ -390,7 +397,6 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
     warehouse = _warehouse()
     successes = []
     phases = []
-    inventories = {}
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "test")
     monkeypatch.setenv(
         "PDP_HEARTBEAT_CONFIG",
@@ -410,11 +416,6 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
         phases.append(name)
         return SimpleNamespace(ok=failure != name)
 
-    def load(_repository, _warehouse, refs, **kwargs):
-        inventories[kwargs["source"].stream] = refs
-        return phase("loader", kwargs)
-
-    monkeypatch.setattr(job, "run_loader_objects", load)
     monkeypatch.setattr(runtime, "run_daily_repair", lambda **kwargs: phase("fitbit", kwargs))
 
     def dbt(**kwargs):
@@ -429,12 +430,12 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
     for source in sources:
         monkeypatch.setattr(type(source), "repository_from_env", lambda _: _Repository())
 
-    def audit(*args, source, **kwargs):
-        assert kwargs["raw_objects"] is inventories[source.stream]
-        assert kwargs["publish_success"] is False
-        return phase(source.stream, kwargs)
+    def audit(_warehouse, source, now):
+        owner = warehouse.query_value("SELECT owner_id FROM ops.job_lock WHERE job_name='loader'")
+        result = phase(source.stream, {"_lease_owner": owner})
+        return SourceHealth(result.ok, {})
 
-    monkeypatch.setattr(job, "run_reconciliation", audit)
+    monkeypatch.setattr(job, "_audit_screen_time_heartbeat", audit)
     if failure == "busy":
         warehouse.acquire_job_lock("loader", "competitor", lease_seconds=7500)
     if failure == "marker":
@@ -459,10 +460,10 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
         assert job.run_reconciliation_from_env() == int(failure not in ("none", "gap", "busy"))
         assert len(successes) == (1 if failure in ("none", "gap") else 0)
         assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == (
-            3 if failure in ("none", "gap") else 0
+            1 if failure in ("none", "gap") else 0
         )
         if failure in ("none", "gap"):
-            assert phases == ["loader", "loader", "fitbit", "dbt", "app-in-focus", "app-usage"]
+            assert phases == ["fitbit", "dbt", "app-in-focus", "app-usage"]
             entries = [json.loads(line) for line in capfd.readouterr().err.splitlines()]
             assert any(
                 entry.get("event") == "reconciliation"

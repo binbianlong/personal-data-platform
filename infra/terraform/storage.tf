@@ -21,15 +21,6 @@ resource "google_storage_bucket" "raw" {
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
 
-  lifecycle_rule {
-    action { type = "Delete" }
-    condition {
-      age            = 90
-      matches_prefix = ["raw/screen_time/v1/", "raw/screen_time/v2/"]
-      matches_suffix = [".segb.gz"]
-    }
-  }
-
   soft_delete_policy {
     retention_duration_seconds = 0
   }

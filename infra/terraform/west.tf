@@ -32,7 +32,7 @@ locals {
   }
   west_job_secret_access = { for key in toset(flatten([for job in values(local.west_jobs) : values(job.secrets)])) : key => key }
   west_scheduled_jobs    = { hourly = "15 * * * *", daily = "10 4 * * *" }
-  west_raw_scopes        = { screen_time = { prefixes = ["raw/screen_time/v1/", "raw/screen_time/v2/"], suffixes = [".segb.gz"] }, fitbit = { prefixes = ["raw/fitbit/v3/"], suffixes = [".json.gz"] } }
+  west_raw_scopes        = { fitbit = { prefixes = ["raw/fitbit/v3/"], suffixes = [".json.gz"] } }
 }
 
 resource "google_storage_bucket" "raw_west" {
@@ -52,14 +52,6 @@ resource "google_storage_bucket" "raw_west" {
         matches_prefix = lifecycle_rule.value.prefixes
         matches_suffix = lifecycle_rule.value.suffixes
       }
-    }
-  }
-  lifecycle_rule {
-    action { type = "Delete" }
-    condition {
-      days_since_custom_time = 90
-      matches_prefix         = ["raw/screen_time/v1/", "raw/screen_time/v2/"]
-      matches_suffix         = [".segb.gz"]
     }
   }
   soft_delete_policy { retention_duration_seconds = 0 }
@@ -271,7 +263,7 @@ data "google_iam_policy" "raw_west" {
     members = ["serviceAccount:${google_service_account.west.email}"]
     condition {
       title      = "runtime_raw_read"
-      expression = "resource.name == 'projects/_/buckets/${local.west_raw_bucket_name}' || resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/fitbit/v3/') || resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/screen_time/v1/') || resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/screen_time/v2/')"
+      expression = "resource.name == 'projects/_/buckets/${local.west_raw_bucket_name}' || resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/fitbit/v3/')"
     }
   }
   binding {
@@ -280,22 +272,6 @@ data "google_iam_policy" "raw_west" {
     condition {
       title      = "fitbit_bundle_create_only"
       expression = "resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/fitbit/v3/') && resource.name.endsWith('.json.gz')"
-    }
-  }
-  binding {
-    role    = local.storage_roles.collector_raw_creator
-    members = ["serviceAccount:${google_service_account.collector.email}"]
-    condition {
-      title      = "collector_raw_create_only"
-      expression = "(resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/screen_time/v1/') || resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/screen_time/v2/')) && resource.name.endsWith('.segb.gz')"
-    }
-  }
-  binding {
-    role    = local.storage_roles.collector_receipt_writer
-    members = ["serviceAccount:${google_service_account.collector.email}"]
-    condition {
-      title      = "collector_control_state_only"
-      expression = "(resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/${local.receipt_object_prefix}') || resource.name == 'projects/_/buckets/${local.west_raw_bucket_name}/objects/${local.device_manifest_key}' || resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/${local.mac_receipt_object_prefix}') || resource.name == 'projects/_/buckets/${local.west_raw_bucket_name}/objects/${local.mac_device_manifest_key}') && resource.name.endsWith('.json')"
     }
   }
   binding {

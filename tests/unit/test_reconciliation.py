@@ -23,6 +23,14 @@ NOW = datetime(2026, 8, 27, tzinfo=UTC)
 REQUIRED_RELATIONS = get_source().required_relations
 
 
+@pytest.fixture(autouse=True)
+def _ninety_day_source(monkeypatch):
+    # These cases exercise the shared lifecycle audit, including expiry boundaries.
+    monkeypatch.setattr(
+        "personal_data_platform.sources.screen_time.adapter.ScreenTimeSource.retention_days", 90
+    )
+
+
 @pytest.mark.parametrize(
     "key",
     ["collector_receipt_count", "stale_collector_count", "missing_collector_receipt_count"],

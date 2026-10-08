@@ -164,7 +164,9 @@ def test_runtime_resources_preserve_backups_and_support_pausing() -> None:
     assert 'resource "google_cloud_run_v2_job" "west"' in west
     assert 'resource "google_cloud_scheduler_job" "west"' in west
     assert re.search(r"paused\s*= !var.west_schedulers_enabled", west)
-    assert re.search(r"days_since_custom_time\s*= 90", west)
+    assert "days_since_custom_time" not in west
+    assert "raw/screen_time/" not in west
+    assert "raw/fitbit/v3/" in west
     assert "retention_duration_seconds = 0" in west
     assert "prevent_destroy = true" in west
 
