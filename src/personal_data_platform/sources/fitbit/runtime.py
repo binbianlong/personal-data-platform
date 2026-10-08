@@ -21,7 +21,7 @@ from .api import HealthClient
 from .logging import configure_logging
 from .models import DATA_TYPES, DATE_TYPES, Window, date_cursor
 from .oauth import GoogleOAuth
-from .service import create_pubsub_app
+from .service import create_pubsub_app, create_worker_app
 from .signatures import TinkSignatures
 from .webhook import GoogleHealthAuthenticator
 
@@ -60,18 +60,19 @@ def _acquisition_runner() -> AcquisitionRunner:
     )
 
 
-def run_notification_job(
-    *, max_messages: int = 500, collect_seconds: int = 120, timeout_seconds: int = 3000
-) -> AcquisitionSummary:
-    from .notifications import PubSubNotifications
-
+def run_worker_from_env() -> int:
     configure_logging()
-    return _acquisition_runner().ingest(
-        PubSubNotifications.from_env(),
-        max_messages=max_messages,
-        collect_seconds=collect_seconds,
-        timeout_seconds=timeout_seconds,
+    app = create_worker_app(
+        runner=_acquisition_runner(), subscription=required("PDP_FITBIT_PUBSUB_SUBSCRIPTION")
     )
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", "8080")),
+        log_level="info",
+        access_log=False,
+    )
+    return 0
 
 
 def run_serve_from_env() -> int:

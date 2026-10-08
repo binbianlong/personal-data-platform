@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -13,7 +12,6 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from personal_data_platform.loader.deadline import interrupt_after
-from personal_data_platform.loader.job import LOADER_LEASE_SECONDS
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConnectionError
 
 from .api import HealthClient
@@ -21,9 +19,9 @@ from .models import (
     DATE_TYPES,
     CapturedSnapshot,
     HeartRateMinuteSnapshot,
+    Notification,
     Window,
 )
-from .notifications import Delivery
 from .writer import FitbitBatch, FitbitMinuteBatch
 
 LOGGER = logging.getLogger(__name__)
@@ -34,7 +32,6 @@ class AcquisitionSummary:
     completed_scopes: int = 0
     failed_scopes: int = 0
     deferred_scopes: int = 0
-    acked_notifications: int = 0
     first_incomplete: Window | None = None
 
     @property
@@ -44,12 +41,6 @@ class AcquisitionSummary:
 
 class AcquisitionDeferred(RuntimeError):
     """A budget, incomplete minute or ownership gate requires another execution."""
-
-
-class NotificationQueue(Protocol):
-    def pull(self, *, limit: int, timeout_seconds: float) -> tuple[Delivery, ...]: ...
-    def extend(self, ack_ids: tuple[str, ...], *, seconds: int) -> None: ...
-    def ack(self, ack_ids: tuple[str, ...]) -> None: ...
 
 
 class AcquisitionClient(Protocol):
@@ -77,33 +68,6 @@ def acquisition_windows(windows: tuple[Window, ...]) -> tuple[Window, ...]:
                 raise ValueError("notification range requires explicit bounded backfill")
             start = stop
     return tuple(sorted(result, key=lambda value: (value.start, value.data_type)))
-
-
-class _AckLease:
-    def __init__(self, queue: NotificationQueue, deliveries: list[Delivery]) -> None:
-        self.queue, self.deliveries = queue, deliveries
-        self.stop = threading.Event()
-        self.thread = threading.Thread(target=self._run, daemon=True)
-
-    def extend(self) -> None:
-        ids = tuple(delivery.ack_id for delivery in self.deliveries)
-        try:
-            self.queue.extend(ids, seconds=600)
-        except Exception as error:
-            LOGGER.warning("fitbit ack extension failed error_type=%s", type(error).__name__)
-
-    def _run(self) -> None:
-        while not self.stop.wait(30):
-            self.extend()
-
-    def __enter__(self) -> _AckLease:
-        self.extend()
-        self.thread.start()
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.stop.set()
-        self.thread.join(timeout=25)
 
 
 class AcquisitionRunner:
@@ -135,110 +99,31 @@ class AcquisitionRunner:
             raise AcquisitionDeferred("shared loader ownership lost") from None
         return seconds
 
-    def ingest(
-        self,
-        queue: NotificationQueue,
-        *,
-        max_messages: int = 500,
-        collect_seconds: int = 120,
-        timeout_seconds: int = 3000,
-    ) -> AcquisitionSummary:
-        if (
-            not 1 <= max_messages <= 500
-            or not 0 <= collect_seconds <= 120
-            or not 0 < timeout_seconds <= 3000
-        ):
-            raise ValueError("invalid notification job limits")
-        deadline = self.monotonic() + timeout_seconds
-        collect_deadline = min(deadline, self.monotonic() + collect_seconds)
-        deliveries = list(
-            queue.pull(
-                limit=min(50, max_messages),
-                timeout_seconds=min(30, collect_seconds or 1, deadline - self.monotonic()),
-            )
-        )
-        while (
-            not deliveries
-            and not getattr(queue, "invalid_count", 0)
-            and self.monotonic() < collect_deadline
-        ):
-            time.sleep(min(1, max(0, collect_deadline - self.monotonic())))
-            seconds = collect_deadline - self.monotonic()
-            if seconds <= 0:
-                break
-            deliveries.extend(
-                queue.pull(limit=min(50, max_messages), timeout_seconds=min(30, seconds))
-            )
-        if not deliveries:
-            return AcquisitionSummary(failed_scopes=int(bool(getattr(queue, "invalid_count", 0))))
+    def process_notification(self, notification: Notification) -> AcquisitionSummary:
+        """Process one push delivery; the HTTP boundary acknowledges confirmed commits."""
+        if notification.subject_key != self.subject_key:
+            raise ValueError("notification subject does not match configured subject")
+        windows = acquisition_windows(notification.windows)
         if self.paused:
-            queue.extend(tuple(d.ack_id for d in deliveries), seconds=0)
-            return AcquisitionSummary(deferred_scopes=len(deliveries))
+            return AcquisitionSummary(deferred_scopes=len(windows))
+        deadline = self.monotonic() + 480
         warehouse = self.warehouse_factory()
         owner = uuid.uuid4().hex
         acquired = False
-        timer = None
         try:
             warehouse.migrate()
-            acquired = warehouse.acquire_job_lock(
-                "loader", owner, lease_seconds=LOADER_LEASE_SECONDS
-            )
+            acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=600)
             if not acquired:
-                queue.extend(tuple(d.ack_id for d in deliveries), seconds=0)
-                return AcquisitionSummary(deferred_scopes=len(deliveries))
-            timer = interrupt_after(warehouse, self._check(warehouse, owner, deadline))
-            with _AckLease(queue, deliveries):
-                while len(deliveries) < max_messages and self.monotonic() < collect_deadline:
-                    more = queue.pull(
-                        limit=min(50, max_messages - len(deliveries)),
-                        timeout_seconds=min(30, max(0.01, collect_deadline - self.monotonic())),
-                    )
-                    deliveries.extend(more)
-                    if not more:
-                        break
-                valid = [d for d in deliveries if d.notification.subject_key == self.subject_key]
-                windows = acquisition_windows(
-                    tuple(w for d in valid for w in d.notification.windows)
-                )
-                try:
-                    result, completed = self._process(warehouse, owner, windows, deadline)
-                except WarehouseConnectionError:
-                    return AcquisitionSummary(failed_scopes=len(windows))
-                ack_ids = tuple(
-                    d.ack_id
-                    for d in valid
-                    if all(w in completed for w in acquisition_windows(d.notification.windows))
-                )
-                acked = 0
-                failures = (
-                    result.failed_scopes
-                    + len(deliveries)
-                    - len(valid)
-                    + int(getattr(queue, "invalid_count", 0))
-                )
-                try:
-                    queue.ack(ack_ids)
-                    acked = len(ack_ids)
-                except Exception as error:
-                    failures += 1
-                    LOGGER.warning("fitbit ack failed error_type=%s", type(error).__name__)
-                pending = tuple(
-                    d.ack_id for d in deliveries if not acked or d.ack_id not in ack_ids
-                )
-                if pending:
-                    queue.extend(pending, seconds=0)
-                return AcquisitionSummary(
-                    result.completed_scopes,
-                    failures,
-                    result.deferred_scopes,
-                    acked,
-                    result.first_incomplete,
-                )
+                return AcquisitionSummary(deferred_scopes=len(windows))
+            seconds = int(deadline - self.monotonic())
+            if seconds <= 0:
+                return AcquisitionSummary(deferred_scopes=len(windows))
+            return self.run_windows(
+                windows, warehouse=warehouse, lease_owner=owner, timeout_seconds=seconds
+            )
+        except WarehouseConnectionError:
+            return AcquisitionSummary(failed_scopes=len(windows))
         finally:
-            if timer is not None:
-                timer.cancel()
-            if isinstance(self.client, HealthClient):
-                self.client.request_guard = None
             if acquired and warehouse.connection_usable:
                 warehouse.release_job_lock("loader", owner)
             warehouse.close()

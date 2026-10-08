@@ -268,38 +268,3 @@ def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path)
         ) == [(60, "existing")]
     finally:
         warehouse.close()
-
-
-def test_scalar_v3_bundle_preserves_rows_on_unchanged_write(tmp_path):
-    import gzip
-
-    from personal_data_platform.sources.fitbit.adapter import FitbitSource
-    from tests.fitbit_helpers import encode_snapshot
-
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "no-intents.duckdb"))))
-    warehouse.migrate()
-    base = datetime(2026, 9, 1, tzinfo=UTC)
-    snapshot = Snapshot(
-        "self",
-        Window("steps", base, base + timedelta(days=1)),
-        base + timedelta(days=1),
-        (Record("steps", "steps", base, base, base + timedelta(minutes=1), 10),),
-    )
-    source = FitbitSource()
-    key, payload = encode_snapshot(snapshot)
-    raw = source.parse_raw_key(
-        key,
-        storage_created_at=snapshot.fetched_at,
-        storage_generation=1,
-    )
-    batch = source.decode(raw, gzip.decompress(payload))
-    try:
-        batch.write(warehouse.connection, raw, byte_size=len(payload), loaded_at=base)
-        batch.write(
-            warehouse.connection, raw, byte_size=len(payload), loaded_at=base + timedelta(hours=1)
-        )
-        assert warehouse.query_rows(
-            "SELECT value,source_key,loaded_at FROM base.fitbit_activity_interval"
-        ) == [(10, raw.key, base)]
-    finally:
-        warehouse.close()

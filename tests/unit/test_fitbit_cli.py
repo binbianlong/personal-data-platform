@@ -51,18 +51,8 @@ def test_sync_preserves_narrow_physical_bounds(monkeypatch):
     ]
 
 
-def test_deferred_hourly_job_exits_zero_and_reports_unfinished_scope(monkeypatch, capsys):
-    import json
-    from datetime import UTC, datetime, timedelta
-
+def test_worker_command_starts_push_service(monkeypatch):
     from personal_data_platform.sources.fitbit import runtime
-    from personal_data_platform.sources.fitbit.acquisition import AcquisitionSummary
-    from personal_data_platform.sources.fitbit.models import Window
 
-    at = datetime(2026, 10, 1, tzinfo=UTC)
-    result = AcquisitionSummary(
-        deferred_scopes=1, first_incomplete=Window("steps", at, at + timedelta(days=1))
-    )
-    monkeypatch.setattr(runtime, "run_notification_job", lambda **kwargs: result)
-    assert main(["fitbit", "ingest-notifications"]) == 0
-    assert json.loads(capsys.readouterr().out)["first_incomplete"]["data_type"] == "steps"
+    monkeypatch.setattr(runtime, "run_worker_from_env", lambda: 0)
+    assert main(["fitbit", "serve-worker"]) == 0

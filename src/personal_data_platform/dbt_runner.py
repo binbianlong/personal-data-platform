@@ -85,9 +85,11 @@ def run_dbt_from_env(
     lease_owner: str | None = None,
     timeout_seconds: int = 50 * 60,
 ) -> int:
-    from personal_data_platform.sources.registry import get_source
+    from personal_data_platform.sources.registry import get_dbt_selector
 
-    source = get_source(source_id, stream) if source_id is not None or stream is not None else None
+    selector = (
+        get_dbt_selector(source_id, stream) if source_id is not None or stream is not None else None
+    )
     target = os.environ.get("DBT_TARGET", "prod")
     if target != "prod":
         raise ValueError("Cloud dbt entrypoint requires DBT_TARGET=prod")
@@ -107,7 +109,7 @@ def run_dbt_from_env(
         run_dbt(
             target=target,
             timeout_seconds=timeout_seconds,
-            selector=source.dbt_selector if source is not None else None,
+            selector=selector,
         )
         warehouse.require_job_lock(owner)
         return 0

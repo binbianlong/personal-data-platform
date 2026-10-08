@@ -39,8 +39,9 @@ elif command == "sync":
     now = datetime(2026, 9, 28, tzinfo=UTC)
     runtime.run_sync_from_env(start=now, end=now + timedelta(days=1), data_types=("steps",))
 else:
-    runtime._acquisition_runner = lambda: SimpleNamespace(ingest=lambda *args,**kwargs: AcquisitionSummary())
-    runtime.run_notification_job()
+    runtime._acquisition_runner = lambda: object()
+    runtime.create_worker_app = lambda **kwargs: object()
+    runtime.run_worker_from_env()
 api.LOGGER.info("api probe")
 service.LOGGER.info("acquisition probe")
 runtime.LOGGER.error("failure probe\nsecond line")
@@ -62,7 +63,7 @@ def _probe(command, root="default", *, level=None):
     )
 
 
-@pytest.mark.parametrize("command", ["serve", "sync", "ingest"])
+@pytest.mark.parametrize("command", ["serve", "sync", "worker"])
 @pytest.mark.parametrize("root", ["default", "root"])
 def test_entrypoint_enables_json_app_logs_without_duplicates(command, root):
     result = _probe(command, root)
@@ -84,7 +85,7 @@ def test_entrypoint_enables_json_app_logs_without_duplicates(command, root):
     assert errors[0]["message"] == "failure probe\nsecond line"
 
 
-@pytest.mark.parametrize("command", ["serve", "sync", "ingest"])
+@pytest.mark.parametrize("command", ["serve", "sync", "worker"])
 def test_entrypoint_respects_log_level(command):
     result = _probe(command, level="WARNING")
     assert result.returncode == 0, result.stderr
