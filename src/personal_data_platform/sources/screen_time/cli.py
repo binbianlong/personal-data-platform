@@ -96,7 +96,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _run_devices() -> int:
-    config = CollectorConfig.from_env(require_gcs=False, require_allowlist=False)
+    config = CollectorConfig.from_env(require_allowlist=False)
     for source, allowed in (
         (_source(config), config.device_allowlist),
         (
@@ -149,7 +149,7 @@ def _run_inspect_mac(*, directory: Path | None) -> int:
 def _run_doctor() -> int:
     checks: list[tuple[str, bool, str]] = []
     try:
-        config = CollectorConfig.from_env(require_gcs=False, require_allowlist=False)
+        config = CollectorConfig.from_env(require_allowlist=False)
     except ConfigurationError as error:
         _print_check("collector secret", False, str(error))
         return 1
@@ -233,7 +233,7 @@ def _run_doctor() -> int:
 
 
 def _run_collect(*, watch: bool) -> int:
-    config = CollectorConfig.from_env(require_gcs=False)
+    config = CollectorConfig.from_env()
     state = CollectorState(config.state_db_path)
     uploader = ScreenTimeLocalRepository(state=state, source=get_source())
     collectors = []

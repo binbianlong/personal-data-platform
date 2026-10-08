@@ -8,44 +8,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from personal_data_platform.config import (
-    ConfigurationError,
-    GCSConfig,
-    _required,
-    _validate_impersonated_adc,
-)
+from personal_data_platform.config import ConfigurationError
 
 KEYCHAIN_SERVICE = "personal-data-platform"
-DEFAULT_COLLECTOR_ADC_PATH = (
-    Path.home()
-    / "Library/Application Support/personal-data-platform/gcloud/application_default_credentials.json"
-)
-
-
-@dataclass(frozen=True, slots=True)
-class CollectorADCConfig:
-    """Explicit impersonated ADC used by the unattended local collector."""
-
-    credentials_path: Path
-    service_account_email: str
-
-    @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> CollectorADCConfig:
-        values = os.environ if environ is None else environ
-        credentials_path = Path(
-            values.get("GOOGLE_APPLICATION_CREDENTIALS", str(DEFAULT_COLLECTOR_ADC_PATH))
-        ).expanduser()
-        service_account_email = _required(values, "PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL")
-        _validate_impersonated_adc(
-            credentials_path,
-            service_account_email,
-            credentials_name="GOOGLE_APPLICATION_CREDENTIALS",
-            service_account_name="PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL",
-        )
-        return cls(
-            credentials_path=credentials_path.resolve(),
-            service_account_email=service_account_email,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +22,6 @@ class CollectorConfig:
     state_db_path: Path
     pseudonym_key: bytes
     device_allowlist: frozenset[str]
-    gcs: GCSConfig | None = None
     mac_device_key: str | None = None
     mac_app_usage_local_dir: Path | None = None
 
@@ -66,7 +30,6 @@ class CollectorConfig:
         cls,
         environ: Mapping[str, str] | None = None,
         *,
-        require_gcs: bool = True,
         require_allowlist: bool = True,
     ) -> CollectorConfig:
         values = os.environ if environ is None else environ
@@ -128,7 +91,6 @@ class CollectorConfig:
             ).expanduser(),
             pseudonym_key=pseudonym_key,
             device_allowlist=allowlist,
-            gcs=GCSConfig.from_env(values) if require_gcs else None,
             mac_device_key=mac_device_key,
             mac_app_usage_local_dir=Path(
                 values.get(

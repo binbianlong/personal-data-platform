@@ -288,14 +288,6 @@ def validate_raw_object_key(key: str) -> None:
     _match_raw_object_key(key)
 
 
-def is_scan_receipt_key(key: str) -> bool:
-    """Return whether a key is a canonical current collector receipt."""
-    return (
-        _SCAN_RECEIPT_KEY_PATTERN.fullmatch(key) is not None
-        or _MAC_SCAN_RECEIPT_KEY_PATTERN.fullmatch(key) is not None
-    )
-
-
 def _match_raw_object_key(key: str) -> re.Match[str]:
     match = _RAW_KEY_PATTERN.fullmatch(key)
     if match is None:
