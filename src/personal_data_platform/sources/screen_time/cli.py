@@ -267,8 +267,10 @@ def _run_collect(*, watch: bool) -> int:
         )
         if not enabled
     )
+    schema_initialized = False
 
     def collect_and_load() -> None:
+        nonlocal schema_initialized
         stats = _collect_all(
             collectors,
             inactive_streams=inactive_streams,
@@ -278,7 +280,9 @@ def _run_collect(*, watch: bool) -> int:
         )
         warehouse = Warehouse(connect(_warehouse_config()))
         try:
-            warehouse.migrate()
+            if not schema_initialized:
+                warehouse.migrate()
+                schema_initialized = True
             pending = len(state.pending())
             _load_pending(state, warehouse, publish_success=not stats.deferred)
             _print_collection_stats(stats)
