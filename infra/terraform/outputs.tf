@@ -63,6 +63,7 @@ output "west_resources" {
     preflight_bucket    = google_storage_bucket.preflight_west.name
     jobs                = { for key, job in google_cloud_run_v2_job.west : key => job.name }
     receiver_url        = "${google_cloud_run_v2_service.west.uri}/webhooks/fitbit"
+    worker_url          = "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit"
     secrets             = { for key, secret in google_secret_manager_secret.west : key => secret.secret_id }
     pubsub_topic        = google_pubsub_topic.west.id
     pubsub_subscription = google_pubsub_subscription.west.id

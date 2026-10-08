@@ -89,7 +89,7 @@ variable "west_secret_versions" {
   }
 }
 variable "west_schedulers_enabled" {
-  description = "Run scheduled processing and its native alerts; false pauses both schedules and Fitbit processing."
+  description = "Run daily scheduling, push processing and native alerts; false pauses daily scheduling and Fitbit processing."
   type        = bool
   default     = true
 }

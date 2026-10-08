@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .contracts import SourceAdapter
-from .fitbit.adapter import FitbitSource
 from .screen_time.adapter import MacAppUsageSource, ScreenTimeSource
 
 
@@ -24,7 +23,6 @@ def _mac_app_usage_source() -> SourceAdapter:
 
 
 _SOURCE_FACTORIES: dict[tuple[str, str], Callable[[], SourceAdapter]] = {
-    ("fitbit", "health"): FitbitSource,
     ("screen_time", "app-in-focus"): _screen_time_source,
     ("screen_time", "app-usage"): _mac_app_usage_source,
 }
@@ -42,6 +40,8 @@ def get_source(source_id: str | None = None, stream: str | None = None) -> Sourc
         if stream is not None:
             raise ValueError("stream requires source_id")
         return _SOURCE_FACTORIES[_DEFAULT_SOURCE]()
+    if source_id == "fitbit":
+        raise ValueError("Fitbit has no saved Raw; use pdp fitbit sync --from ... --to ...")
     candidates = {key: factory for key, factory in _SOURCE_FACTORIES.items() if key[0] == source_id}
     if not candidates:
         raise ValueError(f"unsupported source: {source_id}")
@@ -65,7 +65,18 @@ def get_sources(
         raise ValueError("--all-streams requires source_id")
     if stream is not None:
         raise ValueError("--all-streams cannot be combined with --stream")
+    if source_id == "fitbit":
+        raise ValueError("Fitbit has no saved Raw; use pdp fitbit sync --from ... --to ...")
     keys = sorted(key for key in _SOURCE_FACTORIES if key[0] == source_id)
     if not keys:
         raise ValueError(f"unsupported source: {source_id}")
     return tuple(_SOURCE_FACTORIES[key]() for key in keys)
+
+
+def get_dbt_selector(source_id: str | None, stream: str | None) -> str:
+    """API-only sources do not participate in the Raw adapter registry."""
+    if source_id == "fitbit":
+        if stream not in (None, "health"):
+            raise ValueError(f"unsupported stream for source 'fitbit': {stream}")
+        return "tag:fitbit tag:screen_time"
+    return get_source(source_id, stream).dbt_selector

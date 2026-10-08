@@ -8,14 +8,17 @@ import pytest
 
 from personal_data_platform.sources.fitbit import runtime
 from personal_data_platform.sources.fitbit.models import Window
-from tests.integration.test_fitbit_acquisition import setup
+from tests.integration.test_fitbit_acquisition import direct_setup
 
 NOW = datetime(2026, 9, 28, 3, tzinfo=UTC)
 
 
 @pytest.fixture
 def manual_env(monkeypatch, tmp_path):
-    runner, store, api, factory, _ = setup(tmp_path, states=("A",))
+    runner, api, factory = direct_setup(tmp_path, states=(10,))
+    warehouse = factory()
+    warehouse.migrate()
+    warehouse.close()
     fetch = api.fetch_captured
 
     def daily_records(window, **kwargs):
@@ -38,7 +41,7 @@ def manual_env(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "_acquisition_runner", lambda: runner)
     logger = logging.getLogger("personal_data_platform.sources.fitbit")
     previous = (logger.level, logger.propagate, logger.handlers[:])
-    yield SimpleNamespace(runner=runner, store=store, api=api, warehouse=factory)
+    yield SimpleNamespace(runner=runner, api=api, warehouse=factory)
     for handler in logger.handlers[:]:
         if handler not in previous[2]:
             logger.removeHandler(handler)
@@ -77,9 +80,15 @@ def test_manual_retry_records_first_unfinished_day_and_preserves_committed_data(
     warehouse = manual_env.warehouse()
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 3
     warehouse.close()
-    saved = manual_env.store.puts
     assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 0
-    assert manual_env.store.puts == saved
+    warehouse = manual_env.warehouse()
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM ops.ingestion_metadata WHERE source_id='fitbit'"
+        )
+        == 0
+    )
+    warehouse.close()
 
 
 def test_manual_old_narrow_range_keeps_exact_bounds(manual_env, capsys):
@@ -104,7 +113,7 @@ def test_daily_paused_leaves_existing_data_and_shared_owner(manual_env, monkeypa
             now=NOW, warehouse=warehouse, lease_owner="daily", timeout_seconds=6000
         )
         assert not result.ok and result.deferred_scopes == 1
-        assert manual_env.api.calls == [] and manual_env.store.puts == 0
+        assert manual_env.api.calls == []
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
     finally:
         warehouse.close()

@@ -5,6 +5,32 @@ import pytest
 from personal_data_platform import dbt_runner
 
 
+@pytest.mark.parametrize("stream", [None, "health"])
+def test_fitbit_dbt_selector_does_not_require_a_raw_adapter(monkeypatch, stream):
+    import duckdb
+
+    from personal_data_platform.sources import registry
+    from personal_data_platform.storage.motherduck import Warehouse
+
+    warehouse = Warehouse(duckdb.connect())
+    monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
+    monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
+    monkeypatch.setattr(dbt_runner, "connect", lambda _: warehouse.connection)
+    monkeypatch.setattr(warehouse, "close", lambda: None)
+    monkeypatch.setattr(
+        registry,
+        "get_source",
+        lambda *a, **kw: pytest.fail("Fitbit dbt must not resolve a Raw adapter"),
+    )
+    calls = []
+    monkeypatch.setattr(dbt_runner, "run_dbt", lambda **kwargs: calls.append(kwargs))
+    try:
+        assert dbt_runner.run_dbt_from_env(source_id="fitbit", stream=stream) == 0
+        assert calls[0]["selector"] == "tag:fitbit tag:screen_time"
+    finally:
+        warehouse.connection.close()
+
+
 def test_cloud_dbt_migrates_before_models(monkeypatch) -> None:
     import duckdb
 

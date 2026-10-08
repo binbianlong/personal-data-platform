@@ -8,7 +8,7 @@ Jobの実行・監視・停止、DB更新、共通資格情報は[Platform運用
 | --- | --- |
 | `PDP_FITBIT_WEBHOOK_CONFIG` | `authorization`・`health_user_id`のJSON。receiverだけに渡す |
 | `PDP_FITBIT_OAUTH_CONFIG` | `client_id`・`client_secret`・`refresh_token`・`health_user_id`のJSON。処理Jobに渡す |
-| `PDP_FITBIT_PUBSUB_TOPIC` / `PDP_FITBIT_PUBSUB_SUBSCRIPTION` | 完全なPub/Sub resource名 |
+| `PDP_FITBIT_PUBSUB_TOPIC` / `PDP_FITBIT_PUBSUB_SUBSCRIPTION` | receiverの発行先topic名 / workerが受理するsubscription名 |
 | `PDP_FITBIT_PUBSUB_ENDPOINT` | `pubsub.us-west1.rep.googleapis.com` |
 | `PDP_FITBIT_SUBJECT_KEY` | 安定した疑似subject key。receiverと処理Jobで一致させる |
 | `PDP_FITBIT_PROCESSING_PAUSED` | `true`で取得処理を保留する。通常は`false` |
@@ -17,11 +17,10 @@ secretの保存とversion固定は[Platformセキュリティ](../../platform/se
 
 ## CLIと再試行
 
-取得・ack条件は[取得仕様](acquisition.md#webhookとpubsub)、保存・再生条件は[データモデル](data-model.md)に従う。
-古い成功だけで新通知をackしない。期限/leaseによる保留だけではJob失敗にしない。
+取得・成功応答の条件は[取得仕様](acquisition.md#webhookとpubsub)、範囲置換は[データモデル](data-model.md)に従う。
+古い成功だけで新通知をackせず、新しくAPI取得してcommitを確認する。workerの保留は503として再配信を受ける。
 
 ```bash
-pdp fitbit ingest-notifications --max-messages 500 --collect-seconds 120 --timeout-seconds 3000
 pdp fitbit sync --from YYYY-MM-DD --to YYYY-MM-DD
 ```
 
@@ -32,7 +31,8 @@ pdp fitbit sync --from YYYY-MM-DD --to YYYY-MM-DD
 ## 停止と復旧
 
 Schedulerの停止とlease確認は[Platform運用](../../platform/operations.md)に従う。receiverを止めなければ通知は7日保持される。
-通常のAPI・DB失敗は次の毎時取得、日次のRaw再生と7日再照合で再試行する。
-毒性Rawは削除せず、decoder修正後に同じgenerationを再処理する。
+通常のAPI・DB失敗はPub/Subの再配信と日次の7日再照合で再試行する。
+不正通知は成功応答せず、原因を修正するか、期間指定同期で補修する。
 7日超の停止は空白期間を確認して上記の期間指定取得を行う。
-本番DBを空にせず、Raw再生は独立したscratch DBで比較する。90日より古いRawの復元は保証しない。
+本番DBを空にせず、`MOTHERDUCK_DATABASE`を独立したscratch DBへ向けて期間指定同期とdbtを実行し比較する。
+Fitbitの復旧元はGoogle Health APIであり、Rawは保存しない。

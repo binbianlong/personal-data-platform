@@ -1,17 +1,13 @@
 # Fitbitデータモデル
 
-## API Raw
+## APIからの直接取込
 
-```text
-raw/fitbit/v3/<subject_key>/health/<YYYYMMDDTHHMMSSffffffZ>/<bundle_id>/<object_index>/<sha256>.json.gz
-```
-
-Raw v3は完全取得単位の直接gzip JSON配列で、gzip後最大16 MiB。一つの取得を分割せず、各objectを単独で再生できる。
-元APIの未知フィールド、取得範囲・時刻、正規化結果を保持する。subjectは安定した疑似識別子で、OAuth IDやtokenをkeyへ含めない。
-`fetched_at`は全ページ取得の開始時刻、objectの`observed_at`は含まれる取得単位の最大`fetched_at`。
-`bundle_id`と0始まりの`object_index`がobjectを識別し、`sha256`はgzip前のJSON全体から計算する。
-通知・attempt・bundle・cursorの永続台帳、GCS receipt、同期checkpointは持たない。
-決定的gzip、create-only保存、90日保持、generation固定の再生は[共通Raw契約](../../platform/architecture.md)に従う。
+全ページ取得を検証し、1日・1種別の正規化データとcoverageを同じtransactionへ書き込む。
+APIレスポンスと未知フィールドは処理中のメモリだけで扱い、Rawとして永続保存しない。
+`fetched_at`は全ページ取得の開始時刻。`source_key`は`fitbit-api:<UUID>`形式の取得識別子で、保存先を表さない。
+以前の取込に付いたGCS keyは過去の識別子として残す。既存の正規化データとスキーマは保持する。
+`ops.fitbit_coverage`には現在の取得範囲・時刻・比較用hashを残し、Raw取込台帳への新規登録は行わない。
+通知・attempt・cursorの永続台帳や同期checkpointは持たず、復旧には期間指定のAPI再取得を使う。
 
 ## テーブルと単位
 

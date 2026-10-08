@@ -548,19 +548,3 @@ class HeartRateMinuteSnapshot:
             string(data["origin"]),
             string(data["aggregation_version"]),
         )
-
-
-@dataclass(frozen=True, slots=True)
-class FitbitBundle:
-    bundle_id: str
-    entries: tuple[CapturedSnapshot | HeartRateMinuteSnapshot, ...]
-
-    def __post_init__(self) -> None:
-        if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.bundle_id) is None or not self.entries:
-            raise ValueError("invalid bundle identity or empty entries")
-        if len({entry.subject_key for entry in self.entries}) != 1:
-            raise ValueError("bundle must have one subject")
-        if len({(entry.window, entry.aggregation_version) for entry in self.entries}) != len(
-            self.entries
-        ):
-            raise ValueError("bundle has duplicate acquisition ranges")

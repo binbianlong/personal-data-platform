@@ -1,12 +1,20 @@
 import pytest
 
 
-def test_raw_adapter_rejects_legacy_decoding(monkeypatch):
-    from personal_data_platform.sources.fitbit.adapter import FitbitSource
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["loader", "--source", "fitbit"],
+        ["rebuild", "--source", "fitbit", "--dry-run"],
+        ["rebuild", "--source", "fitbit", "--all-streams", "--dry-run"],
+    ],
+)
+def test_fitbit_raw_commands_redirect_to_api_sync(command, capsys, monkeypatch):
+    from personal_data_platform.cli import main
 
-    assert FitbitSource().schema_versions == (3,)
-    with pytest.raises(ValueError):
-        FitbitSource(version=1)
+    monkeypatch.delenv("GCS_BUCKET", raising=False)
+    assert main(command) == 1
+    assert "fitbit sync" in capsys.readouterr().err
 
 
 def test_old_receipt_repair_command_is_removed():

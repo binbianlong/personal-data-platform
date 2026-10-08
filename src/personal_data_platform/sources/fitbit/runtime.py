@@ -15,15 +15,13 @@ import uvicorn
 
 from personal_data_platform.config import secret_config
 from personal_data_platform.loader.job import JobAlreadyRunning
-from personal_data_platform.storage.gcs import GCSRawRepository
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
-from .adapter import FitbitSource
 from .api import HealthClient
 from .logging import configure_logging
 from .models import DATA_TYPES, DATE_TYPES, Window, date_cursor
 from .oauth import GoogleOAuth
-from .service import create_pubsub_app
+from .service import create_pubsub_app, create_worker_app
 from .signatures import TinkSignatures
 from .webhook import GoogleHealthAuthenticator
 
@@ -55,7 +53,6 @@ def _acquisition_runner() -> AcquisitionRunner:
 
     oauth = GoogleOAuth.from_env()
     return AcquisitionRunner(
-        repository=GCSRawRepository.from_env(source=FitbitSource(version=3)),
         client=HealthClient(access_token=oauth),
         warehouse_factory=_warehouse,
         subject_key=required("PDP_FITBIT_SUBJECT_KEY"),
@@ -63,18 +60,19 @@ def _acquisition_runner() -> AcquisitionRunner:
     )
 
 
-def run_notification_job(
-    *, max_messages: int = 500, collect_seconds: int = 120, timeout_seconds: int = 3000
-) -> AcquisitionSummary:
-    from .notifications import PubSubNotifications
-
+def run_worker_from_env() -> int:
     configure_logging()
-    return _acquisition_runner().ingest(
-        PubSubNotifications.from_env(),
-        max_messages=max_messages,
-        collect_seconds=collect_seconds,
-        timeout_seconds=timeout_seconds,
+    app = create_worker_app(
+        runner=_acquisition_runner(), subscription=required("PDP_FITBIT_PUBSUB_SUBSCRIPTION")
     )
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", "8080")),
+        log_level="info",
+        access_log=False,
+    )
+    return 0
 
 
 def run_serve_from_env() -> int:
@@ -123,7 +121,7 @@ def sync_windows(start: datetime, end: datetime, data_types: tuple[str, ...]) ->
 def run_sync_from_env(
     *, start: datetime, end: datetime, data_types: tuple[str, ...] = DATA_TYPES
 ) -> int:
-    """Acquire an explicit range; progress lives in completed Raw and coverage."""
+    """Acquire an explicit range; progress lives in committed ranges and coverage."""
     from personal_data_platform.loader.job import LOADER_LEASE_SECONDS
 
     configure_logging()
