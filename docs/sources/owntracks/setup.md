@@ -7,7 +7,8 @@ iPhone の Significant モードで記録した位置を HTTPS で送信する�
 1. [OwnTracks](https://apps.apple.com/app/owntracks/id692424691) をインストールして起動する。
 2. iPhone の「設定 → プライバシーとセキュリティ → 位置情報サービス → OwnTracks」で「常に」と「正確な位置情報」を有効にする。初回は使用中の許可を求められる場合があるため、その後に設定を確認する。
 3. 「設定 → 一般 → アプリのバックグラウンド更新」で OwnTracks を有効にする。
-4. OwnTracks の左上「i」から設定を開き、接続と識別情報の欄に次の値を入力する。Significant も情報画面から選ぶ。画面上の名称はアプリの言語・版によって異なる。[iOS の公式説明](https://owntracks.org/booklet/features/ios/)
+4. OwnTracks の Map 画面左上「i」から「Status Info」を開き、Connection 欄の「Settings」を選ぶ。Settings 画面で Mode、URL、UserID、Password、DeviceID、TrackerID を設定する。
+5. Map 画面へ戻り、上部の「Quiet / Manual / Significant / Move」から「Significant」を選ぶ。以下は iOS アプリ27.0.1で確認した表示名。画面上の名称は言語・版によって異なる。[iOS の公式説明](https://owntracks.org/booklet/features/ios/)
 
 | 項目 | 値 |
 |---|---|
