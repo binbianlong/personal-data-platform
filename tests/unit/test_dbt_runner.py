@@ -45,7 +45,9 @@ def test_cloud_dbt_migrates_before_models(monkeypatch) -> None:
     monkeypatch.setattr(warehouse, "close", lambda: None)
 
     def run_models(**kwargs):
-        assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 1
+        assert warehouse.query_rows(
+            "SELECT migration_id FROM ops.schema_migration ORDER BY migration_id"
+        ) == [("001_initial.sql",), ("002_owntracks.sql",)]
         assert (
             warehouse.query_value("SELECT count(*) FROM ops.job_lock WHERE expires_at > now()") == 1
         )
