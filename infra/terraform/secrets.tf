@@ -87,6 +87,7 @@ locals {
     fitbit_oauth_config        = "pdp-west-fitbit-oauth-config"
     fitbit_webhook_config      = "pdp-west-fitbit-webhook-config"
     heartbeat_config           = "pdp-west-heartbeat-config"
+    owntracks_config           = "pdp-west-owntracks-config"
   }
 }
 # Secret versions are provisioned outside Terraform so payloads never enter state.

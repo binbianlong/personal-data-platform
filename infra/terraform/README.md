@@ -14,7 +14,7 @@ terraform apply runtime.tfplan
 
 `west_image_uri`には西部registryのdigest、MotherDuck production/preflightには独立DBを指定する。
 backend bucketはGitHubの`TF_STATE_BUCKET`へ設定する。接続先・実行順・監視・復旧は[Platform運用](../../docs/platform/operations.md)に従う。
-通常はpush配信・日次Schedulerとnative警報が有効。`west_schedulers_enabled=false`とGitHubの`PDP_WEST_SCHEDULERS_ENABLED=false`で一時停止し、subscriptionをpullへ戻して通知を保持し、Fitbit処理も延期する。
+通常はpush配信・日次Schedulerとnative警報が有効。`west_schedulers_enabled=false`とGitHubの`PDP_WEST_SCHEDULERS_ENABLED=false`で一時停止し、subscriptionをpullへ戻して通知を保持し、Fitbit・OwnTracks処理も延期する。
 Logging変更時は既存_Defaultの除外を`west_logging_exclusions`と`PDP_WEST_LOGGING_EXCLUSIONS`へ引き継ぐ。
 
 ## Secretと資格情報
@@ -31,8 +31,11 @@ GitHubの`PDP_WEST_SECRET_VERSIONS`にも同じmapをJSONで設定する。`hear
 | `fitbit_oauth_config` | `pdp-west-fitbit-oauth-config` | worker・daily |
 | `fitbit_webhook_config` | `pdp-west-fitbit-webhook-config` | receiver |
 | `heartbeat_config` | `pdp-west-heartbeat-config` | daily |
+| `owntracks_config` | `pdp-west-owntracks-config` | OwnTracks receiver |
 
 pushのOIDCには既存Scheduler SAを使う。workerは非公開で最大1instance・同時処理1、通知がなければ0instanceとなる。
-通常runtimeはpreflight以外の4 pinを必須とする。更新・rollbackはmapの番号を変更し、
+通常runtimeはpreflight以外の5 pinを必須とする。更新・rollbackはmapの番号を変更し、
 切替完了前に参照中versionを無効化・破棄しない。秘密値をtfvars・state・GitHub variablesへ含めない。
 JSON fieldは[Fitbit環境変数](../../docs/sources/fitbit/operations.md#環境変数)、権限境界は[セキュリティ](../../docs/platform/security.md)を参照する。
+
+OwnTracksの初回secretは`google_secret_manager_secret.west["owntracks_config"]`を先に適用してcontainerを作り、payloadを登録後に全体を適用する。iPhone設定、JSON field、保存・復旧は[OwnTracks設定と運用](../../docs/sources/owntracks/setup.md)を参照する。

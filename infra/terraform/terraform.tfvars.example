@@ -13,6 +13,7 @@ west_secret_versions = {
   fitbit_oauth_config   = "1"
   fitbit_webhook_config = "1"
   heartbeat_config     = "1"
+  owntracks_config     = "1"
 }
 west_schedulers_enabled           = true
 west_motherduck_database           = "personal_data_platform"

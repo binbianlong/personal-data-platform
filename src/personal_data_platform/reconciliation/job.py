@@ -371,6 +371,8 @@ def _run_daily_reconciliation() -> int:
     sources = get_sources("screen_time", all_streams=True)
     for source in sources:
         validate_runtime_policy(source)
+    owntracks = get_source("owntracks")
+    validate_runtime_policy(owntracks)
     warehouse = Warehouse(connect(WarehouseConfig.from_env()))
     owner = str(uuid.uuid4())
     now = datetime.now(UTC)
@@ -424,6 +426,20 @@ def _run_daily_reconciliation() -> int:
             return 1
         stage = "dbt"
         if run_dbt_from_env(lease_owner=owner, timeout_seconds=remaining()):
+            return 1
+        stage = "owntracks"
+        remaining()
+        owntracks_result = run_reconciliation(
+            owntracks.repository_from_env(),
+            warehouse,
+            source=owntracks,
+            heartbeat=_no_external_heartbeat,
+            _lease_owner=owner,
+            publish_success=False,
+        )
+        details["owntracks"] = owntracks_result.details
+        if not owntracks_result.ok:
+            LOGGER.error("OwnTracks Raw reconciliation failed")
             return 1
         for source in sources:
             stage = "audit:" + source.stream

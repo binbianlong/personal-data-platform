@@ -383,7 +383,7 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
 
 @pytest.mark.parametrize(
     "failure",
-    ["fitbit", "dbt", "app-in-focus", "app-usage", "none", "gap", "busy", "marker"],
+    ["fitbit", "dbt", "owntracks", "app-in-focus", "app-usage", "none", "gap", "busy", "marker"],
 )
 def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, failure):
     from personal_data_platform import dbt_runner
@@ -429,6 +429,14 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
     monkeypatch.setattr(job, "get_sources", lambda *args, **kwargs: sources)
     for source in sources:
         monkeypatch.setattr(type(source), "repository_from_env", lambda _: _Repository())
+    owntracks = get_source("owntracks")
+    monkeypatch.setattr(type(owntracks), "repository_from_env", lambda _: _Repository())
+
+    def reconcile(repository, warehouse, **kwargs):
+        result = phase("owntracks", kwargs)
+        return SimpleNamespace(ok=result.ok, details={})
+
+    monkeypatch.setattr(job, "run_reconciliation", reconcile)
 
     def audit(_warehouse, source, now):
         owner = warehouse.query_value("SELECT owner_id FROM ops.job_lock WHERE job_name='loader'")
@@ -463,7 +471,7 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
             1 if failure in ("none", "gap") else 0
         )
         if failure in ("none", "gap"):
-            assert phases == ["fitbit", "dbt", "app-in-focus", "app-usage"]
+            assert phases == ["fitbit", "dbt", "owntracks", "app-in-focus", "app-usage"]
             entries = [json.loads(line) for line in capfd.readouterr().err.splitlines()]
             assert any(
                 entry.get("event") == "reconciliation"

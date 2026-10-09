@@ -14,7 +14,7 @@ locals {
       name        = "reconciliation-west"
       args        = ["reconciliation"]
       timeout     = "6000s"
-      environment = local.west_common_environment
+      environment = merge(local.west_common_environment, { GCS_BUCKET = local.west_raw_bucket_name })
       secrets     = { MOTHERDUCK_TOKEN = "motherduck_token", PDP_FITBIT_OAUTH_CONFIG = "fitbit_oauth_config", PDP_HEARTBEAT_CONFIG = "heartbeat_config" }
     }
   }
@@ -231,12 +231,20 @@ resource "google_cloud_scheduler_job" "west" {
 
 data "google_iam_policy" "raw_west" {
   binding {
+    role    = "roles/storage.objectCreator"
+    members = ["serviceAccount:${google_service_account.owntracks_receiver.email}"]
+    condition {
+      title      = "owntracks_raw_create"
+      expression = "resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/owntracks/v1/')"
+    }
+  }
+  binding {
     role    = "roles/storage.admin"
     members = [var.collector_impersonator_member]
   }
   binding {
     role    = "roles/storage.objectViewer"
-    members = ["serviceAccount:${google_service_account.rebuild_operator.email}"]
+    members = ["serviceAccount:${google_service_account.rebuild_operator.email}", "serviceAccount:${google_service_account.west.email}"]
   }
 }
 resource "google_storage_bucket_iam_policy" "raw_west" {

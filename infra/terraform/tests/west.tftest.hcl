@@ -17,6 +17,7 @@ variables {
     fitbit_oauth_config        = "11"
     fitbit_webhook_config      = "13"
     heartbeat_config           = "17"
+    owntracks_config           = "19"
   }
 }
 run "minimum_normal_runtime" {
@@ -130,7 +131,7 @@ run "runtime_storage_and_execution_contract" {
     error_message = "Pub/Sub must keep only unacked messages for seven days and enforce west storage/transit."
   }
   assert {
-    condition     = length(google_secret_manager_secret.west) == 5 && alltrue([for secret in google_secret_manager_secret.west : secret.replication[0].user_managed[0].replicas[0].location == "us-west1"])
+    condition     = length(google_secret_manager_secret.west) == 6 && alltrue([for secret in google_secret_manager_secret.west : secret.replication[0].user_managed[0].replicas[0].location == "us-west1"])
     error_message = "Global west secrets must use one west replica without secret payloads in state."
   }
   assert {
@@ -162,6 +163,11 @@ run "reject_legacy_image_in_west" {
 
 run "west_storage_and_monitoring_are_separate" {
   command = plan
+  override_resource {
+    target          = google_service_account.owntracks_receiver
+    override_during = plan
+    values          = { email = "owntracks@example-project.iam.gserviceaccount.com", name = "projects/example-project/serviceAccounts/owntracks@example-project.iam.gserviceaccount.com" }
+  }
   override_resource {
     target          = google_service_account.collector
     override_during = plan
@@ -226,7 +232,7 @@ run "west_only_runtime_pins_and_shared_identity" {
     values          = { email = "runtime@example-project.iam.gserviceaccount.com", name = "projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com" }
   }
   variables {
-    west_secret_versions = { motherduck_token = "7", fitbit_oauth_config = "11", fitbit_webhook_config = "13", heartbeat_config = "17" }
+    west_secret_versions = { motherduck_token = "7", fitbit_oauth_config = "11", fitbit_webhook_config = "13", heartbeat_config = "17", owntracks_config = "19" }
   }
   assert {
     condition     = google_cloud_run_v2_service.fitbit_worker.template[0].service_account == google_cloud_run_v2_job.west["daily"].template[0].template[0].service_account && google_cloud_scheduler_job.west["daily"].schedule == "10 4 * * *"

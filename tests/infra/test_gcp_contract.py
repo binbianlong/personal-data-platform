@@ -191,6 +191,7 @@ def test_west_pubsub_and_receiver_access_are_separate() -> None:
 
 
 WEST_SECRET_VERSIONS = {
+    "owntracks_config": "19",
     "motherduck_token": "7",
     "motherduck_preflight_token": "3",
     "fitbit_oauth_config": "11",
@@ -213,6 +214,14 @@ WEST_SECRET_VERSIONS = {
             True,
         ),
         ({}, False),
+        (
+            {
+                key: value
+                for key, value in WEST_SECRET_VERSIONS.items()
+                if key != "owntracks_config"
+            },
+            False,
+        ),
         ({"motherduck_token": "7"}, False),
         ({**WEST_SECRET_VERSIONS, "unknown_secret": "19"}, False),
     ]

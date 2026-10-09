@@ -70,11 +70,11 @@ jobs:
           done
           jq -e '
             type == "object" and
-            (["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_token"] - keys | length == 0) and
-            (keys - ["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_preflight_token", "motherduck_token"] | length == 0) and
+            (["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_token", "owntracks_config"] - keys | length == 0) and
+            (keys - ["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_preflight_token", "motherduck_token", "owntracks_config"] | length == 0) and
             all(.[]; type == "string" and test("^[1-9][0-9]*\\z"))
           ' <<< "${TF_VAR_west_secret_versions}" > /dev/null || {
-            echo "Deployment requires four runtime numeric secret version pins in PDP_WEST_SECRET_VERSIONS." >&2
+            echo "Deployment requires five runtime numeric secret version pins in PDP_WEST_SECRET_VERSIONS." >&2
             exit 1
           }
 
