@@ -29,7 +29,7 @@ resource "google_monitoring_alert_policy" "west_pubsub_backlog" {
   conditions {
     display_name = "Unacked message age exceeds 15 minutes"
     condition_threshold {
-      filter          = "resource.type = \"pubsub_subscription\" AND resource.labels.subscription_id = (\"${google_pubsub_subscription.west.name}\" OR \"${google_pubsub_subscription.owntracks.name}\") AND metric.type = \"pubsub.googleapis.com/subscription/oldest_unacked_message_age\""
+      filter          = "resource.type = \"pubsub_subscription\" AND (resource.labels.subscription_id = \"${google_pubsub_subscription.west.name}\" OR resource.labels.subscription_id = \"${google_pubsub_subscription.owntracks.name}\") AND metric.type = \"pubsub.googleapis.com/subscription/oldest_unacked_message_age\""
       comparison      = "COMPARISON_GT"
       threshold_value = 900
       duration        = "300s"
