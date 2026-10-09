@@ -154,7 +154,7 @@ def run_reconciliation(
         raw_keys = set(raw_by_key)
         states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
 
-    if raw_retention is None:
+    if raw_retention is None and source.source_id == "screen_time":
         current_keys = {
             row[0]
             for row in warehouse.query_rows(

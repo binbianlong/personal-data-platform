@@ -7,7 +7,7 @@ import os
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from personal_data_platform.raw.models import RawObject
 
@@ -58,6 +58,9 @@ class SourceHealth:
 class SourceAdapter(RawCodec, Protocol):
     parser_version: str
     required_relations: tuple[str, ...]
+
+    @property
+    def raw_storage(self) -> Literal["gcs", "sqlite"]: ...
 
     @property
     def retention_days(self) -> int | None: ...

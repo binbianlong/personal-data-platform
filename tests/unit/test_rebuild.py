@@ -36,6 +36,26 @@ def test_rebuild_inventory_preserves_original_retention_dates():
     assert inventory["first_storage_created_at"] == raw.storage_created_at.isoformat()
 
 
+def test_unlimited_gcs_rebuild_uses_read_only_adc_and_restores_environment(tmp_path, monkeypatch):
+    from personal_data_platform.recovery import rebuild
+    from personal_data_platform.sources.owntracks.adapter import OwnTracksSource
+
+    path = tmp_path / "read-only-adc.json"
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "previous-adc")
+    monkeypatch.setattr(
+        rebuild.RebuildADCConfig, "from_env", lambda: SimpleNamespace(credentials_path=path)
+    )
+
+    class EmptyRepository:
+        def list_raw(self, prefix):
+            assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == str(path)
+            return []
+
+    monkeypatch.setattr(OwnTracksSource, "repository_from_env", lambda _: EmptyRepository())
+    assert run_rebuild_from_env(dry_run=True, target_db=None, source_id="owntracks") == 0
+    assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == "previous-adc"
+
+
 def test_all_streams_rebuilds_one_scratch_database_and_shared_daily_views(
     tmp_path, monkeypatch
 ) -> None:

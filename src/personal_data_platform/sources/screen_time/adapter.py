@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
+from typing import Literal
 
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import DecodedBatch, RawRepository, SourceHealth
@@ -26,6 +27,7 @@ class ScreenTimeSource:
 
     source_id = "screen_time"
     stream = APP_IN_FOCUS_STREAM
+    raw_storage: Literal["gcs", "sqlite"] = "sqlite"
     schema_versions: tuple[int, ...] = (1, 2)
     parser_version = PARSER_VERSION
     raw_prefixes: tuple[str, ...] = (f"{RAW_PREFIX}/", f"{RAW_V2_PREFIX}/")
