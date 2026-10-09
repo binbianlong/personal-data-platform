@@ -4,11 +4,12 @@ Screen TimeはMacでRaw保存、FitbitはGCP `us-west1`でAPIから直接取込�
 
 ```text
 Screen Time Collector -> SQLite Raw -> Loader -> MotherDuck -> stream heartbeat
+OwnTracks -> receiver -> GCS Raw -> Pub/Sub push -> 非公開worker -> Loader -> MotherDuck
 Google Health Webhook -> receiver -> Pub/Sub push -> 非公開worker
   -> API完全取得 -> MotherDuckへ直接書込 -> DB commit後204
 
 Loader -> MotherDuck base -> dbt View -> read-only share / Remote MCP
-日次Job -> Fitbit補修 -> dbt -> Macの取込heartbeat・DB監査 -> daily heartbeat
+日次Job -> Fitbit補修 -> dbt -> OwnTracks Raw補修 -> Macの取込heartbeat・DB監査 -> daily heartbeat
 ```
 
 | source / stream | 取得元 | Raw形式 | 保存先 |
@@ -16,8 +17,9 @@ Loader -> MotherDuck base -> dbt View -> read-only share / Remote MCP
 | `screen_time / app-in-focus` | Macへ同期されたiPhoneのApp.InFocus | v1/v2 SEGB | MacのSQLite |
 | `screen_time / app-usage` | Mac自身のScreenTime.AppUsage | v1/v2 SEGB | MacのSQLite |
 | `fitbit / health` | Google Health API | 保存なし | 正規化結果をMotherDuckへ直接取込 |
+| `owntracks / location` | iPhone OwnTracks HTTP | 正規化JSON gzip | GCS `us-west1` |
 
-receiverは通知の認証とPub/Sub発行だけを担当し、API取得やDB書込を行わない。
+Fitbit receiverは認証とPub/Sub発行、OwnTracks receiverは認証とRaw保存を担当し、API取得やDB書込を行わない。
 worker・日次Jobは同じimageとruntime Service Accountを共有する。時刻・lease・監視・復旧は
 [Platform運用](operations.md)、アクセス境界は[セキュリティ](security.md)に従う。
 
@@ -28,7 +30,7 @@ worker・日次Jobは同じimageとruntime Service Accountを共有する。時�
 | 境界 | 責任 |
 |---|---|
 | `sources/contracts.py`・`sources/registry.py` | 登録済みsource/stream、Raw codec、decode、型付きbatch、監査、保持期限、dbt selector |
-| `storage/gcs.py` | 保持済みGCS transport。通常のFitbit・Screen Time取込では使わない |
+| `storage/gcs.py` | OwnTracks Rawの保存・読取と保持済みGCS transport |
 | `loader/`・`storage/motherduck.py` | hash検証、再試行、object単位transaction、共通取込台帳 |
 | `reconciliation/`・`recovery/` | Rawと台帳の照合、期限切れ判定、scratchへの再生 |
 | `sources/<source>/` | 認証・取得、control/pending状態、wire format、正規化、baseへの書込 |
@@ -46,9 +48,10 @@ Raw schema版とparser versionは別で、parser versionを更新すると保持
 - 連続する同一内容は省くが、`A -> B -> A`を過去のhashだけで除外しない。source固有の比較条件は各データモデルに従う。
 - Screen Timeは各元ファイルの最新成功版と未取込分だけを既存SQLiteに保持する。保存期限はなく、Biomeから消えたファイルも残す。
 - FitbitのAPIレスポンスはメモリだけで扱い、Rawを永続保存しない。API再取得で補修・復旧する。
+- OwnTracksの位置メッセージは全フィールドを保持した正規化JSONをGCSに無期限保存する。端末疑似化key・イベント時刻・hashで再送を重複保存しない。
 
 Rawは保存中の版の再生用正本で、MotherDuckはRaw整理後も分析履歴を保持する。
-全期間のDB復元をRawだけで保証しない。keyとpayloadは
+OwnTracks以外の全期間のDB復元をRawだけで保証しない。OwnTracksの取得・保存は[設定と運用](../sources/owntracks/setup.md)を参照する。keyとpayloadは
 [Screen Timeデータモデル](../sources/screen-time/data-model.md)と[Fitbitデータモデル](../sources/fitbit/data-model.md)を参照する。
 
 ## Loaderと永続化
@@ -69,7 +72,7 @@ DBと外部HTTPはatomicではないため、外部送信失敗はJob失敗と�
 ## Source・stream追加手順
 
 1. `sources/<source>/`へ取得・型付きbatch・監査を実装する。Rawを保存するsourceはcodecとRaw adapterを`sources/registry.py`へ登録する。
-2. dbt selectorと必須relationを定義し、Rawを保存する場合は全prefix/schema、parser version、保持条件も定義する。
+2. dbt selectorと必須relationを定義し、Rawを保存する場合は全prefix/schema、parser version、保持条件と保存先種別も定義する。
 3. baseの変更は新しいforward migrationへ追加する。適用済みSQLを書き換えず、batch内でcommitしない。
 4. dbtのmodel/testへselector用tagを付け、scope混入拒否、再実行、rollback、generation固定を検証する。
 5. Terraformで取得identity・実行経路・監視と、必要な場合だけRaw権限・Lifecycleを設定し、[DB更新手順](operations.md#dbの初期化と更新)で有効にする。

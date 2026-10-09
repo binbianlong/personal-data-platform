@@ -6,8 +6,9 @@
 |---|---|
 | GCP project / region | `health-data-pipeline-503813` / `us-west1` |
 | Terraform state | `health-data-pipeline-503813-personal-data-platform-tfstate-west`、prefix `personal-data-platform/runtime` |
-| 保持済みRaw bucket / Logging | `health-data-pipeline-503813-pdp-raw-west` / `pdp-west` |
-| receiver / worker | `pdp-fitbit-west` / `pdp-fitbit-worker-west` |
+| Raw bucket / Logging | `health-data-pipeline-503813-pdp-raw-west` / `pdp-west` |
+| Fitbit receiver / worker | `pdp-fitbit-west` / `pdp-fitbit-worker-west` |
+| OwnTracks receiver / worker | `pdp-owntracks-west` / `pdp-owntracks-worker-west` |
 | 日次Job | `reconciliation-west` |
 | MotherDuck production | `us-west-2`、`personal_data_platform`、owner `pdp_west_prod` |
 
@@ -26,6 +27,7 @@ CIは現行Job・receiverのimageをdeployedタグで保護してからcandidate
 source・dbt・依存・Dockerfileに変更がないpushでは現行日次Jobのdigestを再利用する。
 無効な比較元やJob一覧取得失敗はdeployを止める。アプリdeploy失敗後の再反映には手動deployを使う。
 手動`run_daily`で日次全体を実行できる。rollbackには直接取込・push受付に対応したimageを使う。
+Deploy workflowが停止中の場合は、ローカルで`linux/amd64` imageを登録し、digestを指定してTerraformを手動反映する。
 
 ## DBの初期化と更新
 
@@ -41,31 +43,35 @@ pdp migrate --database /private/path/scratch.duckdb
 再構築には空のscratch DBを使い、[Rebuild](#rebuild)の保持範囲を確認する。
 
 追加DDLはCollector・push配信・日次Schedulerを止め、実行中Jobと`loader` leaseの終了を確認してから適用する。
+MacのCollectorはeditable installのcheckoutを参照するため、そのcheckoutへmigrationを追加する前に停止する。
 Collectorは起動後にスキーマを初期化し、成功後の周期では省略する。DDL・コード・接続設定の変更後は再起動し、
 取込成功と日次全段階の成功を確認して通常運用を再開する。
 
 ## 収集・日次処理
 
-通知受信時にPub/Subが非公開workerを呼び、完全取得した範囲のDB commit後に204を返す。
+Fitbit通知とOwnTracksのGCS保存完了通知はPub/Subから非公開workerへ配信し、DB commit後に204を返す。
 既存martsはViewであり、取込ごとにdbtを実行しなくても次のqueryへ反映される。
 `pdp reconciliation`は日次04:10 Asia/Tokyoの処理全体を実行する。
 
-1. APIから5種別のTokyo直近7完了日を再照合する。
+1. Fitbit APIから5種別のTokyo直近7完了日を再照合する。
 2. dbt run/testを実行する。
-3. Macが更新したScreen Time両streamの取込成功heartbeatを48時間の鮮度とDB relationで監査する。
-4. 完了対象日と内部daily heartbeatを同じtransactionでcommitする。
-5. Healthchecksへ外部成功pingを1回送る。
+3. OwnTracksの無期限Rawと台帳を照合し、未取込分を補修する。
+4. Macが更新したScreen Time両streamの取込成功heartbeatを48時間の鮮度とDB relationで監査する。
+5. 完了対象日と内部daily heartbeatを同じtransactionでcommitする。
+6. Healthchecksへ外部成功pingを1回送る。
 
 Screen Timeの収集・保存・取り込みはMacのCollectorが30分周期で実行する。日次Jobはstream heartbeatを更新しない。
 
-workerは最小0・最大1instance、同時処理1。処理予算480秒、サービスtimeout540秒、lease600秒である。
-日次Jobは1task/parallelism1、100分の予算、125分のleaseを使う。どちらも単一`loader` leaseで直列化する。
+workerは最小0・最大1instance、同時処理1。処理予算480秒、サービスtimeout540秒。
+Fitbit workerのleaseは600秒、共通Loaderを使うOwnTracks workerのleaseは125分である。
+日次Jobは1task/parallelism1、100分の予算、125分のleaseを使う。全処理を単一`loader` leaseで直列化する。
 競合はINFOで延期し、成功pingを送らない。dbt・手動取得・Loaderも同じleaseを使う。
 
 ## 監視とLogging
 
 native警報は日次Job失敗、15分を超えたPub/Sub最古未ackが5分継続、receiver/worker ERRORの3件。
-workerの成功ログは通知受信時刻・commit時刻・反映までの秒数を含み、Rawやtokenは含めない。
+Fitbit workerの成功ログは通知受信時刻・commit時刻・反映までの秒数を含み、Rawやtokenは含めない。
+OwnTracksは`base.owntracks_location`の`received_at`と`loaded_at`から保存後の取込時間を確認する。
 Healthchecksはdaily 1件、Period 24h＋Grace 24h。新しいeventがないことだけを障害とみなさない。
 通常logは_Defaultから西部`pdp-west` bucketへ1経路で送り、30日保持する。_Requiredと既存backupは維持する。
 
@@ -88,10 +94,13 @@ FitbitはRawを持たない。別のscratch DBへ`pdp fitbit sync --from ... --t
 3. 固定inventoryのgenerationで再生し、dbt検証後に本番と件数・key・代表martを比較する。途中でgenerationが消えた場合は失敗させる。
 4. 差分確認後に参照先を切り替える。本番と同じDB、既存tableのあるDB、partial history未承認の再構築は拒否する。
 
+OwnTracksは無期限のGCS Rawを専用read-only ADCで読み、`pdp rebuild --source owntracks`で再生する。
+日次照合・再取込・scratch DBへの復元は[OwnTracksの設定と運用](../sources/owntracks/setup.md)を参照する。
+
 ## 停止と復旧
 
 push配信と日次Schedulerを止め、実行中worker/Jobとleaseを確認する。
-workerの異常終了で残ったleaseは10分、日次・手動処理は125分の期限後に再試行する。
+異常終了で残ったleaseはFitbit workerが10分、OwnTracks worker・日次・手動処理が125分の期限後に再試行する。
 7日を超えたFitbitの空白は[Fitbitの期間指定補修](../sources/fitbit/operations.md)で補う。
 DB成功と外部pingが一致しない場合はrun_id・log・監査を照合する。外部送信失敗で先に確定した取込・期限切れ記録は巻き戻らない。
 
