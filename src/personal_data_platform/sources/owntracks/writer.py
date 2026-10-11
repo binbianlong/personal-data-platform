@@ -26,10 +26,10 @@ class OwnTracksBatch:
     ) -> None:
         connection.execute(
             """INSERT OR REPLACE INTO base.owntracks_location (
-                event_key,device_key,event_at,latitude,longitude,accuracy_m,altitude_m,
-                velocity_kmh,battery_percent,monitoring_mode,trigger,
+                event_key,device_key,event_at,latitude,longitude,accuracy_m,
+                velocity_kmh,battery_percent,
                 object_key,storage_generation,received_at,loaded_at,parser_version
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [
                 raw.logical_key,
                 raw.subject_key,
@@ -37,11 +37,8 @@ class OwnTracksBatch:
                 self.message["lat"],
                 self.message["lon"],
                 self.message.get("acc"),
-                self.message.get("alt"),
                 self.message.get("vel"),
                 self.message.get("batt"),
-                self.message.get("m"),
-                self.message.get("t"),
                 raw.key,
                 raw.storage_generation,
                 raw.storage_created_at,
