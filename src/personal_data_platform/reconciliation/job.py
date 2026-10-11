@@ -14,6 +14,7 @@ from personal_data_platform.loader.job import (
     LOADER_LEASE_SECONDS,
     run_loader,
 )
+from personal_data_platform.logging_config import configure_logging
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import (
     RawRepository,
@@ -363,7 +364,6 @@ def _run_daily_reconciliation() -> int:
     from zoneinfo import ZoneInfo
 
     from personal_data_platform.dbt_runner import run_dbt_from_env
-    from personal_data_platform.sources.fitbit.logging import configure_logging
     from personal_data_platform.sources.fitbit.runtime import run_daily_repair
 
     configure_logging("personal_data_platform.reconciliation")
