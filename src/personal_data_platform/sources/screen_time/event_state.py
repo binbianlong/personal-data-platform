@@ -1,4 +1,4 @@
-"""Update only the affected Screen Time state inside the caller's transaction."""
+"""Maintain current Screen Time copies and durable analytical history."""
 
 from __future__ import annotations
 
@@ -17,6 +17,26 @@ if TYPE_CHECKING:
     from .writer import ScreenTimeBatch
 
 LOGGER = logging.getLogger(__name__)
+RECORD_COLUMNS = (
+    "physical_id",
+    "device_key",
+    "source_stream",
+    "segment_key",
+    "record_offset",
+    "record_metadata_offset",
+    "event_key",
+    "bundle_id",
+    "event_at",
+    "state",
+    "transition_reason",
+    "kind",
+    "app_version",
+    "app_build",
+    "platform_flag",
+    "parser_version",
+    "unknown_field_count",
+    "segment_filename",
+)
 EVENT_COLUMNS = (
     "event_key",
     "device_key",
@@ -63,269 +83,164 @@ def write_state(
     loaded_at: datetime,
 ) -> None:
     scope = [raw.subject_key, raw.stream, raw.logical_key]
-    # Temporary working sets contain only this segment and its related deletions/events.
     connection.execute("""
         CREATE OR REPLACE TEMP TABLE screen_time_affected_event (event_key VARCHAR PRIMARY KEY);
-        CREATE OR REPLACE TEMP TABLE screen_time_affected_tombstone (physical_id VARCHAR PRIMARY KEY);
         CREATE OR REPLACE TEMP TABLE screen_time_input AS
-        SELECT * EXCLUDE (is_current, is_valid), NULL::VARCHAR AS record_kind,
-               NULL::VARCHAR AS target_segment_name, NULL::UBIGINT AS target_offset,
-               NULL::UINTEGER AS target_length, NULL::DOUBLE AS target_event_timestamp,
-               NULL::UINTEGER AS deletion_reason
+        SELECT *, NULL::DOUBLE AS record_timestamp_cocoa, NULL::VARCHAR AS digest
         FROM ops.screen_time_record WHERE false;
     """)
-    # Capture old name matches as well, before learning a new/ambiguous v2 name.
-    _affected_tombstones(connection, scope)
-    connection.execute(
-        """
-        INSERT INTO ops.screen_time_segment (
-            device_key, source_stream, segment_key, observed_at, object_key,
-            source_segment_name, name_ambiguous, source_segment_names
-        )
-        VALUES (?, ?, ?, ?, ?, ?, false, ?)
-        ON CONFLICT (device_key, source_stream, segment_key) DO UPDATE SET
-            source_segment_name = least(ops.screen_time_segment.source_segment_name,
-                                        excluded.source_segment_name),
-            source_segment_names = list_sort(list_distinct(list_concat(
-                ops.screen_time_segment.source_segment_names, excluded.source_segment_names
-            ))),
-            name_ambiguous = ops.screen_time_segment.name_ambiguous OR (
-                ops.screen_time_segment.source_segment_name IS NOT NULL
-                AND excluded.source_segment_name IS NOT NULL
-                AND ops.screen_time_segment.source_segment_name <> excluded.source_segment_name
-            ),
-            observed_at = greatest(ops.screen_time_segment.observed_at, excluded.observed_at),
-            object_key = CASE
-                WHEN (excluded.observed_at, excluded.object_key) >=
-                     (ops.screen_time_segment.observed_at, ops.screen_time_segment.object_key)
-                THEN excluded.object_key ELSE ops.screen_time_segment.object_key END
-        """,
-        [
-            *scope,
-            raw.observed_at,
-            raw.key,
-            batch.source_segment_name if batch.segment_kind == "events" else None,
-            [batch.source_segment_name]
-            if batch.segment_kind == "events" and batch.source_segment_name is not None
-            else [],
-        ],
-    )
-    # The highest metadata entry defines a physical slot, including erased/bad CRC entries.
+    # Apple deletion markers have no role in the current-record model.
+    if batch.segment_kind == "tombstones":
+        return
+
+    previous = connection.execute(
+        "SELECT observed_at, object_key FROM ops.screen_time_segment "
+        "WHERE device_key = ? AND source_stream = ? AND segment_key = ?",
+        scope,
+    ).fetchone()
+    if previous is not None and (raw.observed_at, raw.key) < previous:
+        return
+
+    # The highest metadata entry defines a physical slot, even when erased or invalid.
     positions = set()
     latest: dict[int, ParsedScreenTimeRecord] = {}
     for record in batch.records:
         if record.record_metadata_offset in positions:
             raise ValueError("duplicate metadata position in Screen Time observation")
         positions.add(record.record_metadata_offset)
-        previous = latest.get(record.record_offset)
-        if previous is None or record.record_metadata_offset > previous.record_metadata_offset:
+        prior = latest.get(record.record_offset)
+        if prior is None or record.record_metadata_offset > prior.record_metadata_offset:
             latest[record.record_offset] = record
+
     rows = []
-    for r in latest.values():
-        if r.record_state.upper() != "WRITTEN" or r.crc_passed is False:
+    for record in latest.values():
+        if (
+            record.record_state.upper() != "WRITTEN"
+            or record.crc_passed is False
+            or record.record_kind != "event"
+            or record.event_key is None
+        ):
             continue
-        if r.record_kind not in ("event", "tombstone"):
-            continue
-        if r.record_kind == "event" and r.event_key is None:
-            continue
+        digest = hashlib.sha256(record.original_payload).hexdigest()
         rows.append(
             [
-                hashlib.sha256(r.original_payload).hexdigest(),
+                digest,
                 *scope,
-                r.record_offset,
-                r.record_metadata_offset,
-                r.payload_length or len(r.original_payload),
-                r.record_timestamp_cocoa,
-                r.event_key,
-                r.bundle_id,
-                r.event_at,
-                "start" if r.in_foreground else "end",
-                r.transition_reason,
-                r.kind,
-                r.app_version,
-                r.app_build,
-                r.platform_flag,
-                r.parser_version,
-                r.unknown_field_count,
-                batch.source_segment_name or r.segment_filename,
-                raw.observed_at,
-                raw.key,
-                r.record_kind,
-                r.target_segment_name,
-                r.target_offset,
-                r.target_length,
-                r.target_event_timestamp,
-                r.deletion_reason,
+                record.record_offset,
+                record.record_metadata_offset,
+                record.event_key,
+                record.bundle_id,
+                record.event_at,
+                "start" if record.in_foreground else "end",
+                record.transition_reason,
+                record.kind,
+                record.app_version,
+                record.app_build,
+                record.platform_flag,
+                record.parser_version,
+                record.unknown_field_count,
+                batch.source_segment_name or record.segment_filename,
+                record.record_timestamp_cocoa,
+                digest,
             ]
         )
     if rows:
-        # One array parameter per column avoids a remote statement per record.
-        # SELECT unnest zips equally sized arrays and preserves typed NULLs.
-        column_params = [list(column) for column in zip(*rows, strict=True)]
+        # One columnar statement avoids a remote statement per physical record.
+        columns = [list(column) for column in zip(*rows, strict=True)]
         connection.execute(
-            "INSERT INTO screen_time_input SELECT " + ",".join("unnest(?)" for _ in column_params),
-            column_params,
+            "INSERT INTO screen_time_input SELECT " + ",".join("unnest(?)" for _ in columns),
+            columns,
         )
-    connection.execute("""
-        UPDATE screen_time_input SET physical_id = ops.screen_time_physical_id(
-            device_key, source_stream, segment_key, record_offset, record_metadata_offset,
-            record_timestamp_cocoa, physical_id
-        );
-    """)
-    # Keep old keys before corrections overwrite them. Older evidence rejected by
-    # the UPSERT cannot change ranking and must not expand the resolve set.
+        connection.execute("""
+            UPDATE screen_time_input SET physical_id = ops.screen_time_physical_id(
+                device_key, source_stream, segment_key, record_offset, record_metadata_offset,
+                record_timestamp_cocoa, digest
+            );
+        """)
     connection.execute(
-        """
-        INSERT OR IGNORE INTO screen_time_affected_event
-        SELECT r.event_key FROM ops.screen_time_record r
-        JOIN ops.screen_time_segment s USING (device_key, source_stream, segment_key)
-        WHERE r.device_key = ? AND r.source_stream = ? AND r.segment_key = ?
-          AND ((r.is_valid AND r.object_key = ?) OR (r.is_current AND s.object_key = ?));
-        """,
-        [*scope, raw.key, raw.key],
+        "ALTER TABLE screen_time_input DROP COLUMN record_timestamp_cocoa; "
+        "ALTER TABLE screen_time_input DROP COLUMN digest"
     )
-    connection.execute("""
-        CREATE OR REPLACE TEMP TABLE screen_time_updated_event AS
-        SELECT i.event_key, r.event_key AS old_event_key
-        FROM screen_time_input i LEFT JOIN ops.screen_time_record r USING (physical_id)
-        WHERE i.record_kind = 'event' AND (r.physical_id IS NULL OR
-              (i.observed_at, i.object_key) >= (r.observed_at, r.object_key));
+
+    connection.execute(
+        "CREATE OR REPLACE TEMP TABLE screen_time_previous AS "
+        "SELECT * FROM ops.screen_time_record WHERE device_key = ? "
+        "AND source_stream = ? AND segment_key = ?",
+        scope,
+    )
+    distinct = " OR ".join(
+        f"old.{column} IS DISTINCT FROM incoming.{column}"
+        for column in RECORD_COLUMNS
+        if column != "physical_id"
+    )
+    connection.execute(f"""
+        CREATE OR REPLACE TEMP TABLE screen_time_changes AS
+        SELECT old.event_key AS old_event_key, incoming.event_key AS new_event_key,
+               incoming.physical_id AS new_physical_id
+        FROM screen_time_previous old FULL JOIN screen_time_input incoming USING (physical_id)
+        WHERE old.physical_id IS NULL OR incoming.physical_id IS NULL OR {distinct};
         INSERT OR IGNORE INTO screen_time_affected_event
-        SELECT event_key FROM screen_time_updated_event
-        UNION SELECT old_event_key FROM screen_time_updated_event WHERE old_event_key IS NOT NULL;
+        SELECT old_event_key FROM screen_time_changes WHERE old_event_key IS NOT NULL
+        UNION SELECT new_event_key FROM screen_time_changes WHERE new_event_key IS NOT NULL;
     """)
-    # Include both old and newly learned target names, then preserve effects before
-    # either record keys or tombstone reasons can be corrected in place.
-    _affected_tombstones(connection, scope)
-    _capture_deletion_effects(connection, "screen_time_previous_effect")
-    # Reparse corrections invalidate only versions whose latest evidence is this Raw.
-    # Later observations of the same bytes remain valid.
-    for table in ("record", "tombstone"):
+    # A later observation can change which duplicate copy is representative.
+    if previous is None or (raw.observed_at, raw.key) > previous:
         connection.execute(
-            f"UPDATE ops.screen_time_{table} SET is_valid = false WHERE "
-            "device_key = ? AND source_stream = ? AND segment_key = ? AND object_key = ? "
-            "AND is_valid",
-            [*scope, raw.key],
+            "INSERT OR IGNORE INTO screen_time_affected_event "
+            "SELECT DISTINCT event_key FROM screen_time_input"
         )
+
     connection.execute(
-        """
-        UPDATE ops.screen_time_record r SET is_current = false
-        FROM ops.screen_time_segment s
-        WHERE r.device_key = s.device_key AND r.source_stream = s.source_stream
-          AND r.segment_key = s.segment_key AND s.device_key = ? AND s.source_stream = ?
-          AND s.segment_key = ? AND s.object_key = ? AND r.is_current
-        """,
-        [*scope, raw.key],
+        "INSERT INTO ops.screen_time_segment VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT (device_key, source_stream, segment_key) DO UPDATE SET "
+        "observed_at = excluded.observed_at, object_key = excluded.object_key "
+        "WHERE (excluded.observed_at, excluded.object_key) > "
+        "(ops.screen_time_segment.observed_at, ops.screen_time_segment.object_key)",
+        [*scope, raw.observed_at, raw.key],
     )
-    columns = [
-        row[0]
-        for row in connection.execute("SELECT * FROM ops.screen_time_record LIMIT 0").description
-    ]
+
+    # Preserve historical values before removing their last current physical copy.
     connection.execute(
-        "INSERT INTO ops.screen_time_record SELECT i.* EXCLUDE "
-        "(record_kind, target_segment_name, target_offset, target_length, "
-        "target_event_timestamp, deletion_reason), i.object_key = s.object_key, true "
-        "FROM screen_time_input i JOIN ops.screen_time_segment s "
-        "USING (device_key, source_stream, segment_key) WHERE i.record_kind = 'event' "
-        "ON CONFLICT (physical_id) DO UPDATE SET "
-        + ", ".join(f"{c} = excluded.{c}" for c in columns if c != "physical_id")
-        + " WHERE (excluded.observed_at, excluded.object_key) >= "
-        "(ops.screen_time_record.observed_at, ops.screen_time_record.object_key)"
+        "UPDATE base.screen_time_event e SET is_active = false, loaded_at = ? "
+        "WHERE e.is_active AND e.event_key IN "
+        "(SELECT event_key FROM screen_time_previous) "
+        "AND NOT EXISTS (SELECT 1 FROM screen_time_input i WHERE i.event_key = e.event_key) "
+        "AND NOT EXISTS (SELECT 1 FROM ops.screen_time_record r "
+        "WHERE r.event_key = e.event_key AND "
+        "(r.device_key, r.source_stream, r.segment_key) <> (?, ?, ?))",
+        [loaded_at, *scope],
     )
-    connection.execute("""
-        INSERT INTO ops.screen_time_tombstone
-        SELECT physical_id, device_key, source_stream, segment_key, target_segment_name,
-               target_offset, target_length, target_event_timestamp, deletion_reason,
-               observed_at, object_key, true, 'unmatched'
-        FROM screen_time_input WHERE record_kind = 'tombstone'
-        ON CONFLICT (physical_id) DO UPDATE SET
-            target_segment_name = excluded.target_segment_name,
-            target_offset = excluded.target_offset, target_length = excluded.target_length,
-            target_event_timestamp = excluded.target_event_timestamp,
-            deletion_reason = excluded.deletion_reason, observed_at = excluded.observed_at,
-            object_key = excluded.object_key, is_valid = true
-        WHERE (excluded.observed_at, excluded.object_key) >=
-              (ops.screen_time_tombstone.observed_at, ops.screen_time_tombstone.object_key)
-    """)
-    _affected_tombstones(connection, scope)
-    connection.execute("""
-        DELETE FROM ops.screen_time_deletion_match
-        WHERE tombstone_id IN (SELECT physical_id FROM screen_time_affected_tombstone);
-        INSERT INTO ops.screen_time_deletion_match
-        SELECT * FROM ops.screen_time_matching_record(
-            (SELECT list(physical_id) FROM screen_time_affected_tombstone)
-        );
-        UPDATE ops.screen_time_tombstone t SET resolution = CASE
-            WHEN NOT is_valid THEN 'invalidated'
-            WHEN deletion_reason NOT IN (1, 2) OR deletion_reason IS NULL THEN 'unsupported_reason'
-            WHEN NOT EXISTS (SELECT 1 FROM ops.screen_time_deletion_match m
-                             WHERE m.tombstone_id = t.physical_id) THEN 'unmatched'
-            WHEN deletion_reason = 1 THEN 'ttl_history_retained'
-            ELSE 'user_deletion_applied' END
-        WHERE t.physical_id IN (SELECT physical_id FROM screen_time_affected_tombstone);
-    """)
-    _capture_deletion_effects(connection, "screen_time_next_effect")
-    connection.execute("""
-        INSERT OR IGNORE INTO screen_time_affected_event
-        SELECT event_key FROM (
-            (SELECT * FROM screen_time_previous_effect EXCEPT SELECT * FROM screen_time_next_effect)
-            UNION
-            (SELECT * FROM screen_time_next_effect EXCEPT SELECT * FROM screen_time_previous_effect)
-        );
-    """)
+    connection.execute(
+        "DELETE FROM ops.screen_time_record WHERE device_key = ? AND source_stream = ? "
+        "AND segment_key = ? AND physical_id NOT IN "
+        "(SELECT physical_id FROM screen_time_input)",
+        scope,
+    )
+    update_columns = ", ".join(
+        f"{column} = excluded.{column}" for column in RECORD_COLUMNS if column != "physical_id"
+    )
+    connection.execute(
+        "INSERT INTO ops.screen_time_record SELECT incoming.* FROM screen_time_input incoming "
+        "WHERE incoming.physical_id IN "
+        "(SELECT new_physical_id FROM screen_time_changes WHERE new_physical_id IS NOT NULL) "
+        "ON CONFLICT (physical_id) DO UPDATE SET " + update_columns
+    )
+
     event_columns = (*EVENT_COLUMNS, "is_active", "loaded_at")
     connection.execute(
         f"INSERT INTO base.screen_time_event ({', '.join(event_columns)}) "
         "SELECT *, ? FROM ops.screen_time_resolve("
         "(SELECT list(event_key) FROM screen_time_affected_event)) "
         "ON CONFLICT (event_key) DO UPDATE SET "
-        + ", ".join(f"{c} = excluded.{c}" for c in event_columns if c != "event_key")
+        + ", ".join(
+            f"{column} = excluded.{column}" for column in event_columns if column != "event_key"
+        )
         + " WHERE "
         + " OR ".join(
-            f"base.screen_time_event.{c} IS DISTINCT FROM excluded.{c}"
-            for c in (*ANALYTICAL_COLUMNS, "is_active")
+            f"base.screen_time_event.{column} IS DISTINCT FROM excluded.{column}"
+            for column in (*ANALYTICAL_COLUMNS, "is_active")
         ),
         [loaded_at],
     )
-    # A parser correction can change an event key at an unchanged physical location.
-    connection.execute(
-        "UPDATE base.screen_time_event e SET is_active = false, loaded_at = ? "
-        "WHERE e.is_active AND e.event_key IN (SELECT event_key FROM screen_time_affected_event) "
-        "AND NOT EXISTS (SELECT 1 FROM ops.screen_time_record r WHERE r.event_key = e.event_key)",
-        [loaded_at],
-    )
-    counts = connection.execute("""
-        SELECT (SELECT count(*) FROM screen_time_affected_event),
-               (SELECT count(*) FROM screen_time_affected_tombstone)
-    """).fetchone()
-    # Both scalar count subqueries return a value even for an empty working set.
-    assert counts is not None
-    LOGGER.info("Screen Time affected events=%d tombstones=%d", *counts)
-
-
-def _affected_tombstones(connection: DuckDBPyConnection, scope: list[str]) -> None:
-    connection.execute(
-        """
-        INSERT OR IGNORE INTO screen_time_affected_tombstone
-        SELECT t.physical_id FROM ops.screen_time_tombstone t
-        WHERE t.device_key = ? AND t.source_stream = ? AND (
-            t.segment_key = ? OR EXISTS (
-                SELECT 1 FROM ops.screen_time_segment s
-                WHERE s.device_key = ? AND s.source_stream = ? AND s.segment_key = ?
-                  AND list_contains(s.source_segment_names, t.target_segment_name)
-            )
-        )
-        """,
-        [*scope, *scope],
-    )
-
-
-def _capture_deletion_effects(connection: DuckDBPyConnection, table: str) -> None:
-    connection.execute(f"""
-        CREATE OR REPLACE TEMP TABLE {table} AS
-        SELECT m.tombstone_id, m.physical_id, t.deletion_reason, r.event_key
-        FROM ops.screen_time_deletion_match m
-        JOIN ops.screen_time_tombstone t ON t.physical_id = m.tombstone_id
-        JOIN ops.screen_time_record r ON r.physical_id = m.physical_id
-        WHERE m.tombstone_id IN (SELECT physical_id FROM screen_time_affected_tombstone)
-    """)
+    count = connection.execute("SELECT count(*) FROM screen_time_affected_event").fetchone()[0]
+    LOGGER.info("Screen Time affected events=%d", count)
