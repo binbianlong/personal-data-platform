@@ -106,8 +106,9 @@ def test_failed_migration_rolls_back_schema_data_and_ledger(warehouse, tmp_path,
     else:
         warehouse.migrate()
         before = warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
-        shutil.copyfile(DEFAULT_MIGRATIONS / "001_initial.sql", tmp_path / "001_initial.sql")
-        path = tmp_path / "002_next.sql"
+        for migration in DEFAULT_MIGRATIONS.glob("*.sql"):
+            shutil.copyfile(migration, tmp_path / migration.name)
+        path = tmp_path / "003_next.sql"
         sql = "CREATE TABLE base.next (id INTEGER); INSERT INTO base.next VALUES (1);"
     path.write_text(sql + "\nSELECT error('interrupted migration');")
     with pytest.raises(duckdb.InvalidInputException, match="interrupted migration"):

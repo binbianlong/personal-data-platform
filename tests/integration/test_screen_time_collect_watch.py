@@ -81,6 +81,8 @@ def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatc
     try:
         assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 2
         assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == 2
-        assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 1
+        assert warehouse.query_rows(
+            "SELECT migration_id FROM ops.schema_migration ORDER BY migration_id"
+        ) == [("001_initial.sql",), ("002_owntracks.sql",)]
     finally:
         warehouse.close()

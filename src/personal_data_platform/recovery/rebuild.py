@@ -203,7 +203,7 @@ def run_rebuild_from_env(
     for source in sources:
         validate_runtime_policy(source)
     credentials: AbstractContextManager[None] = nullcontext()
-    if sources[0].retention_days is not None:
+    if sources[0].raw_storage == "gcs":
         adc = RebuildADCConfig.from_env()
         credentials = _temporary_environment(
             "GOOGLE_APPLICATION_CREDENTIALS", str(adc.credentials_path)

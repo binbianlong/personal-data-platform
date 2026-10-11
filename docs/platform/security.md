@@ -18,7 +18,9 @@
 | 実行主体 | capability |
 |---|---|
 | Local Collector | GCS権限なし。SQLite RawとMotherDuck writer tokenを使う |
-| 共通runtime Service Account | worker・日次JobのOAuth/DB secret access。Raw権限なし |
+| 共通runtime Service Account | worker・日次JobのOAuth/DB secret accessと西部Rawへのlist / read |
+| OwnTracks receiver | OwnTracks認証secretと`raw/owntracks/v1/`へのcreateだけ |
+| GCS service agent | OwnTracks topicへのPub/Sub publisher |
 | Trigger Service Account | 日次Jobと非公開workerのinvoke。Pub/Sub pushはOIDCで認証 |
 | Preflight | preflight bucketへのwrite / read / listと作成generationのdeleteだけ |
 | Rebuild operator | 専用read-only Service Accountでproduction bucketへのlist / read |
@@ -31,9 +33,9 @@ Screen Time RebuildはCollectorを止めてローカルSQLiteを読む。Fitbit�
 Macでは疑似化secretと専用MotherDuck writer tokenをmacOS Keychainへ保存する。CollectorにADCは不要である。
 secretをSQLite state、plist、shell履歴、Git管理ファイルへ平文で保存しない。plistには接続先DB名と収集設定だけを含める。
 
-Cloud Runのworker・日次Jobは共通runtime Service Accountを使い、GCS Rawへ接続しない。
-receiverは別Service Accountで、Webhook検証secretとPub/Sub publisherだけを持つ。
-MotherDuck、OAuth、Webhook、日次heartbeatの4 payloadはSecret Managerへ保存し、正の数値versionへ固定する。
+Cloud Runのworker・日次Jobは共通runtime Service Accountを使い、OwnTracks worker・日次JobがGCS Rawを読む。
+Fitbit receiverは別Service Accountで、Webhook検証secretとPub/Sub publisherを持つ。OwnTracks receiverは専用Service Accountで認証secretとOwnTracks Rawの作成権限を持つ。
+MotherDuck、OAuth、Webhook、日次heartbeat、OwnTracks認証の5 payloadはSecret Managerへ保存し、正の数値versionへ固定する。
 各Jobへ渡す環境変数とsecret pinは[Runtime Terraform](../../infra/terraform/README.md#secretと資格情報)を正本とする。
 secret値をTerraform variable、Terraform state、container image、GitHub Actions outputへ含めない。
 

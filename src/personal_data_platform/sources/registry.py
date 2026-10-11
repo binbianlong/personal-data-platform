@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .contracts import SourceAdapter
+from .owntracks.adapter import OwnTracksSource
 from .screen_time.adapter import MacAppUsageSource, ScreenTimeSource
 
 
@@ -23,6 +24,7 @@ def _mac_app_usage_source() -> SourceAdapter:
 
 
 _SOURCE_FACTORIES: dict[tuple[str, str], Callable[[], SourceAdapter]] = {
+    ("owntracks", "location"): OwnTracksSource,
     ("screen_time", "app-in-focus"): _screen_time_source,
     ("screen_time", "app-usage"): _mac_app_usage_source,
 }

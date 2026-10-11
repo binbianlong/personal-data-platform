@@ -58,17 +58,20 @@ output "notification_channel" {
 output "west_resources" {
   description = "Runtime resources and scheduled processing status."
   value = {
-    region              = var.west_region
-    raw_bucket          = google_storage_bucket.raw_west.name
-    preflight_bucket    = google_storage_bucket.preflight_west.name
-    jobs                = { for key, job in google_cloud_run_v2_job.west : key => job.name }
-    receiver_url        = "${google_cloud_run_v2_service.west.uri}/webhooks/fitbit"
-    worker_url          = "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit"
-    secrets             = { for key, secret in google_secret_manager_secret.west : key => secret.secret_id }
-    pubsub_topic        = google_pubsub_topic.west.id
-    pubsub_subscription = google_pubsub_subscription.west.id
-    pubsub_endpoint     = "pubsub.us-west1.rep.googleapis.com"
-    logging_bucket      = google_logging_project_bucket_config.west.id
-    schedulers_enabled  = var.west_schedulers_enabled
+    region                 = var.west_region
+    raw_bucket             = google_storage_bucket.raw_west.name
+    preflight_bucket       = google_storage_bucket.preflight_west.name
+    jobs                   = { for key, job in google_cloud_run_v2_job.west : key => job.name }
+    receiver_url           = "${google_cloud_run_v2_service.west.uri}/webhooks/fitbit"
+    worker_url             = "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit"
+    secrets                = { for key, secret in google_secret_manager_secret.west : key => secret.secret_id }
+    pubsub_topic           = google_pubsub_topic.west.id
+    pubsub_subscription    = google_pubsub_subscription.west.id
+    pubsub_endpoint        = "pubsub.us-west1.rep.googleapis.com"
+    owntracks_url          = "${google_cloud_run_v2_service.owntracks["receiver"].uri}/webhooks/owntracks"
+    owntracks_worker_url   = "${google_cloud_run_v2_service.owntracks["worker"].uri}/notifications/owntracks"
+    owntracks_subscription = google_pubsub_subscription.owntracks.id
+    logging_bucket         = google_logging_project_bucket_config.west.id
+    schedulers_enabled     = var.west_schedulers_enabled
   }
 }

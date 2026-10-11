@@ -1,6 +1,10 @@
 version: 2
 
 sources:
+  - name: owntracks_base
+    schema: base
+    tables:
+      - name: owntracks_location
   - name: fitbit_base
     schema: base
     tables:

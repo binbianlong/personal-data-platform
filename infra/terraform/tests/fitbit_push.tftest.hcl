@@ -12,7 +12,7 @@ variables {
   west_image_uri                 = "us-west1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   alert_email                    = "operator@example.com"
   fitbit_subject_key             = "owner"
-  west_secret_versions           = { motherduck_token = "7", fitbit_oauth_config = "11", fitbit_webhook_config = "13", heartbeat_config = "17" }
+  west_secret_versions           = { motherduck_token = "7", fitbit_oauth_config = "11", fitbit_webhook_config = "13", heartbeat_config = "17", owntracks_config = "19" }
 }
 
 run "push_processing_contract" {
