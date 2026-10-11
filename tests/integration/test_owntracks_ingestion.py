@@ -40,8 +40,16 @@ def location_store():
     key, payload, compressed = prepare_location(
         json.dumps(
             {
-                "_type": "location", "tst": 1791504000, "lat": 35, "lon": 139,
-                "acc": 7, "vel": 12, "batt": 80, "alt": 30, "m": 1, "t": "u",
+                "_type": "location",
+                "tst": 1791504000,
+                "lat": 35,
+                "lon": 139,
+                "acc": 7,
+                "vel": 12,
+                "batt": 80,
+                "alt": 30,
+                "m": 1,
+                "t": "u",
             }
         ).encode(),
         device_key="a" * 64,
