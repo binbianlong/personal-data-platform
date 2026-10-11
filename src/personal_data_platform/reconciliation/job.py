@@ -403,7 +403,7 @@ def _run_daily_reconciliation() -> int:
         warehouse.begin_job("daily-reconciliation-west", owner)
         job_started = True
         previous = warehouse.query_value(
-            "SELECT json_extract_string(details,'$.last_completed_target_date') FROM ops.job_run WHERE job_name='daily-reconciliation-west' AND json_extract_string(details,'$.last_completed_target_date') IS NOT NULL ORDER BY completed_at DESC LIMIT 1"
+            "SELECT json_extract_string(details,'$.last_completed_target_date') FROM ops.job_run WHERE job_name='daily-reconciliation-west' AND status='succeeded' AND json_extract_string(details,'$.last_completed_target_date') IS NOT NULL ORDER BY completed_at DESC LIMIT 1"
         )
         if previous:
             first_missing = date.fromisoformat(str(previous)) + timedelta(days=1)
@@ -466,6 +466,7 @@ def _run_daily_reconciliation() -> int:
         try:
             warehouse.publish_heartbeat("daily", owner, payload)
             warehouse.finish_job(owner, succeeded=True, details=details)
+            warehouse.prune_run_history(now=datetime.now(UTC))
             remaining()
             warehouse.connection.execute("COMMIT")
         except Exception:

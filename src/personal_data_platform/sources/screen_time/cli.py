@@ -361,9 +361,11 @@ def _load_pending(
                     state.mark_uploaded(key, completed_at)
                 if not summary.ok:
                     raise CollectorSourceError(f"{source.stream}: Raw ingestion failed")
-            health = source.audit(repository, list_source_raw(repository, source), completed_at)
+            live_raw = tuple(list_source_raw(repository, source))
+            health = source.audit(repository, live_raw, completed_at)
             if not health.ok or state.pending(stream=source.stream):
                 raise CollectorSourceError(f"{source.stream}: collector audit failed")
+            warehouse.prune_screen_time_receipts(live_raw, parser_version=source.parser_version)
             health_details.append((source, health.details))
         warehouse.require_job_lock(owner)
         for source, details in health_details if publish_success else ():

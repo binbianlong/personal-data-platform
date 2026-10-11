@@ -61,6 +61,8 @@ Fitbit通知とOwnTracksのGCS保存完了通知はPub/Subから非公開worker�
 6. Healthchecksへ外部成功pingを1回送る。
 
 Screen Timeの収集・保存・取り込みはMacのCollectorが30分周期で実行する。日次Jobはstream heartbeatを更新しない。
+日次成功時に`ops.job_run`と`ops.reconciliation_run`の7日を超えた履歴を整理する。
+欠測判定に使う最新の日次成功記録は7日を超えても保持する。
 
 workerは最小0・最大1instance、同時処理1。処理予算480秒、サービスtimeout540秒。
 Fitbit workerのleaseは600秒、共通Loaderを使うOwnTracks workerのleaseは125分である。
