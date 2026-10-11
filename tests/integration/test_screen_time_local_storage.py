@@ -136,6 +136,23 @@ def test_warehouse_commit_then_restart_acknowledges_without_duplicate_events(
     assert wh.query_value("SELECT count(*) FROM base.screen_time_event") == 1
     assert wh.query_value("SELECT count(*) FROM ops.heartbeat") == (2 if publish_success else 0)
     assert repo.get_raw(pending.identity.object_key, generation=1) == pending.compressed_payload
+    successor = state.prepare(
+        device_key="a" * 64,
+        stream="app-in-focus",
+        segment_key="b" * 64,
+        raw_bytes=encode_segment_envelope(
+            segb(event("synthetic.other"))[0], name="100", kind="events"
+        ),
+        observed_at=NOW + timedelta(seconds=1),
+        schema_version=2,
+    )
+    _load_pending(state, wh, now=NOW + timedelta(seconds=1), publish_success=publish_success)
+    assert wh.query_rows("SELECT object_key FROM ops.ingestion_metadata") == [
+        (successor.identity.object_key,)
+    ]
+    assert {raw.key for raw in repo.list_raw("raw/screen_time/v2/")} == {
+        successor.identity.object_key
+    }
     wh.close()
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -15,6 +15,85 @@ from personal_data_platform.storage.motherduck import (
     connect,
 )
 from tests.screen_time_helpers import _raw, _record
+
+
+def test_screen_time_receipts_prune_only_confirmed_compacted_scope(tmp_path):
+    import gzip
+
+    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+    from tests.screen_time_helpers import Repository, event, segb
+
+    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "receipts.duckdb"))))
+    warehouse.migrate()
+    repository = Repository()
+    source = ScreenTimeSource()
+    old = repository.add("100", segb(event("app.old"))[0])
+    current = repository.add("100", segb(event("app.current"))[0])
+    unrelated = repository.add("200", segb(event("app.other"))[0])
+    for raw in (old, current, unrelated):
+        warehouse.load_object(
+            raw,
+            byte_size=1,
+            batch=source.decode(raw, gzip.decompress(repository.objects[raw.key][1])),
+        )
+    warehouse.prune_screen_time_receipts([current], parser_version=source.parser_version)
+    assert warehouse.query_rows(
+        "SELECT object_key FROM ops.ingestion_metadata ORDER BY object_key"
+    ) == [(key,) for key in sorted((current.key, unrelated.key))]
+    warehouse.close()
+
+
+def test_screen_time_receipts_need_one_confirmed_live_raw(tmp_path):
+    import gzip
+
+    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+    from tests.screen_time_helpers import Repository, event, segb
+
+    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "receipts.duckdb"))))
+    warehouse.migrate()
+    repository = Repository()
+    source = ScreenTimeSource()
+    old = repository.add("100", segb(event("app.old"))[0])
+    current = repository.add("100", segb(event("app.current"))[0])
+    for raw in (old, current):
+        warehouse.load_object(
+            raw,
+            byte_size=1,
+            batch=source.decode(raw, gzip.decompress(repository.objects[raw.key][1])),
+        )
+    warehouse.prune_screen_time_receipts([old, current], parser_version=source.parser_version)
+    assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 2
+    unconfirmed = replace(current, storage_generation=2)
+    warehouse.prune_screen_time_receipts([unconfirmed], parser_version=source.parser_version)
+    assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 2
+    warehouse.close()
+
+
+def test_run_history_prunes_after_seven_days_but_keeps_daily_gap_marker():
+    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    warehouse.migrate()
+    now = datetime(2026, 10, 11, tzinfo=UTC)
+    old = now - timedelta(days=8)
+    recent = now - timedelta(days=6)
+    warehouse.connection.execute(
+        "INSERT INTO ops.job_run VALUES "
+        "('old-daily', 'daily-reconciliation-west', 'succeeded', ?, ?, ?), "
+        "('old-other', 'loader', 'failed', ?, ?, NULL), "
+        "('recent', 'loader', 'succeeded', ?, ?, NULL)",
+        [old, old, '{"last_completed_target_date":"2026-10-02"}', old, old, recent, recent],
+    )
+    warehouse.connection.execute(
+        "INSERT INTO ops.reconciliation_run (run_id,status,started_at,completed_at) "
+        "VALUES ('old','succeeded',?,?), ('recent','succeeded',?,?)",
+        [old, old, recent, recent],
+    )
+    warehouse.prune_run_history(now=now)
+    assert warehouse.query_rows("SELECT run_id FROM ops.job_run ORDER BY run_id") == [
+        ("old-daily",),
+        ("recent",),
+    ]
+    assert warehouse.query_rows("SELECT run_id FROM ops.reconciliation_run") == [("recent",)]
+    warehouse.close()
 
 
 @pytest.mark.parametrize("as_mapping", [False, True])
@@ -382,8 +461,8 @@ def test_empty_screen_time_batch_keeps_its_decoder_version_and_source_identity()
             """
         ) == [(PARSER_VERSION, 0, raw.subject_key, raw.logical_key)]
         assert warehouse.query_rows(
-            "SELECT device_key, segment_key, source_segment_names FROM ops.screen_time_segment"
-        ) == [(raw.subject_key, raw.logical_key, [])]
+            "SELECT device_key, segment_key FROM ops.screen_time_segment"
+        ) == [(raw.subject_key, raw.logical_key)]
         failed_raw = replace(raw, key="raw/failed")
         warehouse.mark_failed(
             failed_raw,

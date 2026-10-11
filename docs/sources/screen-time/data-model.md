@@ -28,7 +28,7 @@ JSON: {"segment_kind":"events"または"tombstones","source_segment_name":"数�
 ```
 
 JSONはUTF-8・key順・空白なし、最大1024 bytesで、端末identifier・絶対path・親directory名を含めない。
-元SEGBはbyte-for-byteで復元できる。v1/v2は同じ疑似化keyを使い、v2の元ファイル名を同一logical segmentのv1にも対応付けられる。
+元SEGBはbyte-for-byteで復元できる。v1/v2は同じ疑似化keyを使う。
 
 ## 疑似化key
 
@@ -89,41 +89,23 @@ Cloud Runはその成功時刻と`scan_completed_at`が48時間以内である�
 分析入口tableで、`event_key`がprimary key。同じイベントは1行とし、無効化は`is_active=false`へ更新する。
 列は後述のtransitionに`is_active`と`loaded_at`を加えたもので、`original_payload`や観測ごとの本文を保存しない。
 分析項目・parser version・物理コピー数・有効状態が変わった場合だけ更新し、provenanceは採用した代表recordを指す。
-`observed_at`は全再観測の最新日時ではない。Rawごとの取込時刻・件数は`ops.ingestion_metadata`で確認する。
+`observed_at`は全再観測の最新日時ではない。現在保存しているRawの取込時刻・件数は`ops.ingestion_metadata`で確認する。
 
-`ops.screen_time_segment`は`(observed_at, object_key)`順の最新snapshotを保持する。古いRawは巻き戻さず照合情報を補完・修正する。
-`ops.screen_time_record`は内容digestと物理位置で重複排除し、順位と代表選択用の正規化項目を保持する。
-元payloadは保存せず、同内容の再観測では補助行数が増えない。
+`ops.screen_time_segment`は`(observed_at, object_key)`順の最新snapshotを保持する。古いRawやその再解析で現行状態を巻き戻さない。
+`ops.screen_time_record`は現行かつ有効な物理recordだけを保持する。新しいsnapshotとの差分で追加・訂正・削除し、
+元payloadや非現行recordの照合情報は保存しない。代表recordの順位と物理コピー数は現行recordから求める。
 
-TTLで必要な過去recordの照合情報・正規化項目はMotherDuckに残し、ユーザー削除は同じevent_keyの別segmentコピーにも適用する。
-v1で不明のsegment名は同じlogical segmentのv2から補完する。`source_segment_names`は重複を除いたsort済み非NULL配列で、未観測は空配列。
-複数名を持つsegmentは`name_ambiguous=true`として照合対象外にし、その候補名も全体の一意性判定へ含める。
-名前追加時は全候補名のtombstoneを再照合する。`source_segment_name`は辞書順最小値で、照合には単独で使わない。
-代表イベントの再計算はrecord・順位・削除効果が変わるevent_keyに限定し、別segmentのコピーも比較する。
+Appleの削除済みの印は照合しない。代表イベントの再計算はrecordや順位が変わる`event_key`に限定し、
+別segmentの現行コピーも比較する。分析用の非現行行は`base.screen_time_event`に残す。
 
 ## Recordの取り込み
 
 `ops.ingestion_metadata`にはparser versionと全record数（削除済み・CRC不一致・tombstoneを含む）を保存する。
-parser versionはiPhone `app-in-focus-v2`、Mac `app-usage-v1`。削除済み・CRC不一致は同じ物理位置の既存recordを無効化する。
+parser versionはiPhone `app-in-focus-v2`、Mac `app-usage-v1`。削除済み・CRC不一致の位置は現行候補から外す。
 CRC正常の未知payloadや壊れたSEGB構造はobject全体を失敗させ、保存中の最新版Rawは再解析できる。
 
-### Tombstone
-
-| protobuf field | 型 | 内容 |
-|---|---|---|
-| 1 | string | 対象segment名 |
-| 2 | uint32 | 対象recordのmetadata offset |
-| 3 | uint32 | 対象payload長 |
-| 4 | uint32 | 削除理由: 1=TTL、2=UserInitiated |
-| 5 | string | processName |
-| 6 | double | 対象event timestamp（Cocoa秒） |
-| 7 | string、省略可 | policyID |
-
-未知の削除理由は保持して自動適用しない。端末・stream・一意な元segment名・metadata offset・payload長・元record時刻を照合し、
-`ops.screen_time_deletion_match`へ保存する。時刻は1 microsecondの許容差とし、物理位置が再利用されても異なる時刻のイベントを削除しない。
-
-`ops.screen_time_tombstone.resolution`は`user_deletion_applied`、`ttl_history_retained`、`unmatched`、`unsupported_reason`、
-再解析で無効になった`invalidated`を持つ。`unmatched`は未到着・保存期間外・v1の名前不明も含み、適用済みではない。Loaderで再評価する。
+削除済みの印を含むRawも取込成否とrecord数は記録するが、印の照合状態はMotherDuckに作らない。
+現行Rawの整理を確認したscopeでは、旧版の取込成功台帳も削除する。
 
 ## `event_key`
 
@@ -149,11 +131,10 @@ eventが別segmentに現れるため`event_key`へ含めない。
 
 1. 通常の候補はlogical segmentの最新観測から選び、同じrecord offsetの最後のmetadataを現在stateとする。
 2. `event`かつ`WRITTEN`かつCRC不一致でないrecordだけを候補にする。
-3. TTL tombstoneに完全照合できた過去観測の正常イベントを候補へ戻す。Apple側の期限切れだけでは既取得の履歴を消さない。
-4. UserInitiated tombstoneに完全照合できた`event_key`は、別segmentの重複コピーも含めて候補から除外する。
-5. 同一物理イベントの過去観測を重複計上せず、最後に同じ`event_key`を1件にまとめる。
+3. 同一物理イベントを重複計上せず、最後に同じ`event_key`を1件にまとめる。
 
-無効化は集計からの除外で、Raw・イベント・補助状態を物理削除しない。取得前に消えたpayloadは復元できない。
+元ファイルの更新で消えたイベントは`is_active=false`にして集計から外し、分析行を残す。
+不要になった物理recordは同じ取込transactionで削除する。取得前に消えたpayloadは復元できない。
 
 ```text
 event_key / device_key / platform / source_stream

@@ -23,7 +23,7 @@ from .raw import (
 
 
 class ScreenTimeSource:
-    """Read legacy SEGB and v2 observations with source identities for deletion matching."""
+    """Read legacy SEGB and v2 observations into Screen Time events."""
 
     source_id = "screen_time"
     stream = APP_IN_FOCUS_STREAM

@@ -66,6 +66,7 @@ Loaderは選択scopeの全prefix・全pageを走査し、重複key、namespace�
 Fitbitは完全取得範囲をWriterで直接commitする。結果不明では接続を破棄し、再配信時にAPIを再取得する。
 
 Macは全対象のローカル保存後に既存Loaderを同じprocessで実行し、DB成功確認後に旧成功Rawを整理する。
+Screen Timeは現行の物理recordだけを運用状態に残し、ローカルRawの整理と成功確認が済んだscopeの旧成功台帳も整理する。
 pending・失敗・不完全snapshotがある回はstream heartbeatを更新しない。日次JobはMacの成功記録とDBを監査する。
 DBと外部HTTPはatomicではないため、外部送信失敗はJob失敗として扱う。
 

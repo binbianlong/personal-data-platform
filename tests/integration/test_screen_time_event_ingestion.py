@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import gzip
-import shutil
 from dataclasses import replace
 from datetime import timedelta
-from itertools import permutations
-from pathlib import Path
 
 import pytest
 
-from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.loader.job import run_loader
 from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
@@ -19,7 +15,7 @@ from personal_data_platform.storage.motherduck import (
     WarehouseConnectionError,
     connect,
 )
-from tests.screen_time_helpers import Repository, event, segb, tombstone
+from tests.screen_time_helpers import Repository, event, segb
 
 
 def decode(repository, raw):
@@ -171,57 +167,7 @@ def test_out_of_order_and_reparse_keep_later_snapshot(tmp_path, order):
     warehouse.close()
 
 
-def test_dbt_excludes_user_deleted_events_across_repeated_initialization(tmp_path, monkeypatch):
-    database = tmp_path / "events.duckdb"
-    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
-    warehouse.migrate()
-    repository = Repository()
-    payload = event("app.deleted")
-    segment, offset = segb(payload)
-    raw = repository.add("100", segment)
-    batch = decode(repository, raw)
-    warehouse.load_object(
-        raw,
-        byte_size=1,
-        batch=batch,
-    )
-    warehouse.migrate()
-    warehouse.migrate()
-    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
-    # A different segment contains the same event. No extra event row is created on retry.
-    copy = repository.add("200", segment)
-    warehouse.load_object(copy, byte_size=1, batch=decode(repository, copy))
-    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
-    deletion = repository.add(
-        "100", segb(tombstone("100", offset, len(payload)))[0], kind="tombstones", logical="f" * 64
-    )
-    warehouse.load_object(deletion, byte_size=1, batch=decode(repository, deletion))
-    assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(False,)]
-    warehouse.close()
-    project = tmp_path / "dbt"
-    shutil.copytree(
-        Path(__file__).resolve().parents[2] / "dbt",
-        project,
-        ignore=shutil.ignore_patterns("target", "logs", "dbt_packages", ".user.yml"),
-    )
-    monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
-    run_dbt(target="local", project_dir=project)
-    warehouse = warehouse_at(database)
-    assert (
-        warehouse.query_value(
-            "SELECT count(*) FROM information_schema.views WHERE table_schema = 'base' "
-            "AND table_name IN ('screen_time_legacy_transition', 'screen_time_tombstone_match', "
-            "'screen_time_tombstone_status')"
-        )
-        == 0
-    )
-    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_transition") == 0
-    assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time") == 0
-    assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time_total") == 0
-    warehouse.close()
-
-
-STATE_TABLES = ("segment", "record", "tombstone", "deletion_match")
+STATE_TABLES = ("segment", "record")
 
 
 def state_counts(warehouse):
@@ -248,39 +194,6 @@ def test_unrelated_segments_do_not_expand_working_sets(tmp_path, unrelated):
     load(warehouse, repository, repository.add("100", segb(event("app.first"))[0]))
     assert state_counts(warehouse) == counts
     assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_event") == 1
-    assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_tombstone") == 0
-    warehouse.close()
-
-
-@pytest.mark.parametrize("reason", [1, 2])
-@pytest.mark.parametrize("order", [(0, 1, 2), (2, 1, 0), (1, 0, 2)])
-def test_deletion_target_late_and_empty_snapshot(tmp_path, reason, order):
-    warehouse = warehouse_at(tmp_path / "events.duckdb")
-    repository = Repository()
-    payload = event("app.deleted")
-    segment, offset = segb(payload)
-    raws = [
-        repository.add("100", segment),
-        repository.add("100", b""),
-        repository.add(
-            "100", segb(tombstone("100", offset, len(payload), reason=reason))[0], kind="tombstones"
-        ),
-    ]
-    for i in order:
-        if i == 1:
-            warehouse.load_object(raws[i], byte_size=0, batch=ScreenTimeBatch([], "100", "events"))
-        else:
-            load(warehouse, repository, raws[i])
-    assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(reason == 1,)]
-    counts = state_counts(warehouse)
-    baseline = warehouse.query_rows("SELECT * FROM base.screen_time_event")
-    for i in range(5):
-        repeated = repository.add(
-            "100", segb(tombstone("100", offset, len(payload), reason=reason))[0], kind="tombstones"
-        )
-        load(warehouse, repository, repeated)
-    assert state_counts(warehouse) == counts
-    assert warehouse.query_rows("SELECT * FROM base.screen_time_event") == baseline
     warehouse.close()
 
 
@@ -302,48 +215,6 @@ def test_reparse_empty_latest_and_older_snapshot(tmp_path):
     warehouse.close()
 
 
-def test_reparse_tombstone_and_event_corrects_existing_physical_rows(tmp_path):
-    warehouse = warehouse_at(tmp_path / "events.duckdb")
-    repository = Repository()
-    payload = event("app.original")
-    segment, offset = segb(payload)
-    raw = repository.add("100", segment)
-    load(warehouse, repository, raw)
-    deletion = repository.add(
-        "100", segb(tombstone("100", offset, len(payload)))[0], kind="tombstones"
-    )
-    load(warehouse, repository, deletion)
-    assert warehouse.query_value("SELECT is_active FROM base.screen_time_event") is False
-    batch = decode(repository, deletion)
-    warehouse.load_object(
-        deletion,
-        byte_size=1,
-        batch=replace(
-            batch,
-            records=[replace(r, deletion_reason=99, parser_version="next") for r in batch.records],
-        ),
-    )
-    assert warehouse.query_value("SELECT is_active FROM base.screen_time_event") is True
-    batch = decode(repository, raw)
-    warehouse.load_object(
-        raw,
-        byte_size=1,
-        batch=replace(
-            batch,
-            records=[
-                replace(r, bundle_id="app.corrected", event_key="corrected", parser_version="next")
-                for r in batch.records
-            ],
-        ),
-    )
-    assert warehouse.query_rows("SELECT bundle_id FROM base.screen_time_event WHERE is_active") == [
-        ("app.corrected",)
-    ]
-    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_record") == 1
-    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_tombstone") == 1
-    warehouse.close()
-
-
 class InterruptedConnection:
     def __init__(self, connection, stage):
         self.connection = connection
@@ -358,7 +229,7 @@ class InterruptedConnection:
             (self.stage in ("commit_before", "commit_after") and sql == "COMMIT")
             or (self.stage == "success" and "SET status = 'succeeded'" in sql)
             or (self.stage == "events" and "INSERT INTO base.screen_time_event" in sql)
-            or (self.stage == "state" and "INSERT INTO ops.screen_time_tombstone" in sql)
+            or (self.stage == "state" and "INSERT INTO ops.screen_time_record" in sql)
         )
         if match and not self.failed:
             self.failed = True
@@ -465,33 +336,6 @@ def test_same_content_v1_to_v2_and_representative_fallback(tmp_path):
     warehouse.close()
 
 
-def test_rollback_restores_existing_events_matches_and_success(tmp_path):
-    warehouse = warehouse_at(tmp_path / "events.duckdb")
-    repository = Repository()
-    payload = event("app.history")
-    segment, offset = segb(payload)
-    load(warehouse, repository, repository.add("100", segment))
-    load(warehouse, repository, repository.add("200", segment))
-    tables = [f"ops.screen_time_{t}" for t in STATE_TABLES] + [
-        "base.screen_time_event",
-        "ops.ingestion_metadata",
-    ]
-    before = {t: warehouse.query_rows(f"SELECT * FROM {t} ORDER BY ALL") for t in tables}
-    deletion = repository.add(
-        "100", segb(tombstone("100", offset, len(payload)))[0], kind="tombstones"
-    )
-    connection = warehouse.connection
-    warehouse.connection = InterruptedConnection(connection, "events")
-    with pytest.raises(OSError):
-        load(warehouse, repository, deletion)
-    assert {t: warehouse.query_rows(f"SELECT * FROM {t} ORDER BY ALL") for t in tables} == before
-    warehouse.connection = connection
-    load(warehouse, repository, deletion)
-    assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(False,)]
-    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 1
-    warehouse.close()
-
-
 @pytest.mark.parametrize("failure", ["begin", "rollback"])
 def test_broken_connection_stops_every_followup_write(tmp_path, failure):
     warehouse = warehouse_at(tmp_path / "events.duckdb")
@@ -563,189 +407,3 @@ def test_segment_history_does_not_expand_resolve(tmp_path, history):
     assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_event") == 1
     assert_full_resolution(warehouse)
     warehouse.close()
-
-
-@pytest.mark.parametrize("reason", [1, 2])
-def test_unchanged_deletion_effects_do_not_expand_resolve(tmp_path, reason):
-    warehouse = warehouse_at(tmp_path / "events.duckdb")
-    repository = Repository()
-    payload = event("app.history")
-    segment, offset = segb(payload)
-    load(warehouse, repository, repository.add("100", segment))
-    deletion = repository.add(
-        "100", segb(tombstone("100", offset, len(payload), reason=reason))[0], kind="tombstones"
-    )
-    load(warehouse, repository, deletion)
-    assert_full_resolution(warehouse)
-    before = warehouse.query_rows("SELECT * FROM base.screen_time_event")
-    repeated = repository.add(
-        "100", segb(tombstone("100", offset, len(payload), reason=reason))[0], kind="tombstones"
-    )
-    load(warehouse, repository, repeated)
-    assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_event") == 0
-    assert warehouse.query_rows("SELECT * FROM base.screen_time_event") == before
-    load(
-        warehouse,
-        repository,
-        repository.add("100", segb(event("app.current", timestamp=20.0), timestamp=20.0)[0]),
-    )
-    before = warehouse.query_rows("SELECT * FROM base.screen_time_event ORDER BY event_key")
-    load(
-        warehouse,
-        repository,
-        repository.add("100", segb(event("app.current", timestamp=20.0), timestamp=20.0)[0]),
-    )
-    assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_event") == 1
-    assert warehouse.query_rows("SELECT * FROM base.screen_time_event ORDER BY event_key") == before
-    assert_full_resolution(warehouse)
-    # Same physical match, different reason: TTL and user deletion have opposite effects.
-    batch = decode(repository, repeated)
-    warehouse.load_object(
-        repeated,
-        byte_size=1,
-        batch=replace(
-            batch,
-            records=[
-                replace(r, deletion_reason=3 - reason, parser_version="corrected")
-                for r in batch.records
-            ],
-        ),
-    )
-    assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_event") == 1
-    assert warehouse.query_rows(
-        "SELECT is_active FROM base.screen_time_event WHERE bundle_id='app.history'"
-    ) == [(reason == 2,)]
-    assert_full_resolution(warehouse)
-    warehouse.close()
-
-
-@pytest.mark.parametrize("conflict", ["same_segment", "other_segment"])
-def test_name_ambiguity_removes_old_deletion_effect(tmp_path, conflict):
-    warehouse = warehouse_at(tmp_path / "events.duckdb")
-    repository = Repository()
-    payload = event("app.named")
-    segment, offset = segb(payload)
-    raw = repository.add("100", segment, version=1)
-    load(warehouse, repository, raw)
-    deletion = repository.add(
-        "100", segb(tombstone("100", offset, len(payload)))[0], kind="tombstones"
-    )
-    load(warehouse, repository, deletion)
-    assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_event") == 0
-    # Learning the v2 name makes an existing tombstone match.
-    load(warehouse, repository, repository.add("100", segment))
-    assert warehouse.query_value("SELECT is_active FROM base.screen_time_event") is False
-    assert_full_resolution(warehouse)
-    empty = repository.add(
-        "200" if conflict == "same_segment" else "100",
-        b"",
-        logical=raw.logical_key if conflict == "same_segment" else "f" * 64,
-    )
-    warehouse.load_object(
-        empty,
-        byte_size=0,
-        batch=ScreenTimeBatch([], "200" if conflict == "same_segment" else "100", "events"),
-    )
-    assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_event") == 1
-    assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 0
-    assert warehouse.query_value("SELECT is_active FROM base.screen_time_event") is (
-        conflict == "other_segment"
-    )
-    assert_full_resolution(warehouse)
-    warehouse.close()
-
-
-@pytest.mark.parametrize("order", list(permutations(range(4))))
-@pytest.mark.parametrize("reason", [1, 2])
-def test_conflicting_names_block_every_alias_in_any_arrival_order(tmp_path, order, reason):
-    repository = Repository()
-    payload = event("app.target")
-    segment, offset = segb(payload)
-    raws = [
-        repository.add("100", segb(event("app.conflict"))[0], logical="b" * 64),
-        repository.add("200", segb(event("app.conflict"))[0], logical="b" * 64),
-        repository.add("200", segment, logical="c" * 64),
-        repository.add(
-            "300",
-            segb(tombstone("200", offset, len(payload), reason=reason))[0],
-            kind="tombstones",
-        ),
-    ]
-    warehouse = warehouse_at(tmp_path / "events.duckdb")
-    try:
-        for index in order:
-            load(warehouse, repository, raws[index])
-        assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 0
-        assert warehouse.query_rows(
-            "SELECT bundle_id, is_active FROM base.screen_time_event ORDER BY bundle_id"
-        ) == [("app.conflict", True), ("app.target", True)]
-        # TTL must not retain the target after its current copy is erased either.
-        erased = repository.add(
-            "200", segb(b"\0" * len(payload), state=3, crc=123)[0], logical="c" * 64
-        )
-        load(warehouse, repository, erased)
-        assert (
-            warehouse.query_value(
-                "SELECT is_active FROM base.screen_time_event WHERE bundle_id='app.target'"
-            )
-            is False
-        )
-    finally:
-        warehouse.close()
-
-
-def test_new_alias_invalidates_only_colliding_deletions_after_ambiguity(tmp_path):
-    warehouse = warehouse_at(tmp_path / "events.duckdb")
-    repository = Repository()
-    try:
-        for name in ("100", "200"):
-            load(
-                warehouse,
-                repository,
-                repository.add(
-                    name,
-                    segb(event("app.conflict"))[0],
-                    logical="b" * 64,
-                ),
-            )
-        for name, bundle in (("300", "app.collision"), ("400", "app.unrelated")):
-            payload = event(bundle)
-            segment, offset = segb(payload)
-            load(warehouse, repository, repository.add(name, segment))
-            load(
-                warehouse,
-                repository,
-                repository.add(
-                    name,
-                    segb(tombstone(name, offset, len(payload)))[0],
-                    kind="tombstones",
-                ),
-            )
-        assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 2
-        raw = repository.add("300", segb(event("app.conflict"))[0], logical="b" * 64)
-        load(warehouse, repository, raw)
-        assert warehouse.query_rows(
-            "SELECT bundle_id,is_active FROM base.screen_time_event ORDER BY bundle_id"
-        ) == [("app.collision", True), ("app.conflict", True), ("app.unrelated", False)]
-        assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_deletion_match") == 1
-        before = warehouse.query_rows("SELECT * FROM base.screen_time_event ORDER BY event_key")
-        # Repeating a known alias neither changes the name set nor analytical results.
-        load(
-            warehouse,
-            repository,
-            repository.add(
-                "300",
-                segb(event("app.conflict"))[0],
-                logical="b" * 64,
-            ),
-        )
-        assert (
-            warehouse.query_rows("SELECT * FROM base.screen_time_event ORDER BY event_key")
-            == before
-        )
-        assert warehouse.query_rows(
-            "SELECT source_segment_names FROM ops.screen_time_segment WHERE segment_key=?",
-            ["b" * 64],
-        ) == [(["100", "200", "300"],)]
-    finally:
-        warehouse.close()

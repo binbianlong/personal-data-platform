@@ -140,6 +140,34 @@ class Warehouse:
             if live_identities.get(str(object_key)) == tuple(identity)
         }
 
+    def prune_screen_time_receipts(
+        self, live_raw: Iterable[RawObject], *, parser_version: str
+    ) -> None:
+        """Remove superseded successes only where one live Raw is warehouse-confirmed."""
+
+        by_scope: dict[tuple[str, str, str], list[RawObject]] = {}
+        for raw in live_raw:
+            if raw.source_id == "screen_time":
+                by_scope.setdefault((raw.subject_key, raw.stream, raw.logical_key), []).append(raw)
+        candidates = [values[0] for values in by_scope.values() if len(values) == 1]
+        confirmed = self.succeeded_keys_for(candidates, parser_version=parser_version)
+        self.connection.execute("BEGIN TRANSACTION")
+        try:
+            for raw in candidates:
+                if raw.key not in confirmed:
+                    continue
+                self.connection.execute(
+                    "DELETE FROM ops.ingestion_metadata "
+                    "WHERE source_id = 'screen_time' AND status = 'succeeded' "
+                    "AND subject_key = ? AND source_stream = ? AND logical_key = ? "
+                    "AND (observed_at, object_key) < (?, ?)",
+                    [raw.subject_key, raw.stream, raw.logical_key, raw.observed_at, raw.key],
+                )
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
+
     def ingestion_counts(self, *, source_id: str, stream: str) -> dict[str, int]:
         rows = self.connection.execute(
             """
@@ -485,6 +513,23 @@ class Warehouse:
                 json.dumps(details, sort_keys=True),
                 run_id,
             ],
+        )
+
+    def prune_run_history(self, *, now: datetime) -> None:
+        cutoff = now - timedelta(days=7)
+        self.connection.execute(
+            "DELETE FROM ops.reconciliation_run WHERE coalesce(completed_at, started_at) < ?",
+            [cutoff],
+        )
+        self.connection.execute(
+            "DELETE FROM ops.job_run "
+            "WHERE coalesce(completed_at, started_at) < ? "
+            "AND run_id <> coalesce(( "
+            "SELECT run_id FROM ops.job_run "
+            "WHERE job_name = 'daily-reconciliation-west' AND status = 'succeeded' "
+            "AND json_extract_string(details, '$.last_completed_target_date') IS NOT NULL "
+            "ORDER BY completed_at DESC LIMIT 1), '')",
+            [cutoff],
         )
 
     def query_value(self, sql: str, parameters: list[Any] | None = None) -> Any:
