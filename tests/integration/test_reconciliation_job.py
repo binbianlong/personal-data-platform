@@ -476,13 +476,13 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
             assert any(
                 entry.get("event") == "reconciliation"
                 and entry.get("status") == "succeeded"
-                and entry.get("job_name") == "daily-reconciliation-west"
+                and entry.get("job_name") == "daily-reconciliation"
                 for entry in entries
             )
         if failure == "gap":
             details = json.loads(
                 warehouse.query_value(
-                    "SELECT details FROM ops.job_run WHERE run_id!='previous' AND job_name='daily-reconciliation-west'"
+                    "SELECT details FROM ops.job_run WHERE run_id!='previous' AND job_name='daily-reconciliation'"
                 )
             )
             assert details["manual_repair_required"] == {

@@ -96,6 +96,30 @@ def test_run_history_prunes_after_seven_days_but_keeps_daily_gap_marker():
     warehouse.close()
 
 
+def test_run_history_keeps_latest_daily_marker_across_previous_and_current_names():
+    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    warehouse.migrate()
+    now = datetime(2026, 10, 11, tzinfo=UTC)
+    older = now - timedelta(days=9)
+    newer = now - timedelta(days=8)
+    warehouse.connection.execute(
+        "INSERT INTO ops.job_run VALUES "
+        "('previous', 'daily-reconciliation-west', 'succeeded', ?, ?, ?), "
+        "('current', 'daily-reconciliation', 'succeeded', ?, ?, ?)",
+        [
+            older,
+            older,
+            '{"last_completed_target_date":"2026-10-01"}',
+            newer,
+            newer,
+            '{"last_completed_target_date":"2026-10-02"}',
+        ],
+    )
+    warehouse.prune_run_history(now=now)
+    assert warehouse.query_rows("SELECT run_id FROM ops.job_run") == [("current",)]
+    warehouse.close()
+
+
 @pytest.mark.parametrize("as_mapping", [False, True])
 def test_reconciliation_accepts_result_and_dictionary(as_mapping) -> None:
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))

@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from personal_data_platform.raw.models import RawObject
-from personal_data_platform.reconciliation.models import ReconciliationResult
+from personal_data_platform.reconciliation.models import (
+    DAILY_JOB_HISTORY_NAMES,
+    ReconciliationResult,
+)
 from personal_data_platform.sources.contracts import DecodedBatch
 from personal_data_platform.storage.migrations import DEFAULT_MIGRATIONS as DEFAULT_MIGRATIONS
 from personal_data_platform.storage.migrations import apply_migrations
@@ -526,10 +529,10 @@ class Warehouse:
             "WHERE coalesce(completed_at, started_at) < ? "
             "AND run_id <> coalesce(( "
             "SELECT run_id FROM ops.job_run "
-            "WHERE job_name = 'daily-reconciliation-west' AND status = 'succeeded' "
+            "WHERE job_name IN (?, ?) AND status = 'succeeded' "
             "AND json_extract_string(details, '$.last_completed_target_date') IS NOT NULL "
             "ORDER BY completed_at DESC LIMIT 1), '')",
-            [cutoff],
+            [cutoff, *DAILY_JOB_HISTORY_NAMES],
         )
 
     def query_value(self, sql: str, parameters: list[Any] | None = None) -> Any:

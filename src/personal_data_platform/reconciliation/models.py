@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+DAILY_JOB_NAME = "daily-reconciliation"
+DAILY_JOB_HISTORY_NAMES = (DAILY_JOB_NAME, "daily-reconciliation-west")
+
 
 @dataclass(frozen=True, slots=True)
 class ReconciliationResult:
