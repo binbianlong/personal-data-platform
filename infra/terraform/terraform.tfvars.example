@@ -3,7 +3,6 @@ deployer_service_account_email = "github-tf-deploy@example-project.iam.gservicea
 collector_impersonator_member  = "user:operator@example.com"
 alert_email                    = "operator@example.com"
 fitbit_subject_key             = "owner"
-region                         = "us-central1" # Retained backup storage only.
 
 west_region    = "us-west1"
 west_image_uri = "us-west1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

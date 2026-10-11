@@ -55,7 +55,7 @@ output "notification_channel" {
   value       = google_monitoring_notification_channel.email.name
 }
 
-output "west_resources" {
+output "runtime_resources" {
   description = "Runtime resources and scheduled processing status."
   value = {
     region                 = var.west_region

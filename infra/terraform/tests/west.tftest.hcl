@@ -115,8 +115,8 @@ run "reject_null_west_secret_version" {
 run "runtime_storage_and_execution_contract" {
   command = plan
   assert {
-    condition     = google_storage_bucket.raw.location == "us-central1" && google_storage_bucket.raw_west.location == "us-west1" && google_storage_bucket.preflight_west.name != google_storage_bucket.raw_west.name && google_storage_bucket.raw.name != google_storage_bucket.raw_west.name
-    error_message = "Backup buckets must stay in place and be separate from active storage."
+    condition     = google_storage_bucket.raw_west.location == "us-west1" && google_storage_bucket.preflight_west.location == "us-west1" && google_storage_bucket.preflight_west.name != google_storage_bucket.raw_west.name
+    error_message = "Active Raw and preflight buckets must be separate and remain in us-west1."
   }
   assert {
     condition     = length(google_cloud_run_v2_job.west) == 1 && length(google_cloud_scheduler_job.west) == 1 && alltrue([for scheduler in google_cloud_scheduler_job.west : !scheduler.paused && scheduler.region == "us-west1" && scheduler.time_zone == "Asia/Tokyo"])

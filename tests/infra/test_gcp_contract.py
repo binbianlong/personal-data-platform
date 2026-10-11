@@ -98,11 +98,11 @@ def test_bootstrap_service_accounts_wait_for_api_enablement(account: str) -> Non
 
 
 def test_preflight_bucket_isolated_and_orphans_expire_after_one_day() -> None:
-    storage = _read("infra/terraform/storage.tf")
-    preflight = storage.split('resource "google_storage_bucket" "preflight" {', 1)[1]
-    preflight = preflight.split('data "google_iam_policy" "raw_bucket" {', 1)[0]
+    storage = _read("infra/terraform/west.tf")
+    preflight = storage.split('resource "google_storage_bucket" "preflight_west" {', 1)[1]
+    preflight = preflight.split('resource "google_service_account" "west" {', 1)[0]
 
-    assert re.search(r'preflight_bucket_name\s*= "\$\{var.project_id\}-pdp-preflight"', storage)
+    assert re.search(r'west_preflight_bucket_name\s*= "\$\{var.project_id\}-pdp-preflight-west"', storage)
     assert 'storage_class               = "STANDARD"' in preflight
     assert 'type = "Delete"' in preflight
     assert "age            = 1" in preflight
@@ -112,7 +112,7 @@ def test_preflight_bucket_isolated_and_orphans_expire_after_one_day() -> None:
 
 def test_rebuild_uses_a_separate_read_only_impersonated_identity() -> None:
     jobs = _read("infra/terraform/jobs.tf")
-    storage = _read("infra/terraform/storage.tf")
+    storage = _read("infra/terraform/west.tf")
 
     assert 'account_id   = "raw-rebuild-operator"' in jobs
     assert 'resource "google_service_account_iam_member" "rebuild_operator_impersonator"' in jobs

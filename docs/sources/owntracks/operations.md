@@ -4,7 +4,7 @@ Cloud Run・Pub/Sub・IAM・日次Jobの共通操作は[Platform運用](../../pl
 
 ## 接続と資格情報
 
-receiver URLはTerraformの`west_resources.owntracks_url` output（末尾`/webhooks/owntracks`）を使う。OwnTracksアプリにはHTTPS URLとHTTP Basic認証のuser・passwordを設定する。Secret Managerの`owntracks_config`には`username`、`password`、`device_id`、64桁の疑似化`device_key`をJSONで登録し、`PDP_OWNTRACKS_CONFIG`へ渡す。Secretのversion固定と権限は[Runtime Terraform](../../../infra/terraform/README.md#secretと資格情報)に従う。
+receiver URLはTerraformの`runtime_resources.owntracks_url` output（末尾`/webhooks/owntracks`）を使う。OwnTracksアプリにはHTTPS URLとHTTP Basic認証のuser・passwordを設定する。Secret Managerの`owntracks_config`には`username`、`password`、`device_id`、64桁の疑似化`device_key`をJSONで登録し、`PDP_OWNTRACKS_CONFIG`へ渡す。Secretのversion固定と権限は[Runtime Terraform](../../../infra/terraform/README.md#secretと資格情報)に従う。
 
 ## 取込と補修
 

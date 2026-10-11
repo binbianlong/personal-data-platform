@@ -8,17 +8,6 @@ variable "project_id" {
   }
 }
 
-variable "region" {
-  description = "Region of retained legacy storage; normal compute uses west_region."
-  type        = string
-  default     = "us-central1"
-
-  validation {
-    condition     = var.region == "us-central1"
-    error_message = "Legacy storage stays in us-central1 to avoid replacing retained backups."
-  }
-}
-
 variable "deployer_service_account_email" {
   description = "Bootstrap-created deployment identity granted act-as only on runtime identities."
   type        = string
