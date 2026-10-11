@@ -38,4 +38,4 @@ pushのOIDCには既存Scheduler SAを使う。workerは非公開で最大1insta
 切替完了前に参照中versionを無効化・破棄しない。秘密値をtfvars・state・GitHub variablesへ含めない。
 JSON fieldは[Fitbit環境変数](../../docs/sources/fitbit/operations.md#環境変数)、権限境界は[セキュリティ](../../docs/platform/security.md)を参照する。
 
-OwnTracksの初回secretは`google_secret_manager_secret.west["owntracks_config"]`を先に適用してcontainerを作り、payloadを登録後に全体を適用する。iPhone設定、JSON field、保存・復旧は[OwnTracks設定と運用](../../docs/sources/owntracks/setup.md)を参照する。
+OwnTracksの初回secretは`google_secret_manager_secret.west["owntracks_config"]`を先に適用してcontainerを作り、payloadを登録後に全体を適用する。

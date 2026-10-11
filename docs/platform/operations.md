@@ -95,7 +95,6 @@ FitbitはRawを持たない。別のscratch DBへ`pdp fitbit sync --from ... --t
 4. 差分確認後に参照先を切り替える。本番と同じDB、既存tableのあるDB、partial history未承認の再構築は拒否する。
 
 OwnTracksは無期限のGCS Rawを専用read-only ADCで読み、`pdp rebuild --source owntracks`で再生する。
-日次照合・再取込・scratch DBへの復元は[OwnTracksの設定と運用](../sources/owntracks/setup.md)を参照する。
 
 ## 停止と復旧
 

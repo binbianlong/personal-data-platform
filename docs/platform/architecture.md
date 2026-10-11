@@ -51,7 +51,7 @@ Raw schema版とparser versionは別で、parser versionを更新すると保持
 - OwnTracksの位置メッセージは全フィールドを保持した正規化JSONをGCSに無期限保存する。端末疑似化key・イベント時刻・hashで再送を重複保存しない。
 
 Rawは保存中の版の再生用正本で、MotherDuckはRaw整理後も分析履歴を保持する。
-OwnTracks以外の全期間のDB復元をRawだけで保証しない。OwnTracksの取得・保存は[設定と運用](../sources/owntracks/setup.md)を参照する。keyとpayloadは
+OwnTracks以外の全期間のDB復元をRawだけで保証しない。keyとpayloadは
 [Screen Timeデータモデル](../sources/screen-time/data-model.md)と[Fitbitデータモデル](../sources/fitbit/data-model.md)を参照する。
 
 ## Loaderと永続化
