@@ -45,7 +45,7 @@ class OwnTracksSource:
         if (raw.source_id, raw.stream, raw.schema_version) != (self.source_id, self.stream, 1):
             raise ValueError("Raw does not belong to OwnTracks location")
         self.validate_raw_key(raw.key)
-        message = location_message(payload)
+        message = location_message(payload, from_raw=True)
         if message is None:
             raise ValueError("OwnTracks Raw must contain a location")
         timestamp = message["tst"]

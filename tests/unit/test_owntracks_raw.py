@@ -5,21 +5,29 @@ import pytest
 from personal_data_platform.sources.registry import get_source
 
 
-def test_location_canonicalization_preserves_extra_fields_and_retry_identity():
+def test_location_raw_keeps_only_selected_fields_and_retry_identity():
     source = get_source("owntracks", "location")
     from personal_data_platform.sources.owntracks.raw import prepare_location
 
     first = prepare_location(
-        b'{"lon":139.0,"tst":1791504000,"_type":"location","lat":35.0,"tag":"trip"}',
+        b'{"lon":139.0,"tst":1791504000,"_type":"location","lat":35.0,'
+        b'"acc":7,"vel":12,"batt":80,"bs":2,"motionactivities":["walking"],'
+        b'"alt":30,"vac":4,"m":1,"t":"u","ssid":"home","inregions":["home"],'
+        b'"created_at":1791504001,"tid":"AB","topic":"owntracks/user/phone","p":100}',
         device_key="a" * 64,
     )
     retry = prepare_location(
-        b'{"tag":"trip","lat":35.0,"_type":"location","tst":1791504000,"lon":139.0}',
+        b'{"lat":35.0,"_type":"location","tst":1791504000,"lon":139.0,'
+        b'"acc":7,"vel":12,"batt":80,"bs":2,"motionactivities":["walking"],'
+        b'"alt":99,"vac":8,"m":2,"t":"p","ssid":"other","inregions":[],"tag":"trip"}',
         device_key="a" * 64,
     )
     assert first == retry
     key, payload, compressed = first
-    assert b'"tag":"trip"' in payload
+    assert payload == (
+        b'{"acc":7,"batt":80,"bs":2,"lat":35.0,"lon":139.0,'
+        b'"motionactivities":["walking"],"tst":1791504000,"vel":12}'
+    )
     import gzip
 
     assert gzip.decompress(compressed) == payload

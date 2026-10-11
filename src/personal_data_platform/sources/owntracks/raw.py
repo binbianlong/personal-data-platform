@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from personal_data_platform.raw.models import RawObject
 
 RAW_PREFIX = "raw/owntracks/v1/"
+RAW_FIELDS = frozenset({"tst", "lat", "lon", "acc", "vel", "batt", "bs", "motionactivities"})
 _KEY = re.compile(
     r"raw/owntracks/v1/(?P<device>[0-9a-f]{64})/location/"
     r"(?P<date>\d{4}/\d{2}/\d{2})/(?P<timestamp>\d{8}T\d{6}Z)_"
@@ -32,18 +33,21 @@ def _invalid_constant(_value: str) -> None:
     raise ValueError("non-finite JSON number")
 
 
-def location_message(payload: bytes) -> dict[str, object] | None:
+def location_message(payload: bytes, *, from_raw: bool = False) -> dict[str, object] | None:
     if not payload:
         return None
     try:
         message = json.loads(payload, object_pairs_hook=_unique, parse_constant=_invalid_constant)
     except (ValueError, UnicodeError, RecursionError):
         raise ValueError("invalid OwnTracks JSON") from None
-    if not isinstance(message, dict) or not isinstance(message.get("_type"), str):
+    if not isinstance(message, dict):
         raise ValueError("OwnTracks message requires _type")
-    if message["_type"] == "encrypted":
+    kind = message.get("_type", "location" if from_raw else None)
+    if not isinstance(kind, str):
+        raise ValueError("OwnTracks message requires _type")
+    if kind == "encrypted":
         raise ValueError("OwnTracks payload encryption is unsupported; use HTTPS")
-    if message["_type"] != "location":
+    if kind != "location":
         return None
     for name, lower, upper in (("lat", -90, 90), ("lon", -180, 180)):
         value = message.get(name)
@@ -87,8 +91,9 @@ def prepare_location(payload: bytes, *, device_key: str) -> tuple[str, bytes, by
     message = location_message(payload)
     if message is None:
         return None
+    stored = {name: value for name, value in message.items() if name in RAW_FIELDS}
     canonical = json.dumps(
-        message, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        stored, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     ).encode("utf-8")
     digest = hashlib.sha256(canonical).hexdigest()
     timestamp = message["tst"]

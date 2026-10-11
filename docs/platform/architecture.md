@@ -48,7 +48,7 @@ Raw schema版とparser versionは別で、parser versionを更新すると保持
 - 連続する同一内容は省くが、`A -> B -> A`を過去のhashだけで除外しない。source固有の比較条件は各データモデルに従う。
 - Screen Timeは各元ファイルの最新成功版と未取込分だけを既存SQLiteに保持する。保存期限はなく、Biomeから消えたファイルも残す。
 - FitbitのAPIレスポンスはメモリだけで扱い、Rawを永続保存しない。API再取得で補修・復旧する。
-- OwnTracksの位置メッセージは全フィールドを保持した正規化JSONをGCSに無期限保存する。端末疑似化key・イベント時刻・hashで再送を重複保存しない。
+- OwnTracksの位置メッセージは測位時刻・緯度経度・位置精度・速度・電池状態・動作状態だけを正規化JSONとしてGCSに無期限保存する。通信・地域情報など受信時の他のフィールドは保存しない。端末疑似化key・イベント時刻・hashで再送を重複保存しない。
 
 Rawは保存中の版の再生用正本で、MotherDuckはRaw整理後も分析履歴を保持する。
 OwnTracks以外の全期間のDB復元をRawだけで保証しない。keyとpayloadは
