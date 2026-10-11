@@ -11,18 +11,11 @@ def test_scalar_records_reject_second_level_heart_rate():
         Record("heart-rate", "sample", start, start, value=60)
 
 
-def test_snapshot_roundtrip_and_incomplete_rejected():
-    from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window
+def test_snapshot_rejects_incomplete_acquisition():
+    from personal_data_platform.sources.fitbit.models import Snapshot, Window
 
     start = datetime(2026, 9, 1, tzinfo=UTC)
     window = Window("steps", start, start + timedelta(days=1))
-    snapshot = Snapshot(
-        "owner",
-        window,
-        start,
-        (Record("steps", "a", start, start, start + timedelta(minutes=1), 12),),
-    )
-    assert Snapshot.from_bytes(snapshot.to_bytes()) == snapshot
     with pytest.raises(ValueError, match="complete"):
         Snapshot("owner", window, start, (), complete=False)
 
@@ -43,7 +36,7 @@ def test_rejects_outside_records_and_naive_time():
         Window("steps", start.replace(tzinfo=None), start)
 
 
-def test_source_digest_ignores_api_page_order_but_keeps_original_raw_order():
+def test_source_digest_ignores_record_order_and_observation_time():
     from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window
 
     start = datetime(2026, 9, 1, tzinfo=UTC)
@@ -65,5 +58,4 @@ def test_source_digest_ignores_api_page_order_but_keeps_original_raw_order():
         (second, first),
         source_payload=({"id": "b", "unknown": 2}, {"id": "a", "unknown": 1}),
     )
-    assert a.to_bytes() != b.to_bytes()
     assert a.source_sha256() == b.source_sha256()

@@ -124,40 +124,6 @@ def string(value: object) -> str:
     return value
 
 
-def _optional_int(value: object) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError("expected an integer")
-    return value
-
-
-def record_from_dict(value: object) -> Record:
-    data = object_dict(value)
-    number = data.get("value")
-    if number is not None and (isinstance(number, bool) or not isinstance(number, (int, float))):
-        raise ValueError("expected a numeric record value")
-    main = data.get("is_main_sleep")
-    if main is not None and not isinstance(main, bool):
-        raise ValueError("expected a boolean sleep classification")
-    return Record(
-        kind=string(data["kind"]),
-        record_id=string(data["record_id"]),
-        cursor=parse_time(string(data["cursor"])),
-        start=parse_time(string(data["start"])),
-        end=parse_time(string(data["end"])) if data.get("end") is not None else None,
-        value=float(number) if number is not None else None,
-        offset_seconds=_optional_int(data.get("offset_seconds")),
-        end_offset_seconds=_optional_int(data.get("end_offset_seconds")),
-        source_date=date.fromisoformat(string(data["source_date"]))
-        if data.get("source_date") is not None
-        else None,
-        parent_id=string(data["parent_id"]) if data.get("parent_id") is not None else None,
-        category=string(data["category"]) if data.get("category") is not None else None,
-        is_main_sleep=main,
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class Snapshot:
     subject_key: str
@@ -225,31 +191,6 @@ class Snapshot:
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
         ).hexdigest()
-
-    @classmethod
-    def from_bytes(cls, payload: bytes) -> Snapshot:
-        data = object_dict(json.loads(payload))
-        if type(data.get("schema_version")) is not int or data["schema_version"] != 1:
-            raise ValueError("unsupported Fitbit Raw schema")
-        window = object_dict(data["window"])
-        rows = data["records"]
-        source_payload = data.get("source_payload", [])
-        if not isinstance(rows, list) or not isinstance(source_payload, list):
-            raise ValueError("records and source_payload must be arrays")
-        if data.get("complete") is not True:
-            raise ValueError("Raw acquisition is not complete")
-        return cls(
-            subject_key=string(data["subject_key"]),
-            window=Window(
-                string(window["data_type"]),
-                parse_time(string(window["start"])),
-                parse_time(string(window["end"])),
-            ),
-            fetched_at=parse_time(string(data["fetched_at"])),
-            records=tuple(record_from_dict(row) for row in rows),
-            origin=string(data["origin"]),
-            source_payload=tuple(object_dict(point) for point in source_payload),
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,32 +306,6 @@ class CapturedSnapshot:
             }
         )
 
-    def to_bytes(self) -> bytes:
-        return json.dumps(
-            {
-                "schema_version": 2,
-                "snapshot": json.loads(self.snapshot.to_bytes()),
-                "pages": self.pages,
-            },
-            default=_json_default,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode()
-
-    @classmethod
-    def from_bytes(cls, payload: bytes) -> CapturedSnapshot:
-        data = object_dict(json.loads(payload))
-        if type(data.get("schema_version")) is not int or data["schema_version"] != 2:
-            raise ValueError("unsupported captured Fitbit schema")
-        pages = data["pages"]
-        if not isinstance(pages, list):
-            raise ValueError("pages must be an array")
-        return cls(
-            Snapshot.from_bytes(json.dumps(data["snapshot"]).encode()),
-            tuple(object_dict(page) for page in pages),
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class HeartRateMinute:
@@ -435,28 +350,6 @@ class HeartRateMinute:
             type(self.sample_count) is not int or self.sample_count <= 0
         ):
             raise ValueError("sample count must be positive or unknown")
-
-
-def minute_from_dict(value: object) -> HeartRateMinute:
-    row = object_dict(value)
-
-    def number(name: str) -> float:
-        value = row[name]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError("heart rate statistic must be numeric")
-        return float(value)
-
-    return HeartRateMinute(
-        parse_time(string(row["start"])),
-        parse_time(string(row["end"])),
-        number("average"),
-        number("minimum"),
-        number("maximum"),
-        string(row["data_source_family"]),
-        _optional_int(row.get("sample_count")),
-        string(row["origin"]),
-        string(row["aggregation_version"]),
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,30 +414,3 @@ class HeartRateMinuteSnapshot:
         )
         payload["source"] = _canonical_pages(self.pages, "rollupDataPoints")
         return _source_digest(payload)
-
-    @classmethod
-    def from_bytes(cls, payload: bytes) -> HeartRateMinuteSnapshot:
-        data = object_dict(json.loads(payload))
-        if (
-            type(data.get("schema_version")) is not int
-            or data["schema_version"] != 2
-            or data.get("complete") is not True
-        ):
-            raise ValueError("unsupported or incomplete minute Fitbit schema")
-        window = object_dict(data["window"])
-        minutes, pages = data["minutes"], data["pages"]
-        if not isinstance(minutes, list) or not isinstance(pages, list):
-            raise ValueError("minutes and pages must be arrays")
-        return cls(
-            string(data["subject_key"]),
-            Window(
-                string(window["data_type"]),
-                parse_time(string(window["start"])),
-                parse_time(string(window["end"])),
-            ),
-            parse_time(string(data["fetched_at"])),
-            tuple(minute_from_dict(row) for row in minutes),
-            tuple(object_dict(page) for page in pages),
-            string(data["origin"]),
-            string(data["aggregation_version"]),
-        )
