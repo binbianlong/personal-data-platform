@@ -242,5 +242,6 @@ def write_state(
         ),
         [loaded_at],
     )
-    count = connection.execute("SELECT count(*) FROM screen_time_affected_event").fetchone()[0]
-    LOGGER.info("Screen Time affected events=%d", count)
+    count_row = connection.execute("SELECT count(*) FROM screen_time_affected_event").fetchone()
+    assert count_row is not None
+    LOGGER.info("Screen Time affected events=%d", count_row[0])
