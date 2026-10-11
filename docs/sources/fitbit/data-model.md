@@ -43,16 +43,11 @@ subject・種別・data source family・aggregation versionごとに範囲を管
 通常記録は`records-v1`、分心拍は`heart-rate-minute-v1`で区別する。
 順位は`(fetched_at, source_key)`で、新しい範囲を保護し、古い取得は未反映部分だけを更新する。
 
-保存済みRawを先に再生する。取得範囲が完全に覆われ、未知フィールドを含む内容hashが一致する場合だけ新しいRawを省く。
-比較用hashはSnapshotから`fetched_at`だけを除き、正規化行と元API pointの並びを揃える。Rawは取得時の並びを維持する。
-範囲の重なりや記録IDの移動などで判定が不確かならフルRawを保存する。`A→B→A`では3回保存し、空の完全取得も同じ規則を使う。
-
 同一範囲が現在と同じ内容なら分析行の書き換えを省いて取得順位を進め、A→B→Aも反映する。
 睡眠IDの日付移動は子も親ID単位で置換する。`ops.fitbit_deleted_record`に削除済み主レコードIDの順位を残し、
 古い取得による復活を防ぐ。より新しい取得による復帰は許可する。密なサンプルは一括SQLで書く。
 
-取込結果は`ops.ingestion_metadata`へ分析行と同じtransactionで保存する。失敗時の処理は[共通永続化契約](../../platform/architecture.md#loaderと永続化)に従う。
-Raw省略期間は元Rawの期限切れ後にRawだけの完全再構築を保証できないため、必要ならAPI再取得で補う。
+正規化行とcoverageは同じtransactionでcommitする。commit結果が不明な場合は接続を破棄し、次の通知または期間指定同期でAPIから再取得する。
 
 ## 分析ビュー
 

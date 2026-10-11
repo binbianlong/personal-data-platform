@@ -1,6 +1,6 @@
 # Personal Data Platform
 
-Screen TimeのRawをMacのSQLiteへ保存し、Fitbitは通知受信時にAPIからMotherDuckへ直接取り込む個人データ基盤。
+Screen TimeのRawをMacのSQLiteへ、OwnTracksの位置RawをGCSへ保存し、Fitbitは通知受信時にAPIからMotherDuckへ直接取り込む個人データ基盤。
 GCPは`us-west1`、MotherDuckは`us-west-2`を使う。運用と仕様は[ドキュメント](docs/README.md)を参照する。
 
 ## 開発環境
@@ -39,6 +39,7 @@ Collectorは専用Keychain tokenを使い、最新segmentも検査してSQLite�
 各ファイルの最新成功RawとpendingだけをMacに保持する。
 初期設定・LaunchAgent・休止・復旧は[Screen Time運用](docs/sources/screen-time/operations.md)、
 通知・API補修は[Fitbit運用](docs/sources/fitbit/operations.md)、
+位置通知・Raw補修は[OwnTracks運用](docs/sources/owntracks/operations.md)、
 DB更新・監視・Rebuildは[Platform運用](docs/platform/operations.md)に従う。
 
 ## 検証とコンテナ

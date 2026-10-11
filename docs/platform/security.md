@@ -41,7 +41,7 @@ secret値をTerraform variable、Terraform state、container image、GitHub Acti
 
 ChatGPT接続にはMotherDuckのread-only user/shareを使い、Loader / dbt writer tokenを再利用しない。toolの
 `query_rw`無効化はwrite防止の追加境界であり、database visibilityの代わりにはならない。公開範囲は
-[`chatgpt-mcp.md`](chatgpt-mcp.md)に従う。
+[ChatGPTからの分析接続](../analytics/chatgpt-mcp.md)に従う。
 
 ## GCP IAMとdeploy
 
