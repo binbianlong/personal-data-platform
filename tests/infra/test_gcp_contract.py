@@ -102,7 +102,9 @@ def test_preflight_bucket_isolated_and_orphans_expire_after_one_day() -> None:
     preflight = storage.split('resource "google_storage_bucket" "preflight_west" {', 1)[1]
     preflight = preflight.split('resource "google_service_account" "west" {', 1)[0]
 
-    assert re.search(r'preflight_bucket_name\s*= "\$\{var.project_id\}-pdp-preflight-west"', storage)
+    assert re.search(
+        r'preflight_bucket_name\s*= "\$\{var.project_id\}-pdp-preflight-west"', storage
+    )
     assert 'storage_class               = "STANDARD"' in preflight
     assert 'type = "Delete"' in preflight
     assert "age            = 1" in preflight

@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from personal_data_platform.sources.fitbit.models import Notification
-from tests.integration.test_fitbit_acquisition import NOW, WINDOW, direct_setup
+from tests.integration.fitbit.test_fitbit_acquisition import NOW, WINDOW, direct_setup
 
 SUBSCRIPTION = "projects/test/subscriptions/pdp-fitbit-west-pull"
 

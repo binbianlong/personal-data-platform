@@ -55,5 +55,6 @@ docker build --tag personal-data-platform:dev .
 docker run --rm personal-data-platform:dev --help
 ```
 
+テストの配置は[テスト構成](tests/README.md)を参照する。
 PR・mainへのpushではPython・コンテナ・TerraformをCIで検証する。
 マージ条件は[repository ruleset](infra/github/README.md)で管理する。
