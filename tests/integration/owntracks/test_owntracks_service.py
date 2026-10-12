@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-from tests.integration.test_owntracks_ingestion import RawStore
+from tests.integration.owntracks.test_owntracks_ingestion import RawStore
 
 BUCKET = "test-owntracks"
 SUBSCRIPTION = "projects/test/subscriptions/owntracks"

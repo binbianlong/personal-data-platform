@@ -201,4 +201,4 @@ complete_interval_parts / inferred_interval_parts
 対象がない日・端末・アプリは行を作らないため、不在だけでは利用ゼロと記録不足を区別できない。当日は途中経過である。
 両Viewは訂正・無効化を即時反映し、dbt実行は初回作成・定義変更時に必要となる。Reconciliationは存在と参照可否を確認する。
 
-クエリ例は[`日次Screen Timeの参照`](../../analytics/README.md#日次screen-timeの参照)を参照する。
+クエリ例は[日次Screen Timeの参照](../../analytics/queries.md#日次screen-timeの参照)を参照する。

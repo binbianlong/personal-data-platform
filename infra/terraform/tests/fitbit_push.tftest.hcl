@@ -8,7 +8,7 @@ mock_provider "google" {
 variables {
   project_id                     = "example-project"
   deployer_service_account_email = "github-tf-deploy@example-project.iam.gserviceaccount.com"
-  collector_impersonator_member  = "user:operator@example.com"
+  rebuild_impersonator_member    = "user:operator@example.com"
   west_image_uri                 = "us-west1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   alert_email                    = "operator@example.com"
   fitbit_subject_key             = "owner"
@@ -40,7 +40,7 @@ run "push_processing_contract" {
     error_message = "Existing notifications must be delivered to the IAM-authenticated worker."
   }
   assert {
-    condition     = google_cloud_run_v2_service_iam_member.fitbit_worker.member == "serviceAccount:${google_service_account.west_scheduler.email}" && google_cloud_run_v2_service_iam_member.fitbit_worker.role == "roles/run.invoker" && !contains(keys(local.west_common_environment), "GCS_BUCKET")
+    condition     = google_cloud_run_v2_service_iam_member.fitbit_worker.member == "serviceAccount:${google_service_account.west_scheduler.email}" && google_cloud_run_v2_service_iam_member.fitbit_worker.role == "roles/run.invoker" && !contains(keys(local.runtime_common_environment), "GCS_BUCKET")
     error_message = "Only the trigger identity may invoke the worker and ingestion must not require GCS."
   }
 }

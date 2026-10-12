@@ -1,6 +1,6 @@
 # アーキテクチャ
 
-Screen TimeはMacでRaw保存、FitbitはGCP `us-west1`でAPIから直接取込を行い、MotherDuck `us-west-2`へ長期分析履歴を保存する。
+Screen TimeはMac、OwnTracksはGCP `us-west1`でRawを保存し、FitbitはAPIから直接取り込む。分析履歴はMotherDuck `us-west-2`へ保存する。
 
 ```text
 Screen Time Collector -> SQLite Raw -> Loader -> MotherDuck -> stream heartbeat
@@ -48,11 +48,11 @@ Raw schema版とparser versionは別で、parser versionを更新すると保持
 - 連続する同一内容は省くが、`A -> B -> A`を過去のhashだけで除外しない。source固有の比較条件は各データモデルに従う。
 - Screen Timeは各元ファイルの最新成功版と未取込分だけを既存SQLiteに保持する。保存期限はなく、Biomeから消えたファイルも残す。
 - FitbitのAPIレスポンスはメモリだけで扱い、Rawを永続保存しない。API再取得で補修・復旧する。
-- OwnTracksの位置メッセージは測位時刻・緯度経度・位置精度・速度・電池状態・動作状態だけを正規化JSONとしてGCSに無期限保存する。通信・地域情報など受信時の他のフィールドは保存しない。端末疑似化key・イベント時刻・hashで再送を重複保存しない。
+- OwnTracksの位置Rawは正規化JSONとしてGCSに無期限保存する。保存フィールドと重複排除keyは[OwnTracksデータモデル](../sources/owntracks/data-model.md)に従う。
 
 Rawは保存中の版の再生用正本で、MotherDuckはRaw整理後も分析履歴を保持する。
 OwnTracks以外の全期間のDB復元をRawだけで保証しない。keyとpayloadは
-[Screen Timeデータモデル](../sources/screen-time/data-model.md)と[Fitbitデータモデル](../sources/fitbit/data-model.md)を参照する。
+[Screen Timeデータモデル](../sources/screen-time/data-model.md)、[Fitbitデータモデル](../sources/fitbit/data-model.md)、[OwnTracksデータモデル](../sources/owntracks/data-model.md)を参照する。
 
 ## Loaderと永続化
 

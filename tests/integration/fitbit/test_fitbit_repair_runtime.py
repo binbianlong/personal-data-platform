@@ -8,7 +8,7 @@ import pytest
 
 from personal_data_platform.sources.fitbit import runtime
 from personal_data_platform.sources.fitbit.models import Window
-from tests.integration.test_fitbit_acquisition import direct_setup
+from tests.integration.fitbit.test_fitbit_acquisition import direct_setup
 
 NOW = datetime(2026, 9, 28, 3, tzinfo=UTC)
 

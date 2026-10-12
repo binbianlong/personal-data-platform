@@ -32,7 +32,7 @@ jobs:
       GCP_PLAN_SERVICE_ACCOUNT: ${{ vars.GCP_PLAN_SERVICE_ACCOUNT }}
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
       TF_VAR_alert_email: ${{ vars.GCP_ALERT_EMAIL }}
-      TF_VAR_collector_impersonator_member: ${{ vars.GCP_COLLECTOR_IMPERSONATOR_MEMBER }}
+      TF_VAR_rebuild_impersonator_member: ${{ vars.GCP_COLLECTOR_IMPERSONATOR_MEMBER }}
       TF_VAR_deployer_service_account_email: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
       TF_VAR_fitbit_subject_key: ${{ vars.PDP_FITBIT_SUBJECT_KEY }}
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
@@ -53,7 +53,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in GCP_PLAN_SERVICE_ACCOUNT TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_collector_impersonator_member TF_VAR_deployer_service_account_email TF_VAR_project_id WEST_REGION; do
+          for name in GCP_PLAN_SERVICE_ACCOUNT TF_STATE_BUCKET TF_VAR_alert_email TF_VAR_rebuild_impersonator_member TF_VAR_deployer_service_account_email TF_VAR_project_id WEST_REGION; do
             test -n "${!name}"
           done
           jq -e '

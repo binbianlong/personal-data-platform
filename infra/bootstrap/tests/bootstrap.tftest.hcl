@@ -80,15 +80,6 @@ run "secure_bootstrap_contract" {
 
   assert {
     condition = alltrue([
-      toset(google_project_iam_custom_role.collector_raw_creator.permissions) == toset(["storage.objects.create"]),
-      toset(google_project_iam_custom_role.collector_receipt_writer.permissions) == toset(["storage.objects.create", "storage.objects.delete"]),
-      toset(google_project_iam_custom_role.preflight_object_operator.permissions) == toset(["storage.objects.create", "storage.objects.delete", "storage.objects.get", "storage.objects.list"]),
-    ])
-    error_message = "Runtime object roles must contain only their required data-plane permissions."
-  }
-
-  assert {
-    condition = alltrue([
       contains(google_project_iam_custom_role.runtime_bucket_manager.permissions, "storage.buckets.setIamPolicy"),
       !contains(google_project_iam_custom_role.runtime_bucket_manager.permissions, "storage.objects.get"),
       toset(google_project_iam_custom_role.runtime_bucket_reader.permissions) == toset(["storage.buckets.get", "storage.buckets.getIamPolicy"]),

@@ -14,6 +14,7 @@ from personal_data_platform.loader.job import (
     LOADER_LEASE_SECONDS,
     run_loader,
 )
+from personal_data_platform.logging_config import configure_logging
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import (
     RawRepository,
@@ -32,7 +33,7 @@ from personal_data_platform.storage.motherduck import (
 )
 
 from .heartbeat import HeartbeatPublisher, daily_heartbeat_urls, publish_http_heartbeat
-from .models import ReconciliationResult
+from .models import DAILY_JOB_HISTORY_NAMES, DAILY_JOB_NAME, ReconciliationResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -363,7 +364,6 @@ def _run_daily_reconciliation() -> int:
     from zoneinfo import ZoneInfo
 
     from personal_data_platform.dbt_runner import run_dbt_from_env
-    from personal_data_platform.sources.fitbit.logging import configure_logging
     from personal_data_platform.sources.fitbit.runtime import run_daily_repair
 
     configure_logging("personal_data_platform.reconciliation")
@@ -400,10 +400,14 @@ def _run_daily_reconciliation() -> int:
             )
             return 0
         timer = interrupt_after(warehouse, remaining())
-        warehouse.begin_job("daily-reconciliation-west", owner)
+        warehouse.begin_job(DAILY_JOB_NAME, owner)
         job_started = True
         previous = warehouse.query_value(
-            "SELECT json_extract_string(details,'$.last_completed_target_date') FROM ops.job_run WHERE job_name='daily-reconciliation-west' AND status='succeeded' AND json_extract_string(details,'$.last_completed_target_date') IS NOT NULL ORDER BY completed_at DESC LIMIT 1"
+            "SELECT json_extract_string(details,'$.last_completed_target_date') "
+            "FROM ops.job_run WHERE job_name IN (?, ?) AND status='succeeded' "
+            "AND json_extract_string(details,'$.last_completed_target_date') IS NOT NULL "
+            "ORDER BY completed_at DESC LIMIT 1",
+            list(DAILY_JOB_HISTORY_NAMES),
         )
         if previous:
             first_missing = date.fromisoformat(str(previous)) + timedelta(days=1)
@@ -457,7 +461,7 @@ def _run_daily_reconciliation() -> int:
         payload: dict[str, object] = {
             "run_id": owner,
             "completed_at": datetime.now(UTC).isoformat(),
-            "job_name": "daily-reconciliation-west",
+            "job_name": DAILY_JOB_NAME,
             "status": "succeeded",
         }
         stage = "completion"
@@ -481,7 +485,7 @@ def _run_daily_reconciliation() -> int:
             extra={
                 "event": "reconciliation",
                 "status": "succeeded",
-                "job_name": "daily-reconciliation-west",
+                "job_name": DAILY_JOB_NAME,
             },
         )
         return 0
@@ -492,7 +496,7 @@ def _run_daily_reconciliation() -> int:
             extra={
                 "event": "reconciliation",
                 "status": "failed",
-                "job_name": "daily-reconciliation-west",
+                "job_name": DAILY_JOB_NAME,
             },
         )
         return 1

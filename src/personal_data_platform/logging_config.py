@@ -1,4 +1,4 @@
-"""Fitbit application logs carry severity independently of their output stream."""
+"""Format application logs as JSON independently of their output stream."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class _JSONFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
-def configure_logging(namespace: str = "personal_data_platform.sources.fitbit") -> None:
+def configure_logging(namespace: str) -> None:
     """Configure one application namespace once, leaving the root logger unchanged."""
     name = os.environ.get("LOG_LEVEL", "INFO").upper()
     level = logging.getLevelNamesMapping().get(name)

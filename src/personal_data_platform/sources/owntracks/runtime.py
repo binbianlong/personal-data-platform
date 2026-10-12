@@ -11,9 +11,9 @@ import uvicorn
 
 from personal_data_platform.config import secret_config
 from personal_data_platform.loader.job import run_loader_objects
+from personal_data_platform.logging_config import configure_logging
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import RawRepository
-from personal_data_platform.sources.fitbit.logging import configure_logging
 from personal_data_platform.storage.gcs import GCSRawRepository
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 

@@ -93,10 +93,10 @@ FitbitはRawを持たない。別のscratch DBへ`pdp fitbit sync --from ... --t
 
 1. `pdp rebuild --source screen_time --all-streams --dry-run`で保持範囲とinventoryを確認する。
 2. writer tokenを安全なsecret sourceから`MOTHERDUCK_TOKEN`へ渡し、`pdp rebuild --source screen_time --all-streams --target-db <scratch-db> --allow-partial-history`を実行する。
-3. 固定inventoryのgenerationで再生し、dbt検証後に本番と件数・key・代表martを比較する。途中でgenerationが消えた場合は失敗させる。
+3. 固定inventoryから再生し、dbt検証後に本番と件数・key・代表martを比較する。途中で対象Rawが消えた場合は失敗させる。
 4. 差分確認後に参照先を切り替える。本番と同じDB、既存tableのあるDB、partial history未承認の再構築は拒否する。
 
-OwnTracksは無期限のGCS Rawを専用read-only ADCで読み、`pdp rebuild --source owntracks`で再生する。
+OwnTracksは無期限のGCS Rawを専用read-only ADCで読む。`pdp rebuild --source owntracks --dry-run`でinventoryを確認し、`pdp rebuild --source owntracks --target-db <scratch-db> --allow-partial-history`で再生する。
 
 ## 停止と復旧
 
@@ -107,14 +107,3 @@ DB成功と外部pingが一致しない場合はrun_id・log・監査を照合�
 
 Screen TimeのDB復元はイベント・補助状態・台帳を同じ時点へ戻す。Rawは各元ファイルの最新版だけを保存するため、
 更新前の再解析やRawだけからの全履歴復元を保証しない。復元元のDB・backupは検証が終わるまで保持する。
-
-## Fitbitのpush切替と既存Raw整理
-
-1. 旧毎時・日次Schedulerを停止し、実行中Jobとleaseの終了を確認する。
-2. 旧毎時JobのTerraform `deletion_protection`を解除してから撤去する。
-3. 非公開workerとIAMを作り、既存subscriptionを名前・未ack通知を維持してpushへ変更する。
-4. 実通知、日次全体、scratchへの期間指定再取得を検証する。
-5. 旧・現行Raw bucketの`raw/fitbit/`配下を全version対象で削除する。別のRawコピーは作らない。
-6. 日次Schedulerを再開し、Rawが再作成されないことを確認する。
-
-bucket本体、Terraform state、preflight、Screen Timeはこの整理の対象に含めない。

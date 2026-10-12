@@ -99,6 +99,9 @@ def test_platform_migrate_initializes_a_local_database(tmp_path):
             ("002_owntracks.sql",),
             ("003_screen_time_current_state.sql",),
         ]
+        assert connection.execute(
+            "SELECT count(*) FROM base.fitbit_activity_interval"
+        ).fetchone() == (0,)
 
 
 def test_platform_migrate_rejects_a_nonlocal_database(capsys):

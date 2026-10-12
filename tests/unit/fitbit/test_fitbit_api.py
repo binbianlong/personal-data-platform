@@ -712,9 +712,7 @@ def test_rollup_invalid_pages_never_produce_a_complete_snapshot(mutation):
         )
 
 
-def test_rollup_snapshot_roundtrip_and_digest_ignore_order_pagination_and_observation_time():
-    from personal_data_platform.sources.fitbit.models import HeartRateMinuteSnapshot
-
+def test_rollup_digest_ignores_order_pagination_and_observation_time():
     points = [rollup(), rollup(START + timedelta(minutes=1))]
     window = Window("heart-rate", START, START + timedelta(days=1))
     first = client(
@@ -730,7 +728,6 @@ def test_rollup_snapshot_roundtrip_and_digest_ignore_order_pagination_and_observ
         ),
         clock=lambda: START + timedelta(days=3),
     ).fetch_heart_rate_minutes(window, subject_key="owner")
-    assert HeartRateMinuteSnapshot.from_bytes(first.to_bytes()) == first
     assert first.source_sha256() == second.source_sha256()
     changed = client(
         FakeTransport([{"rollupDataPoints": points, "future": 2}]),
@@ -810,14 +807,11 @@ def test_rollup_no_complete_minute_is_deferred_without_an_api_request():
     assert transport.calls == []
 
 
-def test_captured_snapshot_roundtrip_preserves_unknown_page_and_point_fields():
-    from personal_data_platform.sources.fitbit.models import CapturedSnapshot
-
+def test_captured_snapshot_preserves_unknown_page_and_point_fields():
     point = steps()
     point["futurePoint"] = {"value": [1, 2]}
     page = {"dataPoints": [point], "futurePage": {"value": True}}
     result = client(FakeTransport([page])).fetch_captured(
         Window("steps", START, START + timedelta(days=1)), subject_key="owner"
     )
-    assert CapturedSnapshot.from_bytes(result.to_bytes()) == result
     assert result.pages == (page,)

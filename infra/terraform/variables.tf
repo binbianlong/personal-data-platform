@@ -8,17 +8,6 @@ variable "project_id" {
   }
 }
 
-variable "region" {
-  description = "Region of retained legacy storage; normal compute uses west_region."
-  type        = string
-  default     = "us-central1"
-
-  validation {
-    condition     = var.region == "us-central1"
-    error_message = "Legacy storage stays in us-central1 to avoid replacing retained backups."
-  }
-}
-
 variable "deployer_service_account_email" {
   description = "Bootstrap-created deployment identity granted act-as only on runtime identities."
   type        = string
@@ -29,13 +18,13 @@ variable "deployer_service_account_email" {
   }
 }
 
-variable "collector_impersonator_member" {
-  description = "Google user or group allowed to impersonate the dedicated Mac Collector and rebuild Service Accounts."
+variable "rebuild_impersonator_member" {
+  description = "Google user or group allowed to impersonate the dedicated Raw rebuild Service Account."
   type        = string
 
   validation {
-    condition     = can(regex("^(user|group):[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$", var.collector_impersonator_member))
-    error_message = "collector_impersonator_member must be a user: or group: IAM principal with an email address."
+    condition     = can(regex("^(user|group):[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$", var.rebuild_impersonator_member))
+    error_message = "rebuild_impersonator_member must be a user: or group: IAM principal with an email address."
   }
 }
 

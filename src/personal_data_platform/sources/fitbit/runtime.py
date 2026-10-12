@@ -1,4 +1,4 @@
-"""Compose the west receiver, notification job and explicit range acquisition."""
+"""Compose the Fitbit receiver, worker and explicit range acquisition."""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ import uvicorn
 
 from personal_data_platform.config import secret_config
 from personal_data_platform.loader.job import JobAlreadyRunning
+from personal_data_platform.logging_config import configure_logging
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 from .api import HealthClient
-from .logging import configure_logging
 from .models import DATA_TYPES, DATE_TYPES, Window, date_cursor
 from .oauth import GoogleOAuth
 from .service import create_pubsub_app, create_worker_app
@@ -61,7 +61,7 @@ def _acquisition_runner() -> AcquisitionRunner:
 
 
 def run_worker_from_env() -> int:
-    configure_logging()
+    configure_logging("personal_data_platform.sources.fitbit")
     app = create_worker_app(
         runner=_acquisition_runner(), subscription=required("PDP_FITBIT_PUBSUB_SUBSCRIPTION")
     )
@@ -78,7 +78,7 @@ def run_worker_from_env() -> int:
 def run_serve_from_env() -> int:
     from .notifications import PubSubNotifications
 
-    configure_logging()
+    configure_logging("personal_data_platform.sources.fitbit")
     if os.environ.get("PDP_FITBIT_WEBHOOK_AUTHORIZATION") or os.environ.get(
         "PDP_FITBIT_HEALTH_USER_ID"
     ):
@@ -124,7 +124,7 @@ def run_sync_from_env(
     """Acquire an explicit range; progress lives in committed ranges and coverage."""
     from personal_data_platform.loader.job import LOADER_LEASE_SECONDS
 
-    configure_logging()
+    configure_logging("personal_data_platform.sources.fitbit")
     if start.tzinfo is None or end.tzinfo is None or start >= end or not data_types:
         raise ValueError("sync needs an increasing timezone-aware range and data types")
     warehouse = _warehouse()
@@ -168,7 +168,7 @@ def run_daily_repair(
     """Verify exactly seven completed days; larger gaps need explicit sync."""
     from .acquisition import AcquisitionSummary
 
-    configure_logging()
+    configure_logging("personal_data_platform.sources.fitbit")
     if now.tzinfo is None:
         raise ValueError("daily repair time must be timezone-aware")
     if enabled("PDP_FITBIT_PROCESSING_PAUSED"):
