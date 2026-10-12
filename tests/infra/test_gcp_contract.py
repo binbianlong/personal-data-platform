@@ -250,7 +250,7 @@ def test_west_workflows_require_numeric_pins_before_cloud_work(
                     "GCP_PLAN_SERVICE_ACCOUNT",
                     "TF_STATE_BUCKET",
                     "TF_VAR_alert_email",
-                    "TF_VAR_collector_impersonator_member",
+                    "TF_VAR_rebuild_impersonator_member",
                     "TF_VAR_deployer_service_account_email",
                     "TF_VAR_project_id",
                     "WEST_REGION",

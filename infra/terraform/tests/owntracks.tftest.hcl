@@ -5,7 +5,7 @@ mock_provider "google" {
 variables {
   project_id                     = "example-project"
   deployer_service_account_email = "github-tf-deploy@example-project.iam.gserviceaccount.com"
-  collector_impersonator_member  = "user:operator@example.com"
+  rebuild_impersonator_member    = "user:operator@example.com"
   alert_email                    = "operator@example.com"
   fitbit_subject_key             = "owner"
   west_image_uri                 = "us-west1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

@@ -10,5 +10,5 @@ resource "google_service_account" "rebuild_operator" {
 resource "google_service_account_iam_member" "rebuild_operator_impersonator" {
   service_account_id = google_service_account.rebuild_operator.name
   role               = "roles/iam.serviceAccountTokenCreator"
-  member             = var.collector_impersonator_member
+  member             = var.rebuild_impersonator_member
 }

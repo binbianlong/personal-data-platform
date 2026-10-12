@@ -240,7 +240,7 @@ data "google_iam_policy" "raw_west" {
   }
   binding {
     role    = "roles/storage.admin"
-    members = [var.collector_impersonator_member]
+    members = [var.rebuild_impersonator_member]
   }
   binding {
     role    = "roles/storage.objectViewer"
@@ -254,7 +254,7 @@ resource "google_storage_bucket_iam_policy" "raw_west" {
 data "google_iam_policy" "preflight_west" {
   binding {
     role    = "roles/storage.admin"
-    members = [var.collector_impersonator_member]
+    members = [var.rebuild_impersonator_member]
   }
 
 }

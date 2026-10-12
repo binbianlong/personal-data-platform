@@ -18,13 +18,13 @@ variable "deployer_service_account_email" {
   }
 }
 
-variable "collector_impersonator_member" {
+variable "rebuild_impersonator_member" {
   description = "Google user or group allowed to impersonate the dedicated Raw rebuild Service Account."
   type        = string
 
   validation {
-    condition     = can(regex("^(user|group):[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$", var.collector_impersonator_member))
-    error_message = "collector_impersonator_member must be a user: or group: IAM principal with an email address."
+    condition     = can(regex("^(user|group):[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$", var.rebuild_impersonator_member))
+    error_message = "rebuild_impersonator_member must be a user: or group: IAM principal with an email address."
   }
 }
 
