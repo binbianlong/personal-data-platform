@@ -19,7 +19,7 @@ variable "deployer_service_account_email" {
 }
 
 variable "collector_impersonator_member" {
-  description = "Google user or group allowed to impersonate the dedicated Mac Collector and rebuild Service Accounts."
+  description = "Google user or group allowed to impersonate the dedicated Raw rebuild Service Account."
   type        = string
 
   validation {

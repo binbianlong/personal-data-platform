@@ -14,11 +14,6 @@ output "runtime_service_accounts" {
   }
 }
 
-output "collector_service_account" {
-  description = "Dedicated Service Account impersonated by the Mac Collector."
-  value       = google_service_account.collector.email
-}
-
 output "rebuild_operator_service_account" {
   description = "Read-only Service Account impersonated for explicit local Raw rebuilds."
   value       = google_service_account.rebuild_operator.email

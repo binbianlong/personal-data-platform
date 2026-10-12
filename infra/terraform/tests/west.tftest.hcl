@@ -169,14 +169,6 @@ run "west_storage_and_monitoring_are_separate" {
     values          = { email = "owntracks@example-project.iam.gserviceaccount.com", name = "projects/example-project/serviceAccounts/owntracks@example-project.iam.gserviceaccount.com" }
   }
   override_resource {
-    target          = google_service_account.collector
-    override_during = plan
-    values = {
-      email = "collector@example-project.iam.gserviceaccount.com"
-      name  = "projects/example-project/serviceAccounts/collector@example-project.iam.gserviceaccount.com"
-    }
-  }
-  override_resource {
     target          = google_service_account.rebuild_operator
     override_during = plan
     values = {

@@ -48,7 +48,7 @@ ChatGPT接続にはMotherDuckのread-only user/shareを使い、Loader / dbt wri
 - GitHub ActionsからGCPへはWorkload Identity Federationを使用し、長期Service Account keyを作らない。
 - deploy用federationは対象repository、`main` ref、対象workflowへattribute conditionで限定する。
 - Terraform plan用とdeploy用のService Accountを分離する。
-- worker・日次Jobは共通Service Accountを使う。receiver、Collector、Rebuild operatorは別identityとし、
+- worker・日次Jobは共通Service Accountを使う。receiver、Rebuild operatorは別identityとし、
   Secret Manager accessと実行権限を必要なresourceへ限定する。共有runtime SAの権限はworker・日次Jobの合計であり、両者のIAM分離を保証しない。
 - Trigger SAには日次Job・workerのinvoke権限を与え、Pub/Sub service agentのToken CreatorはそのSAへ限定する。
 - 非公開workerに`allUsers`を付与しない。OIDCのaudienceはworkerのCloud Run URIへ固定する。
