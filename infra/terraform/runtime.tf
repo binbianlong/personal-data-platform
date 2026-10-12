@@ -1,7 +1,7 @@
 locals {
-  west_raw_bucket_name       = "${var.project_id}-pdp-raw-west"
-  west_preflight_bucket_name = "${var.project_id}-pdp-preflight-west"
-  west_common_environment = {
+  raw_bucket_name       = "${var.project_id}-pdp-raw-west"
+  preflight_bucket_name = "${var.project_id}-pdp-preflight-west"
+  runtime_common_environment = {
     APP_ENV                        = "production"
     GOOGLE_CLOUD_PROJECT           = var.project_id
     MOTHERDUCK_DATABASE            = var.west_motherduck_database
@@ -9,21 +9,21 @@ locals {
     PDP_FITBIT_PROCESSING_PAUSED   = tostring(!var.west_schedulers_enabled)
     PDP_FITBIT_PUBSUB_SUBSCRIPTION = "projects/${var.project_id}/subscriptions/pdp-fitbit-west-pull"
   }
-  west_jobs = {
+  runtime_jobs = {
     daily = {
       name        = "reconciliation-west"
       args        = ["reconciliation"]
       timeout     = "6000s"
-      environment = merge(local.west_common_environment, { GCS_BUCKET = local.west_raw_bucket_name })
+      environment = merge(local.runtime_common_environment, { GCS_BUCKET = local.raw_bucket_name })
       secrets     = { MOTHERDUCK_TOKEN = "motherduck_token", PDP_FITBIT_OAUTH_CONFIG = "fitbit_oauth_config", PDP_HEARTBEAT_CONFIG = "heartbeat_config" }
     }
   }
-  west_job_secret_access = { for key in toset(flatten([for job in values(local.west_jobs) : values(job.secrets)])) : key => key }
-  west_scheduled_jobs    = { daily = "10 4 * * *" }
+  runtime_job_secret_access = { for key in toset(flatten([for job in values(local.runtime_jobs) : values(job.secrets)])) : key => key }
+  runtime_scheduled_jobs    = { daily = "10 4 * * *" }
 }
 
 resource "google_storage_bucket" "raw_west" {
-  name                        = local.west_raw_bucket_name
+  name                        = local.raw_bucket_name
   project                     = var.project_id
   location                    = var.west_region
   storage_class               = "STANDARD"
@@ -35,7 +35,7 @@ resource "google_storage_bucket" "raw_west" {
   depends_on = [google_project_service.runtime]
 }
 resource "google_storage_bucket" "preflight_west" {
-  name                        = local.west_preflight_bucket_name
+  name                        = local.preflight_bucket_name
   project                     = var.project_id
   location                    = var.west_region
   storage_class               = "STANDARD"
@@ -65,14 +65,14 @@ resource "google_service_account_iam_member" "west_deployer" {
   member             = "serviceAccount:${var.deployer_service_account_email}"
 }
 resource "google_secret_manager_secret_iam_member" "west_job" {
-  for_each  = local.west_job_secret_access
+  for_each  = local.runtime_job_secret_access
   project   = var.project_id
   secret_id = google_secret_manager_secret.west[each.key].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.west.email}"
 }
 resource "google_cloud_run_v2_job" "west" {
-  for_each            = local.west_jobs
+  for_each            = local.runtime_jobs
   project             = var.project_id
   location            = var.west_region
   name                = each.value.name
@@ -199,7 +199,7 @@ resource "google_service_account_iam_member" "west_scheduler_deployer" {
   member             = "serviceAccount:${var.deployer_service_account_email}"
 }
 resource "google_cloud_run_v2_job_iam_member" "west_scheduler" {
-  for_each = local.west_scheduled_jobs
+  for_each = local.runtime_scheduled_jobs
   project  = var.project_id
   location = var.west_region
   name     = google_cloud_run_v2_job.west[each.key].name
@@ -207,7 +207,7 @@ resource "google_cloud_run_v2_job_iam_member" "west_scheduler" {
   member   = "serviceAccount:${google_service_account.west_scheduler.email}"
 }
 resource "google_cloud_scheduler_job" "west" {
-  for_each         = local.west_scheduled_jobs
+  for_each         = local.runtime_scheduled_jobs
   project          = var.project_id
   region           = var.west_region
   name             = "pdp-${each.key}-west"
@@ -235,7 +235,7 @@ data "google_iam_policy" "raw_west" {
     members = ["serviceAccount:${google_service_account.owntracks_receiver.email}"]
     condition {
       title      = "owntracks_raw_create"
-      expression = "resource.name.startsWith('projects/_/buckets/${local.west_raw_bucket_name}/objects/raw/owntracks/v1/')"
+      expression = "resource.name.startsWith('projects/_/buckets/${local.raw_bucket_name}/objects/raw/owntracks/v1/')"
     }
   }
   binding {
@@ -286,7 +286,7 @@ resource "google_cloud_run_v2_service" "fitbit_worker" {
         cpu_idle = true
       }
       dynamic "env" {
-        for_each = local.west_common_environment
+        for_each = local.runtime_common_environment
         content {
           name  = env.key
           value = env.value

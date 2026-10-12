@@ -40,7 +40,7 @@ run "push_processing_contract" {
     error_message = "Existing notifications must be delivered to the IAM-authenticated worker."
   }
   assert {
-    condition     = google_cloud_run_v2_service_iam_member.fitbit_worker.member == "serviceAccount:${google_service_account.west_scheduler.email}" && google_cloud_run_v2_service_iam_member.fitbit_worker.role == "roles/run.invoker" && !contains(keys(local.west_common_environment), "GCS_BUCKET")
+    condition     = google_cloud_run_v2_service_iam_member.fitbit_worker.member == "serviceAccount:${google_service_account.west_scheduler.email}" && google_cloud_run_v2_service_iam_member.fitbit_worker.role == "roles/run.invoker" && !contains(keys(local.runtime_common_environment), "GCS_BUCKET")
     error_message = "Only the trigger identity may invoke the worker and ingestion must not require GCS."
   }
 }

@@ -7,7 +7,7 @@ locals {
       timeout         = "60s"
       concurrency     = 16
       memory          = "512Mi"
-      environment     = { GOOGLE_CLOUD_PROJECT = var.project_id, GCS_BUCKET = local.west_raw_bucket_name }
+      environment     = { GOOGLE_CLOUD_PROJECT = var.project_id, GCS_BUCKET = local.raw_bucket_name }
       secrets         = { PDP_OWNTRACKS_CONFIG = "owntracks_config" }
     }
     worker = {
@@ -19,7 +19,7 @@ locals {
       memory          = "2Gi"
       environment = {
         GOOGLE_CLOUD_PROJECT              = var.project_id
-        GCS_BUCKET                        = local.west_raw_bucket_name
+        GCS_BUCKET                        = local.raw_bucket_name
         MOTHERDUCK_DATABASE               = var.west_motherduck_database
         PDP_OWNTRACKS_PUBSUB_SUBSCRIPTION = "projects/${var.project_id}/subscriptions/pdp-owntracks-west-push"
         PDP_OWNTRACKS_PROCESSING_PAUSED   = tostring(!var.west_schedulers_enabled)

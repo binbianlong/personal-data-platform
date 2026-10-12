@@ -23,7 +23,7 @@ variables {
 run "minimum_normal_runtime" {
   command = plan
   assert {
-    condition     = google_cloud_run_v2_job.west["daily"].template[0].template[0].containers[0].args == tolist(["reconciliation"]) && local.west_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "false"
+    condition     = google_cloud_run_v2_job.west["daily"].template[0].template[0].containers[0].args == tolist(["reconciliation"]) && local.runtime_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "false"
     error_message = "The daily job must run every stage without ignored scope options."
   }
   assert {
@@ -39,73 +39,73 @@ run "minimum_normal_runtime" {
     error_message = "Storage outputs must point to the active runtime buckets."
   }
 }
-run "west_requires_secret_versions" {
+run "runtime_requires_secret_versions" {
   command = plan
   variables { west_secret_versions = {} }
   expect_failures = [var.west_secret_versions]
 }
-run "west_requires_every_secret_version" {
+run "runtime_requires_every_secret_version" {
   command = plan
   variables { west_secret_versions = { motherduck_token = "7" } }
   expect_failures = [var.west_secret_versions]
 }
-run "reject_unknown_west_secret_key" {
+run "reject_unknown_runtime_secret_key" {
   command = plan
   variables {
     west_secret_versions = { unknown_secret = "1" }
   }
   expect_failures = [var.west_secret_versions]
 }
-run "reject_latest_west_secret_version" {
+run "reject_latest_runtime_secret_version" {
   command = plan
   variables {
     west_secret_versions = { motherduck_token = "latest" }
   }
   expect_failures = [var.west_secret_versions]
 }
-run "reject_zero_west_secret_version" {
+run "reject_zero_runtime_secret_version" {
   command = plan
   variables {
     west_secret_versions = { motherduck_token = "0" }
   }
   expect_failures = [var.west_secret_versions]
 }
-run "reject_negative_west_secret_version" {
+run "reject_negative_runtime_secret_version" {
   command = plan
   variables {
     west_secret_versions = { motherduck_token = "-1" }
   }
   expect_failures = [var.west_secret_versions]
 }
-run "reject_fractional_west_secret_version" {
+run "reject_fractional_runtime_secret_version" {
   command = plan
   variables {
     west_secret_versions = { motherduck_token = "1.5" }
   }
   expect_failures = [var.west_secret_versions]
 }
-run "reject_empty_west_secret_version" {
+run "reject_empty_runtime_secret_version" {
   command = plan
   variables {
     west_secret_versions = { motherduck_token = "" }
   }
   expect_failures = [var.west_secret_versions]
 }
-run "reject_leading_zero_west_secret_version" {
+run "reject_leading_zero_runtime_secret_version" {
   command = plan
   variables {
     west_secret_versions = { motherduck_token = "01" }
   }
   expect_failures = [var.west_secret_versions]
 }
-run "reject_newline_west_secret_version" {
+run "reject_newline_runtime_secret_version" {
   command = plan
   variables {
     west_secret_versions = { motherduck_token = "1\n" }
   }
   expect_failures = [var.west_secret_versions]
 }
-run "reject_null_west_secret_version" {
+run "reject_null_runtime_secret_version" {
   command = plan
   variables {
     west_secret_versions = { motherduck_token = null }
@@ -147,7 +147,7 @@ run "runtime_storage_and_execution_contract" {
     error_message = "The west receiver must inject the specified numeric webhook secret version."
   }
   assert {
-    condition     = google_pubsub_topic_iam_member.west_receiver.role == "roles/pubsub.publisher" && !contains(keys(local.west_common_environment), "GCS_BUCKET") && google_secret_manager_secret_iam_member.west_receiver.secret_id == google_secret_manager_secret.west["fitbit_webhook_config"].secret_id && !contains(keys(local.west_job_secret_access), "fitbit_webhook_config")
+    condition     = google_pubsub_topic_iam_member.west_receiver.role == "roles/pubsub.publisher" && !contains(keys(local.runtime_common_environment), "GCS_BUCKET") && google_secret_manager_secret_iam_member.west_receiver.secret_id == google_secret_manager_secret.west["fitbit_webhook_config"].secret_id && !contains(keys(local.runtime_job_secret_access), "fitbit_webhook_config")
     error_message = "Receiver credentials and publisher access must be isolated from acquisition OAuth and subscriber access."
   }
   assert {
@@ -155,13 +155,13 @@ run "runtime_storage_and_execution_contract" {
     error_message = "Retained buckets must not retain a Fitbit Raw lifecycle rule or soft-delete storage."
   }
 }
-run "reject_legacy_image_in_west" {
+run "reject_legacy_image" {
   command = plan
   variables { west_image_uri = "us-central1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
   expect_failures = [var.west_image_uri]
 }
 
-run "west_storage_and_monitoring_are_separate" {
+run "runtime_storage_and_monitoring_are_separate" {
   command = plan
   override_resource {
     target          = google_service_account.owntracks_receiver
@@ -199,7 +199,7 @@ run "west_storage_and_monitoring_are_separate" {
   }
   variables { west_schedulers_enabled = false }
   assert {
-    condition     = length(google_pubsub_subscription.west.push_config) == 0 && alltrue([for scheduler in google_cloud_scheduler_job.west : scheduler.paused]) && local.west_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "true" && !google_monitoring_alert_policy.west_receiver_failure.enabled
+    condition     = length(google_pubsub_subscription.west.push_config) == 0 && alltrue([for scheduler in google_cloud_scheduler_job.west : scheduler.paused]) && local.runtime_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "true" && !google_monitoring_alert_policy.west_receiver_failure.enabled
     error_message = "Pausing schedules must pause Fitbit processing and all native alerts."
   }
   assert {
@@ -216,7 +216,7 @@ run "west_storage_and_monitoring_are_separate" {
   }
 }
 
-run "west_only_runtime_pins_and_shared_identity" {
+run "runtime_pins_and_shared_identity" {
   command = plan
   override_resource {
     target          = google_service_account.west

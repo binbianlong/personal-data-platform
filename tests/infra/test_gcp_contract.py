@@ -45,8 +45,8 @@ def test_plan_identity_is_separate_and_read_only() -> None:
     assert 'role   = "roles/storage.objectAdmin"' in identity
     assert "roles/viewer" in main
     assert "roles/iam.securityReviewer" not in main
-    assert "west_deployer" in _read("infra/terraform/west.tf")
-    assert "west_scheduler_deployer" in _read("infra/terraform/west.tf")
+    assert "west_deployer" in _read("infra/terraform/runtime.tf")
+    assert "west_scheduler_deployer" in _read("infra/terraform/runtime.tf")
 
 
 def test_runtime_bucket_manager_has_no_object_data_permissions() -> None:
@@ -98,11 +98,11 @@ def test_bootstrap_service_accounts_wait_for_api_enablement(account: str) -> Non
 
 
 def test_preflight_bucket_isolated_and_orphans_expire_after_one_day() -> None:
-    storage = _read("infra/terraform/west.tf")
+    storage = _read("infra/terraform/runtime.tf")
     preflight = storage.split('resource "google_storage_bucket" "preflight_west" {', 1)[1]
     preflight = preflight.split('resource "google_service_account" "west" {', 1)[0]
 
-    assert re.search(r'west_preflight_bucket_name\s*= "\$\{var.project_id\}-pdp-preflight-west"', storage)
+    assert re.search(r'preflight_bucket_name\s*= "\$\{var.project_id\}-pdp-preflight-west"', storage)
     assert 'storage_class               = "STANDARD"' in preflight
     assert 'type = "Delete"' in preflight
     assert "age            = 1" in preflight
@@ -112,7 +112,7 @@ def test_preflight_bucket_isolated_and_orphans_expire_after_one_day() -> None:
 
 def test_rebuild_uses_a_separate_read_only_impersonated_identity() -> None:
     jobs = _read("infra/terraform/jobs.tf")
-    storage = _read("infra/terraform/west.tf")
+    storage = _read("infra/terraform/runtime.tf")
 
     assert 'account_id   = "raw-rebuild-operator"' in jobs
     assert 'resource "google_service_account_iam_member" "rebuild_operator_impersonator"' in jobs
@@ -155,25 +155,25 @@ def _runtime_job(name: str, image: str) -> dict:
 
 def test_runtime_resources_preserve_backups_and_support_pausing() -> None:
     bootstrap = _read("infra/bootstrap/main.tf")
-    west = _read("infra/terraform/west.tf")
+    runtime = _read("infra/terraform/runtime.tf")
     assert 'resource "google_storage_bucket" "terraform_state"' in bootstrap
     assert 'resource "google_storage_bucket" "terraform_state_west"' in bootstrap
     assert 'resource "google_artifact_registry_repository" "runtime_west"' in bootstrap
-    assert 'resource "google_storage_bucket" "raw_west"' in west
-    assert 'resource "google_storage_bucket" "preflight_west"' in west
-    assert 'resource "google_cloud_run_v2_job" "west"' in west
-    assert 'resource "google_cloud_scheduler_job" "west"' in west
-    assert re.search(r"paused\s*= !var.west_schedulers_enabled", west)
-    assert "days_since_custom_time" not in west
-    assert "raw/screen_time/" not in west
-    assert "raw/fitbit/v3/" not in west
-    assert "retention_duration_seconds = 0" in west
-    assert "prevent_destroy = true" in west
+    assert 'resource "google_storage_bucket" "raw_west"' in runtime
+    assert 'resource "google_storage_bucket" "preflight_west"' in runtime
+    assert 'resource "google_cloud_run_v2_job" "west"' in runtime
+    assert 'resource "google_cloud_scheduler_job" "west"' in runtime
+    assert re.search(r"paused\s*= !var.west_schedulers_enabled", runtime)
+    assert "days_since_custom_time" not in runtime
+    assert "raw/screen_time/" not in runtime
+    assert "raw/fitbit/v3/" not in runtime
+    assert "retention_duration_seconds = 0" in runtime
+    assert "prevent_destroy = true" in runtime
 
 
-def test_west_pubsub_and_receiver_access_are_separate() -> None:
+def test_pubsub_and_receiver_access_are_separate() -> None:
     queue = _read("infra/terraform/pubsub.tf")
-    west = _read("infra/terraform/west.tf")
+    runtime = _read("infra/terraform/runtime.tf")
     assert "allowed_persistence_regions = [var.west_region]" in queue
     assert re.search(r"enforce_in_transit\s*= true", queue)
     assert re.search(r'message_retention_duration\s*= "604800s"', queue)
@@ -182,7 +182,7 @@ def test_west_pubsub_and_receiver_access_are_separate() -> None:
     assert "roles/pubsub.publisher" in queue
     assert "roles/pubsub.subscriber" not in queue
     assert "push_config" in queue
-    receiver = west.split('resource "google_cloud_run_v2_service" "west"', 1)[1]
+    receiver = runtime.split('resource "google_cloud_run_v2_service" "west"', 1)[1]
     receiver = receiver.split('resource "google_cloud_run_v2_service_iam_member"', 1)[0]
     assert re.search(r"PDP_FITBIT_WEBHOOK_CONFIG\s*=", receiver)
     assert "PDP_FITBIT_OAUTH_CONFIG" not in receiver
@@ -190,7 +190,7 @@ def test_west_pubsub_and_receiver_access_are_separate() -> None:
     assert "GCS_BUCKET" not in receiver
 
 
-WEST_SECRET_VERSIONS = {
+RUNTIME_SECRET_VERSIONS = {
     "owntracks_config": "19",
     "motherduck_token": "7",
     "motherduck_preflight_token": "3",
@@ -204,11 +204,11 @@ WEST_SECRET_VERSIONS = {
 @pytest.mark.parametrize(
     ("versions", "accepted"),
     [
-        (WEST_SECRET_VERSIONS, True),
+        (RUNTIME_SECRET_VERSIONS, True),
         (
             {
                 key: value
-                for key, value in WEST_SECRET_VERSIONS.items()
+                for key, value in RUNTIME_SECRET_VERSIONS.items()
                 if key != "motherduck_preflight_token"
             },
             True,
@@ -217,16 +217,16 @@ WEST_SECRET_VERSIONS = {
         (
             {
                 key: value
-                for key, value in WEST_SECRET_VERSIONS.items()
+                for key, value in RUNTIME_SECRET_VERSIONS.items()
                 if key != "owntracks_config"
             },
             False,
         ),
         ({"motherduck_token": "7"}, False),
-        ({**WEST_SECRET_VERSIONS, "unknown_secret": "19"}, False),
+        ({**RUNTIME_SECRET_VERSIONS, "unknown_secret": "19"}, False),
     ]
     + [
-        ({**WEST_SECRET_VERSIONS, "motherduck_token": version}, False)
+        ({**RUNTIME_SECRET_VERSIONS, "motherduck_token": version}, False)
         for version in ("latest", "0", "-1", "1.5", "", "01", " 1", "1\n", 1, None)
     ],
 )
