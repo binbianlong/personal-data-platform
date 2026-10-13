@@ -91,29 +91,11 @@ jobs:
         shell: bash
         env:
           BEFORE_SHA: ${{ github.event.before }}
-          WEST_ROLLBACK_IMAGE_URI: ${{ vars.GCP_WEST_ROLLBACK_IMAGE_URI }}
         run: |
           set -euo pipefail
           image_path="${WEST_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${WEST_ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
           jobs="$(gcloud run jobs list --project="${GCP_PROJECT_ID}" --region="${WEST_REGION}" \
             --filter='metadata.labels.application=personal-data-platform' --format=json)"
-          revisions="$(gcloud run revisions list --project="${GCP_PROJECT_ID}" --region="${WEST_REGION}" --format=json)"
-          current_images="$(jq -r '.[] | [.metadata.name, .spec.template.spec.template.spec.containers[0].image] | @tsv' <<< "${jobs}")"
-          while IFS=$'\t' read -r job image; do
-            [[ -n "${job}" ]] || continue
-            [[ "${image}" == "${image_path}@"* && "${image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
-            gcloud artifacts docker tags add "${image}" "${image_path}:deployed-job-${job}" --quiet
-          done <<< "${current_images}"
-          current_revisions="$(jq -r '.[] | [.metadata.name, (.status.imageDigest // .spec.containers[0].image)] | @tsv' <<< "${revisions}")"
-          while IFS=$'\t' read -r revision image; do
-            [[ -n "${revision}" ]] || continue
-            [[ "${image}" == "${image_path}@"* && "${image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
-            gcloud artifacts docker tags add "${image}" "${image_path}:deployed-revision-${revision}" --quiet
-          done <<< "${current_revisions}"
-          if [[ -n "${WEST_ROLLBACK_IMAGE_URI}" ]]; then
-            [[ "${WEST_ROLLBACK_IMAGE_URI}" == "${image_path}@"* && "${WEST_ROLLBACK_IMAGE_URI}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
-            gcloud artifacts docker tags add "${WEST_ROLLBACK_IMAGE_URI}" "${image_path}:deployed-rollback" --quiet
-          fi
           current_image="$(jq -r '.[] | select(.metadata.name == "reconciliation-west") | .spec.template.spec.template.spec.containers[0].image' <<< "${jobs}")"
           build=true
           if [[ "${GITHUB_EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
@@ -128,7 +110,6 @@ jobs:
             current_image="${image_path}@${digest}"
           fi
           [[ "${current_image}" == "${image_path}@"* && "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
-          gcloud artifacts docker tags add "${current_image}" "${image_path}:deployed-candidate" --quiet
           echo "TF_VAR_west_image_uri=${current_image}" >> "${GITHUB_ENV}"
 
       - name: Set up Terraform

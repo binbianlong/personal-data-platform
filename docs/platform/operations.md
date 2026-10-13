@@ -23,7 +23,7 @@ secret payloadはTerraform外で登録し、数値versionに固定する。常�
 通常はpush配信・日次Scheduler・監視が有効で、`PDP_WEST_SCHEDULERS_ENABLED=false`で一時停止する。
 停止時はsubscriptionをpullへ戻して通知を保持し、workerも処理を保留する。
 
-CIは現行Job・receiverのimageをdeployedタグで保護してからcandidate digestへ更新する。
+CIはimageをbuild・登録し、そのdigestを指定してruntimeを更新する。
 source・dbt・依存・Dockerfileに変更がないpushでは現行日次Jobのdigestを再利用する。
 無効な比較元やJob一覧取得失敗はdeployを止める。アプリdeploy失敗後の再反映には手動deployを使う。
 手動`run_daily`で日次全体を実行できる。rollbackには直接取込・push受付に対応したimageを使う。
