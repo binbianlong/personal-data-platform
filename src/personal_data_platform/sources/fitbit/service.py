@@ -190,6 +190,7 @@ def create_worker_app(*, runner: AcquisitionRunner, subscription: str) -> FastAP
             "notification_id": notification.notification_id,
             "pubsub_message_id": message_id if isinstance(message_id, str) else None,
             "attempt_id": attempt_id,
+            "acquisition_mode": notification.acquisition_mode,
             "received_at": notification.received_at.isoformat(),
             "started_at": started_at.isoformat(),
             **_queue_range(notification.windows[0]),

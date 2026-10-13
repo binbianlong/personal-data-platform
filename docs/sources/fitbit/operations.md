@@ -51,6 +51,10 @@ receiverからworkerまでの追跡は`jsonPayload.summary.notification_id="<id>
 取得結果は`notification_id`と`attempt_id`でworker実行へ結び付ける。日次・手動取得では両IDが`null`となる。
 `requested_start/end`はAPIへ渡す範囲、`acquired_start/end`は検証済みの取得範囲である。
 心拍は要求範囲の開始を分境界に切り上げ、終了を取得時点の完了済み分まで縮めるため、両範囲が異なる場合がある。
+物理心拍通知の`acquisition_mode="bounded_minutes"`では、receiverが元区間を含むよう分境界へ外側に丸める。
+workerはその範囲を全て取得できた場合だけ置換・ackするため、成功時の要求・取得範囲は一致する。
+未完了分の保留は`reason="notified_utc_minute_incomplete"`で確認できる。
+`acquisition_mode="legacy"`は従来の日単位通知処理で、日次・手動の取得ログでは`null`となる。
 `fetched_rows`は正規化後の取得行数で、心拍は分集計行、睡眠は親とstage/wake子行を含む。
 `submitted_rows`はINSERTへ渡した行数であり、変更・削除行数や通信バイト数ではない。追加のDB照会で数えない。
 `accepted_ranges`は古い取得結果から保護された範囲を除いた書き込み対象、`protected_records`は保護した主レコード数となる。
@@ -75,6 +79,15 @@ jsonPayload.summary.notification_id="<id>"
 通知の元区間と要求範囲の広がり、`unchanged`の頻度、種類別の投入行数を比較する。
 同じ通知メタデータが繰り返されても、API取得結果が同じとは限らない。
 
+通知範囲に限定した心拍の取得結果を検索する例:
+
+```text
+resource.type="cloud_run_revision"
+resource.labels.service_name="pdp-fitbit-worker-west"
+jsonPayload.event="fitbit_acquisition"
+jsonPayload.summary.acquisition_mode="bounded_minutes"
+```
+
 ## CLIと再試行
 
 取得・成功応答の条件は[取得仕様](acquisition.md#webhookとpubsub)、範囲置換は[データモデル](data-model.md)に従う。
@@ -96,3 +109,7 @@ Schedulerの停止とlease確認は[Platform運用](../../platform/operations.md
 7日超の停止は空白期間を確認して上記の期間指定取得を行う。
 本番DBを空にせず、`MOTHERDUCK_DATABASE`を独立したscratch DBへ向けて期間指定同期とdbtを実行し比較する。
 Fitbitの復旧元はGoogle Health APIであり、Rawは保存しない。
+
+imageのrollbackはreceiver、workerの順に旧digestへ戻す。schema 1の追加項目を旧workerは無視するため、
+新receiverが発行済みの心拍も従来の日単位取得で処理できる。新workerも旧receiverの通知を受理する。
+各反映でコミット、image digest、対象revisionを記録する。未pushのimage反映は次の通常Deployで上書きされ得る。

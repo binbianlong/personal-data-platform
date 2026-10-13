@@ -17,6 +17,7 @@ from personal_data_platform.storage.motherduck import Warehouse, WarehouseConnec
 from .api import HealthClient
 from .models import (
     DATE_TYPES,
+    AcquisitionMode,
     CapturedSnapshot,
     HeartRateMinuteSnapshot,
     Notification,
@@ -60,6 +61,7 @@ def _log_acquisition(
     result: WriteResult | None = None,
     error: Exception | None = None,
     reason: str | None = None,
+    acquisition_mode: AcquisitionMode | None = None,
 ) -> None:
     fetched = None
     if acquisition is not None:
@@ -78,6 +80,7 @@ def _log_acquisition(
             "summary": {
                 "notification_id": notification_id,
                 "attempt_id": attempt_id,
+                "acquisition_mode": acquisition_mode,
                 "data_type": window.data_type,
                 "requested_start": window.start.isoformat(),
                 "requested_end": window.end.isoformat(),
@@ -156,7 +159,12 @@ class AcquisitionRunner:
         """Process one push delivery; the HTTP boundary acknowledges confirmed commits."""
         if notification.subject_key != self.subject_key:
             raise ValueError("notification subject does not match configured subject")
-        windows = acquisition_windows(notification.windows)
+        mode = notification.acquisition_mode
+        windows = (
+            notification.windows
+            if mode == "bounded_minutes"
+            else acquisition_windows(notification.windows)
+        )
         if self.paused:
             for window in windows:
                 _log_acquisition(
@@ -165,8 +173,22 @@ class AcquisitionRunner:
                     notification_id=notification.notification_id,
                     attempt_id=attempt_id,
                     reason="processing_paused",
+                    acquisition_mode=mode,
                 )
             return AcquisitionSummary(deferred_scopes=len(windows))
+        if mode == "bounded_minutes" and any(
+            window.end > self.clock().replace(second=0, microsecond=0) for window in windows
+        ):
+            for window in windows:
+                _log_acquisition(
+                    window,
+                    status="deferred",
+                    notification_id=notification.notification_id,
+                    attempt_id=attempt_id,
+                    reason="notified_utc_minute_incomplete",
+                    acquisition_mode=mode,
+                )
+            return AcquisitionSummary(deferred_scopes=len(windows), first_incomplete=windows[0])
         deadline = self.monotonic() + 480
         warehouse = self.warehouse_factory()
         owner = uuid.uuid4().hex
@@ -182,6 +204,7 @@ class AcquisitionRunner:
                         notification_id=notification.notification_id,
                         attempt_id=attempt_id,
                         reason="loader_busy",
+                        acquisition_mode=mode,
                     )
                 return AcquisitionSummary(deferred_scopes=len(windows))
             seconds = int(deadline - self.monotonic())
@@ -193,6 +216,7 @@ class AcquisitionRunner:
                         notification_id=notification.notification_id,
                         attempt_id=attempt_id,
                         reason="execution_budget_exhausted",
+                        acquisition_mode=mode,
                     )
                 return AcquisitionSummary(deferred_scopes=len(windows))
             return self.run_windows(
@@ -202,6 +226,7 @@ class AcquisitionRunner:
                 timeout_seconds=seconds,
                 notification_id=notification.notification_id,
                 attempt_id=attempt_id,
+                acquisition_mode=mode,
             )
         except WarehouseConnectionError:
             return AcquisitionSummary(failed_scopes=len(windows))
@@ -219,6 +244,7 @@ class AcquisitionRunner:
         timeout_seconds: int,
         notification_id: str | None = None,
         attempt_id: str | None = None,
+        acquisition_mode: AcquisitionMode | None = None,
     ) -> AcquisitionSummary:
         if self.paused:
             for window in windows:
@@ -228,6 +254,7 @@ class AcquisitionRunner:
                     notification_id=notification_id,
                     attempt_id=attempt_id,
                     reason="processing_paused",
+                    acquisition_mode=acquisition_mode,
                 )
             return AcquisitionSummary(
                 deferred_scopes=len(windows), first_incomplete=windows[0] if windows else None
@@ -254,6 +281,7 @@ class AcquisitionRunner:
                 self.monotonic() + timeout_seconds,
                 notification_id=notification_id,
                 attempt_id=attempt_id,
+                acquisition_mode=acquisition_mode,
             )[0]
         finally:
             timer.cancel()
@@ -308,6 +336,7 @@ class AcquisitionRunner:
         *,
         notification_id: str | None = None,
         attempt_id: str | None = None,
+        acquisition_mode: AcquisitionMode | None = None,
     ) -> tuple[AcquisitionSummary, set[Window]]:
         self._check(warehouse, owner, deadline)
         failed = 0
@@ -347,6 +376,8 @@ class AcquisitionRunner:
                 ):
                     raise ValueError("API acquisition does not match requested window")
                 acquisition = fetched
+                if acquisition_mode == "bounded_minutes" and fetched.window != window:
+                    raise AcquisitionDeferred("notified UTC minute range is incomplete")
                 self._check(warehouse, owner, acquisition_deadline)
                 result = self._commit_acquisition(warehouse, acquisition, owner, deadline)
                 completed.add(window)
@@ -357,6 +388,7 @@ class AcquisitionRunner:
                     attempt_id=attempt_id,
                     acquisition=acquisition,
                     result=result,
+                    acquisition_mode=acquisition_mode,
                 )
             except AcquisitionDeferred as error:
                 deferred += 1
@@ -369,6 +401,7 @@ class AcquisitionRunner:
                     acquisition=acquisition,
                     error=error,
                     reason=str(error),
+                    acquisition_mode=acquisition_mode,
                 )
             except WarehouseConnectionError as error:
                 _log_acquisition(
@@ -378,6 +411,7 @@ class AcquisitionRunner:
                     attempt_id=attempt_id,
                     acquisition=acquisition,
                     error=error,
+                    acquisition_mode=acquisition_mode,
                 )
                 raise
             except Exception as error:
@@ -390,6 +424,7 @@ class AcquisitionRunner:
                     attempt_id=attempt_id,
                     acquisition=acquisition,
                     error=error,
+                    acquisition_mode=acquisition_mode,
                 )
                 LOGGER.error(
                     "fitbit scope failed data_type=%s error_type=%s; use manual range sync if persistent",
