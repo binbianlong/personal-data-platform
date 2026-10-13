@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from .acquisition import AcquisitionRunner
-from .models import Notification, Window
+from .models import Notification, Window, parse_time
 from .notifications import decode_notification
 from .webhook import (
     AuthenticationError,
@@ -75,9 +75,20 @@ def create_pubsub_app(
             delivery_id = uuid.uuid4().hex
             work: list[tuple[Notification, str]] = []
             source_ids: list[str] = []
-            for windows in payload.groups or (payload.windows,):
+            for index, windows in enumerate(payload.groups or (payload.windows,)):
+                mode = payload.group_modes[index] if payload.group_modes else "legacy"
+                if mode == "bounded_minutes" and any(
+                    interval.physical_start is not None
+                    and parse_time(interval.physical_start) >= received_at
+                    for interval in payload.observations[index].intervals
+                ):
+                    raise PayloadError("physical notification is entirely in the future")
                 notification = Notification(
-                    uuid.uuid4().hex, payload.subject_key, windows, received_at
+                    uuid.uuid4().hex,
+                    payload.subject_key,
+                    windows,
+                    received_at,
+                    acquisition_mode=mode,
                 )
                 source_ids.append(notification.notification_id)
                 work.extend(
@@ -112,6 +123,7 @@ def create_pubsub_app(
                     "source_notification_id": source_id,
                     "notification_id": notification.notification_id,
                     "pubsub_message_id": None,
+                    "acquisition_mode": notification.acquisition_mode,
                     **_queue_range(notification.windows[0]),
                 }
                 try:

@@ -8,10 +8,12 @@ import math
 import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time
+from typing import Literal
 
 DATA_TYPES = ("steps", "heart-rate", "daily-resting-heart-rate", "active-zone-minutes", "sleep")
 DATE_TYPES = ("daily-resting-heart-rate", "sleep")
 RECORD_AGGREGATION_VERSION = "records-v1"
+AcquisitionMode = Literal["legacy", "bounded_minutes"]
 TABLES = {
     "steps": "fitbit_activity_interval",
     "daily-resting-heart-rate": "fitbit_resting_heart_rate_daily",
@@ -227,6 +229,7 @@ class Notification:
     subject_key: str
     windows: tuple[Window, ...]
     received_at: datetime
+    acquisition_mode: AcquisitionMode = "legacy"
 
     def __post_init__(self) -> None:
         if not self.notification_id or len(self.notification_id) > 256 or not self.windows:
@@ -234,6 +237,14 @@ class Notification:
         AcquisitionScope(self.subject_key, self.windows[0], RECORD_AGGREGATION_VERSION)
         if len(set(self.windows)) != len(self.windows):
             raise ValueError("duplicate notification windows")
+        if self.acquisition_mode not in ("legacy", "bounded_minutes"):
+            raise ValueError("unsupported notification acquisition mode")
+        if self.acquisition_mode == "bounded_minutes" and any(
+            window.data_type != "heart-rate"
+            or any(bound.second or bound.microsecond for bound in (window.start, window.end))
+            for window in self.windows
+        ):
+            raise ValueError("bounded minutes require aligned heart-rate windows")
         object.__setattr__(self, "received_at", aware(self.received_at))
 
 

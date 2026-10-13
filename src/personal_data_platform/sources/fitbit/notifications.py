@@ -10,7 +10,7 @@ from typing import Protocol, cast
 
 from google.cloud import pubsub_v1
 
-from .models import Notification, Window, object_dict, parse_time, string
+from .models import AcquisitionMode, Notification, Window, object_dict, parse_time, string
 
 ENDPOINT = "pubsub.us-west1.rep.googleapis.com"
 
@@ -44,6 +44,7 @@ def decode_notification(payload: bytes) -> Notification:
             for row in (object_dict(value) for value in windows)
         ),
         parse_time(string(data["received_at"])),
+        acquisition_mode=cast(AcquisitionMode, string(data.get("acquisition_mode", "legacy"))),
     )
     if notification.windows[0].end - notification.windows[0].start > timedelta(days=1):
         raise ValueError("notification exceeds one day")
@@ -80,8 +81,11 @@ class PubSubNotifications:
         return self._publisher
 
     def publish(self, notification: Notification) -> str:
+        fields = asdict(notification)
+        if notification.acquisition_mode == "legacy":
+            del fields["acquisition_mode"]
         data = json.dumps(
-            {"schema_version": 1, **asdict(notification)},
+            {"schema_version": 1, **fields},
             default=lambda value: value.isoformat(),
             sort_keys=True,
             separators=(",", ":"),

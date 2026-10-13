@@ -263,3 +263,107 @@ def test_notification_observations_keep_delete_and_civil_only_intervals():
     assert observations[0].intervals[0].physical_end is None
     assert observations[0].intervals[0].civil_start == "2026-09-26T23:00:00"
     assert observations[0].intervals[0].civil_end == "2026-09-27T07:00:00"
+
+
+@pytest.mark.parametrize(
+    "start,end,expected_start,expected_end",
+    [
+        ("14:00:20Z", "14:01:10Z", "14:00:00", "14:02:00"),
+        ("14:00:00Z", "14:01:00Z", "14:00:00", "14:01:00"),
+        ("14:00:59.999999999Z", "14:01:00Z", "14:00:00", "14:01:00"),
+        ("14:00:00Z", "14:01:00.000000001Z", "14:00:00", "14:02:00"),
+        ("14:00:00.000000001Z", "14:00:00.000000002Z", "14:00:00", "14:01:00"),
+        ("23:00:20+09:00", "23:01:00.000000999+09:00", "14:00:00", "14:02:00"),
+    ],
+)
+def test_physical_heart_rate_rounds_outward_without_losing_nanoseconds(
+    start, end, expected_start, expected_end
+):
+    value = notification("heart-rate")
+    value["data"]["intervals"][0]["physicalTimeInterval"] = {
+        "startTime": "2026-09-26T" + start,
+        "endTime": "2026-09-26T" + end,
+    }
+    result = authenticate(value)
+    assert result.groups == (
+        (
+            Window(
+                "heart-rate",
+                time("2026-09-26T" + expected_start),
+                time("2026-09-26T" + expected_end),
+            ),
+        ),
+    )
+    assert result.group_modes == ("bounded_minutes",)
+
+
+def test_nanosecond_heart_rate_observation_retains_unrounded_bounds():
+    value = notification("heart-rate")
+    value["data"]["intervals"][0]["physicalTimeInterval"] = {
+        "startTime": "2026-09-26T14:00:20.000000001Z",
+        "endTime": "2026-09-26T14:01:00.000000999Z",
+    }
+    observed = authenticate(value).observations[0].intervals[0]
+    assert observed.physical_start == "2026-09-26T14:00:20.000000001+00:00"
+    assert observed.physical_end == "2026-09-26T14:01:00.000000999+00:00"
+
+
+@pytest.mark.parametrize("end", ["14:00:00.000000001Z", "14:00:00.000000000Z"])
+def test_heart_rate_rejects_nonpositive_raw_range_before_rounding(end):
+    value = notification("heart-rate")
+    value["data"]["intervals"][0]["physicalTimeInterval"] = {
+        "startTime": "2026-09-26T14:00:00.000000001Z",
+        "endTime": "2026-09-26T" + end,
+    }
+    with pytest.raises(PayloadError):
+        authenticate(value)
+
+
+def test_civil_only_and_mixed_heart_rate_retain_legacy_acquisition():
+    for mixed in (False, True):
+        value = notification("heart-rate")
+        if mixed:
+            value["data"]["intervals"].append(dict(value["data"]["intervals"][0]))
+        del value["data"]["intervals"][0]["physicalTimeInterval"]
+        result = authenticate(value)
+        assert result.group_modes == ("legacy",)
+        assert result.groups[0] == (
+            Window("heart-rate", time("2026-09-26T05:00:00"), time("2026-09-28T01:00:00")),
+        )
+
+
+def test_bounded_heart_rate_split_preserves_mode_and_tokyo_boundary():
+    from personal_data_platform.sources.fitbit.models import Notification
+    from personal_data_platform.sources.fitbit.webhook import split_notifications
+
+    parent = Notification(
+        "bounded",
+        "self",
+        (Window("heart-rate", time("2026-09-26T14:59:00"), time("2026-09-26T15:01:00")),),
+        time("2026-09-27T00:00:00"),
+        acquisition_mode="bounded_minutes",
+    )
+    units = split_notifications(parent)
+    assert [u.windows[0] for u in units] == [
+        Window("heart-rate", time("2026-09-26T14:59:00"), time("2026-09-26T15:00:00")),
+        Window("heart-rate", time("2026-09-26T15:00:00"), time("2026-09-26T15:01:00")),
+    ]
+    assert all(u.acquisition_mode == "bounded_minutes" for u in units)
+
+
+def test_bounded_heart_rate_split_keeps_unfinished_minute_across_tokyo_midnight():
+    from personal_data_platform.sources.fitbit.models import Notification
+    from personal_data_platform.sources.fitbit.webhook import split_notifications
+
+    parent = Notification(
+        "tail",
+        "self",
+        (Window("heart-rate", time("2026-09-26T14:59:00"), time("2026-09-26T15:01:00")),),
+        time("2026-09-26T14:59:50"),
+        acquisition_mode="bounded_minutes",
+    )
+    units = split_notifications(parent)
+    assert [u.windows[0] for u in units] == [
+        Window("heart-rate", time("2026-09-26T14:59:00"), time("2026-09-26T15:00:00")),
+        Window("heart-rate", time("2026-09-26T15:00:00"), time("2026-09-26T15:01:00")),
+    ]

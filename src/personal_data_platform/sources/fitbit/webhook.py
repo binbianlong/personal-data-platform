@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from .models import (
     DATA_TYPES,
     DATE_TYPES,
+    AcquisitionMode,
     Notification,
     Window,
     date_cursor,
@@ -73,6 +74,7 @@ class VerifiedNotification:
     windows: tuple[Window, ...]
     groups: tuple[tuple[Window, ...], ...] = ()
     observations: tuple[NotificationObservation, ...] = ()
+    group_modes: tuple[AcquisitionMode, ...] = ()
 
 
 def split_notifications(
@@ -90,7 +92,11 @@ def split_notifications(
         start = window.start
         while start < window.end:
             midnight = start.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
-            if not civil and midnight >= notification.received_at:
+            if (
+                not civil
+                and midnight >= notification.received_at
+                and notification.acquisition_mode == "legacy"
+            ):
                 break
             end = min(window.end, (midnight + timedelta(days=1)).astimezone(UTC))
             if len(units) >= max_units:
@@ -104,6 +110,7 @@ def split_notifications(
                     notification.subject_key,
                     (Window(window.data_type, start, end),),
                     notification.received_at,
+                    acquisition_mode=notification.acquisition_mode,
                 )
             )
             start = end
@@ -174,15 +181,48 @@ def _civil_interval(interval: dict[str, object]) -> tuple[datetime, datetime] | 
     return bounds
 
 
-def _window(kind: str, value: object) -> Window:
+def _physical_timestamp(value: str) -> tuple[datetime, int]:
+    """Keep submicrosecond precision at the notification boundary."""
+    fraction = re.search(r"\.(\d+)", value)
+    extra = 0
+    if fraction is not None:
+        if len(fraction[1]) > 9:
+            raise ValueError("physical time exceeds nanosecond precision")
+        extra = int(fraction[1].ljust(9, "0")[6:])
+    return parse_time(value), extra
+
+
+def _physical_text(value: str) -> str:
+    timestamp, extra = _physical_timestamp(value)
+    if extra:
+        seconds = timestamp.replace(microsecond=0).isoformat().removesuffix("+00:00")
+        return f"{seconds}.{timestamp.microsecond:06d}{extra:03d}+00:00"
+    return timestamp.isoformat()
+
+
+def _window(kind: str, value: object, *, bounded_minutes: bool = False) -> Window:
     interval = object_dict(value)
     civil = _civil_interval(interval)
     physical: tuple[datetime, datetime] | None = None
     if "physicalTimeInterval" in interval:
         fields = object_dict(interval["physicalTimeInterval"])
-        physical = (parse_time(string(fields["startTime"])), parse_time(string(fields["endTime"])))
-        if physical[0] >= physical[1]:
-            raise ValueError("physical interval must have a positive range")
+        if bounded_minutes:
+            physical_start = _physical_timestamp(string(fields["startTime"]))
+            physical_end = _physical_timestamp(string(fields["endTime"]))
+            if physical_start >= physical_end:
+                raise ValueError("physical interval must have a positive range")
+            lower = physical_start[0].replace(second=0, microsecond=0)
+            upper = physical_end[0].replace(second=0, microsecond=0)
+            if physical_end[0] > upper or physical_end[1]:
+                upper += timedelta(minutes=1)
+            physical = lower, upper
+        else:
+            physical = (
+                parse_time(string(fields["startTime"])),
+                parse_time(string(fields["endTime"])),
+            )
+            if physical[0] >= physical[1]:
+                raise ValueError("physical interval must have a positive range")
     if kind in DATE_TYPES:
         if civil is None:
             raise ValueError("date metric requires civil bounds")
@@ -217,12 +257,8 @@ def _observe_interval(value: object) -> NotificationInterval:
         else None
     )
     return NotificationInterval(
-        parse_time(string(physical["startTime"])).astimezone(UTC).isoformat()
-        if physical is not None
-        else None,
-        parse_time(string(physical["endTime"])).astimezone(UTC).isoformat()
-        if physical is not None
-        else None,
+        _physical_text(string(physical["startTime"])) if physical is not None else None,
+        _physical_text(string(physical["endTime"])) if physical is not None else None,
         civil[0].isoformat() if civil is not None else None,
         civil[1].isoformat() if civil is not None else None,
     )
@@ -277,6 +313,7 @@ class GoogleHealthAuthenticator:
         windows: list[Window] = []
         groups: list[tuple[Window, ...]] = []
         observations: list[NotificationObservation] = []
+        modes: list[AcquisitionMode] = []
         try:
             for notification in notifications:
                 data = object_dict(object_dict(notification)["data"])
@@ -290,8 +327,16 @@ class GoogleHealthAuthenticator:
                 intervals = data["intervals"]
                 if not isinstance(intervals, list) or not intervals:
                     raise ValueError("webhook intervals must be nonempty")
-                group = merge_windows(tuple(_window(kind, interval) for interval in intervals))
+                bounded = kind == "heart-rate" and all(
+                    "physicalTimeInterval" in object_dict(interval) for interval in intervals
+                )
+                group = merge_windows(
+                    tuple(
+                        _window(kind, interval, bounded_minutes=bounded) for interval in intervals
+                    )
+                )
                 groups.append(group)
+                modes.append("bounded_minutes" if bounded else "legacy")
                 windows.extend(group)
                 record_id = data.get("recordId")
                 observations.append(
@@ -307,5 +352,9 @@ class GoogleHealthAuthenticator:
         except (ValueError, KeyError, TypeError, OverflowError) as error:
             raise PayloadError("invalid notification batch") from error
         return VerifiedNotification(
-            self._subject, merge_windows(tuple(windows)), tuple(groups), tuple(observations)
+            self._subject,
+            merge_windows(tuple(windows)),
+            tuple(groups),
+            tuple(observations),
+            tuple(modes),
         )

@@ -199,3 +199,77 @@ def test_receiver_logs_source_intervals_and_correlates_repeated_deliveries(caplo
     serialized = json.dumps(received + published)
     for private in ("health-owner", "Bearer secret", "private-extra"):
         assert private not in serialized
+
+
+@pytest.mark.parametrize("future", [False, True])
+def test_receiver_bounds_each_heart_rate_notification_without_merging(future, monkeypatch, caplog):
+    import base64
+    import json
+
+    from personal_data_platform.sources.fitbit import service
+    from personal_data_platform.sources.fitbit.webhook import GoogleHealthAuthenticator
+    from tests.unit.fitbit.test_fitbit_webhook import Signature, notification
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.replace(second=10)
+
+    monkeypatch.setattr(service, "datetime", Clock)
+    values = [notification("heart-rate"), notification("heart-rate")]
+    for index, value in enumerate(values):
+        value["data"]["intervals"][0]["physicalTimeInterval"] = {
+            "startTime": "2026-09-27T00:00:20Z" if future else f"2026-09-26T14:00:{20 + index}Z",
+            "endTime": "2026-09-27T00:00:30Z" if future else "2026-09-26T14:01:00.000000001Z",
+        }
+    auth = GoogleHealthAuthenticator(
+        authorization="Bearer secret",
+        health_user_id="health-owner",
+        subject_key="self",
+        signatures=Signature(),
+    )
+
+    class Publisher:
+        def __init__(self):
+            self.published = []
+
+        def publish(self, notification):
+            self.published.append(notification)
+            return "message-" + notification.notification_id
+
+    publisher = Publisher()
+    caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
+    response = TestClient(
+        service.create_pubsub_app(authenticator=auth, notifications=publisher)
+    ).post(
+        "/webhooks/fitbit",
+        content=json.dumps(values),
+        headers={
+            "authorization": "Bearer secret",
+            "content-type": "application/json",
+            "google-health-api-signature": base64.b64encode(b"signed").decode(),
+        },
+    )
+    if future:
+        assert response.status_code == 400
+        assert publisher.published == []
+        assert not any(
+            getattr(r, "event", None) == "fitbit_notification_received" for r in caplog.records
+        )
+    else:
+        assert response.status_code == 204
+        assert len(publisher.published) == 2
+        assert len({n.notification_id for n in publisher.published}) == 2
+        expected = Window(
+            "heart-rate", NOW.replace(day=26, hour=14), NOW.replace(day=26, hour=14, minute=2)
+        )
+        assert all(n.windows == (expected,) for n in publisher.published)
+        assert all(n.acquisition_mode == "bounded_minutes" for n in publisher.published)
+        received = [
+            r.summary
+            for r in caplog.records
+            if getattr(r, "event", None) == "fitbit_notification_received"
+        ]
+        assert received[0]["physical_start"] == "2026-09-26T14:00:20+00:00"
+        assert received[0]["physical_end"] == "2026-09-26T14:01:00.000000001+00:00"
+        assert len({s["source_notification_id"] for s in received}) == 2
