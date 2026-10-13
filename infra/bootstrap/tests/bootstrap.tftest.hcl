@@ -49,22 +49,16 @@ run "secure_bootstrap_contract" {
   }
 
   assert {
-    condition = anytrue([
-      for policy in google_artifact_registry_repository.runtime_west.cleanup_policies :
-      policy.action == "KEEP" && try(
-        policy.condition[0].tag_state == "TAGGED" &&
-        contains(policy.condition[0].tag_prefixes, "deployed-"), false
-      )
-    ])
-    error_message = "Cleanup must retain deployed and candidate images regardless of age."
+    condition     = length(google_artifact_registry_repository.runtime_west.cleanup_policies) == 2
+    error_message = "Cleanup must have only one expiration rule and one latest-version exception."
   }
 
   assert {
     condition = anytrue([
       for policy in google_artifact_registry_repository.runtime_west.cleanup_policies :
-      policy.action == "KEEP" && try(policy.most_recent_versions[0].keep_count >= 5, false)
+      policy.action == "KEEP" && try(policy.most_recent_versions[0].keep_count == 1, false)
     ])
-    error_message = "Cleanup must retain recent image versions for rollback."
+    error_message = "Cleanup must retain exactly one most recent version of each image."
   }
 
   assert {
@@ -72,10 +66,10 @@ run "secure_bootstrap_contract" {
       for policy in google_artifact_registry_repository.runtime_west.cleanup_policies :
       policy.action == "DELETE" && try(
         policy.condition[0].tag_state == "ANY" &&
-        policy.condition[0].older_than == "2592000s", false
+        policy.condition[0].older_than == "86400s", false
       )
     ])
-    error_message = "Cleanup must expire old SHA-tagged images as well as untagged images after 30 days."
+    error_message = "Cleanup must expire old SHA-tagged images as well as untagged images after one day."
   }
 
   assert {

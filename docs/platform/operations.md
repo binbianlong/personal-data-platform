@@ -26,7 +26,7 @@ secret payloadはTerraform外で登録し、数値versionに固定する。常�
 CIはimageをbuild・登録し、そのdigestを指定してruntimeを更新する。
 source・dbt・依存・Dockerfileに変更がないpushでは現行日次Jobのdigestを再利用する。
 無効な比較元やJob一覧取得失敗はdeployを止める。アプリdeploy失敗後の再反映には手動deployを使う。
-手動`run_daily`で日次全体を実行できる。rollbackには直接取込・push受付に対応したimageを使う。
+手動`run_daily`で日次全体を実行できる。rollbackには直接取込・push受付に対応したimageを使い、削除済みなら再build・登録する。
 Deploy workflowが停止中の場合は、ローカルで`linux/amd64` imageを登録し、digestを指定してTerraformを手動反映する。
 
 ## DBの初期化と更新

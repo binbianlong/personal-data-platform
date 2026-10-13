@@ -86,28 +86,19 @@ resource "google_artifact_registry_repository" "runtime_west" {
   cleanup_policy_dry_run = false
 
   cleanup_policies {
-    id     = "delete-older-than-30-days"
+    id     = "delete-older-than-one-day"
     action = "DELETE"
     condition {
       tag_state  = "ANY"
-      older_than = "2592000s"
+      older_than = "86400s"
     }
   }
 
   cleanup_policies {
-    id     = "keep-latest-five"
+    id     = "keep-latest-one"
     action = "KEEP"
     most_recent_versions {
-      keep_count = 5
-    }
-  }
-
-  cleanup_policies {
-    id     = "keep-deployed"
-    action = "KEEP"
-    condition {
-      tag_state    = "TAGGED"
-      tag_prefixes = ["deployed-"]
+      keep_count = 1
     }
   }
 
