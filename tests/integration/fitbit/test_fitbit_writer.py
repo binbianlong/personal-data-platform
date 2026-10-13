@@ -42,10 +42,11 @@ def apply(warehouse, data):
 
     warehouse.connection.execute("BEGIN")
     try:
-        FitbitBatch(data).write_snapshot(
+        result = FitbitBatch(data).write_snapshot(
             warehouse.connection, source_key=str(data.fetched_at), loaded_at=data.fetched_at
         )
         warehouse.connection.execute("COMMIT")
+        return result
     except Exception:
         warehouse.connection.execute("ROLLBACK")
         raise
@@ -87,7 +88,13 @@ def test_newer_middle_range_preserves_both_sides_of_an_older_snapshot(warehouse)
     middle = snapshot(20, hour=8, end_hour=16, version=3)
     right = snapshot(30, hour=16, version=2)
     apply(warehouse, middle)
-    apply(warehouse, replace(left, records=left.records + right.records))
+    result = apply(warehouse, replace(left, records=left.records + right.records))
+    assert result is not None
+    assert result.submitted_rows == 2
+    assert result.accepted_ranges == (
+        (left.window.start, middle.window.start),
+        (middle.window.end, left.window.end),
+    )
 
     assert warehouse.query_rows(
         "SELECT record_id, value FROM base.fitbit_activity_interval ORDER BY start_at"
@@ -162,10 +169,14 @@ def sleep_snapshot(day, version, *, child="stage", origin="api"):
 
 @pytest.mark.parametrize("stale_child", ["old", "stale"])
 def test_moving_sleep_session_replaces_its_children_across_date_ranges(warehouse, stale_child):
-    apply(warehouse, sleep_snapshot(1, 1, child="old"))
+    result = apply(warehouse, sleep_snapshot(1, 1, child="old"))
+    assert result is not None
+    assert result.submitted_rows == 2
     apply(warehouse, sleep_snapshot(2, 3, child="new"))
     assert warehouse.query_rows("select record_id from base.fitbit_sleep_detail") == [("new",)]
-    apply(warehouse, sleep_snapshot(1, 2, child=stale_child))
+    result = apply(warehouse, sleep_snapshot(1, 2, child=stale_child))
+    assert result.submitted_rows == 0
+    assert result.protected_records == 1
     assert warehouse.query_rows("select record_id from base.fitbit_sleep_detail") == [("new",)]
     # Returning to an earlier date/content is a real update, not a cached no-op.
     apply(warehouse, sleep_snapshot(1, 4, child="old"))
@@ -232,3 +243,54 @@ def test_changed_dense_day_uses_bounded_sql_statements(warehouse):
     )
     assert warehouse.query_value("select max(value) from base.fitbit_activity_interval") == 61
     assert len(statements) < 20
+
+
+def test_writer_reports_unchanged_empty_and_fully_stale_ranges(warehouse):
+    first = apply(warehouse, snapshot(10, version=1))
+    assert first is not None
+    assert first.outcome == "range_replaced"
+    assert first.submitted_rows == 1
+    unchanged = apply(warehouse, snapshot(10, version=2))
+    assert unchanged.outcome == "unchanged"
+    assert unchanged.submitted_rows == 0
+    empty = apply(warehouse, snapshot(None, version=3))
+    assert empty.outcome == "range_replaced"
+    assert empty.submitted_rows == 0
+    stale = apply(warehouse, snapshot(30, version=1))
+    assert stale.outcome == "stale"
+    assert stale.submitted_rows == 0
+    assert stale.accepted_ranges == ()
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
+
+
+def test_minute_writer_reports_counts_and_stale_ranges(warehouse):
+    from personal_data_platform.sources.fitbit.models import (
+        HeartRateMinute,
+        HeartRateMinuteSnapshot,
+        Window,
+    )
+    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+
+    at = datetime(2026, 9, 1, tzinfo=UTC)
+    scope = Window("heart-rate", at, at + timedelta(minutes=2))
+    rows = (HeartRateMinute(at, at + timedelta(minutes=1), 60, 50, 70),)
+
+    def write(version, values=rows, window=scope):
+        data = HeartRateMinuteSnapshot("self", window, at + timedelta(hours=version), values, ())
+        return FitbitMinuteBatch(data).write_snapshot(
+            warehouse.connection, source_key=str(version), loaded_at=data.fetched_at
+        )
+
+    first = write(1)
+    assert first is not None
+    assert first.submitted_rows == 1
+    assert write(2).outcome == "unchanged"
+    middle = Window("heart-rate", at + timedelta(minutes=1), scope.end)
+    write(4, (), middle)
+    partial = write(3)
+    assert partial.submitted_rows == 1
+    assert partial.accepted_ranges == ((at, middle.start),)
+    assert write(1).outcome == "stale"
+    empty = write(5, ())
+    assert empty.outcome == "range_replaced"
+    assert empty.submitted_rows == 0

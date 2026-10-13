@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from .models import (
     GOOGLE_WEARABLES,
@@ -22,6 +22,14 @@ if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
 
 _SCOPE = "subject_key=? AND data_type=? AND data_source_family=? AND aggregation_version=?"
+
+
+@dataclass(frozen=True, slots=True)
+class WriteResult:
+    outcome: Literal["range_replaced", "unchanged", "stale"]
+    submitted_rows: int
+    accepted_ranges: tuple[tuple[datetime, datetime], ...]
+    protected_records: int = 0
 
 
 def coverage_scope(
@@ -201,22 +209,25 @@ class FitbitBatch:
 
     def write_snapshot(
         self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
-    ) -> None:
+    ) -> WriteResult:
         snapshot = self.snapshot
         window = snapshot.window
         scope = coverage_scope(snapshot.subject_key, window.data_type)
         coverage = _read_coverage(connection, scope, window)
         accepted = _accepted_ranges(snapshot, source_key, coverage)
         if not accepted:
-            return
+            return WriteResult("stale", 0, ())
         records = [asdict(record) for record in snapshot.records]
         records.sort(key=lambda item: json.dumps(item, default=str, sort_keys=True))
         digest = _digest(records)
         source_digest = (
             self.source_digest if self.source_digest is not None else snapshot.source_sha256()
         )
-        if not _unchanged(coverage, window, digest):
-            protected = self._replace_records(
+        unchanged = _unchanged(coverage, window, digest)
+        submitted = 0
+        protected: set[str] = set()
+        if not unchanged:
+            protected, submitted = self._replace_records(
                 connection, accepted, source_key=source_key, loaded_at=loaded_at
             )
             if protected:
@@ -233,6 +244,12 @@ class FitbitBatch:
             digest=digest,
             source_digest=source_digest,
         )
+        return WriteResult(
+            "unchanged" if unchanged else "range_replaced",
+            submitted,
+            tuple(accepted),
+            len(protected),
+        )
 
     def _replace_records(
         self,
@@ -241,7 +258,7 @@ class FitbitBatch:
         *,
         source_key: str,
         loaded_at: datetime,
-    ) -> set[str]:
+    ) -> tuple[set[str], int]:
         snapshot = self.snapshot
         kind = snapshot.window.data_type
         main = [
@@ -264,10 +281,10 @@ class FitbitBatch:
         self._update_deletions(
             connection, accepted, ids, protected=protected, source_key=source_key
         )
-        self._replace_rows(
+        submitted = self._replace_rows(
             connection, accepted, protected, source_key=source_key, loaded_at=loaded_at
         )
-        return protected
+        return protected, submitted
 
     def _protect_existing_records(
         self,
@@ -364,13 +381,14 @@ class FitbitBatch:
         *,
         source_key: str,
         loaded_at: datetime,
-    ) -> None:
+    ) -> int:
         snapshot = self.snapshot
         kinds = (
             ("sleep", "sleep-stage", "sleep-wake")
             if snapshot.window.data_type == "sleep"
             else (snapshot.window.data_type,)
         )
+        submitted = 0
         for kind in kinds:
             table = TABLES[kind]
             identity = "sleep_id" if kind in ("sleep-stage", "sleep-wake") else "record_id"
@@ -411,6 +429,8 @@ class FitbitBatch:
                     WHERE (excluded.fetched_at, excluded.source_key) >= ({table}.fetched_at, {table}.source_key)""",
                     [snapshot.subject_key, snapshot.fetched_at, source_key, loaded_at, rows],
                 )
+                submitted += len(rows)
+        return submitted
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,18 +439,20 @@ class FitbitMinuteBatch:
 
     def write_snapshot(
         self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
-    ) -> None:
+    ) -> WriteResult:
         snapshot = self.snapshot
         window = snapshot.window
         scope = coverage_scope(snapshot.subject_key, window.data_type, snapshot.aggregation_version)
         coverage = _read_coverage(connection, scope, window)
         accepted = _accepted_ranges(snapshot, source_key, coverage)
         if not accepted:
-            return
+            return WriteResult("stale", 0, ())
         digest = _digest(
             [asdict(row) for row in sorted(snapshot.minutes, key=lambda row: row.start)]
         )
-        if not _unchanged(coverage, window, digest):
+        unchanged = _unchanged(coverage, window, digest)
+        submitted = 0
+        if not unchanged:
             for start, end in accepted:
                 connection.execute(
                     "DELETE FROM base.fitbit_heart_rate_minute WHERE subject_key=? AND data_source_family=? "
@@ -457,6 +479,7 @@ class FitbitMinuteBatch:
                         r.sample_count::BIGINT, ?, ?, ? FROM unnest(?) incoming(r)""",
                     [snapshot.subject_key, snapshot.fetched_at, source_key, loaded_at, incoming],
                 )
+                submitted = len(incoming)
         source_digest = snapshot.source_sha256() if accepted == [(window.start, window.end)] else ""
         _replace_coverage(
             connection,
@@ -467,4 +490,7 @@ class FitbitMinuteBatch:
             source_key=source_key,
             digest=digest,
             source_digest=source_digest,
+        )
+        return WriteResult(
+            "unchanged" if unchanged else "range_replaced", submitted, tuple(accepted)
         )

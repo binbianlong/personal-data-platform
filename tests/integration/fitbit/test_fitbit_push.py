@@ -53,12 +53,18 @@ def test_push_commits_before_success_and_redelivery_does_not_duplicate(tmp_path,
     assert entries[0].summary["completed_scopes"] == 1
     assert entries[0].summary["failed_scopes"] == 0
     assert entries[0].summary["deferred_scopes"] == 0
+    scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
+    assert len(scopes) == 2
+    assert scopes[0].summary["notification_id"] == "notice"
+    assert scopes[0].summary["attempt_id"] == entries[0].summary["attempt_id"]
+    assert scopes[1].summary["attempt_id"] == entries[1].summary["attempt_id"]
 
 
-def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monkeypatch):
+def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monkeypatch, caplog):
     runner, api, factory = direct_setup(tmp_path, states=(10, 20))
     client = push_client(runner)
     assert client.post("/notifications/fitbit", json=envelope()).status_code == 204
+    caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
     fetch = api.fetch_captured
     monkeypatch.setattr(
         api,
@@ -66,6 +72,11 @@ def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monke
         lambda *a, **kw: (_ for _ in ()).throw(TimeoutError("API unavailable")),
     )
     assert client.post("/notifications/fitbit", json=envelope()).status_code == 503
+    scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
+    assert len(scopes) == 1
+    assert scopes[0].status == "failed"
+    assert scopes[0].summary["fetched_rows"] is None
+    assert scopes[0].summary["submitted_rows"] is None
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 10
     monkeypatch.setattr(api, "fetch_captured", fetch)

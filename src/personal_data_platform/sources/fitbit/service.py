@@ -173,16 +173,19 @@ def create_worker_app(*, runner: AcquisitionRunner, subscription: str) -> FastAP
             return Response(status_code=400)
         started_at = datetime.now(UTC)
         message_id = message.get("messageId")
+        attempt_id = uuid.uuid4().hex
         summary: dict[str, object] = {
             "notification_id": notification.notification_id,
             "pubsub_message_id": message_id if isinstance(message_id, str) else None,
-            "attempt_id": uuid.uuid4().hex,
+            "attempt_id": attempt_id,
             "received_at": notification.received_at.isoformat(),
             "started_at": started_at.isoformat(),
             **_queue_range(notification.windows[0]),
         }
         try:
-            result = await run_in_threadpool(runner.process_notification, notification)
+            result = await run_in_threadpool(
+                runner.process_notification, notification, attempt_id=attempt_id
+            )
             finished_at = datetime.now(UTC)
             summary.update(
                 {

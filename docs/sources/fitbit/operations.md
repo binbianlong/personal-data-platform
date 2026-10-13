@@ -25,6 +25,7 @@ Cloud Loggingの`pdp-west` bucketに30日保持する。通知の主要項目と
 | `fitbit_notification_received` | 元の区間ごとのUTC/civil開始・終了、種類、操作、`record_id`、受信時刻、区間番号 |
 | `fitbit_notification_publish` | 分割後のキュー範囲、発行結果、`notification_id`、`pubsub_message_id` |
 | `fitbit_push` | workerの実行結果、時刻、完了・失敗・保留の件数、実行ごとの`attempt_id` |
+| `fitbit_acquisition` | API要求範囲、完了した実取得範囲、取得行数、INSERT投入行数、範囲置換の結果 |
 
 `delivery_id`はHTTP受信ごと、`source_notification_id`は元通知ごとに変わる。
 発行ログの`source_notification_id`で元区間へ、`notification_id`と`pubsub_message_id`でworkerへ結び付ける。
@@ -46,6 +47,33 @@ jsonPayload.summary.data_type="heart-rate"
 種類別の同内容通知は`jsonPayload.summary.notification_hash="<hash>"`、
 receiverからworkerまでの追跡は`jsonPayload.summary.notification_id="<id>"`で検索する。
 再配信は`jsonPayload.summary.pubsub_message_id="<message-id>"`で検索し、実行IDと結果を比較する。
+
+取得結果は`notification_id`と`attempt_id`でworker実行へ結び付ける。日次・手動取得では両IDが`null`となる。
+`requested_start/end`はAPIへ渡す範囲、`acquired_start/end`は検証済みの取得範囲である。
+心拍は要求範囲の開始を分境界に切り上げ、終了を取得時点の完了済み分まで縮めるため、両範囲が異なる場合がある。
+`fetched_rows`は正規化後の取得行数で、心拍は分集計行、睡眠は親とstage/wake子行を含む。
+`submitted_rows`はINSERTへ渡した行数であり、変更・削除行数や通信バイト数ではない。追加のDB照会で数えない。
+`accepted_ranges`は古い取得結果から保護された範囲を除いた書き込み対象、`protected_records`は保護した主レコード数となる。
+
+| outcome | 意味 |
+| --- | --- |
+| `range_replaced` | 対象範囲を置換。投入0行でも既存データの削除を伴う場合がある |
+| `unchanged` | 正規化後の内容が同じためデータ行の置換を省略。coverageは更新 |
+| `stale` | 全範囲がより新しい取得で保護され、writerによる変更を省略 |
+
+`succeeded`はCOMMIT確認後のみ記録する。未完了の取得や途中の書き込み失敗で不明な件数は`null`で、
+正常に取得した空の結果の0件と区別する。COMMIT/ROLLBACK結果不明は`unknown`となり、
+再配信後にAPIから再取得する。workerの集計が失敗でも、先にCOMMITできた範囲は取得ログの成功として残る。
+
+```text
+resource.type="cloud_run_revision"
+resource.labels.service_name="pdp-fitbit-worker-west"
+jsonPayload.event="fitbit_acquisition"
+jsonPayload.summary.notification_id="<id>"
+```
+
+通知の元区間と要求範囲の広がり、`unchanged`の頻度、種類別の投入行数を比較する。
+同じ通知メタデータが繰り返されても、API取得結果が同じとは限らない。
 
 ## CLIと再試行
 
