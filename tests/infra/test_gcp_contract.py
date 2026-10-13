@@ -268,22 +268,44 @@ def test_west_workflows_require_numeric_pins_before_cloud_work(
     assert (result.returncode == 0) is accepted, result.stderr
 
 
-def test_deploy_protects_current_job_service_and_rollback_images(tmp_path: Path) -> None:
-    revision_image = f"{IMAGE_PATH}@sha256:" + "b" * 64
-    rollback_image = f"{IMAGE_PATH}@sha256:" + "c" * 64
+@pytest.mark.parametrize(
+    ("event", "job_list_ok", "expected_image"),
+    [
+        ("push", True, CURRENT_DIGEST),
+        ("workflow_dispatch", True, f"{IMAGE_PATH}@sha256:" + "b" * 64),
+        ("push", False, None),
+    ],
+)
+def test_deploy_prepares_image_without_retaining_history(
+    tmp_path: Path, event: str, job_list_ok: bool, expected_image: str | None
+) -> None:
     gcloud = tmp_path / "gcloud"
     gcloud.write_text(
         "#!/bin/bash\n"
-        'case "$1 $2 $3" in\n'
-        '  "run jobs list") printf "%s\\n" "$JOBS_JSON"; exit 0;;\n'
-        '  "run revisions list") printf "%s\\n" "$REVISIONS_JSON"; exit 0;;\n'
-        "esac\n"
-        'if [[ "$1 $2 $3 $4" == "artifacts docker tags add" ]]; then\n'
-        '  printf "%s %s\\n" "$5" "$6" >> "$TAG_LOG"; exit 0\n'
+        'if [[ "$1 $2 $3" == "run jobs list" ]]; then\n'
+        '  [[ "$JOB_LIST_OK" == "true" ]] || exit 7\n'
+        '  printf "%s\\n" "$JOBS_JSON"; exit 0\n'
+        "fi\n"
+        'if [[ "$1 $2" == "auth configure-docker" ]]; then\n'
+        '  [[ "$3" == "us-west1-docker.pkg.dev" ]] || exit 90\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "$1 $2 $3 $4" == "artifacts docker images describe" ]]; then\n'
+        '  [[ "$5" == "$IMAGE_PATH:$GITHUB_SHA" ]] || exit 90\n'
+        '  printf "%s\\n" "$NEW_DIGEST"; exit 0\n'
         "fi\nexit 90\n"
     )
     gcloud.chmod(0o755)
-    tags = tmp_path / "tags"
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/bash\n"
+        '[[ "$1" == "build" || "$1" == "push" ]] || exit 90\n'
+        'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+    )
+    docker.chmod(0o755)
+    docker_log = tmp_path / "docker-log"
+    output = tmp_path / "github-env"
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     result = subprocess.run(
         [
             "bash",
@@ -296,40 +318,37 @@ def test_deploy_protects_current_job_service_and_rollback_images(tmp_path: Path)
             **os.environ,
             "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
             "JOBS_JSON": json.dumps([_runtime_job("reconciliation-west", CURRENT_DIGEST)]),
-            "REVISIONS_JSON": json.dumps(
-                [
-                    {
-                        "metadata": {"name": "pdp-fitbit-west-00001"},
-                        "status": {"imageDigest": revision_image},
-                    }
-                ]
-            ),
-            "TAG_LOG": str(tags),
+            "JOB_LIST_OK": str(job_list_ok).lower(),
+            "NEW_DIGEST": "sha256:" + "b" * 64,
+            "IMAGE_PATH": IMAGE_PATH,
+            "DOCKER_LOG": str(docker_log),
             "GCP_PROJECT_ID": "example-project",
             "WEST_REGION": "us-west1",
             "WEST_ARTIFACT_REPOSITORY": "runtime",
             "IMAGE_NAME": "runtime",
-            "GITHUB_EVENT_NAME": "push",
-            "GITHUB_SHA": subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-            ).strip(),
-            "BEFORE_SHA": subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-            ).strip(),
-            "GITHUB_ENV": str(tmp_path / "github-env"),
-            "WEST_ROLLBACK_IMAGE_URI": rollback_image,
+            "GITHUB_EVENT_NAME": event,
+            "GITHUB_SHA": sha,
+            "BEFORE_SHA": sha,
+            "GITHUB_ENV": str(output),
         },
         capture_output=True,
         text=True,
         check=False,
     )
+    if not job_list_ok:
+        assert result.returncode == 7
+        assert not output.exists()
+        assert not docker_log.exists()
+        return
     assert result.returncode == 0, result.stderr
-    assert tags.read_text().splitlines() == [
-        f"{CURRENT_DIGEST} {IMAGE_PATH}:deployed-job-reconciliation-west",
-        f"{revision_image} {IMAGE_PATH}:deployed-revision-pdp-fitbit-west-00001",
-        f"{rollback_image} {IMAGE_PATH}:deployed-rollback",
-        f"{CURRENT_DIGEST} {IMAGE_PATH}:deployed-candidate",
-    ]
+    assert output.read_text() == f"TF_VAR_west_image_uri={expected_image}\n"
+    if event == "workflow_dispatch":
+        assert docker_log.read_text().splitlines() == [
+            f"build --tag {IMAGE_PATH}:{sha} .",
+            f"push {IMAGE_PATH}:{sha}",
+        ]
+    else:
+        assert not docker_log.exists()
 
 
 @pytest.mark.parametrize("fallback_region", ["us-central1", "us-west1"])
