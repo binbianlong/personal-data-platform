@@ -2,7 +2,7 @@
 
 import base64
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -13,6 +13,7 @@ from personal_data_platform.sources.fitbit.webhook import (
     PayloadError,
     Verification,
     VerifiedNotification,
+    split_notifications,
 )
 
 
@@ -135,11 +136,11 @@ def test_daily_metric_uses_civil_dates_without_physical_time() -> None:
 
 
 def test_civil_only_physical_metric_covers_all_legal_utc_offsets() -> None:
-    value = notification()
+    value = notification("active-zone-minutes")
     del value["data"]["intervals"][0]["physicalTimeInterval"]
     result = authenticate(value)
     assert result.windows == (
-        Window("steps", time("2026-09-26T05:00:00"), time("2026-09-28T01:00:00")),
+        Window("active-zone-minutes", time("2026-09-26T05:00:00"), time("2026-09-28T01:00:00")),
     )
 
 
@@ -195,15 +196,15 @@ def test_split_sleep_uses_provider_dates_and_conservative_physical_excludes_futu
         Window("sleep", time("2026-09-26T00:00:00"), time("2026-09-27T00:00:00")),
         Window("sleep", time("2026-09-27T00:00:00"), time("2026-09-28T00:00:00")),
     ]
-    value = notification()
+    value = notification("active-zone-minutes")
     del value["data"]["intervals"][0]["physicalTimeInterval"]
     verified = authenticate(value)
     units = webhook.split_notifications(
         Notification("c", "subject", verified.windows, time("2026-09-27T00:00:00"))
     )
     assert [u.windows[0] for u in units] == [
-        Window("steps", time("2026-09-26T05:00:00"), time("2026-09-26T15:00:00")),
-        Window("steps", time("2026-09-26T15:00:00"), time("2026-09-27T15:00:00")),
+        Window("active-zone-minutes", time("2026-09-26T05:00:00"), time("2026-09-26T15:00:00")),
+        Window("active-zone-minutes", time("2026-09-26T15:00:00"), time("2026-09-27T15:00:00")),
     ]
 
 
@@ -367,3 +368,72 @@ def test_bounded_heart_rate_split_keeps_unfinished_minute_across_tokyo_midnight(
         Window("heart-rate", time("2026-09-26T14:59:00"), time("2026-09-26T15:00:00")),
         Window("heart-rate", time("2026-09-26T15:00:00"), time("2026-09-26T15:01:00")),
     ]
+
+
+def test_steps_partial_notification_keeps_exact_microsecond_envelope():
+    payload = notification("steps")
+    payload["data"]["intervals"][0]["physicalTimeInterval"] = {
+        "startTime": "2026-10-01T00:00:00.000000001Z",
+        "endTime": "2026-10-01T00:00:00.000000002Z",
+    }
+    result = authenticate(payload)
+    assert result.group_modes == ("bounded_steps",)
+    assert result.windows == (
+        Window("steps", time("2026-10-01T00:00:00"), time("2026-10-01T00:00:00.000001")),
+    )
+
+
+def test_steps_full_day_notification_uses_only_provider_date():
+    payload = notification("steps")
+    payload["data"]["intervals"] = [
+        {
+            "civilIso8601TimeInterval": {
+                "startTime": "2026-10-01T00:00:00",
+                "endTime": "2026-10-02T00:00:00",
+            },
+        }
+    ]
+    result = authenticate(payload)
+    assert result.group_modes == ("bounded_steps",)
+    assert result.windows == (
+        Window(
+            "steps", time("2026-10-01T00:00:00"), time("2026-10-02T00:00:00"), time_basis="civil"
+        ),
+    )
+
+
+def test_mixed_steps_windows_keep_utc_and_civil_separate():
+    payload = notification("steps")
+    payload["data"]["intervals"] = [
+        {
+            "physicalTimeInterval": {
+                "startTime": "2026-10-01T00:00:00Z",
+                "endTime": "2026-10-02T00:00:00Z",
+            }
+        },
+        {
+            "civilIso8601TimeInterval": {
+                "startTime": "2026-10-01T00:00:00",
+                "endTime": "2026-10-02T00:00:00",
+            }
+        },
+    ]
+    result = authenticate(payload)
+    assert len(result.groups[0]) == 2
+    assert {w.time_basis for w in result.groups[0]} == {"utc", "civil"}
+
+
+def test_split_civil_steps_does_not_interpret_provider_date_as_future_utc():
+    from personal_data_platform.sources.fitbit.models import Notification
+
+    at = time("2026-10-01T00:00:00")
+    notice = Notification(
+        "future-calendar",
+        "self",
+        (Window("steps", at, at + timedelta(days=1), time_basis="civil"),),
+        at - timedelta(hours=4),
+        acquisition_mode="bounded_steps",
+    )
+    units = split_notifications(notice)
+    assert len(units) == 1
+    assert units[0].windows == notice.windows

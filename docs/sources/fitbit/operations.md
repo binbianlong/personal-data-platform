@@ -55,6 +55,9 @@ receiverからworkerまでの追跡は`jsonPayload.summary.notification_id="<id>
 workerはその範囲を全て取得できた場合だけ置換・ackするため、成功時の要求・取得範囲は一致する。
 未完了分の保留は`reason="notified_utc_minute_incomplete"`で確認できる。
 `acquisition_mode="legacy"`は従来の日単位通知処理で、日次・手動の取得ログでは`null`となる。
+歩数の`acquisition_mode="bounded_steps"`は、`time_basis="utc"`なら通知の物理区間、
+`time_basis="civil"`なら通知の現地暦日を取得する。civilの開始・終了は内部の日付cursorであり、
+実際のUTC時刻を意味しない。発行ログの`queue_ranges[].time_basis`にも同じ基準を記録する。
 `fetched_rows`は正規化後の取得行数で、心拍は分集計行、睡眠は親とstage/wake子行を含む。
 `submitted_rows`はINSERTへ渡した行数であり、変更・削除行数や通信バイト数ではない。追加のDB照会で数えない。
 `accepted_ranges`は古い取得結果から保護された範囲を除いた書き込み対象、`protected_records`は保護した主レコード数となる。
@@ -88,6 +91,18 @@ jsonPayload.event="fitbit_acquisition"
 jsonPayload.summary.acquisition_mode="bounded_minutes"
 ```
 
+歩数の通知範囲と差分投入を検索する例:
+
+```text
+resource.type="cloud_run_revision"
+resource.labels.service_name="pdp-fitbit-worker-west"
+jsonPayload.event="fitbit_acquisition"
+jsonPayload.summary.acquisition_mode="bounded_steps"
+```
+
+`time_basis`と要求範囲を元区間へ照合し、`fetched_rows`と`submitted_rows`を比較する。
+同内容の全日通知が再度届いた場合もAPI取得は行い、一致する行の再投入を省略する。
+
 ## CLIと再試行
 
 取得・成功応答の条件は[取得仕様](acquisition.md#webhookとpubsub)、範囲置換は[データモデル](data-model.md)に従う。
@@ -110,10 +125,6 @@ Schedulerの停止とlease確認は[Platform運用](../../platform/operations.md
 本番DBを空にせず、`MOTHERDUCK_DATABASE`を独立したscratch DBへ向けて期間指定同期とdbtを実行し比較する。
 Fitbitの復旧元はGoogle Health APIであり、Rawは保存しない。
 
-imageのrollbackはreceiver、workerの順に旧digestへ戻す。schema 1の追加項目を旧workerは無視するため、
-新receiverが発行済みの心拍も従来の日単位取得で処理できる。新workerも旧receiverの通知を受理する。
-各反映でコミット、image digest、対象revisionを記録する。未pushのimage反映は次の通常Deployで上書きされ得る。
-
 歩数のschema 2通知は`acquisition_mode="bounded_steps"`と`windows[].time_basis`を持つ。
 `utc`は物理時刻、`civil`は現地暦日をUTC midnightで表した内部cursorとなる。
 暦日歩数は`steps.interval.civil_start_time`で取得し、保存行のUTC時刻は変えない。
@@ -121,3 +132,11 @@ imageのrollbackはreceiver、workerの順に旧digestへ戻す。schema 1の追
 暦日取得を使用する処理と日次Jobは、この両方を認識するwriterを使用する。
 schema 2を読み取れない旧workerへ戻すと、キュー内の新通知を処理できない。
 互換workerはschema 2の暦日をUTCの保守的包絡へ変換し、従来の日単位処理で再試行できる。
+
+反映はworker、`reconciliation-west`の日次Job、receiverの順にimage digestを固定して行う。
+receiver更新前に、旧writerを使う日次Jobの実行が完了していることを確認する。
+rollbackはreceiverを先に旧digestへ戻し、workerをschema 2対応の互換imageへ戻す。
+日次Jobにも両方のcoverageを認識するwriterを維持する。新しい暦日coverageが存在する間は、
+schema 1だけの旧worker・旧Jobへ戻さない。
+心拍のschema 1通知と既存のlegacy通知も受理できる。
+各反映でコミット、image digest、対象revisionを記録する。未pushのimage反映は次の通常Deployで上書きされ得る。

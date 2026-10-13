@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from .acquisition import AcquisitionRunner
-from .models import Notification, Window, parse_time
+from .models import DATE_TYPES, Notification, Window, parse_time
 from .notifications import decode_notification
 from .webhook import (
     AuthenticationError,
@@ -31,6 +31,7 @@ LOGGER = logging.getLogger(__name__)
 def _queue_range(window: Window) -> dict[str, object]:
     return {
         "data_type": window.data_type,
+        "time_basis": "civil" if window.data_type in DATE_TYPES else window.time_basis,
         "queue_start": window.start.isoformat(),
         "queue_end": window.end.isoformat(),
     }
@@ -77,7 +78,7 @@ def create_pubsub_app(
             source_ids: list[str] = []
             for index, windows in enumerate(payload.groups or (payload.windows,)):
                 mode = payload.group_modes[index] if payload.group_modes else "legacy"
-                if mode == "bounded_minutes" and any(
+                if mode in ("bounded_minutes", "bounded_steps") and any(
                     interval.physical_start is not None
                     and parse_time(interval.physical_start) >= received_at
                     for interval in payload.observations[index].intervals

@@ -202,7 +202,8 @@ def test_receiver_logs_source_intervals_and_correlates_repeated_deliveries(caplo
 
 
 @pytest.mark.parametrize("future", [False, True])
-def test_receiver_bounds_each_heart_rate_notification_without_merging(future, monkeypatch, caplog):
+@pytest.mark.parametrize("kind", ["heart-rate", "steps"])
+def test_receiver_bounds_each_notification_without_merging(kind, future, monkeypatch, caplog):
     import base64
     import json
 
@@ -216,7 +217,7 @@ def test_receiver_bounds_each_heart_rate_notification_without_merging(future, mo
             return NOW.replace(second=10)
 
     monkeypatch.setattr(service, "datetime", Clock)
-    values = [notification("heart-rate"), notification("heart-rate")]
+    values = [notification(kind), notification(kind)]
     for index, value in enumerate(values):
         value["data"]["intervals"][0]["physicalTimeInterval"] = {
             "startTime": "2026-09-27T00:00:20Z" if future else f"2026-09-26T14:00:{20 + index}Z",
@@ -260,11 +261,22 @@ def test_receiver_bounds_each_heart_rate_notification_without_merging(future, mo
         assert response.status_code == 204
         assert len(publisher.published) == 2
         assert len({n.notification_id for n in publisher.published}) == 2
-        expected = Window(
-            "heart-rate", NOW.replace(day=26, hour=14), NOW.replace(day=26, hour=14, minute=2)
-        )
-        assert all(n.windows == (expected,) for n in publisher.published)
-        assert all(n.acquisition_mode == "bounded_minutes" for n in publisher.published)
+        if kind == "heart-rate":
+            expected = Window(
+                kind, NOW.replace(day=26, hour=14), NOW.replace(day=26, hour=14, minute=2)
+            )
+            assert all(n.windows == (expected,) for n in publisher.published)
+        else:
+            assert [n.windows[0] for n in publisher.published] == [
+                Window(
+                    kind,
+                    NOW.replace(day=26, hour=14, second=20 + index),
+                    NOW.replace(day=26, hour=14, minute=1, microsecond=1),
+                )
+                for index in range(2)
+            ]
+        mode = "bounded_minutes" if kind == "heart-rate" else "bounded_steps"
+        assert all(n.acquisition_mode == mode for n in publisher.published)
         received = [
             r.summary
             for r in caplog.records

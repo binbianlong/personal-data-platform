@@ -82,6 +82,7 @@ def _log_acquisition(
                 "attempt_id": attempt_id,
                 "acquisition_mode": acquisition_mode,
                 "data_type": window.data_type,
+                "time_basis": "civil" if window.data_type in DATE_TYPES else window.time_basis,
                 "requested_start": window.start.isoformat(),
                 "requested_end": window.end.isoformat(),
                 "acquired_start": acquisition.window.start.isoformat() if acquisition else None,
@@ -160,20 +161,11 @@ class AcquisitionRunner:
         if notification.subject_key != self.subject_key:
             raise ValueError("notification subject does not match configured subject")
         mode = notification.acquisition_mode
-        queued = notification.windows
-        if mode == "bounded_steps":
-            queued = tuple(
-                Window(
-                    window.data_type,
-                    window.start - timedelta(hours=18),
-                    window.end + timedelta(hours=18),
-                )
-                if window.time_basis == "civil"
-                else window
-                for window in queued
-            )
-            mode = "legacy"
-        windows = queued if mode == "bounded_minutes" else acquisition_windows(queued)
+        windows = (
+            notification.windows
+            if mode in ("bounded_minutes", "bounded_steps")
+            else acquisition_windows(notification.windows)
+        )
         if self.paused:
             for window in windows:
                 _log_acquisition(
@@ -274,10 +266,14 @@ class AcquisitionRunner:
         for window in windows:
             start = window.start
             while start < window.end:
-                zone = UTC if window.data_type in DATE_TYPES else ZoneInfo("Asia/Tokyo")
+                zone = (
+                    UTC
+                    if window.data_type in DATE_TYPES or window.time_basis == "civil"
+                    else ZoneInfo("Asia/Tokyo")
+                )
                 midnight = start.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
                 end = min(window.end, (midnight + timedelta(days=1)).astimezone(UTC))
-                units.append(Window(window.data_type, start, end))
+                units.append(Window(window.data_type, start, end, time_basis=window.time_basis))
                 if len(units) > 50000:
                     raise ValueError("use a narrower manual range")
                 start = end
@@ -286,7 +282,7 @@ class AcquisitionRunner:
             return self._process(
                 warehouse,
                 lease_owner,
-                tuple(sorted(set(units), key=lambda w: (w.start, w.data_type))),
+                tuple(sorted(set(units), key=lambda w: (w.start, w.data_type, w.time_basis))),
                 self.monotonic() + timeout_seconds,
                 notification_id=notification_id,
                 attempt_id=attempt_id,
@@ -385,8 +381,11 @@ class AcquisitionRunner:
                 ):
                     raise ValueError("API acquisition does not match requested window")
                 acquisition = fetched
-                if acquisition_mode == "bounded_minutes" and fetched.window != window:
-                    raise AcquisitionDeferred("notified UTC minute range is incomplete")
+                if (
+                    acquisition_mode in ("bounded_minutes", "bounded_steps")
+                    and fetched.window != window
+                ):
+                    raise AcquisitionDeferred("notified acquisition range is incomplete")
                 self._check(warehouse, owner, acquisition_deadline)
                 result = self._commit_acquisition(warehouse, acquisition, owner, deadline)
                 completed.add(window)

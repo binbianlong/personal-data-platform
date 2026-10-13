@@ -230,7 +230,7 @@ def test_mismatched_api_snapshot_is_not_logged_as_a_complete_acquisition(tmp_pat
     assert entries[0].summary["acquired_start"] is None
 
 
-def test_schema_two_steps_can_fall_back_to_legacy_utc_acquisition(tmp_path):
+def test_schema_two_steps_acquires_only_the_notified_provider_date(tmp_path):
     from personal_data_platform.sources.fitbit.models import Notification
 
     runner, api, factory = direct_setup(tmp_path, states=(None,))
@@ -243,6 +243,34 @@ def test_schema_two_steps_can_fall_back_to_legacy_utc_acquisition(tmp_path):
         acquisition_mode="bounded_steps",
     )
     assert runner.process_notification(notice).ok
-    assert api.calls[0].start <= date - timedelta(hours=18)
-    assert api.calls[-1].end >= date + timedelta(days=1, hours=18)
-    assert all(window.time_basis == "utc" for window in api.calls)
+    assert api.calls == list(notice.windows)
+
+
+def test_bounded_steps_partial_does_not_expand_to_a_day(tmp_path):
+    from personal_data_platform.sources.fitbit.models import Notification
+
+    runner, api, factory = direct_setup(tmp_path, states=(None,))
+    window = Window("steps", NOW - timedelta(minutes=3), NOW - timedelta(minutes=1))
+    assert runner.process_notification(
+        Notification("partial", "self", (window,), NOW, acquisition_mode="bounded_steps")
+    ).ok
+    assert api.calls == [window]
+
+
+def test_bounded_steps_rejects_shortened_acquisition_without_writes(tmp_path):
+    from personal_data_platform.sources.fitbit.models import Notification
+
+    runner, api, factory = direct_setup(tmp_path, states=(None,))
+    window = Window("steps", NOW - timedelta(minutes=3), NOW - timedelta(minutes=1))
+    shorter = Window("steps", window.start, window.end - timedelta(minutes=1))
+    api.fetch_captured = lambda requested, subject_key: CapturedSnapshot(
+        Snapshot(subject_key, shorter, NOW, ()),
+        (),
+    )
+    result = runner.process_notification(
+        Notification("partial", "self", (window,), NOW, acquisition_mode="bounded_steps")
+    )
+    assert not result.ok
+    assert result.deferred_scopes == 1
+    with closing(factory()) as warehouse:
+        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 0

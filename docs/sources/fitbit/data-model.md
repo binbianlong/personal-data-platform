@@ -40,8 +40,12 @@ IDのないサンプルはsubject・種別・時刻/区間から決定的なID�
 全ページ取得済みのcursor範囲だけを置き換え、空結果も反映済み範囲として残す。
 `ops.fitbit_coverage`が全種別の取得順位と現在内容のhashを保持する。
 subject・種別・data source family・aggregation versionごとに範囲を管理する。
-通常記録は`records-v1`、分心拍は`heart-rate-minute-v1`で区別する。
+通常記録のUTC範囲は`records-v1`、歩数の暦日範囲は`records-civil-v1`、
+分心拍は`heart-rate-minute-v1`で区別する。
 順位は`(fetched_at, source_key)`で、新しい範囲を保護し、古い取得は未反映部分だけを更新する。
+歩数は保存行の現地日付とUTC時刻で両方のcoverageを照合する。
+空取得の後に未保存のIDが現れた場合も、古い結果であれば投入しない。
+歩数は範囲hashだけで一致を判断せず、保存する全フィールドを行ごとに比較する。
 
 同一範囲が現在と同じ内容なら分析行の書き換えを省いて取得順位を進め、A→B→Aも反映する。
 睡眠IDの日付移動は子も親ID単位で置換する。`ops.fitbit_deleted_record`に削除済み主レコードIDの順位を残し、

@@ -3,18 +3,20 @@
 ## Google Health API
 
 OAuth refresh tokenからaccess tokenを得て、Google Health v4のreconcileを`google-wearables`指定で呼ぶ。
-Webhook通知と日次の直近7完了日をTokyoの1日・1種別へ分割して取得する。
+日次の直近7完了日はTokyoの1日・1種別へ分割して取得する。
+心拍・歩数の通知は通知された範囲を取得し、その他の通知は日単位で取得する。
 環境変数と長期停止後の期間指定は[運用](operations.md)を参照する。同期checkpointは保存しない。
 
 | data type | フィルターに使う値 | 置換cursor |
 |---|---|---|
-| `steps` | `steps.interval.start_time` | 区間開始のUTC時刻 |
+| `steps` | 部分通知・日次・手動は`steps.interval.start_time`、全日通知は`steps.interval.civil_start_time` | UTC時刻または提供元の日付 |
 | `heart-rate` | `heart_rate.sample_time.physical_time` | サンプルのUTC時刻 |
 | `daily-resting-heart-rate` | `daily_resting_heart_rate.date` | 提供元の日付 |
 | `active-zone-minutes` | `active_zone_minutes.interval.start_time` | 区間開始のUTC時刻 |
 | `sleep` | `sleep.interval.civil_end_time` | 提供元の睡眠終了日付 |
 
-日次・睡眠はcivil date、それ以外はphysical timeで、同じフィールドへの`>=`と`<`による半開区間の全ページを取得する。
+日次指標・睡眠と歩数の全日通知はcivil date、それ以外はphysical timeで、
+同じフィールドへの`>=`と`<`による半開区間の全ページを取得する。
 page sizeは通常10,000、睡眠25。クライアントは心拍を14日、その他を90日に分割するが、APIの最大期間を保証しない。
 1取得は1,000ページ・250,000正規化行・20分まで。超過時は失敗として範囲を狭めて再実行する。
 
@@ -38,6 +40,12 @@ point IDは`dataPointName`/`name`、主睡眠フラグは`mainSleep`/`main`を�
 部分的な発行失敗は503として再送を受ける。再配信は[範囲置換と取得順位](data-model.md#範囲置換と再実行)で処理する。
 
 1 MiBまでのbodyを、1日・1種別の最大1,000単位へ分割する。
+歩数の物理区間がある通知はUTCの半開区間をそのまま取得する。
+小数秒は区間を狭めないよう保存精度のマイクロ秒へ外側に丸める。
+物理区間がない全日通知は通知された現地暦日だけを取得し、UTCの複数日へ広げない。
+どちらもschema 2の`acquisition_mode="bounded_steps"`で、`windows[].time_basis`に
+`utc`または`civil`を指定する。同じ元通知内でも異なる時刻基準の区間は統合しない。
+workerは要求範囲と基準が一致する完全な取得をCOMMITできた場合だけackする。
 物理区間がある心拍通知は元の小数秒精度で区間を検証し、UTCの開始を分境界へ切り下げ、
 終了を切り上げる。元区間は診断ログに残す。別の元通知同士は統合しない。
 Pub/Subのschema 1へ任意の`acquisition_mode="bounded_minutes"`を付けて渡す。
