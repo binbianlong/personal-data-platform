@@ -113,3 +113,11 @@ Fitbitの復旧元はGoogle Health APIであり、Rawは保存しない。
 imageのrollbackはreceiver、workerの順に旧digestへ戻す。schema 1の追加項目を旧workerは無視するため、
 新receiverが発行済みの心拍も従来の日単位取得で処理できる。新workerも旧receiverの通知を受理する。
 各反映でコミット、image digest、対象revisionを記録する。未pushのimage反映は次の通常Deployで上書きされ得る。
+
+歩数のschema 2通知は`acquisition_mode="bounded_steps"`と`windows[].time_basis`を持つ。
+`utc`は物理時刻、`civil`は現地暦日をUTC midnightで表した内部cursorとなる。
+暦日歩数は`steps.interval.civil_start_time`で取得し、保存行のUTC時刻は変えない。
+同じcoverageテーブルの`records-v1`と`records-civil-v1`で双方の取得順位を保護する。
+暦日取得を使用する処理と日次Jobは、この両方を認識するwriterを使用する。
+schema 2を読み取れない旧workerへ戻すと、キュー内の新通知を処理できない。
+互換workerはschema 2の暦日をUTCの保守的包絡へ変換し、従来の日単位処理で再試行できる。

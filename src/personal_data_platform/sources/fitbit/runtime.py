@@ -150,6 +150,8 @@ def run_sync_from_env(
             timeout_seconds=50 * 60,
         )
         payload = json.loads(json.dumps(asdict(result), default=str))
+        if payload["first_incomplete"] is not None:
+            payload["first_incomplete"].pop("time_basis", None)
         warehouse.finish_job(owner, succeeded=result.ok, details={**details, **payload})
         job_started = False
         print(json.dumps(payload, sort_keys=True))

@@ -135,3 +135,99 @@ def test_steps_rollback_restores_rows_deletions_and_coverage(warehouse):
     warehouse.connection.execute("ROLLBACK")
     for table, rows in before.items():
         assert warehouse.query_rows("SELECT * FROM " + table) == rows
+
+
+def civil_snapshot(records, *, day=0, version=1):
+    return Snapshot(
+        "self",
+        Window("steps", AT + timedelta(days=day), AT + timedelta(days=day + 1), time_basis="civil"),
+        AT + timedelta(days=version),
+        tuple(records),
+    )
+
+
+def local_point(identity, minute, value=10, offset=32400):
+    start = AT + timedelta(minutes=minute)
+    return Record(
+        "steps",
+        identity,
+        start,
+        start,
+        start + timedelta(minutes=1),
+        value,
+        offset_seconds=offset,
+        end_offset_seconds=offset,
+        source_date=(start + timedelta(seconds=offset)).date(),
+    )
+
+
+def test_civil_steps_use_source_date_without_changing_utc_storage(warehouse):
+    row = local_point("a", -540)
+    result = apply(warehouse, civil_snapshot([row]))
+    assert result.submitted_rows == 1
+    assert warehouse.query_rows(
+        "SELECT start_at,source_date FROM base.fitbit_activity_interval"
+    ) == [(row.start, AT.date())]
+    assert (
+        warehouse.query_value("SELECT aggregation_version FROM ops.fitbit_coverage")
+        == "records-civil-v1"
+    )
+
+
+def test_civil_empty_prevents_stale_unknown_utc_identity(warehouse):
+    apply(warehouse, civil_snapshot([], version=3))
+    row = local_point("unknown", -539)
+    older = snapshot([row], start=-540, end=-538, version=2)
+    assert apply(warehouse, older).submitted_rows == 0
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
+    assert apply(warehouse, replace(older, fetched_at=AT + timedelta(days=4))).submitted_rows == 1
+
+
+def test_utc_empty_prevents_stale_unknown_civil_identity(warehouse):
+    apply(warehouse, snapshot([], start=-540, end=-538, version=3))
+    row = local_point("unknown", -539)
+    assert apply(warehouse, civil_snapshot([row], version=2)).submitted_rows == 0
+    assert apply(warehouse, civil_snapshot([row], version=4)).submitted_rows == 1
+
+
+def test_civil_confirmation_protects_equal_rows_and_unknown_ids_from_old_utc_result(warehouse):
+    row = local_point("a", -540)
+    apply(warehouse, snapshot([row], start=-540, end=-538))
+    assert apply(warehouse, civil_snapshot([row], version=3)).submitted_rows == 0
+    older = snapshot(
+        [replace(row, value=99), local_point("unknown", -539)], start=-540, end=-538, version=2
+    )
+    assert apply(warehouse, older).submitted_rows == 0
+    assert warehouse.query_rows("SELECT record_id,value FROM base.fitbit_activity_interval") == [
+        ("a", 10.0)
+    ]
+
+
+def test_civil_empty_only_deletes_its_provider_date(warehouse):
+    left = local_point("left", -541)
+    right = local_point("right", -540)
+    apply(warehouse, snapshot([left, right], start=-542, end=-538))
+    assert apply(warehouse, civil_snapshot([], version=2)).submitted_rows == 0
+    assert warehouse.query_rows("SELECT record_id FROM base.fitbit_activity_interval") == [
+        ("left",)
+    ]
+
+
+def test_civil_empty_rejects_ambiguous_stored_dates_without_deleting(warehouse):
+    row = replace(point("a", 0), source_date=None, offset_seconds=None)
+    apply(warehouse, snapshot([row]))
+    with pytest.raises(ValueError, match="civil|date"):
+        apply(warehouse, civil_snapshot([], version=2))
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 1
+
+
+def test_civil_change_invalidates_legacy_utc_hash(warehouse):
+    old = local_point("a", -540)
+    apply(warehouse, snapshot([old], start=-540, end=-538))
+    assert apply(warehouse, civil_snapshot([replace(old, value=20)], version=2)).submitted_rows == 1
+    assert (
+        warehouse.query_value(
+            "SELECT content_sha256 FROM ops.fitbit_coverage WHERE aggregation_version='records-v1'"
+        )
+        == ""
+    )

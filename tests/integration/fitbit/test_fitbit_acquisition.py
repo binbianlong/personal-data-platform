@@ -228,3 +228,21 @@ def test_mismatched_api_snapshot_is_not_logged_as_a_complete_acquisition(tmp_pat
     assert entries[0].status == "failed"
     assert entries[0].summary["fetched_rows"] is None
     assert entries[0].summary["acquired_start"] is None
+
+
+def test_schema_two_steps_can_fall_back_to_legacy_utc_acquisition(tmp_path):
+    from personal_data_platform.sources.fitbit.models import Notification
+
+    runner, api, factory = direct_setup(tmp_path, states=(None,))
+    date = datetime(2026, 10, 1, tzinfo=UTC)
+    notice = Notification(
+        "civil-steps",
+        "self",
+        (Window("steps", date, date + timedelta(days=1), time_basis="civil"),),
+        NOW,
+        acquisition_mode="bounded_steps",
+    )
+    assert runner.process_notification(notice).ok
+    assert api.calls[0].start <= date - timedelta(hours=18)
+    assert api.calls[-1].end >= date + timedelta(days=1, hours=18)
+    assert all(window.time_basis == "utc" for window in api.calls)

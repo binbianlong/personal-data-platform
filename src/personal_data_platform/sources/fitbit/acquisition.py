@@ -160,11 +160,20 @@ class AcquisitionRunner:
         if notification.subject_key != self.subject_key:
             raise ValueError("notification subject does not match configured subject")
         mode = notification.acquisition_mode
-        windows = (
-            notification.windows
-            if mode == "bounded_minutes"
-            else acquisition_windows(notification.windows)
-        )
+        queued = notification.windows
+        if mode == "bounded_steps":
+            queued = tuple(
+                Window(
+                    window.data_type,
+                    window.start - timedelta(hours=18),
+                    window.end + timedelta(hours=18),
+                )
+                if window.time_basis == "civil"
+                else window
+                for window in queued
+            )
+            mode = "legacy"
+        windows = queued if mode == "bounded_minutes" else acquisition_windows(queued)
         if self.paused:
             for window in windows:
                 _log_acquisition(

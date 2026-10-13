@@ -120,3 +120,55 @@ def test_decoder_rejects_invalid_acquisition_mode(mode, kind, start):
     }
     with pytest.raises(ValueError):
         decode_notification(json.dumps(payload).encode())
+
+
+@pytest.mark.parametrize("basis", ["utc", "civil"])
+def test_schema_two_steps_preserve_time_basis(basis):
+    from personal_data_platform.sources.fitbit.notifications import decode_notification
+
+    at = datetime(2026, 10, 1, tzinfo=UTC)
+    notice = Notification(
+        "steps-bounded",
+        "self",
+        (Window("steps", at, at + timedelta(days=1), time_basis=basis),),
+        at + timedelta(days=2),
+        acquisition_mode="bounded_steps",
+    )
+    publisher = Publisher()
+    transport(publisher).publish(notice)
+    payload = publisher.published[0][1]
+    assert json.loads(payload)["schema_version"] == 2
+    assert json.loads(payload)["windows"][0]["time_basis"] == basis
+    assert decode_notification(payload) == notice
+
+
+@pytest.mark.parametrize(
+    "kind,basis,start",
+    [
+        ("heart-rate", "civil", "2026-10-01T00:00:00Z"),
+        ("steps", "invalid", "2026-10-01T00:00:00Z"),
+        ("steps", "civil", "2026-10-01T00:00:01Z"),
+    ],
+)
+def test_schema_two_rejects_invalid_steps_basis(kind, basis, start):
+    from personal_data_platform.sources.fitbit.notifications import decode_notification
+
+    payload = {
+        "schema_version": 2,
+        "notification_id": "bad",
+        "subject_key": "self",
+        "received_at": "2026-10-02T00:00:00Z",
+        "acquisition_mode": "bounded_steps",
+        "windows": [
+            {"data_type": kind, "start": start, "end": "2026-10-02T00:00:00Z", "time_basis": basis}
+        ],
+    }
+    with pytest.raises(ValueError):
+        decode_notification(json.dumps(payload).encode())
+
+
+def test_schema_one_window_shape_remains_unchanged():
+    publisher = Publisher()
+    transport(publisher).publish(notification())
+    window = json.loads(publisher.published[0][1])["windows"][0]
+    assert set(window) == {"data_type", "start", "end"}

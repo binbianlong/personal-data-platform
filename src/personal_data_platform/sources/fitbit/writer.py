@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 from .models import (
+    CIVIL_RECORD_AGGREGATION_VERSION,
     GOOGLE_WEARABLES,
     RECORD_AGGREGATION_VERSION,
     TABLES,
@@ -16,6 +17,7 @@ from .models import (
     Record,
     Snapshot,
     Window,
+    date_cursor,
 )
 
 if TYPE_CHECKING:
@@ -212,7 +214,12 @@ class FitbitBatch:
     ) -> WriteResult:
         snapshot = self.snapshot
         window = snapshot.window
-        scope = coverage_scope(snapshot.subject_key, window.data_type)
+        version = (
+            CIVIL_RECORD_AGGREGATION_VERSION
+            if window.time_basis == "civil"
+            else RECORD_AGGREGATION_VERSION
+        )
+        scope = coverage_scope(snapshot.subject_key, window.data_type, version)
         coverage = _read_coverage(connection, scope, window)
         accepted = _accepted_ranges(snapshot, source_key, coverage)
         if not accepted:
@@ -267,31 +274,47 @@ class FitbitBatch:
         loaded_at: datetime,
     ) -> tuple[set[str], int, bool]:
         snapshot = self.snapshot
+        window = snapshot.window
+        civil = window.time_basis == "civil"
         incoming = {
             record.record_id: record
             for record in snapshot.records
-            if any(start <= record.cursor < end for start, end in accepted)
+            if any(start <= window.record_cursor(record) < end for start, end in accepted)
         }
+        cursor = "timezone('UTC', r.source_date::TIMESTAMP)" if civil else "r.start_at"
         rows = connection.execute(
-            """SELECT r.record_id,r.start_at,r.end_at,r.value,r.offset_seconds,
+            f"""SELECT r.record_id,r.start_at,r.end_at,r.value,r.offset_seconds,
                 r.end_offset_seconds,r.source_date,r.category,r.fetched_at,r.source_key,
                 c.fetched_at,c.source_key
             FROM base.fitbit_activity_interval r LEFT JOIN ops.fitbit_coverage c
               ON c.subject_key=r.subject_key AND c.data_type='steps'
-             AND c.data_source_family=? AND c.aggregation_version=?
-             AND r.start_at >= c.range_start AND r.start_at < c.range_end
+             AND c.data_source_family=? AND (
+                (c.aggregation_version=? AND r.start_at >= c.range_start AND r.start_at < c.range_end)
+                OR (c.aggregation_version=? AND timezone('UTC', r.source_date::TIMESTAMP) >= c.range_start
+                    AND timezone('UTC', r.source_date::TIMESTAMP) < c.range_end))
             WHERE r.subject_key=? AND r.metric='steps' AND
-                ((r.start_at >= ? AND r.start_at < ?)
-                OR r.record_id IN (SELECT unnest(?::VARCHAR[])))""",
+                (({cursor} >= ? AND {cursor} < ?)
+                OR r.record_id IN (SELECT unnest(?::VARCHAR[]))
+                OR (? AND r.source_date IS NULL))""",
             [
                 GOOGLE_WEARABLES,
                 RECORD_AGGREGATION_VERSION,
+                CIVIL_RECORD_AGGREGATION_VERSION,
                 snapshot.subject_key,
                 snapshot.window.start,
                 snapshot.window.end,
                 sorted(incoming),
+                civil,
             ],
         ).fetchall()
+        if civil:
+            for row in rows:
+                if (
+                    row[6] is None
+                    or row[4] is None
+                    or (row[1] + timedelta(seconds=row[4])).date() != row[6]
+                ):
+                    raise ValueError("stored steps have an ambiguous civil date")
         existing = {row[0]: row for row in rows}
         order = snapshot.fetched_at, source_key
         protected = {
@@ -309,12 +332,37 @@ class FitbitBatch:
             ).fetchall()
             if (fetched, key) > order
         )
+        if civil:
+            other_window = Window(
+                "steps", window.start - timedelta(hours=18), window.end + timedelta(hours=18)
+            )
+            other_version = RECORD_AGGREGATION_VERSION
+        else:
+            other_start = date_cursor((window.start - timedelta(hours=18)).date())
+            other_end = date_cursor((window.end + timedelta(hours=18)).date()) + timedelta(days=1)
+            other_window = Window("steps", other_start, other_end, time_basis="civil")
+            other_version = CIVIL_RECORD_AGGREGATION_VERSION
+        other_coverage = _read_coverage(
+            connection, coverage_scope(snapshot.subject_key, "steps", other_version), other_window
+        )
+        for identity, record in incoming.items():
+            if not other_coverage:
+                continue
+            cursor_at = record.cursor if civil else other_window.record_cursor(record)
+            if any(
+                prior.start <= cursor_at < prior.end
+                and (prior.fetched_at, prior.source_key) > order
+                for prior in other_coverage
+            ):
+                protected.add(identity)
         deleted = [
             identity
             for identity, row in existing.items()
             if identity not in incoming
             and identity not in protected
-            and any(start <= row[1] < end for start, end in accepted)
+            and any(
+                start <= (date_cursor(row[6]) if civil else row[1]) < end for start, end in accepted
+            )
         ]
         changed = [
             record
@@ -335,11 +383,11 @@ class FitbitBatch:
             )
         ]
         moved = [
-            existing[record.record_id][1]
-            for record in changed
-            if record.record_id in existing
-            and not any(start <= existing[record.record_id][1] < end for start, end in accepted)
+            existing[record.record_id][1] for record in changed if record.record_id in existing
         ]
+        moved.extend(existing[identity][1] for identity in deleted)
+        if civil:
+            moved.extend(record.start for record in changed)
         if moved:
             connection.execute(
                 f"UPDATE ops.fitbit_coverage SET content_sha256='',source_sha256='' WHERE {_SCOPE} "

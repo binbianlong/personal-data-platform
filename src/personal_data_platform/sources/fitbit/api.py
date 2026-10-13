@@ -164,7 +164,7 @@ def _chunks(window: Window) -> Iterator[Window]:
     start = window.start
     while start < window.end:
         end = min(start + maximum, window.end)
-        yield Window(window.data_type, start, end)
+        yield Window(window.data_type, start, end, time_basis=window.time_basis)
         start = end
 
 
@@ -230,7 +230,7 @@ class HealthClient:
                     except (KeyError, ValueError, TypeError, OverflowError):
                         raise InvalidResponseError("Malformed Google Health data point") from None
                     for record in normalized:
-                        if not chunk.start <= record.cursor < chunk.end:
+                        if not chunk.start <= chunk.record_cursor(record) < chunk.end:
                             raise InvalidResponseError("Google Health point is outside query range")
                         identity = (record.kind, record.record_id)
                         if identity in identities:
@@ -365,8 +365,10 @@ class HealthClient:
 
     def _page(self, window: Window, page_token: str) -> dict[str, object]:
         _, field = _FIELDS[window.data_type]
-        if window.data_type in DATE_TYPES:
+        if window.data_type in DATE_TYPES or window.time_basis == "civil":
             start, end = window.start.date().isoformat(), window.end.date().isoformat()
+            if window.time_basis == "civil":
+                field = "steps.interval.civil_start_time"
         else:
             start, end = _utc_text(window.start), _utc_text(window.end)
         query: dict[str, str | int] = {
