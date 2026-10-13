@@ -115,8 +115,11 @@ def test_changed_step_offsets_are_submitted(warehouse):
     assert warehouse.query_value("SELECT offset_seconds FROM base.fitbit_activity_interval") == 3600
 
 
-def test_steps_rollback_restores_rows_deletions_and_coverage(warehouse):
+@pytest.mark.parametrize("civil", [False, True])
+def test_steps_rollback_restores_rows_deletions_and_coverage(warehouse, civil):
     apply(warehouse, snapshot([point("a", 0), point("b", 1)]))
+    if civil:
+        apply(warehouse, civil_snapshot([point("a", 0), point("b", 1)], version=2))
     before = {
         table: warehouse.query_rows("SELECT * FROM " + table)
         for table in [
@@ -125,7 +128,7 @@ def test_steps_rollback_restores_rows_deletions_and_coverage(warehouse):
             "ops.fitbit_deleted_record",
         ]
     }
-    data = snapshot([point("a", 0, 20)], version=2)
+    data = (civil_snapshot if civil else snapshot)([point("a", 0, 20)], version=3)
     warehouse.connection.execute("BEGIN")
     FitbitBatch(data).write_snapshot(
         warehouse.connection,
@@ -172,6 +175,15 @@ def test_civil_steps_use_source_date_without_changing_utc_storage(warehouse):
         warehouse.query_value("SELECT aggregation_version FROM ops.fitbit_coverage")
         == "records-civil-v1"
     )
+
+
+def test_civil_confirmation_uses_utc_before_offset_in_tokyo_db_session(warehouse):
+    warehouse.connection.execute("SET TimeZone='Asia/Tokyo'")
+    row = local_point("a", 14 * 60)
+    apply(warehouse, snapshot([row]))
+    result = apply(warehouse, civil_snapshot([row], version=2))
+    assert result.submitted_rows == 0
+    assert warehouse.query_value("SELECT start_at FROM base.fitbit_activity_interval") == row.start
 
 
 def test_civil_empty_prevents_stale_unknown_utc_identity(warehouse):
@@ -231,3 +243,23 @@ def test_civil_change_invalidates_legacy_utc_hash(warehouse):
         )
         == ""
     )
+
+
+def test_civil_identity_moves_dates_and_protects_against_older_utc_and_civil(warehouse):
+    row = local_point("a", 14 * 60 + 30)
+    apply(warehouse, snapshot([row]))
+    apply(warehouse, civil_snapshot([row]))
+    moved = replace(
+        row,
+        offset_seconds=36000,
+        end_offset_seconds=36000,
+        source_date=(AT + timedelta(days=1)).date(),
+    )
+    assert apply(warehouse, civil_snapshot([moved], day=1, version=3)).submitted_rows == 1
+    assert apply(warehouse, snapshot([row], version=2)).submitted_rows == 0
+    assert apply(warehouse, civil_snapshot([row], version=2)).submitted_rows == 0
+    assert (
+        warehouse.query_value("SELECT source_date FROM base.fitbit_activity_interval")
+        == moved.source_date
+    )
+    assert apply(warehouse, civil_snapshot([row], version=4)).submitted_rows == 1

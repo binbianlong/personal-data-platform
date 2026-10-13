@@ -17,6 +17,7 @@ from .models import (
     Record,
     Snapshot,
     Window,
+    aware,
     date_cursor,
 )
 
@@ -312,7 +313,7 @@ class FitbitBatch:
                 if (
                     row[6] is None
                     or row[4] is None
-                    or (row[1] + timedelta(seconds=row[4])).date() != row[6]
+                    or (aware(row[1]) + timedelta(seconds=row[4])).date() != row[6]
                 ):
                     raise ValueError("stored steps have an ambiguous civil date")
         existing = {row[0]: row for row in rows}
