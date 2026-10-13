@@ -8,7 +8,7 @@ import hashlib
 import hmac
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -43,10 +43,36 @@ class Verification:
 
 
 @dataclass(frozen=True, slots=True)
+class NotificationInterval:
+    physical_start: str | None
+    physical_end: str | None
+    civil_start: str | None
+    civil_end: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationObservation:
+    data_type: str
+    operation: str
+    record_id: str | None
+    intervals: tuple[NotificationInterval, ...]
+
+    def sha256(self) -> str:
+        fields = asdict(self)
+        fields["intervals"] = sorted(
+            fields["intervals"], key=lambda value: json.dumps(value, sort_keys=True)
+        )
+        return hashlib.sha256(
+            json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedNotification:
     subject_key: str
     windows: tuple[Window, ...]
     groups: tuple[tuple[Window, ...], ...] = ()
+    observations: tuple[NotificationObservation, ...] = ()
 
 
 def split_notifications(
@@ -182,6 +208,26 @@ def _window(kind: str, value: object) -> Window:
     )
 
 
+def _observe_interval(value: object) -> NotificationInterval:
+    interval = object_dict(value)
+    civil = _civil_interval(interval)
+    physical = (
+        object_dict(interval["physicalTimeInterval"])
+        if "physicalTimeInterval" in interval
+        else None
+    )
+    return NotificationInterval(
+        parse_time(string(physical["startTime"])).astimezone(UTC).isoformat()
+        if physical is not None
+        else None,
+        parse_time(string(physical["endTime"])).astimezone(UTC).isoformat()
+        if physical is not None
+        else None,
+        civil[0].isoformat() if civil is not None else None,
+        civil[1].isoformat() if civil is not None else None,
+    )
+
+
 class GoogleHealthAuthenticator:
     def __init__(
         self,
@@ -230,6 +276,7 @@ class GoogleHealthAuthenticator:
             raise PayloadError("webhook requires between one and 99 notifications")
         windows: list[Window] = []
         groups: list[tuple[Window, ...]] = []
+        observations: list[NotificationObservation] = []
         try:
             for notification in notifications:
                 data = object_dict(object_dict(notification)["data"])
@@ -246,8 +293,19 @@ class GoogleHealthAuthenticator:
                 group = merge_windows(tuple(_window(kind, interval) for interval in intervals))
                 groups.append(group)
                 windows.extend(group)
+                record_id = data.get("recordId")
+                observations.append(
+                    NotificationObservation(
+                        kind,
+                        string(data["operation"]),
+                        record_id if isinstance(record_id, str) else None,
+                        tuple(_observe_interval(interval) for interval in intervals),
+                    )
+                )
         except AuthenticationError:
             raise
         except (ValueError, KeyError, TypeError, OverflowError) as error:
             raise PayloadError("invalid notification batch") from error
-        return VerifiedNotification(self._subject, merge_windows(tuple(windows)), tuple(groups))
+        return VerifiedNotification(
+            self._subject, merge_windows(tuple(windows)), tuple(groups), tuple(observations)
+        )

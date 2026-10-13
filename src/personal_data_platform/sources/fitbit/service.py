@@ -7,6 +7,7 @@ import binascii
 import json
 import logging
 import uuid
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -14,7 +15,7 @@ from fastapi import FastAPI, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from .acquisition import AcquisitionRunner
-from .models import Notification
+from .models import Notification, Window
 from .notifications import decode_notification
 from .webhook import (
     AuthenticationError,
@@ -25,6 +26,14 @@ from .webhook import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _queue_range(window: Window) -> dict[str, object]:
+    return {
+        "data_type": window.data_type,
+        "queue_start": window.start.isoformat(),
+        "queue_end": window.end.isoformat(),
+    }
 
 
 async def _body(request: Request) -> bytes:
@@ -63,14 +72,68 @@ def create_pubsub_app(
             if isinstance(payload, Verification):
                 return Response(status_code=201)
             received_at = datetime.now(UTC)
-            work: list[Notification] = []
+            delivery_id = uuid.uuid4().hex
+            work: list[tuple[Notification, str]] = []
+            source_ids: list[str] = []
             for windows in payload.groups or (payload.windows,):
                 notification = Notification(
                     uuid.uuid4().hex, payload.subject_key, windows, received_at
                 )
-                work.extend(split_notifications(notification, max_units=1000 - len(work)))
-            for notification in work:
-                await run_in_threadpool(notifications.publish, notification)
+                source_ids.append(notification.notification_id)
+                work.extend(
+                    (unit, notification.notification_id)
+                    for unit in split_notifications(notification, max_units=1000 - len(work))
+                )
+            for source_id, observation in zip(source_ids, payload.observations):
+                digest = observation.sha256()
+                for index, interval in enumerate(observation.intervals):
+                    LOGGER.info(
+                        "fitbit notification received",
+                        extra={
+                            "event": "fitbit_notification_received",
+                            "status": "received",
+                            "summary": {
+                                "delivery_id": delivery_id,
+                                "source_notification_id": source_id,
+                                "notification_hash": digest,
+                                "received_at": received_at.isoformat(),
+                                "data_type": observation.data_type,
+                                "operation": observation.operation,
+                                "record_id": observation.record_id,
+                                "interval_index": index,
+                                "interval_count": len(observation.intervals),
+                                **asdict(interval),
+                            },
+                        },
+                    )
+            for notification, source_id in work:
+                summary = {
+                    "delivery_id": delivery_id,
+                    "source_notification_id": source_id,
+                    "notification_id": notification.notification_id,
+                    "pubsub_message_id": None,
+                    **_queue_range(notification.windows[0]),
+                }
+                try:
+                    message_id = await run_in_threadpool(notifications.publish, notification)
+                except Exception as error:
+                    LOGGER.error(
+                        "fitbit notification publish result unknown",
+                        extra={
+                            "event": "fitbit_notification_publish",
+                            "status": "unknown",
+                            "summary": {**summary, "error_type": type(error).__name__},
+                        },
+                    )
+                    raise
+                LOGGER.info(
+                    "fitbit notification published",
+                    extra={
+                        "event": "fitbit_notification_publish",
+                        "status": "succeeded",
+                        "summary": {**summary, "pubsub_message_id": message_id},
+                    },
+                )
             return Response(status_code=204)
         except AuthenticationError:
             return Response(status_code=401)
@@ -108,24 +171,42 @@ def create_worker_app(*, runner: AcquisitionRunner, subscription: str) -> FastAP
         except (ValueError, KeyError, TypeError, binascii.Error, PayloadError):
             LOGGER.error("fitbit invalid push notification")
             return Response(status_code=400)
+        started_at = datetime.now(UTC)
+        message_id = message.get("messageId")
+        summary: dict[str, object] = {
+            "notification_id": notification.notification_id,
+            "pubsub_message_id": message_id if isinstance(message_id, str) else None,
+            "attempt_id": uuid.uuid4().hex,
+            "received_at": notification.received_at.isoformat(),
+            "started_at": started_at.isoformat(),
+            **_queue_range(notification.windows[0]),
+        }
         try:
             result = await run_in_threadpool(runner.process_notification, notification)
+            finished_at = datetime.now(UTC)
+            summary.update(
+                {
+                    "finished_at": finished_at.isoformat(),
+                    "completed_scopes": result.completed_scopes,
+                    "failed_scopes": result.failed_scopes,
+                    "deferred_scopes": result.deferred_scopes,
+                }
+            )
             if not result.ok:
                 LOGGER.log(
                     logging.ERROR if result.failed_scopes else logging.INFO,
                     "fitbit push deferred or failed",
-                    extra={"status": "retry"},
+                    extra={"event": "fitbit_push", "status": "retry", "summary": summary},
                 )
                 return Response(status_code=503)
-            committed_at = datetime.now(UTC)
+            committed_at = finished_at
             LOGGER.info(
                 "fitbit push committed",
                 extra={
                     "event": "fitbit_push",
                     "status": "succeeded",
                     "summary": {
-                        "notification_id": notification.notification_id,
-                        "received_at": notification.received_at.isoformat(),
+                        **summary,
                         "committed_at": committed_at.isoformat(),
                         "lag_seconds": (committed_at - notification.received_at).total_seconds(),
                     },
@@ -133,7 +214,22 @@ def create_worker_app(*, runner: AcquisitionRunner, subscription: str) -> FastAP
             )
             return Response(status_code=204)
         except Exception as error:
-            LOGGER.error("fitbit push failed error_type=%s", type(error).__name__)
+            LOGGER.error(
+                "fitbit push failed error_type=%s",
+                type(error).__name__,
+                extra={
+                    "event": "fitbit_push",
+                    "status": "retry",
+                    "summary": {
+                        **summary,
+                        "finished_at": datetime.now(UTC).isoformat(),
+                        "completed_scopes": None,
+                        "failed_scopes": None,
+                        "deferred_scopes": None,
+                        "error_type": type(error).__name__,
+                    },
+                },
+            )
             return Response(status_code=503)
 
     return app

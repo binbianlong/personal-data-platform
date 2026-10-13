@@ -221,3 +221,45 @@ def test_split_rejects_future_only_physical_notification():
                 time("2026-10-01T00:00:00"),
             )
         )
+
+
+def test_notification_observations_preserve_source_intervals_without_private_fields():
+    value = notification("heart-rate")
+    data = value["data"]
+    data["recordId"] = "record-42"
+    data["unknown"] = "private-extra"
+    data["intervals"][0]["physicalTimeInterval"]["startTime"] = "2026-09-26T14:00:20Z"
+    data["intervals"][0]["civilIso8601TimeInterval"]["startTime"] = "2026-09-26T23:00:20"
+    result = authenticate(value)
+    observations = getattr(result, "observations", ())
+    assert len(observations) == 1
+    observation = observations[0]
+    assert observation.data_type == "heart-rate"
+    assert observation.operation == "UPSERT"
+    assert observation.record_id == "record-42"
+    assert observation.intervals[0].physical_start == "2026-09-26T14:00:20+00:00"
+    assert observation.intervals[0].physical_end == "2026-09-26T22:00:00+00:00"
+    assert observation.intervals[0].civil_start == "2026-09-26T23:00:20"
+    assert observation.intervals[0].civil_end == "2026-09-27T07:00:00"
+    assert "health-owner" not in repr(result)
+    assert "private-extra" not in repr(result)
+    assert len(observation.sha256()) == 64
+    data["unknown"] = "different-extra"
+    assert authenticate(value).observations[0].sha256() == observation.sha256()
+
+
+def test_notification_observations_keep_delete_and_civil_only_intervals():
+    value = notification("sleep")
+    data = value["data"]
+    data["operation"] = "DELETE"
+    data["recordId"] = "sleep-42"
+    del data["intervals"][0]["physicalTimeInterval"]
+    result = authenticate(value)
+    observations = getattr(result, "observations", ())
+    assert len(observations) == 1
+    assert observations[0].operation == "DELETE"
+    assert observations[0].record_id == "sleep-42"
+    assert observations[0].intervals[0].physical_start is None
+    assert observations[0].intervals[0].physical_end is None
+    assert observations[0].intervals[0].civil_start == "2026-09-26T23:00:00"
+    assert observations[0].intervals[0].civil_end == "2026-09-27T07:00:00"

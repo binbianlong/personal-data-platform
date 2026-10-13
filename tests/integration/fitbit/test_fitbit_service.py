@@ -72,7 +72,7 @@ def test_receiver_rejects_expansion_before_publishing(groups):
     assert publisher.published == []
 
 
-def test_partial_publish_returns_503_and_retry_preserves_units():
+def test_partial_publish_returns_503_and_retry_preserves_units(caplog):
     from datetime import timedelta
 
     from personal_data_platform.sources.fitbit.service import create_pubsub_app
@@ -97,6 +97,7 @@ def test_partial_publish_returns_503_and_retry_preserves_units():
 
     publisher = Publisher()
     client = TestClient(create_pubsub_app(authenticator=Auth(), notifications=publisher))
+    caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
     assert client.post("/webhooks/fitbit", content="{}").status_code == 503
     assert client.post("/webhooks/fitbit", content="{}").status_code == 204
     assert len(publisher.published) == 5
@@ -108,3 +109,93 @@ def test_partial_publish_returns_503_and_retry_preserves_units():
         Window("steps", start + timedelta(days=1), start + timedelta(days=2)),
         Window("steps", start + timedelta(days=2), start + timedelta(days=3)),
     ]
+    entries = [
+        r for r in caplog.records if getattr(r, "event", None) == "fitbit_notification_publish"
+    ]
+    assert len(entries) == 5
+    assert [r.status for r in entries] == [
+        "succeeded",
+        "unknown",
+        "succeeded",
+        "succeeded",
+        "succeeded",
+    ]
+    assert entries[1].summary["notification_id"] == publisher.published[1].notification_id
+    assert entries[1].summary["pubsub_message_id"] is None
+    assert entries[1].summary["error_type"] == "TimeoutError"
+    assert (
+        entries[0].summary["source_notification_id"] == entries[1].summary["source_notification_id"]
+    )
+    assert (
+        entries[0].summary["source_notification_id"] != entries[2].summary["source_notification_id"]
+    )
+
+
+def test_receiver_logs_source_intervals_and_correlates_repeated_deliveries(caplog):
+    import base64
+    import json
+
+    from personal_data_platform.sources.fitbit.service import create_pubsub_app
+    from personal_data_platform.sources.fitbit.webhook import GoogleHealthAuthenticator
+    from tests.unit.fitbit.test_fitbit_webhook import Signature, notification
+
+    value = notification()
+    value["data"]["unknown"] = "private-extra"
+    value["data"]["intervals"].append(
+        {
+            "physicalTimeInterval": {
+                "startTime": "2026-09-27T00:00:00Z",
+                "endTime": "2026-09-27T00:05:00Z",
+            }
+        }
+    )
+    auth = GoogleHealthAuthenticator(
+        authorization="Bearer secret",
+        health_user_id="health-owner",
+        subject_key="self",
+        signatures=Signature(),
+    )
+
+    class Publisher:
+        def publish(self, notification):
+            return "message-" + notification.notification_id
+
+    client = TestClient(create_pubsub_app(authenticator=auth, notifications=Publisher()))
+    caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
+    for _ in range(2):
+        response = client.post(
+            "/webhooks/fitbit",
+            content=json.dumps(value),
+            headers={
+                "authorization": "Bearer secret",
+                "content-type": "application/json",
+                "google-health-api-signature": base64.b64encode(b"signed").decode(),
+            },
+        )
+        assert response.status_code == 204
+    received = [
+        r.summary
+        for r in caplog.records
+        if getattr(r, "event", None) == "fitbit_notification_received"
+    ]
+    published = [
+        r.summary
+        for r in caplog.records
+        if getattr(r, "event", None) == "fitbit_notification_publish"
+    ]
+    assert len(received) == 4
+    assert received[0]["physical_start"] == "2026-09-26T14:00:00+00:00"
+    assert received[1]["physical_start"] == "2026-09-27T00:00:00+00:00"
+    assert received[0]["civil_start"] == "2026-09-26T23:00:00"
+    assert received[1]["civil_start"] is None
+    assert received[0]["interval_index"] == 0
+    assert received[1]["interval_index"] == 1
+    assert received[0]["interval_count"] == 2
+    assert received[0]["notification_hash"] == received[2]["notification_hash"]
+    assert received[0]["delivery_id"] != received[2]["delivery_id"]
+    assert received[0]["source_notification_id"] != received[2]["source_notification_id"]
+    assert published[0]["source_notification_id"] == received[0]["source_notification_id"]
+    assert published[0]["pubsub_message_id"] == "message-" + published[0]["notification_id"]
+    serialized = json.dumps(received + published)
+    for private in ("health-owner", "Bearer secret", "private-extra"):
+        assert private not in serialized
