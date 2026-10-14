@@ -46,6 +46,11 @@ point IDは`dataPointName`/`name`、主睡眠フラグは`mainSleep`/`main`を�
 どちらもschema 2の`acquisition_mode="bounded_steps"`で、`windows[].time_basis`に
 `utc`または`civil`を指定する。同じ元通知内でも異なる時刻基準の区間は統合しない。
 workerは要求範囲と基準が一致する完全な取得をCOMMITできた場合だけackする。
+同じHTTP受信に歩数の元通知が2件以上ある場合、UTC同士・civil同士の重複や隣接区間を統合する。
+UTCはTokyoの日境界、civilは提供元の日付境界で再分割し、各範囲を個別のschema 2メッセージとして発行する。
+全日通知とUTC部分通知はそれぞれ取得し、異なるHTTP受信や心拍・他種別は統合しない。
+取得範囲ごとに再試行できるため、他の範囲が時間切れになっても完了済みのメッセージは再取得しない。
+待機時間や永続的な統合キューは追加せず、元の最大1,000単位の検証は統合前に行う。
 物理区間がある心拍通知は元の小数秒精度で区間を検証し、UTCの開始を分境界へ切り下げ、
 終了を切り上げる。元区間は診断ログに残す。別の元通知同士は統合しない。
 Pub/Subのschema 1へ任意の`acquisition_mode="bounded_minutes"`を付けて渡す。

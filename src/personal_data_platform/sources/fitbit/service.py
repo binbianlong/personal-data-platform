@@ -22,6 +22,7 @@ from .webhook import (
     GoogleHealthAuthenticator,
     PayloadError,
     Verification,
+    merge_windows,
     split_notifications,
 )
 
@@ -35,6 +36,50 @@ def _queue_range(window: Window) -> dict[str, object]:
         "queue_start": window.start.isoformat(),
         "queue_end": window.end.isoformat(),
     }
+
+
+def _coalesce_steps(
+    work: list[tuple[Notification, str]],
+) -> list[tuple[Notification, tuple[str, ...]]]:
+    """Coalesce this delivery's steps, keeping each scope independently retryable."""
+    steps = [
+        (notice, source) for notice, source in work if notice.acquisition_mode == "bounded_steps"
+    ]
+    if len({source for _, source in steps}) < 2:
+        return [(notice, (source,)) for notice, source in work]
+    first = steps[0][0]
+    merged = Notification(
+        uuid.uuid4().hex,
+        first.subject_key,
+        merge_windows(tuple(notice.windows[0] for notice, _ in steps)),
+        first.received_at,
+        acquisition_mode="bounded_steps",
+    )
+    coalesced = []
+    for unit in split_notifications(merged):
+        window = unit.windows[0]
+        coalesced.append(
+            (
+                unit,
+                tuple(
+                    dict.fromkeys(
+                        source
+                        for notice, source in steps
+                        if notice.windows[0].time_basis == window.time_basis
+                        and notice.windows[0].start < window.end
+                        and window.start < notice.windows[0].end
+                    )
+                ),
+            )
+        )
+    result = []
+    for notice, source in work:
+        if notice.acquisition_mode == "bounded_steps":
+            result.extend(coalesced)
+            coalesced = []
+        else:
+            result.append((notice, (source,)))
+    return result
 
 
 async def _body(request: Request) -> bytes:
@@ -96,6 +141,7 @@ def create_pubsub_app(
                     (unit, notification.notification_id)
                     for unit in split_notifications(notification, max_units=1000 - len(work))
                 )
+            queued_work = _coalesce_steps(work)
             for source_id, observation in zip(source_ids, payload.observations):
                 digest = observation.sha256()
                 for index, interval in enumerate(observation.intervals):
@@ -118,10 +164,13 @@ def create_pubsub_app(
                             },
                         },
                     )
-            for notification, source_id in work:
+            for notification, source_ids_for_message in queued_work:
                 summary = {
                     "delivery_id": delivery_id,
-                    "source_notification_id": source_id,
+                    "source_notification_id": source_ids_for_message[0]
+                    if len(source_ids_for_message) == 1
+                    else None,
+                    "source_notification_ids": list(source_ids_for_message),
                     "notification_id": notification.notification_id,
                     "pubsub_message_id": None,
                     "acquisition_mode": notification.acquisition_mode,

@@ -23,12 +23,15 @@ Cloud Loggingの`pdp-west` bucketに30日保持する。通知の主要項目と
 | event | 内容 |
 | --- | --- |
 | `fitbit_notification_received` | 元の区間ごとのUTC/civil開始・終了、種類、操作、`record_id`、受信時刻、区間番号 |
-| `fitbit_notification_publish` | 分割後のキュー範囲、発行結果、`notification_id`、`pubsub_message_id` |
+| `fitbit_notification_publish` | 統合・分割後のキュー範囲、元通知IDの対応、発行結果、`notification_id`、`pubsub_message_id` |
 | `fitbit_push` | workerの実行結果、時刻、完了・失敗・保留の件数、実行ごとの`attempt_id` |
 | `fitbit_acquisition` | API要求範囲、完了した実取得範囲、取得行数、INSERT投入行数、範囲置換の結果 |
 
 `delivery_id`はHTTP受信ごと、`source_notification_id`は元通知ごとに変わる。
 発行ログの`source_notification_id`で元区間へ、`notification_id`と`pubsub_message_id`でworkerへ結び付ける。
+`source_notification_ids`は、その取得範囲に重なる元通知IDの一覧となる。
+同じHTTP内の歩数通知を統合し、元通知が複数になる場合は単数の`source_notification_id`を`null`とする。
+元通知の区間・操作・削除対象IDは統合前の受信ログに残る。
 `interval_index`は0始まりで、`interval_count`は元通知の区間数。存在しない元区間の表現やIDは`null`となる。
 `notification_hash`は主要項目を正規化したSHA-256で、未知フィールドを含まない。
 同じhashでも同じ区間への別更新の場合があるため、処理を省略する根拠にはしない。
@@ -46,6 +49,7 @@ jsonPayload.summary.data_type="heart-rate"
 
 種類別の同内容通知は`jsonPayload.summary.notification_hash="<hash>"`、
 receiverからworkerまでの追跡は`jsonPayload.summary.notification_id="<id>"`で検索する。
+統合した発行ログは`jsonPayload.summary.source_notification_ids="<source-id>"`で元通知から検索できる。
 再配信は`jsonPayload.summary.pubsub_message_id="<message-id>"`で検索し、実行IDと結果を比較する。
 
 取得結果は`notification_id`と`attempt_id`でworker実行へ結び付ける。日次・手動取得では両IDが`null`となる。
