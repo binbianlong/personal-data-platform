@@ -9,10 +9,11 @@ import logging
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from fastapi import FastAPI, Request, Response
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import JSONResponse
 
 from .acquisition import AcquisitionRunner
 from .models import DATE_TYPES, Notification, Window, parse_time
@@ -27,6 +28,9 @@ from .webhook import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .batch import NotificationDrainer
 
 
 def _queue_range(window: Window) -> dict[str, object]:
@@ -209,13 +213,22 @@ def create_pubsub_app(
     return app
 
 
-def create_worker_app(*, runner: AcquisitionRunner, subscription: str) -> FastAPI:
+def create_worker_app(
+    *, runner: AcquisitionRunner, subscription: str, drainer: NotificationDrainer | None = None
+) -> FastAPI:
     """Cloud Run IAM authenticates the push caller before requests reach this app."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/healthz")
     def health() -> Response:
         return Response(status_code=200)
+
+    @app.post("/notifications/fitbit/drain")
+    async def drain() -> Response:
+        if drainer is None:
+            return Response(status_code=503)
+        result = await run_in_threadpool(drainer.run)
+        return JSONResponse(asdict(result), status_code=200 if result.ok else 503)
 
     @app.post("/notifications/fitbit")
     async def ingest(request: Request) -> Response:

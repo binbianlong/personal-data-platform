@@ -61,17 +61,32 @@ def _acquisition_runner() -> AcquisitionRunner:
 
 
 def run_worker_from_env() -> int:
+    from google.cloud import pubsub_v1
+
+    from .batch import NotificationDrainer
+    from .notifications import ENDPOINT
+
     configure_logging("personal_data_platform.sources.fitbit")
+    runner = _acquisition_runner()
+    subscription = required("PDP_FITBIT_PUBSUB_SUBSCRIPTION")
+    subscriber = pubsub_v1.SubscriberClient(client_options={"api_endpoint": ENDPOINT})
     app = create_worker_app(
-        runner=_acquisition_runner(), subscription=required("PDP_FITBIT_PUBSUB_SUBSCRIPTION")
+        runner=runner,
+        subscription=subscription,
+        drainer=NotificationDrainer(
+            runner=runner, subscriber=subscriber, subscription=subscription
+        ),
     )
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", "8080")),
-        log_level="info",
-        access_log=False,
-    )
+    try:
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=int(os.environ.get("PORT", "8080")),
+            log_level="info",
+            access_log=False,
+        )
+    finally:
+        subscriber.close()
     return 0
 
 

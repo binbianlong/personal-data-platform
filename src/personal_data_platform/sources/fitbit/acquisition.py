@@ -155,11 +155,21 @@ class AcquisitionRunner:
         return seconds
 
     def process_notification(
-        self, notification: Notification, *, attempt_id: str | None = None
+        self,
+        notification: Notification,
+        *,
+        attempt_id: str | None = None,
+        warehouse: Warehouse | None = None,
+        lease_owner: str | None = None,
+        timeout_seconds: int = 480,
     ) -> AcquisitionSummary:
         """Process one push delivery; the HTTP boundary acknowledges confirmed commits."""
         if notification.subject_key != self.subject_key:
             raise ValueError("notification subject does not match configured subject")
+        if (warehouse is None) != (lease_owner is None):
+            raise ValueError("warehouse and lease_owner must be paired")
+        if not 0 < timeout_seconds <= 6000:
+            raise ValueError("invalid acquisition budget")
         mode = notification.acquisition_mode
         windows = (
             notification.windows
@@ -190,7 +200,18 @@ class AcquisitionRunner:
                     acquisition_mode=mode,
                 )
             return AcquisitionSummary(deferred_scopes=len(windows), first_incomplete=windows[0])
-        deadline = self.monotonic() + 480
+        if warehouse is not None and lease_owner is not None:
+            return self.run_windows(
+                windows,
+                warehouse=warehouse,
+                lease_owner=lease_owner,
+                timeout_seconds=timeout_seconds,
+                notification_id=notification.notification_id,
+                attempt_id=attempt_id,
+                acquisition_mode=mode,
+                reserve_seconds=0,
+            )
+        deadline = self.monotonic() + timeout_seconds
         warehouse = self.warehouse_factory()
         owner = uuid.uuid4().hex
         acquired = False
@@ -246,6 +267,7 @@ class AcquisitionRunner:
         notification_id: str | None = None,
         attempt_id: str | None = None,
         acquisition_mode: AcquisitionMode | None = None,
+        reserve_seconds: float = 120,
     ) -> AcquisitionSummary:
         if self.paused:
             for window in windows:
@@ -287,9 +309,11 @@ class AcquisitionRunner:
                 notification_id=notification_id,
                 attempt_id=attempt_id,
                 acquisition_mode=acquisition_mode,
+                reserve_seconds=reserve_seconds,
             )[0]
         finally:
             timer.cancel()
+            timer.join()
             if isinstance(self.client, HealthClient):
                 self.client.request_guard = None
 
@@ -342,13 +366,16 @@ class AcquisitionRunner:
         notification_id: str | None = None,
         attempt_id: str | None = None,
         acquisition_mode: AcquisitionMode | None = None,
+        reserve_seconds: float = 120,
     ) -> tuple[AcquisitionSummary, set[Window]]:
         self._check(warehouse, owner, deadline)
         failed = 0
         completed: set[Window] = set()
         incomplete: set[Window] = set()
         deferred = 0
-        acquisition_deadline = deadline - min(120.0, self._check(warehouse, owner, deadline) / 5)
+        acquisition_deadline = deadline - min(
+            reserve_seconds, self._check(warehouse, owner, deadline) / 5
+        )
         last_fetch_seconds = 0.0
         for index, window in enumerate(windows):
             acquisition: CapturedSnapshot | HeartRateMinuteSnapshot | None = None

@@ -144,3 +144,35 @@ rollbackはreceiverを先に旧digestへ戻し、workerをschema 2対応の互�
 schema 1だけの旧worker・旧Jobへ戻さない。
 心拍のschema 1通知と既存のlegacy通知も受理できる。
 各反映でコミット、image digest、対象revisionを記録する。未pushのimage反映は次の通常Deployで上書きされ得る。
+
+
+## 15分バッチの確認
+
+`fitbit_delivery_mode=pull`ではCloud Scheduler `pdp-fitbit-batch-west`が既存workerの
+`POST /notifications/fitbit/drain`をOIDC認証で起動する。日次補完の対象範囲は変更しない。
+切替と切り戻しは[Runtime Terraform](../../../infra/terraform/README.md#fitbitの配信切替)を参照する。
+
+`fitbit_batch`のsummaryは`received`（pullした件数）、`grouped`（統合後の取得単位）、
+`completed`・`failed`・`deferred`、`acked`（ACK応答を確認した元メッセージ数）、
+`session_opens`、`elapsed_seconds`を持つ。`failed`は不正通知・通信・後始末の失敗も含み、単位件数だけを意味しない。
+元通知の`fitbit_push`は`batch_id`と`group_id`／`group_ids`を持ち、
+取得ログの`notification_id`へ対応する。`attempt_id`はバッチ実行ごとに変わる。
+COMMIT後のACKが不明なら`retry`となるため、`completed`と`acked`は一致しない場合がある。
+ACK ID、通知JSON全体、健康値、資格情報は記録しない。
+
+Logs Explorerでは次を既存の`pdp-west`ログビューで検索する。
+
+```text
+resource.type="cloud_run_revision"
+resource.labels.service_name="pdp-fitbit-worker-west"
+jsonPayload.event="fitbit_batch"
+```
+
+```text
+resource.labels.service_name="pdp-fitbit-worker-west"
+(jsonPayload.summary.batch_id="<batch_id>" OR jsonPayload.summary.attempt_id="<batch_id>")
+```
+
+費用比較は切替前後各72時間のinternet送信bytesと課金対象実行時間を取得し、
+元通知件数・取得件数・投入行数・COMMITまでの遅延と併記する。変更前のrevision別にも分ける。
+Cloud Run・Scheduler等の費用を含めて評価し、SQL呼び出し削減率を転送量削減率とは扱わない。

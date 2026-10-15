@@ -82,3 +82,54 @@ def test_daily_repair_uses_seven_completed_days_without_device_cursor(monkeypatc
         )
     finally:
         warehouse.close()
+
+
+def test_worker_composes_regional_pull_client_and_keeps_push_route(monkeypatch):
+    import time
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+    from google.cloud import pubsub_v1
+
+    from personal_data_platform.sources.fitbit import runtime
+
+    runner = SimpleNamespace(
+        subject_key="self",
+        paused=False,
+        monotonic=time.monotonic,
+        clock=lambda: datetime.now(UTC),
+        warehouse_factory=lambda: pytest.fail("empty queue must not open a database"),
+    )
+    calls = []
+
+    class Subscriber:
+        closed = False
+
+        def pull(self, *, request, retry, timeout):
+            assert request["subscription"] == "projects/test/subscriptions/fitbit"
+            assert retry is None and timeout <= 2
+            return SimpleNamespace(received_messages=[])
+
+        def close(self):
+            self.closed = True
+
+    subscriber = Subscriber()
+
+    def construct(**kwargs):
+        calls.append(kwargs)
+        return subscriber
+
+    monkeypatch.setenv("PDP_FITBIT_PUBSUB_SUBSCRIPTION", "projects/test/subscriptions/fitbit")
+    monkeypatch.setattr(pubsub_v1, "SubscriberClient", construct)
+    monkeypatch.setattr(runtime, "_acquisition_runner", lambda: runner)
+
+    def serve(app, **kwargs):
+        assert "/notifications/fitbit" in {route.path for route in app.routes}
+        response = TestClient(app).post("/notifications/fitbit/drain")
+        assert response.status_code == 200 and response.json()["session_opens"] == 0
+
+    monkeypatch.setattr(runtime.uvicorn, "run", serve)
+    assert runtime.run_worker_from_env() == 0
+    assert calls == [{"client_options": {"api_endpoint": "pubsub.us-west1.rep.googleapis.com"}}]
+    assert subscriber.closed
