@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import replace
+from unittest.mock import Mock
 
 import duckdb
 import pytest
@@ -72,6 +73,41 @@ def test_repeated_migration_preserves_loaded_data_and_ledger(warehouse):
     before = {name: warehouse.query_rows(f"SELECT * FROM {name}") for name in tables}
     warehouse.migrate()
     assert {name: warehouse.query_rows(f"SELECT * FROM {name}") for name in tables} == before
+
+
+def test_fully_applied_migration_only_reads_schema_and_ledger(warehouse):
+    warehouse.migrate()
+    connection = Mock(wraps=warehouse.connection)
+    warehouse.connection = connection
+
+    warehouse.migrate()
+
+    statements = [call.args[0] for call in connection.execute.call_args_list]
+    assert len(statements) == 2
+    assert all(sql.startswith("SELECT ") for sql in statements)
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    [
+        ("checksum", "changed", "applied migration changed"),
+        ("migration_id", "unknown.sql", "unsupported schema history"),
+    ],
+)
+def test_fully_applied_migration_rejects_invalid_history(warehouse, column, value, message):
+    warehouse.migrate()
+    warehouse.connection.execute(
+        f"UPDATE ops.schema_migration SET {column} = ? WHERE migration_id = '001_initial.sql'",
+        [value],
+    )
+    before = warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
+
+    with pytest.raises(RuntimeError, match=message):
+        warehouse.migrate()
+
+    assert (
+        warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id") == before
+    )
 
 
 def test_applied_sql_changes_stop_before_applying_later_migrations(warehouse, tmp_path):
