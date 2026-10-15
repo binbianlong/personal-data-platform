@@ -27,12 +27,12 @@ run "minimum_normal_runtime" {
     error_message = "The daily job must run every stage without ignored scope options."
   }
   assert {
-    condition     = toset(keys(output.runtime_jobs)) == toset(["daily"]) && toset(keys(output.scheduler_jobs)) == toset(["daily"])
-    error_message = "Normal deployment must retain only the combined daily Job and its schedule."
+    condition     = toset(keys(output.runtime_jobs)) == toset(["daily"]) && toset(keys(output.scheduler_jobs)) == toset(["daily", "fitbit_batch"])
+    error_message = "Normal deployment must retain the daily Job and expose its schedule plus the Fitbit batch schedule."
   }
   assert {
-    condition     = alltrue([for job in google_cloud_scheduler_job.west : !job.paused]) && google_monitoring_alert_policy.west_job_failed.enabled && google_monitoring_alert_policy.west_pubsub_backlog.enabled
-    error_message = "Normal operation must enable both schedules and native monitoring by default."
+    condition     = alltrue([for job in google_cloud_scheduler_job.west : !job.paused]) && google_cloud_scheduler_job.fitbit_batch.paused && google_monitoring_alert_policy.west_job_failed.enabled && google_monitoring_alert_policy.west_pubsub_backlog.enabled
+    error_message = "Default push operation must keep the daily schedule and monitoring enabled with batch scheduling paused."
   }
   assert {
     condition     = output.storage_buckets.raw == google_storage_bucket.raw_west.name && output.storage_buckets.preflight == google_storage_bucket.preflight_west.name
@@ -119,8 +119,8 @@ run "runtime_storage_and_execution_contract" {
     error_message = "Active Raw and preflight buckets must be separate and remain in us-west1."
   }
   assert {
-    condition     = length(google_cloud_run_v2_job.west) == 1 && length(google_cloud_scheduler_job.west) == 1 && alltrue([for scheduler in google_cloud_scheduler_job.west : !scheduler.paused && scheduler.region == "us-west1" && scheduler.time_zone == "Asia/Tokyo"])
-    error_message = "Normal operation requires one daily schedule in the configured region and time zone."
+    condition     = length(google_cloud_run_v2_job.west) == 1 && length(output.scheduler_jobs) == 2 && length(google_cloud_scheduler_job.west) == 1 && alltrue([for scheduler in google_cloud_scheduler_job.west : !scheduler.paused && scheduler.region == "us-west1" && scheduler.time_zone == "Asia/Tokyo"]) && google_cloud_scheduler_job.fitbit_batch.region == "us-west1"
+    error_message = "Normal operation requires one daily Job and separate daily and Fitbit batch schedules in the configured region."
   }
   assert {
     condition     = google_cloud_run_v2_job.west["daily"].template[0].template[0].timeout == "6000s" && alltrue([for job in google_cloud_run_v2_job.west : job.location == "us-west1" && job.template[0].task_count == 1 && job.template[0].parallelism == 1 && job.template[0].template[0].containers[0].image == var.west_image_uri])
@@ -199,7 +199,7 @@ run "runtime_storage_and_monitoring_are_separate" {
   }
   variables { west_schedulers_enabled = false }
   assert {
-    condition     = length(google_pubsub_subscription.west.push_config) == 0 && alltrue([for scheduler in google_cloud_scheduler_job.west : scheduler.paused]) && local.runtime_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "true" && !google_monitoring_alert_policy.west_receiver_failure.enabled
+    condition     = length(google_pubsub_subscription.west.push_config) == 0 && alltrue([for scheduler in google_cloud_scheduler_job.west : scheduler.paused]) && google_cloud_scheduler_job.fitbit_batch.paused && local.runtime_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "true" && !google_monitoring_alert_policy.west_receiver_failure.enabled
     error_message = "Pausing schedules must pause Fitbit processing and all native alerts."
   }
   assert {
@@ -231,7 +231,11 @@ run "runtime_pins_and_shared_identity" {
     error_message = "Push and daily processing with one runtime identity and non-overlapping daily schedule are required."
   }
   assert {
-    condition     = google_monitoring_alert_policy.west_job_failed.enabled && google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 900
-    error_message = "Failure and 15-minute backlog policies must be consolidated."
+    condition     = google_monitoring_alert_policy.west_job_failed.enabled && length(google_monitoring_alert_policy.west_pubsub_backlog.conditions) == 2 && google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 2700
+    error_message = "Fitbit must tolerate its batch interval with a separate 45-minute backlog threshold."
+  }
+  assert {
+    condition     = google_monitoring_alert_policy.west_pubsub_backlog.combiner == "OR" && google_monitoring_alert_policy.west_pubsub_backlog.conditions[1].condition_threshold[0].threshold_value == 900 && alltrue([for condition in google_monitoring_alert_policy.west_pubsub_backlog.conditions : condition.condition_threshold[0].duration == "300s"]) && strcontains(google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].filter, "subscription_id = \"pdp-fitbit-west-pull\"") && !strcontains(google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].filter, "pdp-owntracks-west") && strcontains(google_monitoring_alert_policy.west_pubsub_backlog.conditions[1].condition_threshold[0].filter, "subscription_id = \"pdp-owntracks-west-push\"") && !strcontains(google_monitoring_alert_policy.west_pubsub_backlog.conditions[1].condition_threshold[0].filter, "pdp-fitbit-west")
+    error_message = "Backlog monitoring must isolate each queue and retain OwnTracks' 15-minute threshold for five minutes."
   }
 }

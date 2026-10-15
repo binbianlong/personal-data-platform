@@ -24,12 +24,25 @@ resource "google_monitoring_alert_policy" "west_job_failed" {
 resource "google_monitoring_alert_policy" "west_pubsub_backlog" {
   project      = var.project_id
   enabled      = var.west_schedulers_enabled
-  display_name = "PDP west: oldest unacked notification over 15 minutes"
+  display_name = "PDP west: overdue unacked notifications"
   combiner     = "OR"
   conditions {
-    display_name = "Unacked message age exceeds 15 minutes"
+    display_name = "Fitbit unacked message age exceeds 45 minutes"
     condition_threshold {
-      filter          = "resource.type = \"pubsub_subscription\" AND (resource.labels.subscription_id = \"${google_pubsub_subscription.west.name}\" OR resource.labels.subscription_id = \"${google_pubsub_subscription.owntracks.name}\") AND metric.type = \"pubsub.googleapis.com/subscription/oldest_unacked_message_age\""
+      filter          = "resource.type = \"pubsub_subscription\" AND resource.labels.subscription_id = \"${google_pubsub_subscription.west.name}\" AND metric.type = \"pubsub.googleapis.com/subscription/oldest_unacked_message_age\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 2700
+      duration        = "300s"
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MAX"
+      }
+    }
+  }
+  conditions {
+    display_name = "OwnTracks unacked message age exceeds 15 minutes"
+    condition_threshold {
+      filter          = "resource.type = \"pubsub_subscription\" AND resource.labels.subscription_id = \"${google_pubsub_subscription.owntracks.name}\" AND metric.type = \"pubsub.googleapis.com/subscription/oldest_unacked_message_age\""
       comparison      = "COMPARISON_GT"
       threshold_value = 900
       duration        = "300s"
