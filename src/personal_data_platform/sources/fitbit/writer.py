@@ -109,26 +109,51 @@ def _replace_coverage(
     source_digest: str,
 ) -> None:
     # Split empty and nonempty acquisitions alike to protect newer subranges.
+    deleted = []
+    rows = []
     for prior in coverage:
         remaining = [(prior.start, prior.end)]
         for start, end in accepted:
             remaining = _subtract(remaining, start, end)
         if remaining == [(prior.start, prior.end)]:
             continue
-        connection.execute(
-            f"DELETE FROM ops.fitbit_coverage WHERE {_SCOPE} AND range_start=?",
-            [*scope, prior.start],
-        )
+        deleted.append(prior.start)
         for start, end in remaining:
             # A fragment is not a complete acquisition; neither hash is reusable.
-            connection.execute(
-                "INSERT INTO ops.fitbit_coverage VALUES (?,?,?,?,?,?,?,?,?,?)",
-                [*scope, start, end, prior.fetched_at, prior.source_key, "", ""],
+            rows.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "fetched_at": prior.fetched_at,
+                    "source_key": prior.source_key,
+                    "content_sha256": "",
+                    "source_sha256": "",
+                }
             )
-    for start, end in accepted:
+    rows.extend(
+        {
+            "start": start,
+            "end": end,
+            "fetched_at": fetched_at,
+            "source_key": source_key,
+            "content_sha256": digest,
+            "source_sha256": source_digest,
+        }
+        for start, end in accepted
+    )
+    if deleted:
         connection.execute(
-            "INSERT INTO ops.fitbit_coverage VALUES (?,?,?,?,?,?,?,?,?,?)",
-            [*scope, start, end, fetched_at, source_key, digest, source_digest],
+            f"DELETE FROM ops.fitbit_coverage WHERE {_SCOPE} "
+            "AND range_start IN (SELECT unnest(?::TIMESTAMPTZ[]))",
+            [*scope, deleted],
+        )
+    if rows:
+        connection.execute(
+            "INSERT INTO ops.fitbit_coverage "
+            "SELECT ?,?,?,?,r.start::TIMESTAMPTZ,r.end::TIMESTAMPTZ,r.fetched_at::TIMESTAMPTZ,"
+            "r.source_key::VARCHAR,r.content_sha256::VARCHAR,r.source_sha256::VARCHAR "
+            "FROM unnest(?) incoming(r)",
+            [*scope, rows],
         )
 
 

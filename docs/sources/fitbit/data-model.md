@@ -51,6 +51,9 @@ subject・種別・data source family・aggregation versionごとに範囲を管
 睡眠IDの日付移動は子も親ID単位で置換する。`ops.fitbit_deleted_record`に削除済み主レコードIDの順位を残し、
 古い取得による復活を防ぐ。より新しい取得による復帰は許可する。密なサンプルは一括SQLで書く。
 
+coverageの範囲置換は、対象範囲の一括削除と残存断片・受理範囲の一括挿入で最大2回のSQLにまとめる。
+残存断片は元の取得順位を保ち、完全な取得結果ではないため両hashを空にする。
+
 正規化行とcoverageは同じtransactionでcommitする。commit結果が不明な場合は接続を破棄し、次の通知または期間指定同期でAPIから再取得する。
 
 ## 分析ビュー
