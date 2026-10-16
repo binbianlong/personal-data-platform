@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from google.api_core.exceptions import DeadlineExceeded
 
 from personal_data_platform.loader.deadline import interrupt_after
+from personal_data_platform.network_diagnostics import network_phase, network_run
 from personal_data_platform.storage.motherduck import Warehouse
 
 from .acquisition import AcquisitionRunner, acquisition_windows
@@ -203,6 +204,13 @@ class NotificationDrainer:
 
     def run(self) -> BatchSummary:
         """Commit independent groups in one leased session, then ACK their originals."""
+        with network_run("fitbit_batch") as profile:
+            result = self._run()
+            if profile is not None:
+                profile.correlation_id = result.batch_id
+            return result
+
+    def _run(self) -> BatchSummary:
         started = self.runner.monotonic()
         deadline = started + 480
         work_deadline = deadline - 20
@@ -224,13 +232,14 @@ class NotificationDrainer:
             if self.runner.paused:
                 summary.deferred = 1
                 return summary
-            collected = collect_notifications(
-                self.subscriber,
-                self.subscription,
-                subject_key=self.runner.subject_key,
-                deadline=min(started + 10, work_deadline),
-                monotonic=self.runner.monotonic,
-            )
+            with network_phase("pubsub_pull"):
+                collected = collect_notifications(
+                    self.subscriber,
+                    self.subscription,
+                    subject_key=self.runner.subject_key,
+                    deadline=min(started + 10, work_deadline),
+                    monotonic=self.runner.monotonic,
+                )
             messages = collected.messages
             summary.received, summary.failed = collected.received, collected.rejected
             units, incomplete = group_notifications(messages, now=self.runner.clock())
@@ -296,11 +305,12 @@ class NotificationDrainer:
                         summary.failed += 1
                         break
                     try:
-                        self.subscriber.acknowledge(
-                            request={"subscription": self.subscription, "ack_ids": ready},
-                            retry=None,
-                            timeout=min(2.0, remaining_ack),
-                        )
+                        with network_phase("pubsub_ack"):
+                            self.subscriber.acknowledge(
+                                request={"subscription": self.subscription, "ack_ids": ready},
+                                retry=None,
+                                timeout=min(2.0, remaining_ack),
+                            )
                     except Exception as error:
                         summary.failed += 1
                         outcomes.update((ack_id, "failed") for ack_id in ready)

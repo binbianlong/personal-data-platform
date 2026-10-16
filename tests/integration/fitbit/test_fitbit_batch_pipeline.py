@@ -9,6 +9,54 @@ from tests.unit.fitbit.test_fitbit_batch import Subscriber, raw_message
 SUBSCRIPTION = "projects/test/subscriptions/fitbit"
 
 
+def test_network_profile_keeps_commit_ack_and_separates_api_queue_and_db(
+    tmp_path, monkeypatch, capfd
+):
+    import json
+
+    from personal_data_platform import network_diagnostics as net
+
+    monkeypatch.setattr(net.LOGGER, "handlers", [])
+    monkeypatch.setattr(net.LOGGER, "level", net.LOGGER.level)
+    monkeypatch.setattr(net.LOGGER, "propagate", net.LOGGER.propagate)
+    sent = [0]
+    monkeypatch.setenv("PDP_NETWORK_DIAGNOSTICS", "true")
+    monkeypatch.setattr(net, "read_counters", lambda: net.Counters(sent[0], 0, ("eth0",)))
+    runner, api, _ = direct_setup(tmp_path, states=(None,))
+    fetch = api.fetch_captured
+
+    def measured_fetch(*args, **kwargs):
+        sent[0] += 300
+        return fetch(*args, **kwargs)
+
+    api.fetch_captured = measured_fetch
+
+    class MeasuredSubscriber(Subscriber):
+        def pull(self, **kwargs):
+            sent[0] += 50
+            return super().pull(**kwargs)
+
+        def acknowledge(self, **kwargs):
+            sent[0] += 70
+            return super().acknowledge(**kwargs)
+
+    subscriber = MeasuredSubscriber([[raw_message("a")]])
+    result = drainer(runner, subscriber).run()
+    assert result.ok and result.acked == result.completed == 1
+    entries = [json.loads(line) for line in capfd.readouterr().err.splitlines()]
+    summary = next(e["summary"] for e in entries if e.get("event") == "network_profile")
+    assert summary["correlation_id"] == result.batch_id
+    assert summary["workload"] == "fitbit_batch"
+    assert summary["sent_bytes"] == 470
+    phases = {row["phase"]: row for row in summary["phases"]}
+    assert phases["fitbit_api"]["sent_bytes"] == 300
+    assert phases["pubsub_pull"]["sent_bytes"] == 100
+    assert phases["pubsub_ack"]["sent_bytes"] == 70
+    assert phases["lock_check"]["calls"] > 0
+    assert phases["coverage_write"]["calls"] > 0
+    assert "secret-ack" not in json.dumps(summary)
+
+
 def drainer(runner, subscriber):
     from personal_data_platform.sources.fitbit.batch import NotificationDrainer
 

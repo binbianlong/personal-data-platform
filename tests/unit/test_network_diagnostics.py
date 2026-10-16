@@ -6,6 +6,13 @@ import pytest
 from personal_data_platform import network_diagnostics as net
 
 
+@pytest.fixture(autouse=True)
+def isolated_diagnostic_logger(monkeypatch):
+    monkeypatch.setattr(net.LOGGER, "handlers", [])
+    monkeypatch.setattr(net.LOGGER, "level", net.LOGGER.level)
+    monkeypatch.setattr(net.LOGGER, "propagate", net.LOGGER.propagate)
+
+
 class Counter:
     def __init__(self):
         self.sent = 100
@@ -154,3 +161,32 @@ def test_nested_runs_share_outer_profile(counter):
             assert outer is inner
             counter.sent += 8
     assert outer.summary()["sent_bytes"] == 8
+
+
+def test_warehouse_profiles_connect_schema_and_lock_without_changing_results(counter):
+    from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+
+    with net.network_run("test") as profile:
+        warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+        warehouse.migrate()
+        assert warehouse.acquire_job_lock("loader", "owner", lease_seconds=600)
+        warehouse.require_job_lock("owner")
+        warehouse.release_job_lock("loader", "owner")
+        assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+        warehouse.close()
+    phases = {row["phase"] for row in profile.summary()["phases"]}
+    assert {"db_connect", "schema_check", "lock_check", "lock_write", "db_close"} <= phases
+
+
+def test_dbt_run_and_test_have_separate_network_phases(counter, monkeypatch):
+    from personal_data_platform import dbt_runner
+
+    def invoke(arguments):
+        counter.sent += 110 if arguments[0] == "run" else 70
+
+    monkeypatch.setattr(dbt_runner, "_invoke", invoke)
+    with net.network_run("daily") as profile:
+        dbt_runner.run_dbt(target="local")
+    phases = {row["phase"]: row for row in profile.summary()["phases"]}
+    assert phases["dbt_run"]["sent_bytes"] == 110
+    assert phases["dbt_test"]["sent_bytes"] == 70

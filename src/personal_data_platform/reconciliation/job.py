@@ -356,7 +356,10 @@ def _audit_screen_time_heartbeat(
 
 
 def run_reconciliation_from_env() -> int:
-    return _run_daily_reconciliation()
+    from personal_data_platform.network_diagnostics import network_run
+
+    with network_run("daily"):
+        return _run_daily_reconciliation()
 
 
 def _run_daily_reconciliation() -> int:
@@ -364,6 +367,7 @@ def _run_daily_reconciliation() -> int:
     from zoneinfo import ZoneInfo
 
     from personal_data_platform.dbt_runner import run_dbt_from_env
+    from personal_data_platform.network_diagnostics import network_phase
     from personal_data_platform.sources.fitbit.runtime import DAILY_REPAIR_DAYS, run_daily_repair
 
     configure_logging("personal_data_platform.reconciliation")
@@ -423,24 +427,27 @@ def _run_daily_reconciliation() -> int:
                     extra={"event": "fitbit_manual_repair", **gap},
                 )
         stage = "fitbit"
-        repair = run_daily_repair(
-            now=now, warehouse=warehouse, lease_owner=owner, timeout_seconds=remaining()
-        )
+        with network_phase("daily_fitbit"):
+            repair = run_daily_repair(
+                now=now, warehouse=warehouse, lease_owner=owner, timeout_seconds=remaining()
+            )
         if not repair.ok:
             return 1
         stage = "dbt"
-        if run_dbt_from_env(lease_owner=owner, timeout_seconds=remaining()):
-            return 1
+        with network_phase("daily_dbt"):
+            if run_dbt_from_env(lease_owner=owner, timeout_seconds=remaining()):
+                return 1
         stage = "owntracks"
         remaining()
-        owntracks_result = run_reconciliation(
-            owntracks.repository_from_env(),
-            warehouse,
-            source=owntracks,
-            heartbeat=_no_external_heartbeat,
-            _lease_owner=owner,
-            publish_success=False,
-        )
+        with network_phase("daily_owntracks"):
+            owntracks_result = run_reconciliation(
+                owntracks.repository_from_env(),
+                warehouse,
+                source=owntracks,
+                heartbeat=_no_external_heartbeat,
+                _lease_owner=owner,
+                publish_success=False,
+            )
         details["owntracks"] = owntracks_result.details
         if not owntracks_result.ok:
             LOGGER.error("OwnTracks Raw reconciliation failed")
@@ -448,15 +455,16 @@ def _run_daily_reconciliation() -> int:
         for source in sources:
             stage = "audit:" + source.stream
             remaining()
-            health = _audit_screen_time_heartbeat(warehouse, source, datetime.now(UTC))
-            relations = _relation_names(warehouse)
-            if (
-                not health.ok
-                or set(source.required_relations) - relations
-                or _failed_relation_queries(warehouse, relations, source.required_relations)
-            ):
-                LOGGER.error("Screen Time audit failed: %s", source.stream)
-                return 1
+            with network_phase("daily_screen_time"):
+                health = _audit_screen_time_heartbeat(warehouse, source, datetime.now(UTC))
+                relations = _relation_names(warehouse)
+                if (
+                    not health.ok
+                    or set(source.required_relations) - relations
+                    or _failed_relation_queries(warehouse, relations, source.required_relations)
+                ):
+                    LOGGER.error("Screen Time audit failed: %s", source.stream)
+                    return 1
         remaining()
         payload: dict[str, object] = {
             "run_id": owner,

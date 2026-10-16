@@ -100,6 +100,36 @@ FitbitはRawを持たない。別のscratch DBへ`pdp fitbit sync --from ... --t
 
 OwnTracksは無期限のGCS Rawを専用read-only ADCで読む。`pdp rebuild --source owntracks --dry-run`でinventoryを確認し、`pdp rebuild --source owntracks --target-db <scratch-db> --allow-partial-history`で再生する。
 
+## 処理別ネットワーク計測
+
+Fitbit workerと日次Jobは`PDP_NETWORK_DIAGNOSTICS=true`で、一実行につき一つの
+`network_profile` JSONログを出す。通常は無効とし、調査時に対象のruntimeだけで有効にする。
+停止するには環境変数を削除するか`false`へ戻す。権限・DBスキーマ・取得範囲は変更しない。
+
+`summary.sent_bytes`と`received_bytes`は`/proc/net/dev`の非loopbackインターフェースの増分。
+`phases`はDB接続、スキーマ確認、ロック確認・更新、coverage読取・更新、削除履歴、
+既存データ比較、データ書込、BEGIN/COMMIT/ROLLBACK、API、Pub/Subを区別する。
+日次は`daily_fitbit`、`daily_dbt/dbt_run`、`daily_dbt/dbt_test`、
+`daily_owntracks`、`daily_screen_time`の段階も記録する。`/`で区切られた入れ子は
+排他的な計測区間で、親子の通信量を重複計上しない。`calls`は計測区間数でSQL件数ではない。
+Fitbitの`correlation_id`は既存の`batch_id`へ対応する。
+
+これはInternet課金量そのものではない。Google向け通信やバックグラウンド通信を含み、
+非同期送信は後続の区間・`unattributed`へ入る場合がある。実行前のstartupとHTTP応答後の
+通信も含まれないため、Cloud Monitoringの`run.googleapis.com/container/network/sent_bytes_count`
+（`kind=internet`と`google`）と集計範囲を合わせて比較する。受信量をegressへ加算しない。
+SQL・引数・健康値・認証情報は保存しない。カウンタが読めない・巻き戻る・interfaceが変わる場合は
+`valid=false`、送受信量は`null`とし、取り込み処理の成功・失敗は変えない。
+
+```text
+jsonPayload.event="network_profile"
+jsonPayload.summary.workload="fitbit_batch"
+jsonPayload.summary.valid=true
+```
+
+日次は`workload="daily"`で検索する。計測の合計と各phaseを比較し、正常な0 byteと
+計測不能の`null`を区別する。SQL回数の減少率をegress削減率として扱わない。
+
 ## 停止と復旧
 
 push配信と日次Schedulerを止め、実行中worker/Jobとleaseを確認する。

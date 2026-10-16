@@ -12,6 +12,7 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from personal_data_platform.loader.deadline import interrupt_after
+from personal_data_platform.network_diagnostics import network_phase
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConnectionError
 
 from .api import HealthClient
@@ -389,17 +390,18 @@ class AcquisitionRunner:
                     )
                 started = self.monotonic()
                 fetched: CapturedSnapshot | HeartRateMinuteSnapshot
-                if window.data_type == "heart-rate":
-                    if (
-                        min(window.end, self.clock()).replace(second=0, microsecond=0)
-                        <= window.start
-                    ):
-                        raise AcquisitionDeferred("no completed UTC minute")
-                    fetched = self.client.fetch_heart_rate_minutes(
-                        window, subject_key=self.subject_key
-                    )
-                else:
-                    fetched = self.client.fetch_captured(window, subject_key=self.subject_key)
+                with network_phase("fitbit_api"):
+                    if window.data_type == "heart-rate":
+                        if (
+                            min(window.end, self.clock()).replace(second=0, microsecond=0)
+                            <= window.start
+                        ):
+                            raise AcquisitionDeferred("no completed UTC minute")
+                        fetched = self.client.fetch_heart_rate_minutes(
+                            window, subject_key=self.subject_key
+                        )
+                    else:
+                        fetched = self.client.fetch_captured(window, subject_key=self.subject_key)
                 last_fetch_seconds = max(last_fetch_seconds, self.monotonic() - started)
                 if (
                     fetched.subject_key != self.subject_key

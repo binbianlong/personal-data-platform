@@ -397,10 +397,19 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
         "marker",
     ],
 )
-def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, failure):
+@pytest.mark.parametrize("measure_network", [False, True])
+def test_daily_failure_does_not_advance_success_heartbeat(
+    monkeypatch, capfd, failure, measure_network
+):
     from personal_data_platform import dbt_runner
+    from personal_data_platform import network_diagnostics as net
     from personal_data_platform.reconciliation import job
     from personal_data_platform.sources.fitbit import runtime
+
+    monkeypatch.setenv("PDP_NETWORK_DIAGNOSTICS", str(measure_network).lower())
+    monkeypatch.setattr(net.LOGGER, "handlers", [])
+    monkeypatch.setattr(net.LOGGER, "level", net.LOGGER.level)
+    monkeypatch.setattr(net.LOGGER, "propagate", net.LOGGER.propagate)
 
     logger = logging.getLogger("personal_data_platform.reconciliation")
     monkeypatch.setattr(logger, "handlers", [])
@@ -501,6 +510,18 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
                 and entry.get("job_name") == "daily-reconciliation"
                 for entry in entries
             )
+            profiles = [entry for entry in entries if entry.get("event") == "network_profile"]
+            assert len(profiles) == int(measure_network)
+            if measure_network:
+                summary = profiles[0]["summary"]
+                assert summary["workload"] == "daily"
+                names = {row["phase"] for row in summary["phases"]}
+                assert {
+                    "daily_fitbit",
+                    "daily_dbt",
+                    "daily_owntracks",
+                    "daily_screen_time",
+                } <= names
         if failure.startswith("gap"):
             details = json.loads(
                 warehouse.query_value(
