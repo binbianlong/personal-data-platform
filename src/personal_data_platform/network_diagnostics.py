@@ -28,6 +28,7 @@ class Counters:
     sent: int
     received: int
     interfaces: tuple[str, ...]
+    interface_counters: tuple[tuple[str, int, int], ...] = ()
 
 
 def read_counters(path: Path = Path("/proc/net/dev")) -> Counters:
@@ -42,12 +43,13 @@ def read_counters(path: Path = Path("/proc/net/dev")) -> Counters:
         rx, tx = int(fields[0]), int(fields[8])
         if min(rx, tx) < 0:
             raise ValueError("negative network counter")
-        interfaces.append(name)
+        interfaces.append((name, tx, rx))
         sent += tx
         received += rx
     if not interfaces:
         raise ValueError("no non-loopback network interface")
-    return Counters(sent, received, tuple(sorted(interfaces)))
+    counters = tuple(sorted(interfaces))
+    return Counters(sent, received, tuple(name for name, _, _ in counters), counters)
 
 
 @dataclass
@@ -87,6 +89,14 @@ class NetworkProfile:
                     self.valid = False
                     self.invalid_reason = "interfaces_changed"
                 elif current.sent < self._last.sent or current.received < self._last.received:
+                    self.valid = False
+                    self.invalid_reason = "counter_reset"
+                elif any(
+                    sent < previous_sent or received < previous_received
+                    for (_, sent, received), (_, previous_sent, previous_received) in zip(
+                        current.interface_counters, self._last.interface_counters, strict=True
+                    )
+                ):
                     self.valid = False
                     self.invalid_reason = "counter_reset"
                 else:

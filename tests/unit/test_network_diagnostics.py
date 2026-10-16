@@ -41,7 +41,9 @@ def test_network_counter_excludes_loopback_and_uses_transmit_column(tmp_path):
         "eth0: 120 0 0 0 0 0 0 0 45 0 0 0 0 0 0 0\n"
         "eth1: 30 0 0 0 0 0 0 0 5 0 0 0 0 0 0 0\n"
     )
-    assert net.read_counters(path) == net.Counters(50, 150, ("eth0", "eth1"))
+    assert net.read_counters(path) == net.Counters(
+        50, 150, ("eth0", "eth1"), (("eth0", 45, 120), ("eth1", 5, 30))
+    )
 
 
 def test_nested_phases_account_for_each_byte_once(counter):
@@ -61,6 +63,27 @@ def test_nested_phases_account_for_each_byte_once(counter):
     assert phases["outer/inner"]["sent_bytes"] == 20
     assert phases["unattributed"]["sent_bytes"] == 3
     assert sum(row["sent_bytes"] for row in phases.values()) == 38
+
+
+def test_reset_on_one_interface_is_not_hidden_by_growth_on_another(tmp_path, monkeypatch):
+    path = tmp_path / "dev"
+    header = "Inter-| Receive | Transmit\n face |bytes packets\n"
+    path.write_text(
+        header
+        + "eth0: 100 0 0 0 0 0 0 0 100 0 0 0 0 0 0 0\n"
+        + "eth1: 100 0 0 0 0 0 0 0 100 0 0 0 0 0 0 0\n"
+    )
+    reader = net.read_counters
+    monkeypatch.setenv("PDP_NETWORK_DIAGNOSTICS", "true")
+    monkeypatch.setattr(net, "read_counters", lambda: reader(path))
+    with net.network_run("test") as profile:
+        path.write_text(
+            header
+            + "eth0: 100 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
+            + "eth1: 100 0 0 0 0 0 0 0 250 0 0 0 0 0 0 0\n"
+        )
+    assert profile.summary()["valid"] is False
+    assert profile.summary()["sent_bytes"] is None
 
 
 @pytest.mark.parametrize("failure", ["unavailable", "reset", "interfaces_changed"])
