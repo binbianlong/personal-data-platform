@@ -72,7 +72,8 @@ Fitbit workerのleaseは600秒、共通Loaderを使うOwnTracks workerのlease�
 
 ## 監視とLogging
 
-native警報は日次Job失敗、15分を超えたPub/Sub最古未ackが5分継続、receiver/worker ERRORの3件。
+native警報は日次Job失敗、Pub/Sub滞留、receiver/worker ERRORの3件。
+Pub/Sub滞留はFitbitが45分超、OwnTracksが15分超の最古未ackが5分継続した場合に発報する。
 Fitbit workerの成功ログは通知受信時刻・commit時刻・反映までの秒数を含み、Rawやtokenは含めない。
 OwnTracksは`base.owntracks_location`の`received_at`と`loaded_at`から保存後の取込時間を確認する。
 Healthchecksはdaily 1件、Period 24h＋Grace 24h。新しいeventがないことだけを障害とみなさない。

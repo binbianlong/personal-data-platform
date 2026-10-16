@@ -182,7 +182,17 @@ def test_pubsub_and_receiver_access_are_separate() -> None:
     assert re.search(r"retain_acked_messages\s*= false", queue)
     assert 'ttl = ""' in queue
     assert "roles/pubsub.publisher" in queue
-    assert "roles/pubsub.subscriber" not in queue
+    subscriber = queue.split('resource "google_pubsub_subscription_iam_member" "fitbit_worker"', 1)[
+        1
+    ]
+    subscriber = subscriber.split("\n}", 1)[0]
+    assert re.search(r"subscription\s*= google_pubsub_subscription.west.name", subscriber)
+    assert re.search(r'role\s*= "roles/pubsub.subscriber"', subscriber)
+    assert 'member       = "serviceAccount:${google_service_account.west.email}"' in subscriber
+    publisher = queue.split('resource "google_pubsub_topic_iam_member" "west_receiver"', 1)[1]
+    publisher = publisher.split("\n}", 1)[0]
+    assert "roles/pubsub.subscriber" not in publisher
+    assert "google_service_account.west_receiver.email" in publisher
     assert "push_config" in queue
     receiver = runtime.split('resource "google_cloud_run_v2_service" "west"', 1)[1]
     receiver = receiver.split('resource "google_cloud_run_v2_service_iam_member"', 1)[0]
