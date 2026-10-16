@@ -69,6 +69,9 @@ workerは最小0・最大1instance、同時処理1。処理予算480秒、サー
 Fitbit workerのleaseは600秒、共通Loaderを使うOwnTracks workerのleaseは125分である。
 日次Jobは1task/parallelism1、100分の予算、125分のleaseを使う。全処理を単一`loader` leaseで直列化する。
 競合はINFOで延期し、成功pingを送らない。dbt・手動取得・Loaderも同じleaseを使う。
+FitbitはAPIの各HTTP要求前、書き込み開始前、COMMIT前にDB上のleaseを確認する。
+実行予算だけの確認はローカルで行い、同じAPI要求でleaseを二重照会しない。
+取得完了後の予算判定、所有権・期限不足による延期、書き込み途中のROLLBACKは維持する。
 
 ## 監視とLogging
 

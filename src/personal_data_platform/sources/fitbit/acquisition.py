@@ -145,10 +145,14 @@ class AcquisitionRunner:
             monotonic,
         )
 
-    def _check(self, warehouse: Warehouse, owner: str, deadline: float) -> float:
+    def _remaining(self, deadline: float) -> float:
         seconds = deadline - self.monotonic()
         if seconds <= 0:
             raise AcquisitionDeferred("acquisition execution budget exhausted")
+        return seconds
+
+    def _check(self, warehouse: Warehouse, owner: str, deadline: float) -> float:
+        seconds = self._remaining(deadline)
         try:
             warehouse.require_job_lock(owner, remaining_seconds=max(1, int(seconds)))
         except RuntimeError:
@@ -369,19 +373,17 @@ class AcquisitionRunner:
         acquisition_mode: AcquisitionMode | None = None,
         reserve_seconds: float = 120,
     ) -> tuple[AcquisitionSummary, set[Window]]:
-        self._check(warehouse, owner, deadline)
+        remaining = self._remaining(deadline)
         failed = 0
         completed: set[Window] = set()
         incomplete: set[Window] = set()
         deferred = 0
-        acquisition_deadline = deadline - min(
-            reserve_seconds, self._check(warehouse, owner, deadline) / 5
-        )
+        acquisition_deadline = deadline - min(reserve_seconds, remaining / 5)
         last_fetch_seconds = 0.0
         for index, window in enumerate(windows):
             acquisition: CapturedSnapshot | HeartRateMinuteSnapshot | None = None
             try:
-                available = self._check(warehouse, owner, acquisition_deadline)
+                available = self._remaining(acquisition_deadline)
                 if index >= 500 or (completed and available <= last_fetch_seconds):
                     raise AcquisitionDeferred("insufficient acquisition budget")
                 if isinstance(self.client, HealthClient):
@@ -415,7 +417,7 @@ class AcquisitionRunner:
                     and fetched.window != window
                 ):
                     raise AcquisitionDeferred("notified acquisition range is incomplete")
-                self._check(warehouse, owner, acquisition_deadline)
+                self._remaining(acquisition_deadline)
                 result = self._commit_acquisition(warehouse, acquisition, owner, deadline)
                 completed.add(window)
                 _log_acquisition(

@@ -68,6 +68,73 @@ def run_range(runner, factory, windows=(WINDOW,), timeout=100):
                 warehouse.release_job_lock("loader", "manual")
 
 
+@pytest.mark.parametrize("kind", ["steps", "heart-rate"])
+def test_paginated_acquisition_checks_lease_per_request_and_write_boundary(tmp_path, monkeypatch, kind):
+    from tests.unit.fitbit.test_fitbit_api import FakeTransport, client
+
+    runner, _, factory = direct_setup(tmp_path)
+    transport = FakeTransport([{"nextPageToken": "next"}, {}])
+    runner.client = client(transport, clock=lambda: NOW + timedelta(hours=1))
+    window = Window(kind, WINDOW.start, WINDOW.end)
+    with closing(factory()) as warehouse:
+        warehouse.migrate()
+        assert warehouse.acquire_job_lock("loader", "manual", lease_seconds=7500)
+        checks = []
+        require = warehouse.require_job_lock
+
+        def checked(*args, **kwargs):
+            checks.append(kwargs["remaining_seconds"])
+            return require(*args, **kwargs)
+
+        monkeypatch.setattr(warehouse, "require_job_lock", checked)
+        result = runner.run_windows(
+            (window,), warehouse=warehouse, lease_owner="manual", timeout_seconds=100
+        )
+        assert result.ok and result.completed_scopes == 1
+        assert len(transport.calls) == 2
+        assert len(checks) == 4  # Two requests, before BEGIN, before COMMIT.
+        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 1
+        assert runner.client.request_guard is None
+
+
+@pytest.mark.parametrize("loss", ["owner", "expiry"])
+@pytest.mark.parametrize("stage", ["before_api", "before_begin", "before_commit"])
+def test_lease_loss_still_stops_api_or_rolls_back_the_acquisition(tmp_path, monkeypatch, loss, stage):
+    from tests.unit.fitbit.test_fitbit_api import FakeTransport, client
+
+    runner, _, factory = direct_setup(tmp_path)
+    with closing(factory()) as warehouse:
+        warehouse.migrate()
+        assert warehouse.acquire_job_lock("loader", "manual", lease_seconds=7500)
+
+        def lose():
+            if loss == "owner":
+                warehouse.connection.execute("UPDATE ops.job_lock SET owner_id='other'")
+            else:
+                warehouse.connection.execute("UPDATE ops.job_lock SET expires_at=now()")
+
+        if stage == "before_api":
+            lose()
+        transport = FakeTransport([{}], before_request=lose if stage == "before_begin" else None)
+        runner.client = client(transport, clock=lambda: NOW + timedelta(hours=1))
+        if stage == "before_commit":
+            write = FitbitBatch.write_snapshot
+
+            def write_then_lose(*args, **kwargs):
+                result = write(*args, **kwargs)
+                lose()
+                return result
+
+            monkeypatch.setattr(FitbitBatch, "write_snapshot", write_then_lose)
+        result = runner.run_windows(
+            (WINDOW,), warehouse=warehouse, lease_owner="manual", timeout_seconds=100
+        )
+        assert result.deferred_scopes == 1 and result.completed_scopes == 0
+        assert len(transport.calls) == (0 if stage == "before_api" else 1)
+        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 0
+        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
+
+
 def test_direct_acquisition_keeps_unchanged_rows_and_applies_changes_and_empty(tmp_path, caplog):
     runner, api, factory = direct_setup(tmp_path)
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")

@@ -216,8 +216,6 @@ class HealthClient:
                 if page_count >= self._max_pages or time.monotonic() >= deadline:
                     raise InvalidResponseError("Google Health acquisition limit exceeded")
                 page_count += 1
-                if self.request_guard is not None:
-                    self.request_guard()
                 page = self._page(chunk, page_token)
                 pages.append(page)
                 raw_points = page.get("dataPoints", [])
@@ -285,8 +283,6 @@ class HealthClient:
             while True:
                 if len(pages) >= self._max_pages or time.monotonic() >= deadline:
                     raise InvalidResponseError("Google Health acquisition limit exceeded")
-                if self.request_guard is not None:
-                    self.request_guard()
                 page = self._rollup_page(chunk, page_token)
                 pages.append(page)
                 points = page.get("rollupDataPoints", [])
