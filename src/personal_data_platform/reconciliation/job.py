@@ -364,7 +364,7 @@ def _run_daily_reconciliation() -> int:
     from zoneinfo import ZoneInfo
 
     from personal_data_platform.dbt_runner import run_dbt_from_env
-    from personal_data_platform.sources.fitbit.runtime import run_daily_repair
+    from personal_data_platform.sources.fitbit.runtime import DAILY_REPAIR_DAYS, run_daily_repair
 
     configure_logging("personal_data_platform.reconciliation")
     urls = daily_heartbeat_urls()
@@ -411,7 +411,7 @@ def _run_daily_reconciliation() -> int:
         )
         if previous:
             first_missing = date.fromisoformat(str(previous)) + timedelta(days=1)
-            repair_start = target_date - timedelta(days=6)
+            repair_start = target_date - timedelta(days=DAILY_REPAIR_DAYS - 1)
             if first_missing < repair_start:
                 gap = {
                     "from": first_missing.isoformat(),

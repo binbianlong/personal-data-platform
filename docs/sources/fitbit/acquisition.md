@@ -3,7 +3,7 @@
 ## Google Health API
 
 OAuth refresh tokenからaccess tokenを得て、Google Health v4のreconcileを`google-wearables`指定で呼ぶ。
-日次の直近7完了日はTokyoの1日・1種別へ分割して取得する。
+日次はTokyoの2日前00:00から当日00:00（排他）までの直近2完了日を、1日・1種別の計10取得単位へ分割して取得する。
 心拍・歩数の通知は通知された範囲を取得し、その他の通知は日単位で取得する。
 環境変数と長期停止後の期間指定は[運用](operations.md)を参照する。同期checkpointは保存しない。
 

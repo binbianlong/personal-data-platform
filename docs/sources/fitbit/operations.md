@@ -116,16 +116,16 @@ jsonPayload.summary.acquisition_mode="bounded_steps"
 pdp fitbit sync --from YYYY-MM-DD --to YYYY-MM-DD
 ```
 
-7日超の停止や広い期間の補修は明示的な`--from`/`--to`で行う。終了日は排他的で、`--resume-id`は提供しない。
-途中終了時に出る最初の未完了日・種別から再実行し、日次の7日だけで過去の空白を埋めたと判断しない。
+直近2完了日に収まらない空白や広い期間の補修は明示的な`--from`/`--to`で行う。終了日は排他的で、`--resume-id`は提供しない。
+途中終了時に出る最初の未完了日・種別から再実行し、日次の2完了日だけで過去の空白を埋めたと判断しない。
 手動の物理時刻範囲を日全体へ拡大せず、睡眠・日次指標はproviderのcivil dateを使う。
 
 ## 停止と復旧
 
 Schedulerの停止とlease確認は[Platform運用](../../platform/operations.md)に従う。receiverを止めなければ通知は7日保持される。
-通常のAPI・DB失敗はPub/Subの再配信と日次の7日再照合で再試行する。
+通常のAPI・DB失敗はPub/Subの再配信と日次の2完了日再照合で再試行する。
 不正通知は成功応答せず、原因を修正するか、期間指定同期で補修する。
-7日超の停止は空白期間を確認して上記の期間指定取得を行う。
+日次補完の直近2完了日より前の空白は期間を確認して上記の期間指定取得を行う。
 本番DBを空にせず、`MOTHERDUCK_DATABASE`を独立したscratch DBへ向けて期間指定同期とdbtを実行し比較する。
 Fitbitの復旧元はGoogle Health APIであり、Rawは保存しない。
 

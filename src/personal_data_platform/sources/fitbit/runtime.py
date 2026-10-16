@@ -28,6 +28,7 @@ from .webhook import GoogleHealthAuthenticator
 if TYPE_CHECKING:
     from .acquisition import AcquisitionRunner, AcquisitionSummary
 LOGGER = logging.getLogger(__name__)
+DAILY_REPAIR_DAYS = 2
 
 
 def required(name: str) -> str:
@@ -182,7 +183,7 @@ def run_sync_from_env(
 def run_daily_repair(
     *, now: datetime, warehouse: Warehouse, lease_owner: str, timeout_seconds: int
 ) -> AcquisitionSummary:
-    """Verify exactly seven completed days; larger gaps need explicit sync."""
+    """Verify the latest two completed Tokyo days; older gaps need explicit sync."""
     from .acquisition import AcquisitionSummary
 
     configure_logging("personal_data_platform.sources.fitbit")
@@ -192,7 +193,7 @@ def run_daily_repair(
         return AcquisitionSummary(deferred_scopes=1)
     stop = _tokyo_start(now.astimezone(ZoneInfo("Asia/Tokyo")).date())
     return _acquisition_runner().run_windows(
-        sync_windows(stop - timedelta(days=7), stop, DATA_TYPES),
+        sync_windows(stop - timedelta(days=DAILY_REPAIR_DAYS), stop, DATA_TYPES),
         warehouse=warehouse,
         lease_owner=lease_owner,
         timeout_seconds=timeout_seconds,
