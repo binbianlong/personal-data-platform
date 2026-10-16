@@ -20,8 +20,8 @@ Logging変更時は既存_Defaultの除外を`west_logging_exclusions`と`PDP_WE
 ## Fitbitの配信切替
 
 `fitbit_delivery_mode`は`push`（既定）または`pull`。GitHub Deployも`PDP_FITBIT_DELIVERY_MODE`を参照し、未設定時は`push`を使う。
-`pull`では既存subscriptionのpush設定だけを外し、`pdp-fitbit-batch-west`が30分ごと（毎時00・30分）に非公開workerの`/notifications/fitbit/drain`をOIDC認証で呼ぶ。通知は全種類を同じqueueに保持する。
-subscriptionの7日保持・600秒ack deadline、workerの540秒timeout・最大1instance・同時処理1は維持する。未ack通知の警報はFitbitが45分超、OwnTracksが15分超の状態が5分続いた場合に発報する。
+`pull`では既存subscriptionのpush設定だけを外し、`pdp-fitbit-batch-west`が60分ごと（毎時00分）に非公開workerの`/notifications/fitbit/drain`をOIDC認証で呼ぶ。通知は全種類を同じqueueに保持する。
+subscriptionの7日保持・600秒ack deadline、workerの540秒timeout・最大1instance・同時処理1は維持する。未ack通知の警報はFitbitが75分超、OwnTracksが15分超の状態が5分続いた場合に発報する。
 
 切替は`west_schedulers_enabled`を変更せず、次の順で行う。
 

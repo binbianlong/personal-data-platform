@@ -72,8 +72,8 @@ run "pull_batches_existing_subscription" {
     error_message = "Pull mode must retain the existing unfiltered queue with its acknowledgement deadline and seven-day retention."
   }
   assert {
-    condition     = google_cloud_scheduler_job.fitbit_batch.name == "pdp-fitbit-batch-west" && !google_cloud_scheduler_job.fitbit_batch.paused && google_cloud_scheduler_job.fitbit_batch.schedule == "*/30 * * * *" && google_cloud_scheduler_job.fitbit_batch.time_zone == "Asia/Tokyo" && google_cloud_scheduler_job.fitbit_batch.attempt_deadline == "540s" && google_cloud_scheduler_job.fitbit_batch.retry_config[0].retry_count == 0
-    error_message = "Pull delivery needs an active 30-minute Scheduler with bounded execution and no Scheduler retries."
+    condition     = google_cloud_scheduler_job.fitbit_batch.name == "pdp-fitbit-batch-west" && !google_cloud_scheduler_job.fitbit_batch.paused && google_cloud_scheduler_job.fitbit_batch.schedule == "0 * * * *" && google_cloud_scheduler_job.fitbit_batch.time_zone == "Asia/Tokyo" && google_cloud_scheduler_job.fitbit_batch.attempt_deadline == "540s" && google_cloud_scheduler_job.fitbit_batch.retry_config[0].retry_count == 0
+    error_message = "Pull delivery needs an active hourly Scheduler with bounded execution and no Scheduler retries."
   }
   assert {
     condition     = google_cloud_scheduler_job.fitbit_batch.http_target[0].http_method == "POST" && google_cloud_scheduler_job.fitbit_batch.http_target[0].uri == "https://worker.example.run.app/notifications/fitbit/drain" && base64decode(google_cloud_scheduler_job.fitbit_batch.http_target[0].body) == "{}" && google_cloud_scheduler_job.fitbit_batch.http_target[0].headers["Content-Type"] == "application/json" && google_cloud_scheduler_job.fitbit_batch.http_target[0].oidc_token[0].service_account_email == "scheduler@example-project.iam.gserviceaccount.com" && google_cloud_scheduler_job.fitbit_batch.http_target[0].oidc_token[0].audience == "https://worker.example.run.app"

@@ -231,8 +231,8 @@ run "runtime_pins_and_shared_identity" {
     error_message = "Push and daily processing with one runtime identity and non-overlapping daily schedule are required."
   }
   assert {
-    condition     = google_monitoring_alert_policy.west_job_failed.enabled && length(google_monitoring_alert_policy.west_pubsub_backlog.conditions) == 2 && google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 2700
-    error_message = "Fitbit must tolerate its batch interval with a separate 45-minute backlog threshold."
+    condition     = google_monitoring_alert_policy.west_job_failed.enabled && length(google_monitoring_alert_policy.west_pubsub_backlog.conditions) == 2 && google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 4500
+    error_message = "Fitbit must tolerate its hourly batch interval with a separate 75-minute backlog threshold."
   }
   assert {
     condition     = google_monitoring_alert_policy.west_pubsub_backlog.combiner == "OR" && google_monitoring_alert_policy.west_pubsub_backlog.conditions[1].condition_threshold[0].threshold_value == 900 && alltrue([for condition in google_monitoring_alert_policy.west_pubsub_backlog.conditions : condition.condition_threshold[0].duration == "300s"]) && strcontains(google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].filter, "subscription_id = \"pdp-fitbit-west-pull\"") && !strcontains(google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].filter, "pdp-owntracks-west") && strcontains(google_monitoring_alert_policy.west_pubsub_backlog.conditions[1].condition_threshold[0].filter, "subscription_id = \"pdp-owntracks-west-push\"") && !strcontains(google_monitoring_alert_policy.west_pubsub_backlog.conditions[1].condition_threshold[0].filter, "pdp-fitbit-west")

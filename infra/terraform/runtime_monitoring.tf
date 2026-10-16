@@ -27,11 +27,11 @@ resource "google_monitoring_alert_policy" "west_pubsub_backlog" {
   display_name = "PDP west: overdue unacked notifications"
   combiner     = "OR"
   conditions {
-    display_name = "Fitbit unacked message age exceeds 45 minutes"
+    display_name = "Fitbit unacked message age exceeds 75 minutes"
     condition_threshold {
       filter          = "resource.type = \"pubsub_subscription\" AND resource.labels.subscription_id = \"${google_pubsub_subscription.west.name}\" AND metric.type = \"pubsub.googleapis.com/subscription/oldest_unacked_message_age\""
       comparison      = "COMPARISON_GT"
-      threshold_value = 2700
+      threshold_value = 4500
       duration        = "300s"
       aggregations {
         alignment_period   = "60s"

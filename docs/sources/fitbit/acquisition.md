@@ -61,8 +61,8 @@ Pub/Subのschema 1へ任意の`acquisition_mode="bounded_minutes"`を付けて�
 最後のUTC分が未完了ならAPI・DB接続前に503で保留し、分の完了後にPub/Subから再配信を受ける。
 日境界をまたぐ未完了分もキューに残す。APIが要求より短い完了範囲を返した場合は書き込まず再試行する。
 日次・手動取得と、`acquisition_mode`がない既存キュー通知の取得範囲は従来どおりとなる。
-`fitbit_delivery_mode=pull`では全種類を既存Pub/Subへ保持し、30分ごと（毎時00・30分）に非公開workerの
-`/notifications/fitbit/drain`を起動する。通常の追加待機は0〜30分と処理時間で、
+`fitbit_delivery_mode=pull`では全種類を既存Pub/Subへ保持し、60分ごと（毎時00分）に非公開workerの
+`/notifications/fitbit/drain`を起動する。通常の追加待機は0〜60分と処理時間で、
 混雑・失敗・lease競合時は次回以降へ持ち越す。OwnTracks・Screen Timeはこの待機に含めない。
 bounded歩数・心拍は、同じ取得モード・時刻基準・取得日内の重複と隣接範囲を統合する。
 睡眠・安静時心拍とlegacy通知は元の範囲が完全一致する重複だけをまとめる。
