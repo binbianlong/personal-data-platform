@@ -67,7 +67,10 @@ def connect(config: WarehouseConfig) -> DuckDBPyConnection:
     if not config.token:
         raise ValueError("MOTHERDUCK_TOKEN is required for a MotherDuck database")
     with network_phase("db_connect"):
-        return duckdb.connect(f"md:{config.database}", config={"motherduck_token": config.token})
+        return duckdb.connect(
+            f"md:{config.database}",
+            config={"motherduck_token": config.token, "motherduck_attach_mode": "single"},
+        )
 
 
 def _raw_identity(raw: RawObject) -> tuple[str, int, str, str, str, datetime, str]:

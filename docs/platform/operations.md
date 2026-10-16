@@ -15,6 +15,8 @@
 MotherDuckはPulse/Pulse・read scaling 1、分析接続はrestricted read-only share `pdp_analytics`を使う。
 分析アカウントの接続名も`personal_data_platform`にそろえ、view・macro内のDB参照を解決する。
 preflightは独立したbucket・DB・tokenで手動実行し、本番DB/shareを付与しない。
+アプリのMotherDuck接続とdbtのprod接続は`attach_mode=single`で指定DBだけをattachする。
+workspaceの他DBを自動attachせず、ローカルDuckDBへの接続方法は変更しない。
 
 ## Deploy
 
