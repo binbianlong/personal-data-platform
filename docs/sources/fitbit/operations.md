@@ -150,7 +150,7 @@ schema 1だけの旧worker・旧Jobへ戻さない。
 
 `fitbit_delivery_mode=pull`ではCloud Scheduler `pdp-fitbit-batch-west`が既存workerの
 `POST /notifications/fitbit/drain`を毎時00分にOIDC認証で起動する。日次補完は直近2完了日を対象とする。
-通常の追加待機は0〜60分と処理時間。Fitbitの滞留警報は75分超が5分継続した場合に発報する。
+通常の追加待機は0〜60分と処理時間。Fitbitの滞留警報はpullで75分超・pushで15分超が5分継続した場合に発報する。
 30分運用へ戻す場合は、このSchedulerを毎時00・30分、Fitbitの滞留警報を45分超へ戻す。
 切替と切り戻しは[Runtime Terraform](../../../infra/terraform/README.md#fitbitの配信切替)を参照する。
 

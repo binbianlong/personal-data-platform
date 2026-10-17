@@ -78,7 +78,7 @@ FitbitはAPIの各HTTP要求前、書き込み開始前、COMMIT前にDB上のle
 ## 監視とLogging
 
 native警報は日次Job失敗、Pub/Sub滞留、receiver/worker ERRORの3件。
-Pub/Sub滞留はFitbitが75分超、OwnTracksが15分超の最古未ackが5分継続した場合に発報する。
+Pub/Sub滞留はFitbitがpullで75分超・pushで15分超、OwnTracksが15分超の最古未ackが5分継続した場合に発報する。
 Fitbit workerの成功ログは通知受信時刻・commit時刻・反映までの秒数を含み、Rawやtokenは含めない。
 OwnTracksは`base.owntracks_location`の`received_at`と`loaded_at`から保存後の取込時間を確認する。
 Healthchecksはdaily 1件、Period 24h＋Grace 24h。新しいeventがないことだけを障害とみなさない。

@@ -91,6 +91,10 @@ run "pull_batches_existing_subscription" {
     condition     = output.scheduler_jobs.fitbit_batch.name == "pdp-fitbit-batch-west" && output.runtime_resources.fitbit_delivery_mode == "pull" && output.runtime_resources.fitbit_drain_url == "https://worker.example.run.app/notifications/fitbit/drain"
     error_message = "Operators need the active delivery mode, batch schedule, and drain endpoint in runtime outputs."
   }
+  assert {
+    condition     = google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 4500
+    error_message = "Hourly Fitbit batches need a 75-minute backlog threshold."
+  }
 }
 
 run "paused_pull_keeps_queue_and_stops_batch_scheduler" {
