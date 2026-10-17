@@ -145,7 +145,8 @@ def collect_notifications(
             response = subscriber.pull(
                 request={"subscription": subscription, "max_messages": min(100, 1000 - received)},
                 retry=None,
-                timeout=min(2.0, remaining),
+                # Unary Pull can need more than two seconds even with a backlog.
+                timeout=min(10.0, remaining),
             )
         except DeadlineExceeded:
             break

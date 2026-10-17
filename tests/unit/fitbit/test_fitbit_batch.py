@@ -131,7 +131,36 @@ def test_collection_stops_at_message_limit_without_retry_or_ack():
     )
     assert len(collected.messages) == collected.received == 1000
     assert len(subscriber.pulls) == 10 and not subscriber.acks
-    assert all(r[0]["max_messages"] == 100 and r[1] is None and r[2] <= 2 for r in subscriber.pulls)
+    assert all(r[0]["max_messages"] == 100 and r[1] is None and r[2] <= 10 for r in subscriber.pulls)
+
+
+def test_collection_receives_backlog_that_takes_more_than_two_seconds_to_arrive():
+    from google.api_core.exceptions import DeadlineExceeded
+
+    from personal_data_platform.sources.fitbit.batch import collect_notifications
+
+    elapsed = [0.0]
+
+    class DelayedSubscriber(Subscriber):
+        def pull(self, *, request, retry, timeout):
+            from types import SimpleNamespace
+
+            self.pulls.append((request, retry, timeout))
+            wait = 3.0 if len(self.pulls) == 1 else 20.0
+            elapsed[0] += min(wait, timeout)
+            if timeout < wait:
+                raise DeadlineExceeded("secret transport text")
+            return SimpleNamespace(received_messages=[raw_message("delayed")])
+
+    subscriber = DelayedSubscriber()
+    result = collect_notifications(
+        subscriber, "subscription", subject_key="self", deadline=10, monotonic=lambda: elapsed[0]
+    )
+    assert result.received == len(result.messages) == 1
+    assert result.messages[0].message_id == "message-delayed"
+    assert elapsed[0] == 10 and not subscriber.acks
+    assert [call[2] for call in subscriber.pulls] == [10, 7]
+    assert all(call[1] is None for call in subscriber.pulls)
 
 
 def test_collection_rejects_invalid_subject_and_byte_overflow_without_ack():
