@@ -76,6 +76,27 @@ def test_acquisition_pages_use_remaining_job_budget(method, kind):
     assert transport.calls[0][-1] == 0.25
 
 
+@pytest.mark.parametrize(
+    ("method", "kind"),
+    [("fetch_captured", "steps"), ("fetch_heart_rate_minutes", "heart-rate")],
+)
+def test_each_api_page_checks_lease_once_and_uses_its_remaining_budget(method, kind):
+    events = []
+    transport = FakeTransport(
+        [{"nextPageToken": "next"}, {}], before_request=lambda: events.append("request")
+    )
+    health = client(transport, clock=lambda: START + timedelta(days=2))
+
+    def guard():
+        events.append("lease")
+        return 0.25
+
+    health.request_guard = guard
+    getattr(health, method)(Window(kind, START, START + timedelta(days=1)), subject_key="self")
+    assert events == ["lease", "request", "lease", "request"]
+    assert [call[-1] for call in transport.calls] == [0.25, 0.25]
+
+
 def test_unbounded_unique_pagination_stops_without_returning_partial_data():
     from personal_data_platform.sources.fitbit.api import InvalidResponseError
 
@@ -815,3 +836,34 @@ def test_captured_snapshot_preserves_unknown_page_and_point_fields():
         Window("steps", START, START + timedelta(days=1)), subject_key="owner"
     )
     assert result.pages == (page,)
+
+
+def test_civil_steps_query_provider_day_and_keep_physical_storage_cursor():
+    first = steps(start="2026-08-31T15:00:00Z", end="2026-08-31T15:01:00Z")
+    last = steps(start="2026-09-01T14:59:00Z", end="2026-09-01T15:00:00Z")
+    transport = FakeTransport(
+        [{"dataPoints": [first], "nextPageToken": "next"}, {"dataPoints": [last]}]
+    )
+    window = Window("steps", START, START + timedelta(days=1), time_basis="civil")
+    result = client(transport).fetch_captured(window, subject_key="self")
+    assert result.window == window
+    assert [r.source_date for r in result.snapshot.records] == [START.date(), START.date()]
+    assert result.snapshot.records[0].cursor == START - timedelta(hours=9)
+    query = parse_qs(urlsplit(transport.calls[0][1]).query)
+    assert query["filter"] == [
+        'steps.interval.civil_start_time >= "2026-09-01" AND steps.interval.civil_start_time < "2026-09-02"'
+    ]
+    assert parse_qs(urlsplit(transport.calls[1][1]).query)["pageToken"] == ["next"]
+
+
+def test_civil_steps_reject_response_from_another_provider_date():
+    from personal_data_platform.sources.fitbit.api import InvalidResponseError
+
+    transport = FakeTransport(
+        [{"dataPoints": [steps(start="2026-08-31T14:59:00Z", end="2026-08-31T15:00:00Z")]}]
+    )
+    with pytest.raises(InvalidResponseError, match="range"):
+        client(transport).fetch_captured(
+            Window("steps", START, START + timedelta(days=1), time_basis="civil"),
+            subject_key="self",
+        )

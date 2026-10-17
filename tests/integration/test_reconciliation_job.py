@@ -383,12 +383,33 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
 
 @pytest.mark.parametrize(
     "failure",
-    ["fitbit", "dbt", "owntracks", "app-in-focus", "app-usage", "none", "gap", "busy", "marker"],
+    [
+        "fitbit",
+        "dbt",
+        "owntracks",
+        "app-in-focus",
+        "app-usage",
+        "none",
+        "gap",
+        "gap-covered",
+        "gap-edge",
+        "busy",
+        "marker",
+    ],
 )
-def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, failure):
+@pytest.mark.parametrize("measure_network", [False, True])
+def test_daily_failure_does_not_advance_success_heartbeat(
+    monkeypatch, capfd, failure, measure_network
+):
     from personal_data_platform import dbt_runner
+    from personal_data_platform import network_diagnostics as net
     from personal_data_platform.reconciliation import job
     from personal_data_platform.sources.fitbit import runtime
+
+    monkeypatch.setenv("PDP_NETWORK_DIAGNOSTICS", str(measure_network).lower())
+    monkeypatch.setattr(net.LOGGER, "handlers", [])
+    monkeypatch.setattr(net.LOGGER, "level", net.LOGGER.level)
+    monkeypatch.setattr(net.LOGGER, "propagate", net.LOGGER.propagate)
 
     logger = logging.getLogger("personal_data_platform.reconciliation")
     monkeypatch.setattr(logger, "handlers", [])
@@ -452,7 +473,7 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
             raise RuntimeError("marker write failed")
 
         monkeypatch.setattr(warehouse, "publish_heartbeat", broken_marker)
-    if failure == "gap":
+    if failure.startswith("gap"):
 
         class Clock(datetime):
             @classmethod
@@ -462,15 +483,25 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
         monkeypatch.setattr(job, "datetime", Clock)
         warehouse.begin_job("daily-reconciliation-west", "previous")
         warehouse.finish_job(
-            "previous", succeeded=True, details={"last_completed_target_date": "2026-09-01"}
+            "previous",
+            succeeded=True,
+            details={
+                "last_completed_target_date": {
+                    "gap": "2026-09-01",
+                    "gap-covered": "2026-10-03",
+                    "gap-edge": "2026-10-02",
+                }[failure]
+            },
         )
     try:
-        assert job.run_reconciliation_from_env() == int(failure not in ("none", "gap", "busy"))
-        assert len(successes) == (1 if failure in ("none", "gap") else 0)
-        assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == (
-            1 if failure in ("none", "gap") else 0
+        assert job.run_reconciliation_from_env() == int(
+            failure not in ("none", "gap", "gap-covered", "gap-edge", "busy")
         )
-        if failure in ("none", "gap"):
+        assert len(successes) == (1 if failure in ("none", "gap", "gap-covered", "gap-edge") else 0)
+        assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == (
+            1 if failure in ("none", "gap", "gap-covered", "gap-edge") else 0
+        )
+        if failure in ("none", "gap", "gap-covered", "gap-edge"):
             assert phases == ["fitbit", "dbt", "owntracks", "app-in-focus", "app-usage"]
             entries = [json.loads(line) for line in capfd.readouterr().err.splitlines()]
             assert any(
@@ -479,16 +510,35 @@ def test_daily_failure_does_not_advance_success_heartbeat(monkeypatch, capfd, fa
                 and entry.get("job_name") == "daily-reconciliation"
                 for entry in entries
             )
-        if failure == "gap":
+            profiles = [entry for entry in entries if entry.get("event") == "network_profile"]
+            assert len(profiles) == int(measure_network)
+            if measure_network:
+                summary = profiles[0]["summary"]
+                assert summary["workload"] == "daily"
+                names = {row["phase"] for row in summary["phases"]}
+                assert {
+                    "daily_fitbit",
+                    "daily_dbt",
+                    "daily_owntracks",
+                    "daily_screen_time",
+                } <= names
+        if failure.startswith("gap"):
             details = json.loads(
                 warehouse.query_value(
                     "SELECT details FROM ops.job_run WHERE run_id!='previous' AND job_name='daily-reconciliation'"
                 )
             )
-            assert details["manual_repair_required"] == {
-                "from": "2026-09-02",
-                "through": "2026-09-28",
-            }
+            warnings = [entry for entry in entries if entry.get("event") == "fitbit_manual_repair"]
+            if failure == "gap-covered":
+                assert "manual_repair_required" not in details
+                assert warnings == []
+            else:
+                expected_gap = {
+                    "from": "2026-09-02" if failure == "gap" else "2026-10-03",
+                    "through": "2026-10-03",
+                }
+                assert details["manual_repair_required"] == expected_gap
+                assert len(warnings) == 1
             assert details["last_completed_target_date"] == "2026-10-05"
         if failure == "busy":
             assert phases == []

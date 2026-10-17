@@ -8,7 +8,7 @@ import hashlib
 import hmac
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from .models import (
     DATA_TYPES,
     DATE_TYPES,
+    AcquisitionMode,
     Notification,
     Window,
     date_cursor,
@@ -43,10 +44,37 @@ class Verification:
 
 
 @dataclass(frozen=True, slots=True)
+class NotificationInterval:
+    physical_start: str | None
+    physical_end: str | None
+    civil_start: str | None
+    civil_end: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationObservation:
+    data_type: str
+    operation: str
+    record_id: str | None
+    intervals: tuple[NotificationInterval, ...]
+
+    def sha256(self) -> str:
+        fields = asdict(self)
+        fields["intervals"] = sorted(
+            fields["intervals"], key=lambda value: json.dumps(value, sort_keys=True)
+        )
+        return hashlib.sha256(
+            json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedNotification:
     subject_key: str
     windows: tuple[Window, ...]
     groups: tuple[tuple[Window, ...], ...] = ()
+    observations: tuple[NotificationObservation, ...] = ()
+    group_modes: tuple[AcquisitionMode, ...] = ()
 
 
 def split_notifications(
@@ -57,27 +85,35 @@ def split_notifications(
         raise PayloadError("notification expansion exceeds the request limit")
     units: list[Notification] = []
     for window in notification.windows:
-        civil = window.data_type in DATE_TYPES
+        civil = window.data_type in DATE_TYPES or window.time_basis == "civil"
         if not civil and window.start >= notification.received_at:
             raise PayloadError("physical notification is entirely in the future")
         zone = UTC if civil else ZoneInfo("Asia/Tokyo")
         start = window.start
         while start < window.end:
             midnight = start.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
-            if not civil and midnight >= notification.received_at:
+            if (
+                not civil
+                and midnight >= notification.received_at
+                and notification.acquisition_mode == "legacy"
+            ):
                 break
             end = min(window.end, (midnight + timedelta(days=1)).astimezone(UTC))
             if len(units) >= max_units:
                 raise PayloadError("notification expansion exceeds the request limit")
             identity = hashlib.sha256(
-                f"{notification.notification_id}:{window.data_type}:{start.isoformat()}:{end.isoformat()}".encode()
+                (
+                    f"{notification.notification_id}:{window.data_type}:{start.isoformat()}:{end.isoformat()}"
+                    + (":civil" if window.time_basis == "civil" else "")
+                ).encode()
             ).hexdigest()
             units.append(
                 Notification(
                     identity,
                     notification.subject_key,
-                    (Window(window.data_type, start, end),),
+                    (Window(window.data_type, start, end, time_basis=window.time_basis),),
                     notification.received_at,
+                    acquisition_mode=notification.acquisition_mode,
                 )
             )
             start = end
@@ -90,11 +126,23 @@ def merge_windows(windows: tuple[Window, ...]) -> tuple[Window, ...]:
     for kind in DATA_TYPES:
         for window in sorted(
             (window for window in windows if window.data_type == kind),
-            key=lambda window: window.start,
+            key=lambda window: (window.time_basis, window.start),
         ):
-            if merged and merged[-1].data_type == kind and window.start <= merged[-1].end:
+            if (
+                merged
+                and merged[-1].data_type == kind
+                and merged[-1].time_basis == window.time_basis
+                and window.start <= merged[-1].end
+            ):
                 previous = merged.pop()
-                merged.append(Window(kind, previous.start, max(previous.end, window.end)))
+                merged.append(
+                    Window(
+                        kind,
+                        previous.start,
+                        max(previous.end, window.end),
+                        time_basis=window.time_basis,
+                    )
+                )
             else:
                 merged.append(window)
     return tuple(merged)
@@ -148,15 +196,54 @@ def _civil_interval(interval: dict[str, object]) -> tuple[datetime, datetime] | 
     return bounds
 
 
-def _window(kind: str, value: object) -> Window:
+def _physical_timestamp(value: str) -> tuple[datetime, int]:
+    """Keep submicrosecond precision at the notification boundary."""
+    fraction = re.search(r"\.(\d+)", value)
+    extra = 0
+    if fraction is not None:
+        if len(fraction[1]) > 9:
+            raise ValueError("physical time exceeds nanosecond precision")
+        extra = int(fraction[1].ljust(9, "0")[6:])
+    return parse_time(value), extra
+
+
+def _physical_text(value: str) -> str:
+    timestamp, extra = _physical_timestamp(value)
+    if extra:
+        seconds = timestamp.replace(microsecond=0).isoformat().removesuffix("+00:00")
+        return f"{seconds}.{timestamp.microsecond:06d}{extra:03d}+00:00"
+    return timestamp.isoformat()
+
+
+def _window(
+    kind: str, value: object, *, bounded_minutes: bool = False, bounded_steps: bool = False
+) -> Window:
     interval = object_dict(value)
     civil = _civil_interval(interval)
     physical: tuple[datetime, datetime] | None = None
     if "physicalTimeInterval" in interval:
         fields = object_dict(interval["physicalTimeInterval"])
-        physical = (parse_time(string(fields["startTime"])), parse_time(string(fields["endTime"])))
-        if physical[0] >= physical[1]:
-            raise ValueError("physical interval must have a positive range")
+        if bounded_minutes or bounded_steps:
+            physical_start = _physical_timestamp(string(fields["startTime"]))
+            physical_end = _physical_timestamp(string(fields["endTime"]))
+            if physical_start >= physical_end:
+                raise ValueError("physical interval must have a positive range")
+            if bounded_minutes:
+                lower = physical_start[0].replace(second=0, microsecond=0)
+                upper = physical_end[0].replace(second=0, microsecond=0)
+                if physical_end[0] > upper or physical_end[1]:
+                    upper += timedelta(minutes=1)
+            else:
+                lower = physical_start[0]
+                upper = physical_end[0] + timedelta(microseconds=bool(physical_end[1]))
+            physical = lower, upper
+        else:
+            physical = (
+                parse_time(string(fields["startTime"])),
+                parse_time(string(fields["endTime"])),
+            )
+            if physical[0] >= physical[1]:
+                raise ValueError("physical interval must have a positive range")
     if kind in DATE_TYPES:
         if civil is None:
             raise ValueError("date metric requires civil bounds")
@@ -172,6 +259,12 @@ def _window(kind: str, value: object) -> Window:
         return Window(kind, *physical)
     if civil is None:
         raise ValueError("notification has no interval")
+    if bounded_steps:
+        lower = date_cursor(civil[0].date())
+        upper = date_cursor(civil[1].date())
+        if civil[1].time() != datetime.min.time():
+            upper += timedelta(days=1)
+        return Window(kind, lower, upper, time_basis="civil")
     # A full-day notification intentionally omits physical bounds. Without a
     # provider offset, query a conservative UTC envelope covering every legal
     # offset accepted by the source model. The API still returns wearable data.
@@ -179,6 +272,22 @@ def _window(kind: str, value: object) -> Window:
         kind,
         civil[0].replace(tzinfo=UTC) - timedelta(hours=18),
         civil[1].replace(tzinfo=UTC) + timedelta(hours=18),
+    )
+
+
+def _observe_interval(value: object) -> NotificationInterval:
+    interval = object_dict(value)
+    civil = _civil_interval(interval)
+    physical = (
+        object_dict(interval["physicalTimeInterval"])
+        if "physicalTimeInterval" in interval
+        else None
+    )
+    return NotificationInterval(
+        _physical_text(string(physical["startTime"])) if physical is not None else None,
+        _physical_text(string(physical["endTime"])) if physical is not None else None,
+        civil[0].isoformat() if civil is not None else None,
+        civil[1].isoformat() if civil is not None else None,
     )
 
 
@@ -230,6 +339,8 @@ class GoogleHealthAuthenticator:
             raise PayloadError("webhook requires between one and 99 notifications")
         windows: list[Window] = []
         groups: list[tuple[Window, ...]] = []
+        observations: list[NotificationObservation] = []
+        modes: list[AcquisitionMode] = []
         try:
             for notification in notifications:
                 data = object_dict(object_dict(notification)["data"])
@@ -243,11 +354,43 @@ class GoogleHealthAuthenticator:
                 intervals = data["intervals"]
                 if not isinstance(intervals, list) or not intervals:
                     raise ValueError("webhook intervals must be nonempty")
-                group = merge_windows(tuple(_window(kind, interval) for interval in intervals))
+                bounded = kind == "heart-rate" and all(
+                    "physicalTimeInterval" in object_dict(interval) for interval in intervals
+                )
+                group = merge_windows(
+                    tuple(
+                        _window(
+                            kind, interval, bounded_minutes=bounded, bounded_steps=kind == "steps"
+                        )
+                        for interval in intervals
+                    )
+                )
                 groups.append(group)
+                modes.append(
+                    "bounded_steps"
+                    if kind == "steps"
+                    else "bounded_minutes"
+                    if bounded
+                    else "legacy"
+                )
                 windows.extend(group)
+                record_id = data.get("recordId")
+                observations.append(
+                    NotificationObservation(
+                        kind,
+                        string(data["operation"]),
+                        record_id if isinstance(record_id, str) else None,
+                        tuple(_observe_interval(interval) for interval in intervals),
+                    )
+                )
         except AuthenticationError:
             raise
         except (ValueError, KeyError, TypeError, OverflowError) as error:
             raise PayloadError("invalid notification batch") from error
-        return VerifiedNotification(self._subject, merge_windows(tuple(windows)), tuple(groups))
+        return VerifiedNotification(
+            self._subject,
+            merge_windows(tuple(windows)),
+            tuple(groups),
+            tuple(observations),
+            tuple(modes),
+        )

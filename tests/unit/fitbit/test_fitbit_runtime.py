@@ -38,13 +38,42 @@ def test_pubsub_receiver_uses_only_webhook_config(monkeypatch):
     assert "/internal/tasks/fitbit" not in {route.path for route in apps[0].routes}
 
 
-def test_daily_repair_uses_seven_completed_days_without_device_cursor(monkeypatch):
-    from datetime import UTC, datetime
+@pytest.mark.parametrize(
+    ("now", "physical_start", "physical_end", "civil_start", "civil_end"),
+    [
+        (
+            "2026-10-12T12:00:00Z",
+            "2026-10-09T15:00:00Z",
+            "2026-10-11T15:00:00Z",
+            "2026-10-10T00:00:00Z",
+            "2026-10-12T00:00:00Z",
+        ),
+        (
+            "2026-10-12T14:59:59Z",
+            "2026-10-09T15:00:00Z",
+            "2026-10-11T15:00:00Z",
+            "2026-10-10T00:00:00Z",
+            "2026-10-12T00:00:00Z",
+        ),
+        (
+            "2026-10-12T15:00:00Z",
+            "2026-10-10T15:00:00Z",
+            "2026-10-12T15:00:00Z",
+            "2026-10-11T00:00:00Z",
+            "2026-10-13T00:00:00Z",
+        ),
+    ],
+)
+def test_daily_repair_uses_two_completed_tokyo_days_without_device_cursor(
+    monkeypatch, now, physical_start, physical_end, civil_start, civil_end
+):
+    from datetime import datetime
 
     import duckdb
 
     from personal_data_platform.sources.fitbit import runtime
     from personal_data_platform.sources.fitbit.acquisition import AcquisitionSummary
+    from personal_data_platform.sources.fitbit.models import DATE_TYPES
     from personal_data_platform.storage.motherduck import Warehouse
 
     warehouse = Warehouse(duckdb.connect())
@@ -57,22 +86,28 @@ def test_daily_repair_uses_seven_completed_days_without_device_cursor(monkeypatc
 
         def run_windows(self, windows, **kwargs):
             calls.append((windows, kwargs))
-            return AcquisitionSummary(completed_scopes=35)
+            return AcquisitionSummary(completed_scopes=10)
 
     monkeypatch.setattr(runtime, "_acquisition_runner", lambda: Runner())
     monkeypatch.delenv("PDP_FITBIT_PROCESSING_PAUSED", raising=False)
     try:
         result = runtime.run_daily_repair(
-            now=datetime(2026, 10, 12, 12, tzinfo=UTC),
+            now=datetime.fromisoformat(now),
             warehouse=warehouse,
             lease_owner="daily",
             timeout_seconds=100,
         )
         assert result.ok and len(calls) == 1
         windows, kwargs = calls[0]
-        steps = next(w for w in windows if w.data_type == "steps")
-        assert steps.start == datetime(2026, 10, 4, 15, tzinfo=UTC)
-        assert steps.end == datetime(2026, 10, 11, 15, tzinfo=UTC)
+        assert len(windows) == 5
+        for window in windows:
+            start, end = (
+                (civil_start, civil_end)
+                if window.data_type in DATE_TYPES
+                else (physical_start, physical_end)
+            )
+            assert window.start == datetime.fromisoformat(start)
+            assert window.end == datetime.fromisoformat(end)
         assert kwargs["warehouse"] is warehouse and kwargs["lease_owner"] == "daily"
         assert (
             warehouse.query_value(
@@ -82,3 +117,54 @@ def test_daily_repair_uses_seven_completed_days_without_device_cursor(monkeypatc
         )
     finally:
         warehouse.close()
+
+
+def test_worker_composes_regional_pull_client_and_keeps_push_route(monkeypatch):
+    import time
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+    from google.cloud import pubsub_v1
+
+    from personal_data_platform.sources.fitbit import runtime
+
+    runner = SimpleNamespace(
+        subject_key="self",
+        paused=False,
+        monotonic=time.monotonic,
+        clock=lambda: datetime.now(UTC),
+        warehouse_factory=lambda: pytest.fail("empty queue must not open a database"),
+    )
+    calls = []
+
+    class Subscriber:
+        closed = False
+
+        def pull(self, *, request, retry, timeout):
+            assert request["subscription"] == "projects/test/subscriptions/fitbit"
+            assert retry is None and 0 < timeout <= 10
+            return SimpleNamespace(received_messages=[])
+
+        def close(self):
+            self.closed = True
+
+    subscriber = Subscriber()
+
+    def construct(**kwargs):
+        calls.append(kwargs)
+        return subscriber
+
+    monkeypatch.setenv("PDP_FITBIT_PUBSUB_SUBSCRIPTION", "projects/test/subscriptions/fitbit")
+    monkeypatch.setattr(pubsub_v1, "SubscriberClient", construct)
+    monkeypatch.setattr(runtime, "_acquisition_runner", lambda: runner)
+
+    def serve(app, **kwargs):
+        assert "/notifications/fitbit" in {route.path for route in app.routes}
+        response = TestClient(app).post("/notifications/fitbit/drain")
+        assert response.status_code == 200 and response.json()["session_opens"] == 0
+
+    monkeypatch.setattr(runtime.uvicorn, "run", serve)
+    assert runtime.run_worker_from_env() == 0
+    assert calls == [{"client_options": {"api_endpoint": "pubsub.us-west1.rep.googleapis.com"}}]
+    assert subscriber.closed

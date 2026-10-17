@@ -42,10 +42,11 @@ def apply(warehouse, data):
 
     warehouse.connection.execute("BEGIN")
     try:
-        FitbitBatch(data).write_snapshot(
+        result = FitbitBatch(data).write_snapshot(
             warehouse.connection, source_key=str(data.fetched_at), loaded_at=data.fetched_at
         )
         warehouse.connection.execute("COMMIT")
+        return result
     except Exception:
         warehouse.connection.execute("ROLLBACK")
         raise
@@ -87,7 +88,13 @@ def test_newer_middle_range_preserves_both_sides_of_an_older_snapshot(warehouse)
     middle = snapshot(20, hour=8, end_hour=16, version=3)
     right = snapshot(30, hour=16, version=2)
     apply(warehouse, middle)
-    apply(warehouse, replace(left, records=left.records + right.records))
+    result = apply(warehouse, replace(left, records=left.records + right.records))
+    assert result is not None
+    assert result.submitted_rows == 2
+    assert result.accepted_ranges == (
+        (left.window.start, middle.window.start),
+        (middle.window.end, left.window.end),
+    )
 
     assert warehouse.query_rows(
         "SELECT record_id, value FROM base.fitbit_activity_interval ORDER BY start_at"
@@ -162,10 +169,14 @@ def sleep_snapshot(day, version, *, child="stage", origin="api"):
 
 @pytest.mark.parametrize("stale_child", ["old", "stale"])
 def test_moving_sleep_session_replaces_its_children_across_date_ranges(warehouse, stale_child):
-    apply(warehouse, sleep_snapshot(1, 1, child="old"))
+    result = apply(warehouse, sleep_snapshot(1, 1, child="old"))
+    assert result is not None
+    assert result.submitted_rows == 2
     apply(warehouse, sleep_snapshot(2, 3, child="new"))
     assert warehouse.query_rows("select record_id from base.fitbit_sleep_detail") == [("new",)]
-    apply(warehouse, sleep_snapshot(1, 2, child=stale_child))
+    result = apply(warehouse, sleep_snapshot(1, 2, child=stale_child))
+    assert result.submitted_rows == 0
+    assert result.protected_records == 1
     assert warehouse.query_rows("select record_id from base.fitbit_sleep_detail") == [("new",)]
     # Returning to an earlier date/content is a real update, not a cached no-op.
     apply(warehouse, sleep_snapshot(1, 4, child="old"))
@@ -232,3 +243,210 @@ def test_changed_dense_day_uses_bounded_sql_statements(warehouse):
     )
     assert warehouse.query_value("select max(value) from base.fitbit_activity_interval") == 61
     assert len(statements) < 20
+
+
+def test_writer_reports_unchanged_empty_and_fully_stale_ranges(warehouse):
+    first = apply(warehouse, snapshot(10, version=1))
+    assert first is not None
+    assert first.outcome == "range_replaced"
+    assert first.submitted_rows == 1
+    unchanged = apply(warehouse, snapshot(10, version=2))
+    assert unchanged.outcome == "unchanged"
+    assert unchanged.submitted_rows == 0
+    empty = apply(warehouse, snapshot(None, version=3))
+    assert empty.outcome == "range_replaced"
+    assert empty.submitted_rows == 0
+    stale = apply(warehouse, snapshot(30, version=1))
+    assert stale.outcome == "stale"
+    assert stale.submitted_rows == 0
+    assert stale.accepted_ranges == ()
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
+
+
+def test_minute_writer_reports_counts_and_stale_ranges(warehouse):
+    from personal_data_platform.sources.fitbit.models import (
+        HeartRateMinute,
+        HeartRateMinuteSnapshot,
+        Window,
+    )
+    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+
+    at = datetime(2026, 9, 1, tzinfo=UTC)
+    scope = Window("heart-rate", at, at + timedelta(minutes=2))
+    rows = (HeartRateMinute(at, at + timedelta(minutes=1), 60, 50, 70),)
+
+    def write(version, values=rows, window=scope):
+        data = HeartRateMinuteSnapshot("self", window, at + timedelta(hours=version), values, ())
+        return FitbitMinuteBatch(data).write_snapshot(
+            warehouse.connection, source_key=str(version), loaded_at=data.fetched_at
+        )
+
+    first = write(1)
+    assert first is not None
+    assert first.submitted_rows == 1
+    assert write(2).outcome == "unchanged"
+    middle = Window("heart-rate", at + timedelta(minutes=1), scope.end)
+    write(4, (), middle)
+    partial = write(3)
+    assert partial.submitted_rows == 1
+    assert partial.accepted_ranges == ((at, middle.start),)
+    assert write(1).outcome == "stale"
+    empty = write(5, ())
+    assert empty.outcome == "range_replaced"
+    assert empty.submitted_rows == 0
+
+
+class CoverageConnection:
+    def __init__(self, connection):
+        self.connection = connection
+        self.mutations = []
+
+    def execute(self, sql, parameters):
+        if sql.startswith(("DELETE FROM ops.fitbit_coverage", "INSERT INTO ops.fitbit_coverage")):
+            self.mutations.append(sql)
+        return self.connection.execute(sql, parameters)
+
+
+def test_fragmented_coverage_uses_two_mutations_and_preserves_scopes_and_hashes(warehouse):
+    from personal_data_platform.sources.fitbit.writer import _Coverage, _replace_coverage
+
+    warehouse.connection.execute("SET TimeZone='Asia/Tokyo'")
+    at = datetime.fromisoformat("2026-09-01T09:00:00.123456+09:00")
+    scope = ("self", "steps", "users/me/dataSourceFamilies/google-wearables", "records-v1")
+    old = at + timedelta(days=1)
+    new = at + timedelta(days=2, microseconds=7)
+    coverage = [
+        _Coverage(at + timedelta(hours=i), at + timedelta(hours=i + 8), old, f"old-{i}", "c", "s")
+        for i in (0, 8, 16)
+    ]
+    other_scopes = [
+        ("other", *scope[1:]),
+        (scope[0], "sleep", *scope[2:]),
+        (*scope[:2], "other-family", scope[3]),
+        (*scope[:3], "records-civil-v1"),
+    ]
+    for row in coverage:
+        warehouse.connection.execute(
+            "INSERT INTO ops.fitbit_coverage VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [*scope, row.start, row.end, old, row.source_key, "c", "s"],
+        )
+    for other in other_scopes:
+        warehouse.connection.execute(
+            "INSERT INTO ops.fitbit_coverage VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [*other, at, at + timedelta(days=1), old, "other", "c", "s"],
+        )
+    accepted = [(at + timedelta(hours=i), at + timedelta(hours=i + 1)) for i in (2, 5, 10, 13)]
+    connection = CoverageConnection(warehouse.connection)
+    _replace_coverage(
+        connection,
+        scope,
+        coverage,
+        accepted,
+        fetched_at=new,
+        source_key="new",
+        digest="new-content",
+        source_digest="new-source",
+    )
+    assert len(connection.mutations) == 2
+    assert warehouse.query_rows(
+        "SELECT range_start,range_end,fetched_at,source_key,content_sha256,source_sha256 "
+        "FROM ops.fitbit_coverage WHERE subject_key=? AND data_type=? "
+        "AND data_source_family=? AND aggregation_version=? ORDER BY range_start",
+        list(scope),
+    ) == [
+        (at, at + timedelta(hours=2), old, "old-0", "", ""),
+        (at + timedelta(hours=2), at + timedelta(hours=3), new, "new", "new-content", "new-source"),
+        (at + timedelta(hours=3), at + timedelta(hours=5), old, "old-0", "", ""),
+        (at + timedelta(hours=5), at + timedelta(hours=6), new, "new", "new-content", "new-source"),
+        (at + timedelta(hours=6), at + timedelta(hours=8), old, "old-0", "", ""),
+        (at + timedelta(hours=8), at + timedelta(hours=10), old, "old-8", "", ""),
+        (
+            at + timedelta(hours=10),
+            at + timedelta(hours=11),
+            new,
+            "new",
+            "new-content",
+            "new-source",
+        ),
+        (at + timedelta(hours=11), at + timedelta(hours=13), old, "old-8", "", ""),
+        (
+            at + timedelta(hours=13),
+            at + timedelta(hours=14),
+            new,
+            "new",
+            "new-content",
+            "new-source",
+        ),
+        (at + timedelta(hours=14), at + timedelta(hours=16), old, "old-8", "", ""),
+        (at + timedelta(hours=16), at + timedelta(hours=24), old, "old-16", "c", "s"),
+    ]
+    assert warehouse.query_rows(
+        "SELECT subject_key,data_type,data_source_family,aggregation_version,"
+        "range_start,range_end,fetched_at,source_key,content_sha256,source_sha256 "
+        "FROM ops.fitbit_coverage WHERE source_key='other' ORDER BY 1,2,3,4"
+    ) == sorted(
+        [(*other, at, at + timedelta(days=1), old, "other", "c", "s") for other in other_scopes]
+    )
+
+
+def test_new_and_stale_snapshots_use_one_and_zero_coverage_mutations(warehouse):
+    from personal_data_platform.sources.fitbit.writer import FitbitBatch
+
+    connection = CoverageConnection(warehouse.connection)
+    data = snapshot(None, version=2)
+    result = FitbitBatch(data).write_snapshot(
+        connection, source_key="new", loaded_at=data.fetched_at
+    )
+    assert result.outcome == "range_replaced"
+    assert result.submitted_rows == 0
+    assert result.accepted_ranges == ((data.window.start, data.window.end),)
+    assert len(connection.mutations) == 1
+    connection.mutations.clear()
+    older = snapshot(10, version=1)
+    result = FitbitBatch(older).write_snapshot(
+        connection, source_key="old", loaded_at=older.fetched_at
+    )
+    assert result.outcome == "stale"
+    assert result.submitted_rows == 0
+    assert result.accepted_ranges == ()
+    assert connection.mutations == []
+
+
+def test_failed_coverage_insert_rolls_back_bulk_delete_and_record_changes(warehouse):
+    from personal_data_platform.sources.fitbit.writer import FitbitBatch
+
+    for hour in (0, 8, 16):
+        apply(warehouse, snapshot(hour + 1, hour=hour, end_hour=hour + 8))
+    before = {
+        table: warehouse.query_rows(f"SELECT * FROM {table} ORDER BY 1,2,3")
+        for table in (
+            "base.fitbit_activity_interval",
+            "ops.fitbit_coverage",
+            "ops.fitbit_deleted_record",
+        )
+    }
+    remaining = []
+
+    class FailingConnection(CoverageConnection):
+        def execute(self, sql, parameters):
+            if sql.startswith("INSERT INTO ops.fitbit_coverage"):
+                remaining.append(warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage"))
+                raise duckdb.ConstraintException("coverage insert failed")
+            return super().execute(sql, parameters)
+
+    data = snapshot(None, hour=4, end_hour=20, version=2)
+    warehouse.connection.execute("BEGIN")
+    try:
+        with pytest.raises(duckdb.ConstraintException, match="coverage insert failed"):
+            FitbitBatch(data).write_snapshot(
+                FailingConnection(warehouse.connection),
+                source_key="empty",
+                loaded_at=data.fetched_at,
+            )
+        assert remaining == [0]
+        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 1
+        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_deleted_record") == 2
+    finally:
+        warehouse.connection.execute("ROLLBACK")
+    for table, rows in before.items():
+        assert warehouse.query_rows(f"SELECT * FROM {table} ORDER BY 1,2,3") == rows

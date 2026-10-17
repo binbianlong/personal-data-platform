@@ -53,7 +53,9 @@ def apply_migrations(connection: DuckDBPyConnection, migrations: Path | None = N
         raise ValueError(f"no migrations found: {migrations}")
     prepared = [(path, path.read_text(encoding="utf-8")) for path in paths]
     checksums = {path.name: hashlib.sha256(sql.encode()).hexdigest() for path, sql in prepared}
-    _read_applied(connection, checksums)
+    applied = _read_applied(connection, checksums)
+    if applied.keys() == checksums.keys():
+        return
     connection.execute("CREATE SCHEMA IF NOT EXISTS ops")
     connection.execute(
         """CREATE TABLE IF NOT EXISTS ops.schema_migration (

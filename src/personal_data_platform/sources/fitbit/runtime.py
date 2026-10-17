@@ -28,6 +28,7 @@ from .webhook import GoogleHealthAuthenticator
 if TYPE_CHECKING:
     from .acquisition import AcquisitionRunner, AcquisitionSummary
 LOGGER = logging.getLogger(__name__)
+DAILY_REPAIR_DAYS = 2
 
 
 def required(name: str) -> str:
@@ -61,17 +62,32 @@ def _acquisition_runner() -> AcquisitionRunner:
 
 
 def run_worker_from_env() -> int:
+    from google.cloud import pubsub_v1
+
+    from .batch import NotificationDrainer
+    from .notifications import ENDPOINT
+
     configure_logging("personal_data_platform.sources.fitbit")
+    runner = _acquisition_runner()
+    subscription = required("PDP_FITBIT_PUBSUB_SUBSCRIPTION")
+    subscriber = pubsub_v1.SubscriberClient(client_options={"api_endpoint": ENDPOINT})
     app = create_worker_app(
-        runner=_acquisition_runner(), subscription=required("PDP_FITBIT_PUBSUB_SUBSCRIPTION")
+        runner=runner,
+        subscription=subscription,
+        drainer=NotificationDrainer(
+            runner=runner, subscriber=subscriber, subscription=subscription
+        ),
     )
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", "8080")),
-        log_level="info",
-        access_log=False,
-    )
+    try:
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=int(os.environ.get("PORT", "8080")),
+            log_level="info",
+            access_log=False,
+        )
+    finally:
+        subscriber.close()
     return 0
 
 
@@ -150,6 +166,8 @@ def run_sync_from_env(
             timeout_seconds=50 * 60,
         )
         payload = json.loads(json.dumps(asdict(result), default=str))
+        if payload["first_incomplete"] is not None:
+            payload["first_incomplete"].pop("time_basis", None)
         warehouse.finish_job(owner, succeeded=result.ok, details={**details, **payload})
         job_started = False
         print(json.dumps(payload, sort_keys=True))
@@ -165,7 +183,7 @@ def run_sync_from_env(
 def run_daily_repair(
     *, now: datetime, warehouse: Warehouse, lease_owner: str, timeout_seconds: int
 ) -> AcquisitionSummary:
-    """Verify exactly seven completed days; larger gaps need explicit sync."""
+    """Verify the latest two completed Tokyo days; older gaps need explicit sync."""
     from .acquisition import AcquisitionSummary
 
     configure_logging("personal_data_platform.sources.fitbit")
@@ -175,7 +193,7 @@ def run_daily_repair(
         return AcquisitionSummary(deferred_scopes=1)
     stop = _tokyo_start(now.astimezone(ZoneInfo("Asia/Tokyo")).date())
     return _acquisition_runner().run_windows(
-        sync_windows(stop - timedelta(days=7), stop, DATA_TYPES),
+        sync_windows(stop - timedelta(days=DAILY_REPAIR_DAYS), stop, DATA_TYPES),
         warehouse=warehouse,
         lease_owner=lease_owner,
         timeout_seconds=timeout_seconds,

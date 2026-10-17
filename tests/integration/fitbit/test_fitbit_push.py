@@ -28,9 +28,10 @@ def push_client(runner):
     return TestClient(create_worker_app(runner=runner, subscription=SUBSCRIPTION))
 
 
-def test_push_commits_before_success_and_redelivery_does_not_duplicate(tmp_path):
+def test_push_commits_before_success_and_redelivery_does_not_duplicate(tmp_path, caplog):
     runner, api, factory = direct_setup(tmp_path)
     client = push_client(runner)
+    caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
     for _ in range(2):
         assert client.post("/notifications/fitbit", json=envelope()).status_code == 204
         with closing(factory()) as warehouse:
@@ -41,12 +42,29 @@ def test_push_commits_before_success_and_redelivery_does_not_duplicate(tmp_path)
             assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 0
             assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     assert api.calls == [WINDOW, WINDOW]
+    entries = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_push"]
+    assert len(entries) == 2
+    assert (
+        entries[0].summary["pubsub_message_id"]
+        == entries[1].summary["pubsub_message_id"]
+        == "message"
+    )
+    assert entries[0].summary["attempt_id"] != entries[1].summary["attempt_id"]
+    assert entries[0].summary["completed_scopes"] == 1
+    assert entries[0].summary["failed_scopes"] == 0
+    assert entries[0].summary["deferred_scopes"] == 0
+    scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
+    assert len(scopes) == 2
+    assert scopes[0].summary["notification_id"] == "notice"
+    assert scopes[0].summary["attempt_id"] == entries[0].summary["attempt_id"]
+    assert scopes[1].summary["attempt_id"] == entries[1].summary["attempt_id"]
 
 
-def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monkeypatch):
+def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monkeypatch, caplog):
     runner, api, factory = direct_setup(tmp_path, states=(10, 20))
     client = push_client(runner)
     assert client.post("/notifications/fitbit", json=envelope()).status_code == 204
+    caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
     fetch = api.fetch_captured
     monkeypatch.setattr(
         api,
@@ -54,6 +72,11 @@ def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monke
         lambda *a, **kw: (_ for _ in ()).throw(TimeoutError("API unavailable")),
     )
     assert client.post("/notifications/fitbit", json=envelope()).status_code == 503
+    scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
+    assert len(scopes) == 1
+    assert scopes[0].status == "failed"
+    assert scopes[0].summary["fetched_rows"] is None
+    assert scopes[0].summary["submitted_rows"] is None
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 10
     monkeypatch.setattr(api, "fetch_captured", fetch)
@@ -62,14 +85,20 @@ def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monke
         assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 20
 
 
-def test_push_busy_preserves_owner_and_expired_lease_can_retry(tmp_path):
+def test_push_busy_preserves_owner_and_expired_lease_can_retry(tmp_path, caplog):
     runner, api, factory = direct_setup(tmp_path)
     with closing(factory()) as warehouse:
         warehouse.migrate()
         warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
     client = push_client(runner)
+    caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
     assert client.post("/notifications/fitbit", json=envelope()).status_code == 503
     assert api.calls == []
+    entries = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_push"]
+    assert len(entries) == 1
+    assert entries[0].status == "retry"
+    assert entries[0].summary["pubsub_message_id"] == "message"
+    assert entries[0].summary["deferred_scopes"] == 1
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
         warehouse.connection.execute(

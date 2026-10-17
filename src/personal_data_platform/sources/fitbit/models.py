@@ -7,11 +7,15 @@ import json
 import math
 import re
 from dataclasses import asdict, dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
+from typing import Literal
 
 DATA_TYPES = ("steps", "heart-rate", "daily-resting-heart-rate", "active-zone-minutes", "sleep")
 DATE_TYPES = ("daily-resting-heart-rate", "sleep")
 RECORD_AGGREGATION_VERSION = "records-v1"
+CIVIL_RECORD_AGGREGATION_VERSION = "records-civil-v1"
+AcquisitionMode = Literal["legacy", "bounded_minutes", "bounded_steps"]
+TimeBasis = Literal["utc", "civil"]
 TABLES = {
     "steps": "fitbit_activity_interval",
     "daily-resting-heart-rate": "fitbit_resting_heart_rate_daily",
@@ -42,6 +46,7 @@ class Window:
     data_type: str
     start: datetime
     end: datetime
+    time_basis: TimeBasis = "utc"
 
     def __post_init__(self) -> None:
         if self.data_type not in DATA_TYPES:
@@ -50,10 +55,27 @@ class Window:
         object.__setattr__(self, "end", aware(self.end))
         if self.start >= self.end:
             raise ValueError("window must have a positive range")
+        if self.time_basis not in ("utc", "civil"):
+            raise ValueError("unsupported time basis")
+        if self.time_basis == "civil" and (
+            self.data_type != "steps"
+            or any(value != date_cursor(value.date()) for value in (self.start, self.end))
+        ):
+            raise ValueError("civil steps require provider date bounds")
         if self.data_type in DATE_TYPES and any(
             value != date_cursor(value.date()) for value in (self.start, self.end)
         ):
             raise ValueError("civil date bounds must use UTC midnight")
+
+    def record_cursor(self, record: Record) -> datetime:
+        if self.time_basis == "civil":
+            if record.source_date is None or record.offset_seconds is None:
+                raise ValueError("civil steps require an unambiguous provider date")
+            local_date = (record.start + timedelta(seconds=record.offset_seconds)).date()
+            if local_date != record.source_date:
+                raise ValueError("provider date disagrees with UTC offset")
+            return date_cursor(record.source_date)
+        return record.cursor
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +172,7 @@ class Snapshot:
             kind = "sleep" if record.kind in ("sleep-stage", "sleep-wake") else record.kind
             if kind != self.window.data_type:
                 raise ValueError("record belongs to another data type")
-            if not self.window.start <= record.cursor < self.window.end:
+            if not self.window.start <= self.window.record_cursor(record) < self.window.end:
                 raise ValueError("record is outside the acquired range")
             identity = (record.kind, record.record_id)
             if identity in identities:
@@ -168,8 +190,11 @@ class Snapshot:
                     raise ValueError("sleep detail is outside its session")
 
     def to_bytes(self) -> bytes:
+        fields = asdict(self)
+        if self.window.time_basis == "utc":
+            del fields["window"]["time_basis"]
         return json.dumps(
-            {"schema_version": 1, **asdict(self)},
+            {"schema_version": 1, **fields},
             default=_json_default,
             sort_keys=True,
             separators=(",", ":"),
@@ -227,6 +252,7 @@ class Notification:
     subject_key: str
     windows: tuple[Window, ...]
     received_at: datetime
+    acquisition_mode: AcquisitionMode = "legacy"
 
     def __post_init__(self) -> None:
         if not self.notification_id or len(self.notification_id) > 256 or not self.windows:
@@ -234,6 +260,22 @@ class Notification:
         AcquisitionScope(self.subject_key, self.windows[0], RECORD_AGGREGATION_VERSION)
         if len(set(self.windows)) != len(self.windows):
             raise ValueError("duplicate notification windows")
+        if self.acquisition_mode not in ("legacy", "bounded_minutes", "bounded_steps"):
+            raise ValueError("unsupported notification acquisition mode")
+        if self.acquisition_mode == "bounded_minutes" and any(
+            window.data_type != "heart-rate"
+            or any(bound.second or bound.microsecond for bound in (window.start, window.end))
+            for window in self.windows
+        ):
+            raise ValueError("bounded minutes require aligned heart-rate windows")
+        if self.acquisition_mode == "bounded_steps" and any(
+            window.data_type != "steps" for window in self.windows
+        ):
+            raise ValueError("bounded steps require steps windows")
+        if self.acquisition_mode != "bounded_steps" and any(
+            window.time_basis != "utc" for window in self.windows
+        ):
+            raise ValueError("civil windows require bounded steps")
         object.__setattr__(self, "received_at", aware(self.received_at))
 
 
@@ -387,11 +429,13 @@ class HeartRateMinuteSnapshot:
             seen.add(minute.start)
 
     def to_bytes(self) -> bytes:
+        window = asdict(self.window)
+        del window["time_basis"]
         return json.dumps(
             {
                 "schema_version": 2,
                 "subject_key": self.subject_key,
-                "window": asdict(self.window),
+                "window": window,
                 "fetched_at": self.fetched_at,
                 "minutes": [asdict(row) for row in self.minutes],
                 "pages": self.pages,

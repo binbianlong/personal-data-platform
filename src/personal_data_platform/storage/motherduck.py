@@ -8,8 +8,9 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+from personal_data_platform.network_diagnostics import instrument_connection, network_phase
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.models import (
     DAILY_JOB_HISTORY_NAMES,
@@ -61,10 +62,15 @@ def connect(config: WarehouseConfig) -> DuckDBPyConnection:
     if config.token is None and (
         config.database == ":memory:" or config.database.endswith((".duckdb", ".db"))
     ):
-        return duckdb.connect(config.database)
+        with network_phase("db_connect"):
+            return duckdb.connect(config.database)
     if not config.token:
         raise ValueError("MOTHERDUCK_TOKEN is required for a MotherDuck database")
-    return duckdb.connect(f"md:{config.database}", config={"motherduck_token": config.token})
+    with network_phase("db_connect"):
+        return duckdb.connect(
+            f"md:{config.database}",
+            config={"motherduck_token": config.token, "motherduck_attach_mode": "single"},
+        )
 
 
 def _raw_identity(raw: RawObject) -> tuple[str, int, str, str, str, datetime, str]:
@@ -87,7 +93,7 @@ class Warehouse:
     """Small repository that makes a raw object's load status atomic."""
 
     def __init__(self, connection: DuckDBPyConnection) -> None:
-        self.connection = connection
+        self.connection = cast("DuckDBPyConnection", instrument_connection(connection))
         self.connection_usable = True
 
     def close(self) -> None:

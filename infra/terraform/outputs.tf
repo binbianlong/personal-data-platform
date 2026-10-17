@@ -29,13 +29,18 @@ output "storage_buckets" {
 
 output "scheduler_jobs" {
   description = "Cloud Scheduler job names and schedules."
-  value = {
-    for key, job in google_cloud_scheduler_job.west : key => {
+  value = merge(
+    { for key, job in google_cloud_scheduler_job.west : key => {
       name      = job.name
       schedule  = job.schedule
       time_zone = job.time_zone
-    }
-  }
+    } },
+    { fitbit_batch = {
+      name      = google_cloud_scheduler_job.fitbit_batch.name
+      schedule  = google_cloud_scheduler_job.fitbit_batch.schedule
+      time_zone = google_cloud_scheduler_job.fitbit_batch.time_zone
+    } }
+  )
 }
 
 output "secret_ids" {
@@ -59,6 +64,8 @@ output "runtime_resources" {
     jobs                   = { for key, job in google_cloud_run_v2_job.west : key => job.name }
     receiver_url           = "${google_cloud_run_v2_service.west.uri}/webhooks/fitbit"
     worker_url             = "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit"
+    fitbit_drain_url       = "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit/drain"
+    fitbit_delivery_mode   = var.fitbit_delivery_mode
     secrets                = { for key, secret in google_secret_manager_secret.west : key => secret.secret_id }
     pubsub_topic           = google_pubsub_topic.west.id
     pubsub_subscription    = google_pubsub_subscription.west.id

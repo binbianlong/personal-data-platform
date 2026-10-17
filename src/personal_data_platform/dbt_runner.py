@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from personal_data_platform.loader.job import LOADER_LEASE_SECONDS, JobAlreadyRunning
+from personal_data_platform.network_diagnostics import network_phase
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 PROJECT_ROOT = Path(os.environ.get("PDP_PROJECT_ROOT", Path(__file__).resolve().parents[2]))
@@ -66,10 +67,11 @@ def run_dbt(
     try:
         deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
         for operation in ("run", "test"):
-            if deadline is None:
-                _invoke([operation, *common])
-            else:
-                _invoke([operation, *common], timeout_seconds=deadline - time.monotonic())
+            with network_phase("dbt_" + operation):
+                if deadline is None:
+                    _invoke([operation, *common])
+                else:
+                    _invoke([operation, *common], timeout_seconds=deadline - time.monotonic())
     finally:
         if target == "prod":
             if previous_secret is None:

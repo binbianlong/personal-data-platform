@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 import uvicorn
 import duckdb
+from google.cloud import pubsub_v1
 from personal_data_platform.sources.fitbit import api, runtime, service
 from personal_data_platform.sources.fitbit.acquisition import AcquisitionSummary
 from personal_data_platform.storage.motherduck import Warehouse
@@ -41,6 +42,7 @@ elif command == "sync":
 else:
     runtime._acquisition_runner = lambda: object()
     runtime.create_worker_app = lambda **kwargs: object()
+    pubsub_v1.SubscriberClient = lambda **kwargs: SimpleNamespace(close=lambda: None)
     runtime.run_worker_from_env()
 api.LOGGER.info("api probe")
 service.LOGGER.info("acquisition probe")
@@ -51,6 +53,7 @@ print("ready")
 
 def _probe(command, root="default", *, level=None):
     environ = dict(os.environ)
+    environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.devnull
     environ.pop("LOG_LEVEL", None)
     if level is not None:
         environ["LOG_LEVEL"] = level

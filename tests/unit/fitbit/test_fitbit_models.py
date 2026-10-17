@@ -59,3 +59,30 @@ def test_source_digest_ignores_record_order_and_observation_time():
         source_payload=({"id": "b", "unknown": 2}, {"id": "a", "unknown": 1}),
     )
     assert a.source_sha256() == b.source_sha256()
+
+
+def test_civil_steps_validate_provider_date_instead_of_physical_cursor():
+    from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window
+
+    at = datetime(2026, 9, 1, tzinfo=UTC)
+    start = at - timedelta(hours=9)
+    record = Record(
+        "steps",
+        "a",
+        start,
+        start,
+        start + timedelta(minutes=1),
+        1,
+        offset_seconds=32400,
+        end_offset_seconds=32400,
+        source_date=at.date(),
+    )
+    window = Window("steps", at, at + timedelta(days=1), time_basis="civil")
+    assert Snapshot("self", window, at, (record,)).records == (record,)
+    with pytest.raises(ValueError, match="range"):
+        Snapshot(
+            "self",
+            Window("steps", at + timedelta(days=1), at + timedelta(days=2), time_basis="civil"),
+            at,
+            (record,),
+        )

@@ -10,7 +10,15 @@ from typing import Protocol, cast
 
 from google.cloud import pubsub_v1
 
-from .models import Notification, Window, object_dict, parse_time, string
+from .models import (
+    AcquisitionMode,
+    Notification,
+    TimeBasis,
+    Window,
+    object_dict,
+    parse_time,
+    string,
+)
 
 ENDPOINT = "pubsub.us-west1.rep.googleapis.com"
 
@@ -27,8 +35,12 @@ def decode_notification(payload: bytes) -> Notification:
     if len(payload) > 1024 * 1024:
         raise ValueError("notification exceeds size limit")
     data = object_dict(json.loads(payload))
-    if type(data.get("schema_version")) is not int or data["schema_version"] != 1:
+    version = data.get("schema_version")
+    if type(version) is not int or version not in (1, 2):
         raise ValueError("unsupported notification schema")
+    mode = cast(AcquisitionMode, string(data.get("acquisition_mode", "legacy")))
+    if (version == 1 and mode == "bounded_steps") or (version == 2 and mode != "bounded_steps"):
+        raise ValueError("acquisition mode does not match schema")
     windows = data["windows"]
     if not isinstance(windows, list) or len(windows) != 1:
         raise ValueError("invalid notification windows")
@@ -40,10 +52,14 @@ def decode_notification(payload: bytes) -> Notification:
                 string(row["data_type"]),
                 parse_time(string(row["start"])),
                 parse_time(string(row["end"])),
+                time_basis=cast(TimeBasis, string(row.get("time_basis", "utc")))
+                if version == 2
+                else "utc",
             )
             for row in (object_dict(value) for value in windows)
         ),
         parse_time(string(data["received_at"])),
+        acquisition_mode=mode,
     )
     if notification.windows[0].end - notification.windows[0].start > timedelta(days=1):
         raise ValueError("notification exceeds one day")
@@ -80,8 +96,15 @@ class PubSubNotifications:
         return self._publisher
 
     def publish(self, notification: Notification) -> str:
+        fields = asdict(notification)
+        version = 2 if notification.acquisition_mode == "bounded_steps" else 1
+        if version == 1:
+            for window in fields["windows"]:
+                del window["time_basis"]
+        if notification.acquisition_mode == "legacy":
+            del fields["acquisition_mode"]
         data = json.dumps(
-            {"schema_version": 1, **asdict(notification)},
+            {"schema_version": version, **fields},
             default=lambda value: value.isoformat(),
             sort_keys=True,
             separators=(",", ":"),

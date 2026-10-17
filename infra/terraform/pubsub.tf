@@ -17,7 +17,7 @@ resource "google_pubsub_subscription" "west" {
   retain_acked_messages      = false
   expiration_policy { ttl = "" }
   dynamic "push_config" {
-    for_each = var.west_schedulers_enabled ? [true] : []
+    for_each = var.west_schedulers_enabled && var.fitbit_delivery_mode == "push" ? [true] : []
     content {
       push_endpoint = "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit"
       oidc_token {
@@ -32,6 +32,12 @@ resource "google_pubsub_subscription" "west" {
   }
   depends_on = [google_cloud_run_v2_service_iam_member.fitbit_worker, google_service_account_iam_member.pubsub_push_token]
   lifecycle { prevent_destroy = true }
+}
+resource "google_pubsub_subscription_iam_member" "fitbit_worker" {
+  project      = var.project_id
+  subscription = google_pubsub_subscription.west.name
+  role         = "roles/pubsub.subscriber"
+  member       = "serviceAccount:${google_service_account.west.email}"
 }
 resource "google_pubsub_topic_iam_member" "west_receiver" {
   project = var.project_id

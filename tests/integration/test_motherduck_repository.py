@@ -17,6 +17,26 @@ from personal_data_platform.storage.motherduck import (
 from tests.screen_time_helpers import _raw, _record
 
 
+def test_cloud_connection_is_scoped_to_the_requested_database(monkeypatch):
+    import duckdb
+
+    calls = []
+    connection = object()
+
+    def open_connection(database, *, config):
+        calls.append((database, config))
+        return connection
+
+    monkeypatch.setattr(duckdb, "connect", open_connection)
+    assert connect(WarehouseConfig("production", "synthetic-token")) is connection
+    assert calls == [
+        (
+            "md:production",
+            {"motherduck_token": "synthetic-token", "motherduck_attach_mode": "single"},
+        )
+    ]
+
+
 def test_screen_time_receipts_prune_only_confirmed_compacted_scope(tmp_path):
     import gzip
 
