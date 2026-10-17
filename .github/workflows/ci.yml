@@ -110,7 +110,7 @@ jobs:
 
       - name: Validate Terraform roots
         run: |
-          for root in infra/bootstrap infra/github infra/terraform; do
+          for root in infra/bootstrap infra/github infra/terraform infra/motherduck; do
             terraform -chdir="$root" init -backend=false -input=false -lockfile=readonly
             terraform -chdir="$root" validate
             terraform -chdir="$root" test
