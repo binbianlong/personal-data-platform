@@ -9,11 +9,12 @@ def test_dockerfile_installs_the_project() -> None:
     dockerfile = DOCKERFILE.read_text()
 
     assert dockerfile.startswith("FROM python:3.13-slim\n")
-    assert "COPY pyproject.toml /app/" in dockerfile
+    assert "COPY pyproject.toml uv.lock /app/" in dockerfile
     assert "COPY src /app/src" in dockerfile
     assert "COPY dbt /app/dbt" in dockerfile
     assert "COPY sql" not in dockerfile
-    assert "RUN python -m pip install --no-cache-dir ." in dockerfile
+    assert "uv sync --locked --no-dev --no-editable --no-cache" in dockerfile
+    assert "UV_PROJECT_ENVIRONMENT=/usr/local" in dockerfile
     assert "PDP_PROJECT_ROOT=/app" in dockerfile
 
 
