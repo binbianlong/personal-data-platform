@@ -5,16 +5,22 @@ GCPは`us-west1`、MotherDuckは`us-west-2`を使う。運用と仕様は[ドキ
 
 ## 開発環境
 
-Python 3.13以降と[uv](https://docs.astral.sh/uv/)を使用する。macOSでは`brew install uv`で導入する。
+Python 3.13以降と[uv](https://docs.astral.sh/uv/)・[just](https://just.systems/)を使用する。
+macOSでは`brew install uv just`で導入する。
 
 ```bash
-uv sync --locked
-source .venv/bin/activate
-pdp --help
-python -m personal_data_platform.entrypoint --help
+just sync
+just pdp --help
 ```
 
-`uv sync --locked`は`uv.lock`の依存バージョンから開発環境を作る。
+`just`でコマンド一覧を表示する。CLIは`just pdp <command>`または`uv run --locked pdp <command>`で実行できる。
+以下の操作例のように`pdp`を直接使う場合は、仮想環境を有効にする。
+
+```bash
+source .venv/bin/activate
+```
+
+`just sync`は`uv sync --locked`を実行し、`uv.lock`の依存バージョンから開発環境を作る。
 依存の追加は`uv add <package>`、開発用ツールの追加は`uv add --dev <package>`、
 依存の更新は`uv lock --upgrade-package <package>`を使い、`pyproject.toml`と`uv.lock`を一緒に管理する。
 
@@ -50,14 +56,16 @@ DB更新・監視・Rebuildは[Platform運用](docs/platform/operations.md)に�
 workflowの回帰テストにはBashとjqも必要となる。mypyは`src`をstrictモードで検証する。
 
 ```bash
-uv run --locked ruff check src tests
-uv run --locked ruff format --check src tests
-uv run --locked mypy src
-uv run --locked pytest
-uv build --wheel
-docker build --tag personal-data-platform:dev .
+just check
+just test tests/unit/test_entrypoint.py -q
+just format
+just build
+just docker-build
 docker run --rm personal-data-platform:dev --help
 ```
+
+`just check`は`lint`・`format-check`・`typecheck`・`test`を順に実行する。
+変更箇所だけを検証する場合は`just test <path> [pytestの引数...]`を使う。
 
 テストの配置は[テスト構成](tests/README.md)を参照する。
 PR・mainへのpushではPython・コンテナ・TerraformをCIで検証する。
