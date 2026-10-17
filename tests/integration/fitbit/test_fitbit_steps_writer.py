@@ -19,6 +19,23 @@ def warehouse():
     value.close()
 
 
+@pytest.fixture
+def sql_trace(warehouse, monkeypatch):
+    connection = warehouse.connection
+    statements = []
+
+    class Connection:
+        def execute(self, sql, parameters=None):
+            statements.append(sql)
+            return connection.execute(sql, parameters)
+
+        def __getattr__(self, name):
+            return getattr(connection, name)
+
+    monkeypatch.setattr(warehouse, "connection", Connection())
+    return statements
+
+
 def point(identity, minute, value=10):
     start = AT + timedelta(minutes=minute)
     return Record(
@@ -88,6 +105,49 @@ def test_empty_partial_steps_only_deletes_inside_range(warehouse):
         "SELECT record_id FROM base.fitbit_activity_interval ORDER BY record_id"
     ) == [("a",), ("c",)]
     assert warehouse.query_rows("SELECT record_id FROM ops.fitbit_deleted_record") == [("b",)]
+
+
+@pytest.mark.parametrize(
+    "civil,remaining,deleted",
+    [
+        (False, [("left",), ("right",)], [("inside",)]),
+        (True, [("left",)], [("inside",), ("right",)]),
+    ],
+)
+def test_empty_steps_skip_incoming_protection_queries(
+    warehouse, sql_trace, civil, remaining, deleted
+):
+    rows = [local_point("left", -541), local_point("inside", -540), local_point("right", -539)]
+    apply(warehouse, snapshot(rows, start=-542, end=-538))
+    sql_trace.clear()
+    data = civil_snapshot([], version=2) if civil else snapshot([], start=-540, end=-539, version=2)
+    result = apply(warehouse, data)
+    assert result.submitted_rows == 0
+    assert sum(sql.lstrip().upper().startswith("SELECT") for sql in sql_trace) == 2
+    assert (
+        warehouse.query_rows(
+            "SELECT record_id FROM base.fitbit_activity_interval ORDER BY record_id"
+        )
+        == remaining
+    )
+    assert (
+        warehouse.query_rows("SELECT record_id FROM ops.fitbit_deleted_record ORDER BY record_id")
+        == deleted
+    )
+
+
+@pytest.mark.parametrize("civil", [False, True])
+def test_fully_protected_steps_skip_empty_deletion_cleanup(warehouse, sql_trace, civil):
+    row = local_point("unknown", -539)
+    utc = snapshot([row], start=-540, end=-538, version=2)
+    local = civil_snapshot([row], version=2)
+    newer = replace(utc if civil else local, records=(), fetched_at=AT + timedelta(days=3))
+    apply(warehouse, newer)
+    sql_trace.clear()
+    result = apply(warehouse, local if civil else utc)
+    assert result.submitted_rows == 0 and result.protected_records == 1
+    assert not any(sql.startswith("DELETE FROM ops.fitbit_deleted_record") for sql in sql_trace)
+    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
 
 
 def test_step_identity_move_invalidates_old_range_hash(warehouse):

@@ -348,39 +348,44 @@ class FitbitBatch:
             for row in rows
             if max((row[8], row[9]), (row[10], row[11]) if row[10] else (row[8], row[9])) > order
         }
-        protected.update(
-            identity
-            for identity, fetched, key in connection.execute(
-                "SELECT record_id,fetched_at,source_key FROM ops.fitbit_deleted_record "
-                "WHERE subject_key=? AND data_type='steps' "
-                "AND record_id IN (SELECT unnest(?::VARCHAR[]))",
-                [snapshot.subject_key, sorted(incoming)],
-            ).fetchall()
-            if (fetched, key) > order
-        )
-        if civil:
-            other_window = Window(
-                "steps", window.start - timedelta(hours=18), window.end + timedelta(hours=18)
+        if incoming:
+            protected.update(
+                identity
+                for identity, fetched, key in connection.execute(
+                    "SELECT record_id,fetched_at,source_key FROM ops.fitbit_deleted_record "
+                    "WHERE subject_key=? AND data_type='steps' "
+                    "AND record_id IN (SELECT unnest(?::VARCHAR[]))",
+                    [snapshot.subject_key, sorted(incoming)],
+                ).fetchall()
+                if (fetched, key) > order
             )
-            other_version = RECORD_AGGREGATION_VERSION
-        else:
-            other_start = date_cursor((window.start - timedelta(hours=18)).date())
-            other_end = date_cursor((window.end + timedelta(hours=18)).date()) + timedelta(days=1)
-            other_window = Window("steps", other_start, other_end, time_basis="civil")
-            other_version = CIVIL_RECORD_AGGREGATION_VERSION
-        other_coverage = _read_coverage(
-            connection, coverage_scope(snapshot.subject_key, "steps", other_version), other_window
-        )
-        for identity, record in incoming.items():
-            if not other_coverage:
-                continue
-            cursor_at = record.cursor if civil else other_window.record_cursor(record)
-            if any(
-                prior.start <= cursor_at < prior.end
-                and (prior.fetched_at, prior.source_key) > order
-                for prior in other_coverage
-            ):
-                protected.add(identity)
+            if civil:
+                other_window = Window(
+                    "steps", window.start - timedelta(hours=18), window.end + timedelta(hours=18)
+                )
+                other_version = RECORD_AGGREGATION_VERSION
+            else:
+                other_start = date_cursor((window.start - timedelta(hours=18)).date())
+                other_end = date_cursor((window.end + timedelta(hours=18)).date()) + timedelta(
+                    days=1
+                )
+                other_window = Window("steps", other_start, other_end, time_basis="civil")
+                other_version = CIVIL_RECORD_AGGREGATION_VERSION
+            other_coverage = _read_coverage(
+                connection,
+                coverage_scope(snapshot.subject_key, "steps", other_version),
+                other_window,
+            )
+            for identity, record in incoming.items():
+                if not other_coverage:
+                    continue
+                cursor_at = record.cursor if civil else other_window.record_cursor(record)
+                if any(
+                    prior.start <= cursor_at < prior.end
+                    and (prior.fetched_at, prior.source_key) > order
+                    for prior in other_coverage
+                ):
+                    protected.add(identity)
         deleted = [
             identity
             for identity, row in existing.items()
@@ -434,11 +439,12 @@ class FitbitBatch:
                 "AND record_id IN (SELECT unnest(?::VARCHAR[]))",
                 [snapshot.subject_key, deleted],
             )
-        if incoming:
+        accepted_ids = sorted(set(incoming) - protected)
+        if accepted_ids:
             connection.execute(
                 "DELETE FROM ops.fitbit_deleted_record WHERE subject_key=? AND data_type='steps' "
                 "AND record_id IN (SELECT unnest(?::VARCHAR[]))",
-                [snapshot.subject_key, sorted(set(incoming) - protected)],
+                [snapshot.subject_key, accepted_ids],
             )
         if changed:
             fields, projection = _record_fields("steps")
