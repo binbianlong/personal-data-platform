@@ -69,7 +69,9 @@ def run_range(runner, factory, windows=(WINDOW,), timeout=100):
 
 
 @pytest.mark.parametrize("kind", ["steps", "heart-rate"])
-def test_paginated_acquisition_checks_lease_per_request_and_write_boundary(tmp_path, monkeypatch, kind):
+def test_paginated_acquisition_checks_lease_per_request_and_write_boundary(
+    tmp_path, monkeypatch, kind
+):
     from tests.unit.fitbit.test_fitbit_api import FakeTransport, client
 
     runner, _, factory = direct_setup(tmp_path)
@@ -99,7 +101,9 @@ def test_paginated_acquisition_checks_lease_per_request_and_write_boundary(tmp_p
 
 @pytest.mark.parametrize("loss", ["owner", "expiry"])
 @pytest.mark.parametrize("stage", ["before_api", "before_begin", "before_commit"])
-def test_lease_loss_still_stops_api_or_rolls_back_the_acquisition(tmp_path, monkeypatch, loss, stage):
+def test_lease_loss_still_stops_api_or_rolls_back_the_acquisition(
+    tmp_path, monkeypatch, loss, stage
+):
     from tests.unit.fitbit.test_fitbit_api import FakeTransport, client
 
     runner, _, factory = direct_setup(tmp_path)

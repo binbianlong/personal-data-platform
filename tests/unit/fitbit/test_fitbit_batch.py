@@ -131,7 +131,9 @@ def test_collection_stops_at_message_limit_without_retry_or_ack():
     )
     assert len(collected.messages) == collected.received == 1000
     assert len(subscriber.pulls) == 10 and not subscriber.acks
-    assert all(r[0]["max_messages"] == 100 and r[1] is None and r[2] <= 10 for r in subscriber.pulls)
+    assert all(
+        r[0]["max_messages"] == 100 and r[1] is None and r[2] <= 10 for r in subscriber.pulls
+    )
 
 
 def test_collection_receives_backlog_that_takes_more_than_two_seconds_to_arrive():

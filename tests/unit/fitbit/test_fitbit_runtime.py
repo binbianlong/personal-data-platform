@@ -143,7 +143,7 @@ def test_worker_composes_regional_pull_client_and_keeps_push_route(monkeypatch):
 
         def pull(self, *, request, retry, timeout):
             assert request["subscription"] == "projects/test/subscriptions/fitbit"
-            assert retry is None and timeout <= 2
+            assert retry is None and 0 < timeout <= 10
             return SimpleNamespace(received_messages=[])
 
         def close(self):
