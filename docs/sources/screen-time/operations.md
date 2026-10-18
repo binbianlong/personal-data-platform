@@ -37,7 +37,7 @@ pendingには元のkeyとgzip bytesを保持する。再起動後も同じbytes�
 再接続後にMotherDuck台帳を確認する。削除処理・イベントkey・補助状態のtransactionは既存の契約を使う。
 片方のstreamが走査失敗しても他方を走査する。失敗した回は全体を成功として記録しない。
 
-ローカルreceipt・manifestは[データモデル](data-model.md#collector-scan-receipt)の形式でSQLiteへ保存する。未設定streamは空manifestで明示的に休止する。
+stream・端末別の最終scan時刻を[SQLiteへ保存する](data-model.md#collector-scan)。未設定streamは有効なdevice集合を空にして明示的に休止する。
 端末をallowlistから外しても保存済みRawは残す。設定変更はLaunchAgentを再生成・再起動して反映する。
 
 全streamでpendingがなく、取込とローカル監査が成功した回だけ、MacがMotherDuckの

@@ -154,7 +154,7 @@ def test_reconciliation_accepts_result_and_dictionary(as_mapping) -> None:
         missing_object_count=0,
         failed_object_count=0,
         orphaned_loaded_object_count=0,
-        details={"collector_receipt_count": 2},
+        details={"collector_device_count": 2},
     )
     try:
         warehouse.migrate()
@@ -164,7 +164,7 @@ def test_reconciliation_accepts_result_and_dictionary(as_mapping) -> None:
             "FROM ops.reconciliation_run"
         )[0]
         assert row[:4] == ("typed-audit", "succeeded", 3, 3)
-        assert json.loads(row[4]) == {"collector_receipt_count": 2}
+        assert json.loads(row[4]) == {"collector_device_count": 2}
     finally:
         warehouse.close()
 

@@ -25,17 +25,15 @@ from personal_data_platform.sources.screen_time.collector import (
     BiomeScreenTimeSource,
     CollectionStats,
     CollectorSourceError,
-    CompressedRawUploader,
     ScreenTimeCollector,
 )
 from personal_data_platform.sources.screen_time.config import CollectorConfig, _env_or_keychain
 from personal_data_platform.sources.screen_time.raw import (
     APP_IN_FOCUS_STREAM,
     APP_USAGE_STREAM,
-    CollectorDeviceManifest,
     build_device_key,
 )
-from personal_data_platform.sources.screen_time.state import CollectorState
+from personal_data_platform.sources.screen_time.state import CollectorScan, CollectorState
 from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
@@ -245,7 +243,6 @@ def _run_collect(*, watch: bool) -> int:
                 uploader=uploader,
                 pseudonym_key=config.pseudonym_key,
                 allowed_device_keys=config.device_allowlist,
-                destination=str(state.path.resolve()),
             )
         )
     if config.mac_device_key:
@@ -256,7 +253,6 @@ def _run_collect(*, watch: bool) -> int:
                 uploader=uploader,
                 pseudonym_key=config.pseudonym_key,
                 allowed_device_keys=frozenset({config.mac_device_key}),
-                destination=str(state.path.resolve()),
             )
         )
     inactive_streams = tuple(
@@ -274,9 +270,7 @@ def _run_collect(*, watch: bool) -> int:
         stats = _collect_all(
             collectors,
             inactive_streams=inactive_streams,
-            inactive_uploader=uploader,
             inactive_state=state,
-            destination=str(state.path.resolve()),
         )
         warehouse = Warehouse(connect(_warehouse_config()))
         try:
@@ -455,9 +449,7 @@ def _collect_all(
     collectors: Sequence[ScreenTimeCollector],
     *,
     inactive_streams: Sequence[str] = (),
-    inactive_uploader: CompressedRawUploader | None = None,
     inactive_state: CollectorState | None = None,
-    destination: str | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> CollectionStats:
     """Attempt each configured stream and report failure after all attempts."""
@@ -468,37 +460,13 @@ def _collect_all(
             results.append(collector.collect_once())
         except Exception as error:
             failures.append(RuntimeError(f"{collector.stream}: {error}"))
-    if inactive_streams and (
-        inactive_uploader is None or inactive_state is None or destination is None
-    ):
-        raise ValueError("inactive streams require uploader, state, and destination")
+    if inactive_streams and inactive_state is None:
+        raise ValueError("inactive streams require state")
     now = clock or (lambda: datetime.now(UTC))
     for stream in inactive_streams:
-        assert inactive_uploader is not None
         assert inactive_state is not None
-        assert destination is not None
         try:
-            completed_at = now()
-            if not inactive_state.control_due(
-                stream=stream,
-                device_key="",
-                destination=destination,
-                config_digest="inactive",
-                control_kind="manifest",
-                now=completed_at,
-            ):
-                continue
-            inactive_uploader.put_device_manifest(
-                CollectorDeviceManifest((), completed_at, stream=stream)
-            )
-            inactive_state.mark_control_published(
-                stream=stream,
-                device_key="",
-                destination=destination,
-                config_digest="inactive",
-                control_kind="manifest",
-                published_at=now(),
-            )
+            inactive_state.record_successful_scan(CollectorScan(now(), (), {}), stream=stream)
         except Exception as error:
             failures.append(RuntimeError(f"{stream} deactivation: {error}"))
     if failures:
