@@ -469,27 +469,6 @@ def test_loader_uses_source_decoder_across_schema_versions_and_preserves_other_s
         warehouse.close()
 
 
-@pytest.mark.parametrize(
-    ("name", "value"),
-    [("PDP_RAW_RETENTION_DAYS", "91"), ("PDP_LIFECYCLE_GRACE_DAYS", "4")],
-)
-def test_loader_runtime_rejects_retention_drift_before_cloud_access(
-    monkeypatch, name, value
-) -> None:
-    from personal_data_platform.loader.job import run_loader_from_env
-    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
-
-    monkeypatch.setattr(ScreenTimeSource, "retention_days", 90)
-    monkeypatch.setenv(name, value)
-    monkeypatch.setattr(
-        ScreenTimeSource,
-        "repository_from_env",
-        lambda self: pytest.fail("cloud repository must not be constructed"),
-    )
-    with pytest.raises(ValueError, match=name):
-        run_loader_from_env()
-
-
 def test_inherited_loader_lease_stops_after_owner_loss(monkeypatch):
     from types import SimpleNamespace
 

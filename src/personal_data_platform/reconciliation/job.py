@@ -1,4 +1,4 @@
-"""Reconcile lifecycle-managed GCS Raw with warehouse ingestion state."""
+"""Reconcile saved Raw with warehouse ingestion state."""
 
 from __future__ import annotations
 
@@ -103,14 +103,6 @@ def run_reconciliation(
     source = source or get_source()
     if selected_prefixes(source, prefix) != source.raw_prefixes:
         raise ValueError("reconciliation must audit every canonical prefix for the source stream")
-    raw_retention = (
-        timedelta(days=source.retention_days) if source.retention_days is not None else None
-    )
-    lifecycle_overdue = (
-        timedelta(days=source.retention_days + source.lifecycle_grace_days)
-        if source.retention_days is not None
-        else None
-    )
     started_at = _aware_utc(now or datetime.now(UTC))
     if started_at is None:
         raise ValueError("reconciliation time must be timezone-aware")
@@ -155,7 +147,7 @@ def run_reconciliation(
         raw_keys = set(raw_by_key)
         states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
 
-    if raw_retention is None and source.source_id == "screen_time":
+    if source.source_id == "screen_time":
         current_keys = {
             row[0]
             for row in warehouse.query_rows(
@@ -175,45 +167,13 @@ def run_reconciliation(
     live_loaded_keys = raw_keys & succeeded_keys
     missing = raw_keys - succeeded_keys
 
-    expected_expired: set[str] = set()
-    premature_missing: set[str] = set()
-    unrecoverable_uningested: set[str] = set()
-    unknown_creation_time: set[str] = set()
-    for key, state in states.items():
-        created_at = _aware_utc(state.retention_started_at or state.storage_created_at)
-        if key in raw_keys:
-            if created_at is None:
-                unknown_creation_time.add(key)
-            continue
-        if state.status != "succeeded":
-            unrecoverable_uningested.add(key)
-        elif created_at is None:
-            unknown_creation_time.add(key)
-        elif raw_retention is not None and created_at <= checked_at - raw_retention:
-            expected_expired.add(key)
-        else:
-            premature_missing.add(key)
-
-    lifecycle_lag: set[str] = set()
-    overdue_deletion: set[str] = set()
-    for key, value in raw_by_key.items():
-        created_at = _aware_utc(value.retention_origin)
-        if created_at is None:
-            unknown_creation_time.add(key)
-        elif lifecycle_overdue is not None and created_at <= checked_at - lifecycle_overdue:
-            overdue_deletion.add(key)
-        elif raw_retention is not None and created_at <= checked_at - raw_retention:
-            lifecycle_lag.add(key)
-
+    absent_loaded = _active_status_keys(states, "succeeded") - raw_keys
+    absent_uningested = {
+        key for key, value in states.items() if value.status != "succeeded"
+    } - raw_keys
     source_health = source.audit(repository, raw_refs, checked_at)
-    unexpected_absent_succeeded = premature_missing | (
-        (unknown_creation_time & succeeded_keys) - raw_keys
-    )
     failed = len(failed_keys)
     loading = len(loading_keys)
-    inventory_counts = warehouse.retention_inventory_counts(
-        source_id=source.source_id, stream=source.stream
-    )
     available_relations = _relation_names(warehouse)
     missing_relations = tuple(sorted(set(source.required_relations) - available_relations))
     failed_relation_queries = _failed_relation_queries(
@@ -222,17 +182,14 @@ def run_reconciliation(
     succeeded = (
         source_health.ok
         and not missing
-        and not premature_missing
-        and not unrecoverable_uningested
-        and not unknown_creation_time
-        and not overdue_deletion
+        and not absent_loaded
+        and not absent_uningested
         and failed == 0
         and loading == 0
         and not missing_relations
         and not failed_relation_queries
     )
     completed_at = datetime.now(UTC)
-    existing_expired_count = inventory_counts["expired_object_count"]
     details: dict[str, object] = {
         **source_health.details,
         "source_id": source.source_id,
@@ -240,21 +197,13 @@ def run_reconciliation(
         "schema_versions": list(source.schema_versions),
         "missing_before_repair": len(missing_before_repair),
         "repair_summary": repair_summary,
-        "total_object_count": inventory_counts["total_object_count"],
-        "expired_object_count": (
-            existing_expired_count + len(expected_expired) if succeeded else existing_expired_count
-        ),
-        "newly_expired_object_count": len(expected_expired) if succeeded else 0,
-        "expected_expiry_candidate_count": len(expected_expired),
-        "premature_missing_object_count": len(premature_missing),
-        "unrecoverable_uningested_object_count": len(unrecoverable_uningested),
-        "unknown_creation_time_object_count": len(unknown_creation_time),
-        "overdue_deletion_object_count": len(overdue_deletion),
-        "lifecycle_lag_object_count": len(lifecycle_lag),
+        "total_object_count": len(states),
+        "missing_raw_object_count": len(absent_loaded | absent_uningested),
+        "unrecoverable_uningested_object_count": len(absent_uningested),
         "live_loaded_object_count": len(live_loaded_keys),
         "live_unloaded_object_count": len(missing),
         "active_loading_object_count": loading,
-        "orphaned_loaded_object_count": len(unexpected_absent_succeeded),
+        "orphaned_loaded_object_count": len(absent_loaded),
         "missing_relations": list(missing_relations),
         "failed_relation_queries": list(failed_relation_queries),
     }
@@ -267,7 +216,7 @@ def run_reconciliation(
         loaded_object_count=len(live_loaded_keys),
         missing_object_count=len(missing),
         failed_object_count=failed,
-        orphaned_loaded_object_count=len(unexpected_absent_succeeded),
+        orphaned_loaded_object_count=len(absent_loaded),
         missing_relations=missing_relations,
         failed_relation_queries=failed_relation_queries,
         details=details,
@@ -283,7 +232,6 @@ def run_reconciliation(
         "completed_at": result.completed_at.isoformat(),
         "raw_object_count": result.raw_object_count,
         "loaded_object_count": result.loaded_object_count,
-        "expired_object_count": details["expired_object_count"],
     }
     warehouse.record_reconciliation(replace(result, status="running"))
     warehouse.connection.execute("BEGIN TRANSACTION")
@@ -291,14 +239,6 @@ def run_reconciliation(
     try:
         if _lease_owner is not None:
             warehouse.require_job_lock(_lease_owner)
-        stage = "retention_expiry"
-        marked_expired = warehouse.mark_retention_expired(
-            (states[key] for key in expected_expired),
-            expired_at=checked_at,
-        )
-        if marked_expired != expected_expired:
-            raise RuntimeError("retention state changed during reconciliation; retry the audit")
-        stage = "warehouse_heartbeat"
         if publish_success:
             warehouse.publish_heartbeat(source.monitor_name, result.run_id, heartbeat_payload)
         stage = "heartbeat"
@@ -314,8 +254,6 @@ def run_reconciliation(
             status="failed",
             details={
                 **result.details,
-                "expired_object_count": existing_expired_count,
-                "newly_expired_object_count": 0,
                 f"{stage}_error": str(error),
             },
         )

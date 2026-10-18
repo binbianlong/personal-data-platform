@@ -25,17 +25,6 @@ from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig
 from tests.screen_time_helpers import Repository, event, mac_usage_event, segb
 
 
-def test_rebuild_inventory_preserves_original_retention_dates():
-    repository = Repository()
-    raw = repository.add("100", segb(event("synthetic.app"))[0])
-    origin = raw.storage_created_at - timedelta(days=80)
-    copied = replace(raw, retention_started_at=origin)
-    inventory = rebuild_inventory([copied])
-    assert inventory["first_retention_started_at"] == origin.isoformat()
-    assert inventory["last_retention_started_at"] == origin.isoformat()
-    assert inventory["first_storage_created_at"] == raw.storage_created_at.isoformat()
-
-
 def test_unlimited_gcs_rebuild_uses_read_only_adc_and_restores_environment(tmp_path, monkeypatch):
     from personal_data_platform.recovery import rebuild
     from personal_data_platform.sources.owntracks.adapter import OwnTracksSource
@@ -171,7 +160,6 @@ def test_rebuild_inventory_is_order_independent() -> None:
     assert inventory["first_observed_at"] == first.isoformat()
     assert inventory["first_storage_created_at"] == (first + timedelta(hours=1)).isoformat()
     assert inventory["last_storage_created_at"] == (first + timedelta(days=2)).isoformat()
-    assert inventory["retention_days"] is None
     assert inventory["full_history_rebuild_guaranteed"] is False
 
 
@@ -327,7 +315,6 @@ def test_rebuild_uses_one_inventory_and_fails_if_a_listed_generation_disappears(
 
 def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(monkeypatch):
     import gzip
-    from dataclasses import replace
 
     from personal_data_platform.sources.contracts import SourceHealth
 
@@ -367,8 +354,6 @@ def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(mon
         schema_versions = (1, 2)
         raw_prefixes = ("raw/synthetic/v1/metrics/", "raw/synthetic/v2/metrics/")
         raw_suffixes = (".json.gz",)
-        retention_days = 7
-        lifecycle_grace_days = 2
         required_relations = ()
         dbt_selector = "tag:synthetic_metrics"
         monitor_name = "synthetic_metrics_reconciliation"
@@ -432,24 +417,6 @@ def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(mon
     assert inventory["source_id"] == "synthetic"
     assert inventory["stream"] == "metrics"
     assert inventory["schema_versions"] == [1, 2]
-    assert inventory["retention_days"] == 7
     assert inventory["subject_count"] == inventory["scope_count"] == 1
     assert inventory["synthetic_count"] == 2
     assert "device_count" not in inventory
-
-
-@pytest.mark.parametrize(
-    ("name", "value"), [("PDP_RAW_RETENTION_DAYS", "7"), ("PDP_LIFECYCLE_GRACE_DAYS", "0")]
-)
-def test_rebuild_rejects_deployment_retention_drift_before_cloud_access(monkeypatch, name, value):
-    monkeypatch.setenv(name, value)
-    monkeypatch.setattr(
-        "personal_data_platform.sources.screen_time.adapter.ScreenTimeSource.retention_days", 90
-    )
-    monkeypatch.setattr(
-        "personal_data_platform.sources.screen_time.adapter.ScreenTimeSource.repository_from_env",
-        lambda _: pytest.fail("repository must not open with mismatched retention"),
-    )
-
-    with pytest.raises(ValueError, match=name):
-        run_rebuild_from_env(dry_run=True, target_db=None)

@@ -24,8 +24,6 @@ class OwnTracksSource:
         "base.owntracks_location",
         "marts.owntracks_location_time_series",
     )
-    retention_days: int | None = None
-    lifecycle_grace_days = 3
     dbt_selector = "tag:owntracks"
     monitor_name = "owntracks_reconciliation"
 

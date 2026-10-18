@@ -136,7 +136,7 @@ def test_unlimited_raw_audit_repairs_missing_load_and_detects_deleted_raw(monkey
         store.objects.clear()
         result = run_reconciliation(store, warehouse, source=source, heartbeat=lambda _: None)
         assert not result.ok
-        assert result.details["premature_missing_object_count"] == 1
+        assert result.details["missing_raw_object_count"] == 1
     finally:
         warehouse.close()
 

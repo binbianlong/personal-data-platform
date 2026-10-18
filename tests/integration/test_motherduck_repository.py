@@ -220,12 +220,11 @@ def test_expired_key_can_be_reloaded_with_a_new_storage_creation_time(tmp_path) 
             )
             == 1
         )
-        original_state = warehouse.active_ingestion_states(
-            source_id="screen_time", stream="App.InFocus"
-        )[original.key]
-        assert warehouse.mark_retention_expired([original_state], expired_at=datetime.now(UTC)) == {
-            original.key
-        }
+        warehouse.connection.execute(
+            "UPDATE ops.ingestion_metadata SET retention_expired_at = current_timestamp "
+            "WHERE object_key = ?",
+            [original.key],
+        )
         assert warehouse.succeeded_keys(source_id="screen_time", stream="App.InFocus") == set()
 
         recreated = _raw(
@@ -289,56 +288,6 @@ def test_new_generation_is_not_trusted_until_it_is_reloaded(tmp_path) -> None:
         warehouse.close()
 
 
-@pytest.mark.parametrize(
-    ("changed_column", "replacement"),
-    [
-        ("storage_created_at", datetime(2026, 10, 27, 1, tzinfo=UTC)),
-        ("storage_generation", 2),
-    ],
-)
-def test_changed_storage_identity_cannot_be_marked_as_retention_expired(
-    tmp_path, changed_column: str, replacement: object
-) -> None:
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "test.duckdb"))))
-    try:
-        warehouse.migrate()
-        original = _raw()
-        assert (
-            warehouse.load_object(
-                original, byte_size=100, batch=ScreenTimeBatch([_record(original)])
-            )
-            == 1
-        )
-        stale_state = warehouse.active_ingestion_states(
-            source_id="screen_time", stream="App.InFocus"
-        )[original.key]
-
-        warehouse.connection.execute(
-            f"UPDATE ops.ingestion_metadata SET {changed_column} = ? WHERE object_key = ?",
-            [replacement, original.key],
-        )
-
-        assert (
-            warehouse.mark_retention_expired([stale_state], expired_at=datetime.now(UTC)) == set()
-        )
-        assert (
-            warehouse.query_value(
-                f"SELECT {changed_column} FROM ops.ingestion_metadata WHERE object_key = ?",
-                [original.key],
-            )
-            == replacement
-        )
-        assert (
-            warehouse.query_value(
-                "SELECT retention_expired_at FROM ops.ingestion_metadata WHERE object_key = ?",
-                [original.key],
-            )
-            is None
-        )
-    finally:
-        warehouse.close()
-
-
 def test_job_lease_rejects_a_second_owner(tmp_path) -> None:
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "test.duckdb"))))
     try:
@@ -394,25 +343,13 @@ def test_ingestion_queries_isolate_both_source_and_stream() -> None:
         warehouse.load_object(screen_time, byte_size=10, batch=_MetricBatch())
         warehouse.mark_failed(other_stream, byte_size=0, error=ValueError("other stream"))
         warehouse.load_object(other_source, byte_size=10, batch=_MetricBatch())
-        other_states = warehouse.active_ingestion_states(
-            source_id=other_source.source_id, stream=other_source.stream
-        )
-        warehouse.mark_retention_expired(other_states.values(), expired_at=datetime.now(UTC))
-
         scope = {"source_id": screen_time.source_id, "stream": screen_time.stream}
         assert warehouse.succeeded_keys(**scope) == {screen_time.key}
         assert warehouse.ingestion_counts(**scope) == {"succeeded": 1}
         assert set(warehouse.active_ingestion_states(**scope)) == {screen_time.key}
-        assert warehouse.retention_inventory_counts(**scope) == {
-            "total_object_count": 1,
-            "expired_object_count": 0,
-        }
         assert warehouse.ingestion_counts(
             source_id=other_stream.source_id, stream=other_stream.stream
         ) == {"failed": 1}
-        assert warehouse.retention_inventory_counts(
-            source_id=other_source.source_id, stream=other_source.stream
-        ) == {"total_object_count": 1, "expired_object_count": 1}
     finally:
         warehouse.close()
 
