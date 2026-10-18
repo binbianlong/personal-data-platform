@@ -41,14 +41,10 @@ class WarehouseConfig:
 
 @dataclass(frozen=True, slots=True)
 class IngestionState:
-    """Retention-relevant state for one object known to the warehouse."""
+    """Current load status for one object known to the warehouse."""
 
     object_key: str
     status: str
-    storage_created_at: datetime | None
-    storage_generation: int | None
-    retention_expired_at: datetime | None
-    retention_started_at: datetime | None = None
 
 
 def connect(config: WarehouseConfig) -> DuckDBPyConnection:
@@ -190,77 +186,13 @@ class Warehouse:
         return {str(status): int(count) for status, count in rows}
 
     def active_ingestion_states(self, *, source_id: str, stream: str) -> dict[str, IngestionState]:
-        """Return metadata that has not already been accepted as lifecycle-expired."""
-
+        """Return current statuses, excluding previously expired legacy receipts."""
         rows = self.connection.execute(
-            """
-            SELECT object_key, status, storage_created_at, storage_generation,
-                   retention_expired_at, retention_started_at
-            FROM ops.ingestion_metadata
-            WHERE source_id = ? AND source_stream = ? AND retention_expired_at IS NULL
-            """,
+            """SELECT object_key, status FROM ops.ingestion_metadata
+            WHERE source_id = ? AND source_stream = ? AND retention_expired_at IS NULL""",
             [source_id, stream],
         ).fetchall()
-        return {
-            row[0]: IngestionState(
-                object_key=row[0],
-                status=row[1],
-                storage_created_at=row[2],
-                storage_generation=row[3],
-                retention_expired_at=row[4],
-                retention_started_at=row[5],
-            )
-            for row in rows
-        }
-
-    def retention_inventory_counts(self, *, source_id: str, stream: str) -> dict[str, int]:
-        row = self.connection.execute(
-            """
-            SELECT
-                count(*),
-                count(*) FILTER (WHERE retention_expired_at IS NOT NULL)
-            FROM ops.ingestion_metadata
-            WHERE source_id = ? AND source_stream = ?
-            """,
-            [source_id, stream],
-        ).fetchone()
-        # Aggregate queries without GROUP BY always return one row.
-        assert row is not None
-        return {
-            "total_object_count": int(row[0]),
-            "expired_object_count": int(row[1]),
-        }
-
-    def mark_retention_expired(
-        self, states: Iterable[IngestionState], *, expired_at: datetime
-    ) -> set[str]:
-        """Expire only the exact storage incarnation audited as absent."""
-
-        expired: set[str] = set()
-        for state in sorted(states, key=lambda value: value.object_key):
-            row = self.connection.execute(
-                """
-            UPDATE ops.ingestion_metadata
-            SET retention_expired_at = ?
-            WHERE object_key = ?
-              AND status = 'succeeded'
-              AND retention_expired_at IS NULL
-              AND storage_created_at IS NOT DISTINCT FROM ?
-              AND storage_generation IS NOT DISTINCT FROM ?
-              AND retention_started_at IS NOT DISTINCT FROM ?
-            RETURNING object_key
-                """,
-                [
-                    expired_at,
-                    state.object_key,
-                    state.storage_created_at,
-                    state.storage_generation,
-                    state.retention_started_at,
-                ],
-            ).fetchone()
-            if row is not None:
-                expired.add(str(row[0]))
-        return expired
+        return {key: IngestionState(key, status) for key, status in rows}
 
     def _existing_object(self, raw: RawObject) -> tuple[Any, ...] | None:
         current = self.connection.execute(

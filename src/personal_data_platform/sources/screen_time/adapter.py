@@ -39,8 +39,6 @@ class ScreenTimeSource:
         "marts.daily_screen_time",
         "marts.daily_screen_time_total",
     )
-    retention_days: int | None = None
-    lifecycle_grace_days = 3
     dbt_selector = "tag:screen_time"
     monitor_name = "screen_time_reconciliation"
 

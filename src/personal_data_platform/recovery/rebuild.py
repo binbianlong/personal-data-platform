@@ -47,7 +47,6 @@ def rebuild_inventory(
     source = source or get_source()
     materialized = validate_observations(source, observations)
     creation_times = sorted(value.storage_created_at for value in materialized)
-    retention_times = sorted(value.retention_origin for value in materialized)
     return {
         **source.inventory(materialized),
         "source_id": source.source_id,
@@ -62,9 +61,6 @@ def rebuild_inventory(
         "last_observed_at": (materialized[-1].observed_at.isoformat() if materialized else None),
         "first_storage_created_at": creation_times[0].isoformat() if creation_times else None,
         "last_storage_created_at": creation_times[-1].isoformat() if creation_times else None,
-        "first_retention_started_at": retention_times[0].isoformat() if retention_times else None,
-        "last_retention_started_at": retention_times[-1].isoformat() if retention_times else None,
-        "retention_days": source.retention_days,
         "full_history_rebuild_guaranteed": False,
     }
 
