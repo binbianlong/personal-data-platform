@@ -125,24 +125,18 @@ class Warehouse:
         }
         if not live_identities:
             return set()
-        rows: list[tuple[Any, ...]] = []
-        for source_id, stream in sorted(
-            {(value.source_id, value.stream) for value in materialized}
-        ):
-            rows.extend(
-                self.connection.execute(
-                    """
-                    SELECT object_key, source_id, schema_version, subject_key,
-                           source_stream, logical_key, observed_at,
-                           content_sha256, storage_generation
-                    FROM ops.ingestion_metadata
-                    WHERE source_id = ? AND source_stream = ?
-                      AND status = 'succeeded' AND retention_expired_at IS NULL
-                      AND (? IS NULL OR parser_version = ?)
-                    """,
-                    [source_id, stream, parser_version, parser_version],
-                ).fetchall()
-            )
+        rows = self.connection.execute(
+            """
+            SELECT object_key, source_id, schema_version, subject_key,
+                   source_stream, logical_key, observed_at,
+                   content_sha256, storage_generation
+            FROM ops.ingestion_metadata
+            WHERE object_key IN (SELECT unnest(?::VARCHAR[]))
+              AND status = 'succeeded' AND retention_expired_at IS NULL
+              AND (? IS NULL OR parser_version = ?)
+            """,
+            [list(live_identities), parser_version, parser_version],
+        ).fetchall()
         return {
             str(object_key)
             for object_key, *identity in rows
