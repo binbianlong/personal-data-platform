@@ -23,13 +23,13 @@ def test_network_profile_keeps_commit_ack_and_separates_api_queue_and_db(
     monkeypatch.setenv("PDP_NETWORK_DIAGNOSTICS", "true")
     monkeypatch.setattr(net, "read_counters", lambda: net.Counters(sent[0], 0, ("eth0",)))
     runner, api, _ = direct_setup(tmp_path, states=(None,))
-    fetch = api.fetch_captured
+    fetch = api.fetch_snapshot
 
     def measured_fetch(*args, **kwargs):
         sent[0] += 300
         return fetch(*args, **kwargs)
 
-    api.fetch_captured = measured_fetch
+    api.fetch_snapshot = measured_fetch
 
     class MeasuredSubscriber(Subscriber):
         def pull(self, **kwargs):
@@ -121,7 +121,7 @@ def test_independent_failed_unit_does_not_block_successful_unit(tmp_path):
     payload["windows"][0]["start"] = (NOW - timedelta(days=3)).isoformat()
     payload["windows"][0]["end"] = (NOW - timedelta(days=3) + timedelta(minutes=1)).isoformat()
     second.message.data = json.dumps(payload).encode()
-    fetch = api.fetch_captured
+    fetch = api.fetch_snapshot
     attempts = []
 
     def failing(window, **kwargs):
@@ -130,7 +130,7 @@ def test_independent_failed_unit_does_not_block_successful_unit(tmp_path):
             raise TimeoutError("API failure")
         return fetch(window, **kwargs)
 
-    api.fetch_captured = failing
+    api.fetch_snapshot = failing
     subscriber = Subscriber([[first, second]])
     result = drainer(runner, subscriber).run()
     assert not result.ok and result.failed == 1 and result.completed == 1
@@ -154,14 +154,14 @@ def test_two_200_second_units_fit_shared_budget_and_keep_one_session(tmp_path):
     runner, api, _ = direct_setup(tmp_path, states=(None,))
     elapsed = [0.0]
     runner.monotonic = lambda: elapsed[0]
-    fetch = api.fetch_captured
+    fetch = api.fetch_snapshot
 
     def slow(*args, **kwargs):
         result = fetch(*args, **kwargs)
         elapsed[0] += 200
         return result
 
-    api.fetch_captured = slow
+    api.fetch_snapshot = slow
     messages = [
         raw_message("a"),
         retime(
@@ -182,7 +182,7 @@ def test_legacy_message_waits_for_every_normalized_day_before_ack(tmp_path):
     notice = retime(
         raw_message("legacy"), NOW - timedelta(minutes=1), NOW + timedelta(hours=4), mode="legacy"
     )
-    fetch = api.fetch_captured
+    fetch = api.fetch_snapshot
     attempts = []
 
     def fail_second(*args, **kwargs):
@@ -191,12 +191,12 @@ def test_legacy_message_waits_for_every_normalized_day_before_ack(tmp_path):
             raise TimeoutError("second day failed")
         return fetch(*args, **kwargs)
 
-    api.fetch_captured = fail_second
+    api.fetch_snapshot = fail_second
     subscriber = Subscriber([[notice]])
     result = drainer(runner, subscriber).run()
     assert len(attempts) == result.grouped == 2
     assert result.completed == 1 and not result.ok and not subscriber.acks
-    api.fetch_captured = fetch
+    api.fetch_snapshot = fetch
     retry = Subscriber([[notice]])
     assert drainer(runner, retry).run().ok and retry.acks == [notice.ack_id]
 

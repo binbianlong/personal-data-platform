@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 
@@ -128,12 +128,6 @@ class Record:
                 raise ValueError("record cursor must match its provider date")
 
 
-def _json_default(value: object) -> str:
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    raise TypeError("unsupported JSON value")
-
-
 def object_dict(value: object) -> dict[str, object]:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise ValueError("expected a JSON object")
@@ -154,7 +148,6 @@ class Snapshot:
     records: tuple[Record, ...]
     origin: str = "api"
     complete: bool = True
-    source_payload: tuple[dict[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         if self.window.data_type == "heart-rate":
@@ -189,33 +182,9 @@ class Snapshot:
                 ):
                     raise ValueError("sleep detail is outside its session")
 
-    def to_bytes(self) -> bytes:
-        fields = asdict(self)
-        if self.window.time_basis == "utc":
-            del fields["window"]["time_basis"]
-        return json.dumps(
-            {"schema_version": 1, **fields},
-            default=_json_default,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode()
-
-    def source_sha256(self) -> str:
-        """Hash every persisted source field except observation time."""
-        payload = json.loads(self.to_bytes())
-        del payload["fetched_at"]
-        # API pages do not promise a stable order. Raw keeps their original
-        # sequence, while equality compares the same complete set of points.
-        for field in ("records", "source_payload"):
-            payload[field].sort(
-                key=lambda item: json.dumps(
-                    item, sort_keys=True, separators=(",", ":"), allow_nan=False
-                )
-            )
-        return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-        ).hexdigest()
+    @property
+    def aggregation_version(self) -> str:
+        return RECORD_AGGREGATION_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,72 +252,6 @@ HEART_RATE_AGGREGATION_VERSION = "heart-rate-minute-v1"
 GOOGLE_WEARABLES = "users/me/dataSourceFamilies/google-wearables"
 
 
-def _canonical_pages(pages: tuple[dict[str, object], ...], field: str) -> dict[str, object]:
-    """Compare source data independently of page boundaries and transport tokens."""
-    points: list[object] = []
-    metadata: set[str] = set()
-    for page in pages:
-        rows = page.get(field, [])
-        if not isinstance(rows, list):
-            raise ValueError("source page records must be an array")
-        points.extend(rows)
-        rest = {key: value for key, value in page.items() if key not in (field, "nextPageToken")}
-        if rest:
-            metadata.add(json.dumps(rest, sort_keys=True, separators=(",", ":"), allow_nan=False))
-    return {
-        "points": sorted(
-            points,
-            key=lambda item: json.dumps(
-                item, sort_keys=True, separators=(",", ":"), allow_nan=False
-            ),
-        ),
-        "page_metadata": [json.loads(item) for item in sorted(metadata)],
-    }
-
-
-def _source_digest(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            payload, default=_json_default, sort_keys=True, separators=(",", ":"), allow_nan=False
-        ).encode()
-    ).hexdigest()
-
-
-@dataclass(frozen=True, slots=True)
-class CapturedSnapshot:
-    snapshot: Snapshot
-    pages: tuple[dict[str, object], ...]
-
-    @property
-    def aggregation_version(self) -> str:
-        return RECORD_AGGREGATION_VERSION
-
-    @property
-    def subject_key(self) -> str:
-        return self.snapshot.subject_key
-
-    @property
-    def window(self) -> Window:
-        return self.snapshot.window
-
-    @property
-    def fetched_at(self) -> datetime:
-        return self.snapshot.fetched_at
-
-    @property
-    def origin(self) -> str:
-        return self.snapshot.origin
-
-    def source_sha256(self) -> str:
-        return _source_digest(
-            {
-                "snapshot": self.snapshot.source_sha256(),
-                "aggregation_version": self.aggregation_version,
-                "source": _canonical_pages(self.pages, "dataPoints"),
-            }
-        )
-
-
 @dataclass(frozen=True, slots=True)
 class HeartRateMinute:
     start: datetime
@@ -400,7 +303,6 @@ class HeartRateMinuteSnapshot:
     window: Window
     fetched_at: datetime
     minutes: tuple[HeartRateMinute, ...]
-    pages: tuple[dict[str, object], ...]
     origin: str = "api"
     aggregation_version: str = HEART_RATE_AGGREGATION_VERSION
     complete: bool = True
@@ -427,34 +329,3 @@ class HeartRateMinuteSnapshot:
             if minute.start in seen:
                 raise ValueError("duplicate heart rate minute")
             seen.add(minute.start)
-
-    def to_bytes(self) -> bytes:
-        window = asdict(self.window)
-        del window["time_basis"]
-        return json.dumps(
-            {
-                "schema_version": 2,
-                "subject_key": self.subject_key,
-                "window": window,
-                "fetched_at": self.fetched_at,
-                "minutes": [asdict(row) for row in self.minutes],
-                "pages": self.pages,
-                "origin": self.origin,
-                "aggregation_version": self.aggregation_version,
-                "complete": self.complete,
-            },
-            default=_json_default,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode()
-
-    def source_sha256(self) -> str:
-        payload = object_dict(json.loads(self.to_bytes()))
-        del payload["fetched_at"]
-        del payload["pages"]
-        payload["minutes"] = sorted(
-            [asdict(row) for row in self.minutes], key=lambda row: row["start"]
-        )
-        payload["source"] = _canonical_pages(self.pages, "rollupDataPoints")
-        return _source_digest(payload)

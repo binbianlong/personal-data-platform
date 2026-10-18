@@ -150,7 +150,6 @@ def test_minute_daily_average_has_observed_minute_semantics(
         Window("heart-rate", base, base + timedelta(minutes=3)),
         base + timedelta(days=1),
         minutes,
-        (),
     )
     FitbitMinuteBatch(snapshot).write_snapshot(
         warehouse.connection, source_key="minutes", loaded_at=base + timedelta(days=1)
@@ -187,7 +186,7 @@ def test_minute_writer_empty_deletes_and_stale_snapshot_protects_newer_subrange(
     window = Window("heart-rate", base, base + timedelta(minutes=3))
 
     def snapshot(at, rows, scope=window):
-        return HeartRateMinuteSnapshot("self", scope, at, tuple(rows), ())
+        return HeartRateMinuteSnapshot("self", scope, at, tuple(rows))
 
     def minute(at, avg=60):
         return HeartRateMinute(
@@ -241,7 +240,6 @@ def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path)
         window,
         base + timedelta(days=1),
         (HeartRateMinute(base, base + timedelta(minutes=1), 60, 50, 70),),
-        (),
     )
     try:
         FitbitMinuteBatch(snapshot).write_snapshot(
