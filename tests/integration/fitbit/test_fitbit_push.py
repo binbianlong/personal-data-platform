@@ -65,10 +65,10 @@ def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monke
     client = push_client(runner)
     assert client.post("/notifications/fitbit", json=envelope()).status_code == 204
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
-    fetch = api.fetch_captured
+    fetch = api.fetch_snapshot
     monkeypatch.setattr(
         api,
-        "fetch_captured",
+        "fetch_snapshot",
         lambda *a, **kw: (_ for _ in ()).throw(TimeoutError("API unavailable")),
     )
     assert client.post("/notifications/fitbit", json=envelope()).status_code == 503
@@ -79,7 +79,7 @@ def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monke
     assert scopes[0].summary["submitted_rows"] is None
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 10
-    monkeypatch.setattr(api, "fetch_captured", fetch)
+    monkeypatch.setattr(api, "fetch_snapshot", fetch)
     assert client.post("/notifications/fitbit", json=envelope()).status_code == 204
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 20
@@ -175,18 +175,18 @@ def test_push_deadline_keeps_unfinished_scope_for_redelivery(tmp_path):
     runner, api, factory = direct_setup(tmp_path)
     elapsed = [0.0]
     runner.monotonic = lambda: elapsed[0]
-    original = api.fetch_captured
+    original = api.fetch_snapshot
 
     def slow(*args, **kwargs):
         value = original(*args, **kwargs)
         elapsed[0] += 481
         return value
 
-    api.fetch_captured = slow
+    api.fetch_snapshot = slow
     assert push_client(runner).post("/notifications/fitbit", json=envelope()).status_code == 503
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
         assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 0
-    api.fetch_captured = original
+    api.fetch_snapshot = original
     runner.monotonic = lambda: 0.0
     assert push_client(runner).post("/notifications/fitbit", json=envelope()).status_code == 204

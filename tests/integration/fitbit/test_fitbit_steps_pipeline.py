@@ -11,7 +11,7 @@ import duckdb
 from fastapi.testclient import TestClient
 
 from personal_data_platform.sources.fitbit.acquisition import AcquisitionRunner
-from personal_data_platform.sources.fitbit.models import CapturedSnapshot, Snapshot
+from personal_data_platform.sources.fitbit.models import Snapshot
 from personal_data_platform.sources.fitbit.notifications import PubSubNotifications
 from personal_data_platform.sources.fitbit.service import create_pubsub_app, create_worker_app
 from personal_data_platform.sources.fitbit.webhook import GoogleHealthAuthenticator
@@ -353,13 +353,10 @@ def test_slow_coalesced_scopes_can_each_commit_without_retry_starvation(tmp_path
         def __init__(self):
             self.calls = []
 
-        def fetch_captured(self, window, *, subject_key):
+        def fetch_snapshot(self, window, *, subject_key):
             self.calls.append(window)
             elapsed[0] += 200
-            return CapturedSnapshot(
-                Snapshot(subject_key, window, NOW + timedelta(seconds=elapsed[0]), ()),
-                ({"dataPoints": []},),
-            )
+            return Snapshot(subject_key, window, NOW + timedelta(seconds=elapsed[0]), ())
 
     api = API()
     runner = AcquisitionRunner(

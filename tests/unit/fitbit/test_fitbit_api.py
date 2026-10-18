@@ -54,7 +54,7 @@ def client(transport, **kwargs):
 
 @pytest.mark.parametrize(
     ("method", "kind"),
-    [("fetch_captured", "steps"), ("fetch_heart_rate_minutes", "heart-rate")],
+    [("fetch_snapshot", "steps"), ("fetch_heart_rate_minutes", "heart-rate")],
 )
 def test_acquisition_pages_use_remaining_job_budget(method, kind):
     remaining = [0.25]
@@ -78,7 +78,7 @@ def test_acquisition_pages_use_remaining_job_budget(method, kind):
 
 @pytest.mark.parametrize(
     ("method", "kind"),
-    [("fetch_captured", "steps"), ("fetch_heart_rate_minutes", "heart-rate")],
+    [("fetch_snapshot", "steps"), ("fetch_heart_rate_minutes", "heart-rate")],
 )
 def test_each_api_page_checks_lease_once_and_uses_its_remaining_budget(method, kind):
     events = []
@@ -102,23 +102,19 @@ def test_unbounded_unique_pagination_stops_without_returning_partial_data():
 
     transport = FakeTransport([{"nextPageToken": "page2"}, {"nextPageToken": "page3"}])
     with pytest.raises(InvalidResponseError, match="limit"):
-        client(transport, max_pages=2).fetch_captured(
+        client(transport, max_pages=2).fetch_snapshot(
             Window("steps", START, START + timedelta(days=1)), subject_key="self"
         )
     assert len(transport.calls) == 2
 
 
 def fetch_points(data_type, points, *, subject_key="owner"):
-    return (
-        client(FakeTransport([{"dataPoints": points}]))
-        .fetch_captured(
-            Window(data_type, START, START + timedelta(days=1)), subject_key=subject_key
-        )
-        .snapshot
+    return client(FakeTransport([{"dataPoints": points}])).fetch_snapshot(
+        Window(data_type, START, START + timedelta(days=1)), subject_key=subject_key
     )
 
 
-def test_fetch_completes_all_pages_and_keeps_fetch_start_and_original_points():
+def test_fetch_completes_all_pages_and_keeps_fetch_start():
     events = []
 
     def clock():
@@ -132,14 +128,13 @@ def test_fetch_completes_all_pages_and_keeps_fetch_start_and_original_points():
         before_request=lambda: events.append("request"),
     )
     window = Window("steps", START, START + timedelta(days=1))
-    result = client(transport, clock=clock).fetch_captured(window, subject_key="owner").snapshot
+    result = client(transport, clock=clock).fetch_snapshot(window, subject_key="owner")
 
     assert events == ["clock", "request", "request"]
     assert result.fetched_at == datetime(2026, 9, 3, tzinfo=UTC)
     assert result.window == window
     assert result.complete is True
     assert [record.value for record in result.records] == [12, 4]
-    assert result.source_payload == (first, second)
     first_query = parse_qs(urlsplit(transport.calls[0][1]).query)
     second_query = parse_qs(urlsplit(transport.calls[1][1]).query)
     assert first_query == {
@@ -177,10 +172,8 @@ def test_fetch_completes_all_pages_and_keeps_fetch_start_and_original_points():
 )
 def test_query_uses_the_data_types_own_filter_cursor(data_type, field, start, end, page_size):
     transport = FakeTransport([{}])
-    snapshot = (
-        client(transport)
-        .fetch_captured(Window(data_type, START, START + timedelta(days=1)), subject_key="owner")
-        .snapshot
+    snapshot = client(transport).fetch_snapshot(
+        Window(data_type, START, START + timedelta(days=1)), subject_key="owner"
     )
     query = parse_qs(urlsplit(transport.calls[0][1]).query)
     assert query["filter"] == [f'{field} >= "{start}" AND {field} < "{end}"']
@@ -197,10 +190,8 @@ def test_query_uses_the_data_types_own_filter_cursor(data_type, field, start, en
 )
 def test_large_ranges_are_split_without_reusing_previous_page_tokens(data_type, days, boundary):
     transport = FakeTransport([{"nextPageToken": "p2"}, {}, {}])
-    snapshot = (
-        client(transport)
-        .fetch_captured(Window(data_type, START, START + timedelta(days=days)), subject_key="owner")
-        .snapshot
+    snapshot = client(transport).fetch_snapshot(
+        Window(data_type, START, START + timedelta(days=days)), subject_key="owner"
     )
     queries = [parse_qs(urlsplit(call[1]).query) for call in transport.calls]
     assert len(queries) == 3
@@ -229,7 +220,7 @@ def test_malformed_page_cannot_become_an_empty_complete_snapshot(payload):
     from personal_data_platform.sources.fitbit.api import InvalidResponseError
 
     with pytest.raises(InvalidResponseError) as caught:
-        client(FakeTransport([payload])).fetch_captured(
+        client(FakeTransport([payload])).fetch_snapshot(
             Window("steps", START, START + timedelta(days=1)), subject_key="owner"
         )
     assert "synthetic-sensitive-text" not in str(caught.value)
@@ -245,7 +236,7 @@ def test_repeated_page_token_is_rejected_before_completing():
         ]
     )
     with pytest.raises(InvalidResponseError, match="page token"):
-        client(transport).fetch_captured(
+        client(transport).fetch_snapshot(
             Window("steps", START, START + timedelta(days=1)), subject_key="owner"
         )
 
@@ -271,7 +262,7 @@ def test_later_page_http_failure_is_classified_without_health_or_token_text(stat
         ]
     )
     with pytest.raises(getattr(api, expected)) as caught:
-        client(transport).fetch_captured(
+        client(transport).fetch_snapshot(
             Window("steps", START, START + timedelta(days=1)), subject_key="owner"
         )
     assert "synthetic-token" not in str(caught.value)
@@ -284,7 +275,7 @@ def test_network_failure_is_transient_and_has_a_sanitized_message():
     from personal_data_platform.sources.fitbit.api import TransientError
 
     with pytest.raises(TransientError) as caught:
-        client(FakeTransport([TimeoutError("synthetic-token")])).fetch_captured(
+        client(FakeTransport([TimeoutError("synthetic-token")])).fetch_snapshot(
             Window("steps", START, START + timedelta(days=1)), subject_key="owner"
         )
     assert "synthetic-token" not in str(caught.value)
@@ -297,7 +288,7 @@ def test_each_response_is_checked_against_its_chunk_not_only_total_window():
         [{"dataPoints": [steps(start="2026-11-30T00:00:00Z", end="2026-11-30T00:01:00Z")]}]
     )
     with pytest.raises(InvalidResponseError, match="range"):
-        client(transport).fetch_captured(
+        client(transport).fetch_snapshot(
             Window("steps", START, START + timedelta(days=91)), subject_key="owner"
         )
 
@@ -307,7 +298,6 @@ def test_steps_true_zero_is_a_record_while_off_wrist_remains_missing():
     result = fetch_points("steps", [point])
     assert len(result.records) == 1
     assert result.records[0].value == 0
-    assert result.source_payload == (point,)
     assert fetch_points("steps", []).records == ()
 
 
@@ -641,7 +631,6 @@ def test_rollup_uses_complete_utc_minutes_and_all_pages():
     assert result.window.end == START + timedelta(minutes=2)
     assert len(result.minutes) == 2
     assert result.minutes[0].sample_count is None
-    assert result.pages == (first, second)
     request = json.loads(transport.calls[0][3])
     assert transport.calls[0][0] == "POST"
     assert transport.calls[0][1].endswith("/dataPoints:rollUp")
@@ -733,52 +722,6 @@ def test_rollup_invalid_pages_never_produce_a_complete_snapshot(mutation):
         )
 
 
-def test_rollup_digest_ignores_order_pagination_and_observation_time():
-    points = [rollup(), rollup(START + timedelta(minutes=1))]
-    window = Window("heart-rate", START, START + timedelta(days=1))
-    first = client(
-        FakeTransport([{"rollupDataPoints": points, "future": 1}]),
-        clock=lambda: START + timedelta(days=2),
-    ).fetch_heart_rate_minutes(window, subject_key="owner")
-    second = client(
-        FakeTransport(
-            [
-                {"rollupDataPoints": [points[1]], "nextPageToken": "next", "future": 1},
-                {"rollupDataPoints": [points[0]], "future": 1},
-            ]
-        ),
-        clock=lambda: START + timedelta(days=3),
-    ).fetch_heart_rate_minutes(window, subject_key="owner")
-    assert first.source_sha256() == second.source_sha256()
-    changed = client(
-        FakeTransport([{"rollupDataPoints": points, "future": 2}]),
-        clock=lambda: START + timedelta(days=2),
-    ).fetch_heart_rate_minutes(window, subject_key="owner")
-    assert first.source_sha256() != changed.source_sha256()
-
-
-def test_captured_scalar_pages_preserve_unknown_fields_and_digest_pagination_independence():
-    window = Window("steps", START, START + timedelta(days=1))
-    points = [steps(), steps(start="2026-09-01T00:01:00Z", end="2026-09-01T00:02:00Z")]
-    first = client(FakeTransport([{"dataPoints": points, "future": 1}])).fetch_captured(
-        window, subject_key="owner"
-    )
-    second = client(
-        FakeTransport(
-            [
-                {"dataPoints": [points[1]], "nextPageToken": "next", "future": 1},
-                {"dataPoints": [points[0]], "future": 1},
-            ]
-        )
-    ).fetch_captured(window, subject_key="owner")
-    assert first.pages[0]["future"] == 1
-    assert first.source_sha256() == second.source_sha256()
-    third = client(FakeTransport([{"dataPoints": points, "future": 2}])).fetch_captured(
-        window, subject_key="owner"
-    )
-    assert first.source_sha256() != third.source_sha256()
-
-
 @pytest.mark.parametrize(
     "response", [(503, {"error": "synthetic-health"}, {}), TimeoutError("synthetic-health")]
 )
@@ -828,14 +771,15 @@ def test_rollup_no_complete_minute_is_deferred_without_an_api_request():
     assert transport.calls == []
 
 
-def test_captured_snapshot_preserves_unknown_page_and_point_fields():
+def test_snapshot_ignores_unknown_page_and_point_fields():
     point = steps()
     point["futurePoint"] = {"value": [1, 2]}
     page = {"dataPoints": [point], "futurePage": {"value": True}}
-    result = client(FakeTransport([page])).fetch_captured(
+    result = client(FakeTransport([page])).fetch_snapshot(
         Window("steps", START, START + timedelta(days=1)), subject_key="owner"
     )
-    assert result.pages == (page,)
+    assert len(result.records) == 1
+    assert result.records[0].value == 12
 
 
 def test_civil_steps_query_provider_day_and_keep_physical_storage_cursor():
@@ -845,10 +789,10 @@ def test_civil_steps_query_provider_day_and_keep_physical_storage_cursor():
         [{"dataPoints": [first], "nextPageToken": "next"}, {"dataPoints": [last]}]
     )
     window = Window("steps", START, START + timedelta(days=1), time_basis="civil")
-    result = client(transport).fetch_captured(window, subject_key="self")
+    result = client(transport).fetch_snapshot(window, subject_key="self")
     assert result.window == window
-    assert [r.source_date for r in result.snapshot.records] == [START.date(), START.date()]
-    assert result.snapshot.records[0].cursor == START - timedelta(hours=9)
+    assert [r.source_date for r in result.records] == [START.date(), START.date()]
+    assert result.records[0].cursor == START - timedelta(hours=9)
     query = parse_qs(urlsplit(transport.calls[0][1]).query)
     assert query["filter"] == [
         'steps.interval.civil_start_time >= "2026-09-01" AND steps.interval.civil_start_time < "2026-09-02"'
@@ -863,7 +807,7 @@ def test_civil_steps_reject_response_from_another_provider_date():
         [{"dataPoints": [steps(start="2026-08-31T14:59:00Z", end="2026-08-31T15:00:00Z")]}]
     )
     with pytest.raises(InvalidResponseError, match="range"):
-        client(transport).fetch_captured(
+        client(transport).fetch_snapshot(
             Window("steps", START, START + timedelta(days=1), time_basis="civil"),
             subject_key="self",
         )

@@ -18,7 +18,6 @@ from urllib.request import Request, urlopen
 
 from personal_data_platform.sources.fitbit.models import (
     DATE_TYPES,
-    CapturedSnapshot,
     HeartRateMinute,
     HeartRateMinuteSnapshot,
     Record,
@@ -199,12 +198,10 @@ class HealthClient:
         remaining = self.request_guard() if self.request_guard is not None else None
         return self._timeout if remaining is None else min(self._timeout, remaining)
 
-    def fetch_captured(self, window: Window, *, subject_key: str) -> CapturedSnapshot:
+    def fetch_snapshot(self, window: Window, *, subject_key: str) -> Snapshot:
         if window.data_type == "heart-rate":
             raise ValueError("heart rate requires the minute aggregation API")
         snapshot = Snapshot(subject_key, window, self._clock(), ())
-        points: list[dict[str, object]] = []
-        pages: list[dict[str, object]] = []
         records: list[Record] = []
         identities: set[tuple[str, str]] = set()
         page_count = 0
@@ -217,7 +214,6 @@ class HealthClient:
                     raise InvalidResponseError("Google Health acquisition limit exceeded")
                 page_count += 1
                 page = self._page(chunk, page_token)
-                pages.append(page)
                 raw_points = page.get("dataPoints", [])
                 if not isinstance(raw_points, list):
                     raise InvalidResponseError("Google Health dataPoints must be an array")
@@ -237,7 +233,6 @@ class HealthClient:
                             )
                         identities.add(identity)
                     records.extend(normalized)
-                    points.append(point)
                     if len(records) > 250_000:
                         raise InvalidResponseError("Google Health record limit exceeded")
                 next_token = page.get("nextPageToken", "")
@@ -250,10 +245,7 @@ class HealthClient:
                 seen_tokens.add(next_token)
                 page_token = next_token
         try:
-            return CapturedSnapshot(
-                replace(snapshot, records=tuple(records), source_payload=tuple(points)),
-                tuple(pages),
-            )
+            return replace(snapshot, records=tuple(records))
         except ValueError:
             raise InvalidResponseError(
                 "Google Health records do not form a valid snapshot"
@@ -274,17 +266,17 @@ class HealthClient:
             raise ValueError("heart rate range has no complete minute")
         effective = Window("heart-rate", start, end)
         minutes: list[HeartRateMinute] = []
-        pages: list[dict[str, object]] = []
         seen_starts: set[datetime] = set()
+        page_count = 0
         deadline = time.monotonic() + 1200
         for chunk in _chunks(effective):
             page_token = ""
             seen_tokens: set[str] = set()
             while True:
-                if len(pages) >= self._max_pages or time.monotonic() >= deadline:
+                if page_count >= self._max_pages or time.monotonic() >= deadline:
                     raise InvalidResponseError("Google Health acquisition limit exceeded")
+                page_count += 1
                 page = self._rollup_page(chunk, page_token)
-                pages.append(page)
                 points = page.get("rollupDataPoints", [])
                 if not isinstance(points, list):
                     raise InvalidResponseError("Google Health rollupDataPoints must be an array")
@@ -329,9 +321,7 @@ class HealthClient:
                     raise InvalidResponseError("Google Health repeated a page token")
                 seen_tokens.add(next_token)
                 page_token = next_token
-        return HeartRateMinuteSnapshot(
-            subject_key, effective, fetched_at, tuple(minutes), tuple(pages)
-        )
+        return HeartRateMinuteSnapshot(subject_key, effective, fetched_at, tuple(minutes))
 
     def _rollup_page(self, window: Window, page_token: str) -> dict[str, object]:
         token = self._access_token()

@@ -99,7 +99,7 @@ def test_replaces_only_target_minutes_and_preserves_newer_data(tmp_path, caplog,
         warehouse.migrate()
         warehouse.connection.execute("BEGIN")
         FitbitMinuteBatch(
-            HeartRateMinuteSnapshot("self", wide, NOW + timedelta(minutes=10), rows, ())
+            HeartRateMinuteSnapshot("self", wide, NOW + timedelta(minutes=10), rows)
         ).write_snapshot(
             warehouse.connection, source_key="seed", loaded_at=NOW + timedelta(minutes=10)
         )

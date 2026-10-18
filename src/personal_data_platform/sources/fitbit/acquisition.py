@@ -19,9 +19,9 @@ from .api import HealthClient
 from .models import (
     DATE_TYPES,
     AcquisitionMode,
-    CapturedSnapshot,
     HeartRateMinuteSnapshot,
     Notification,
+    Snapshot,
     Window,
 )
 from .writer import FitbitBatch, FitbitMinuteBatch, WriteResult
@@ -46,7 +46,7 @@ class AcquisitionDeferred(RuntimeError):
 
 
 class AcquisitionClient(Protocol):
-    def fetch_captured(self, window: Window, *, subject_key: str) -> CapturedSnapshot: ...
+    def fetch_snapshot(self, window: Window, *, subject_key: str) -> Snapshot: ...
     def fetch_heart_rate_minutes(
         self, window: Window, *, subject_key: str
     ) -> HeartRateMinuteSnapshot: ...
@@ -58,7 +58,7 @@ def _log_acquisition(
     status: str,
     notification_id: str | None,
     attempt_id: str | None,
-    acquisition: CapturedSnapshot | HeartRateMinuteSnapshot | None = None,
+    acquisition: Snapshot | HeartRateMinuteSnapshot | None = None,
     result: WriteResult | None = None,
     error: Exception | None = None,
     reason: str | None = None,
@@ -69,7 +69,7 @@ def _log_acquisition(
         fetched = (
             len(acquisition.minutes)
             if isinstance(acquisition, HeartRateMinuteSnapshot)
-            else len(acquisition.snapshot.records)
+            else len(acquisition.records)
         )
     LOGGER.log(
         logging.ERROR if status in ("failed", "unknown") else logging.INFO,
@@ -325,7 +325,7 @@ class AcquisitionRunner:
     def _commit_acquisition(
         self,
         warehouse: Warehouse,
-        acquisition: CapturedSnapshot | HeartRateMinuteSnapshot,
+        acquisition: Snapshot | HeartRateMinuteSnapshot,
         owner: str,
         deadline: float,
     ) -> WriteResult:
@@ -333,7 +333,7 @@ class AcquisitionRunner:
         if isinstance(acquisition, HeartRateMinuteSnapshot):
             batch = FitbitMinuteBatch(acquisition)
         else:
-            batch = FitbitBatch(acquisition.snapshot, source_digest=acquisition.source_sha256())
+            batch = FitbitBatch(acquisition)
         self._check(warehouse, owner, deadline)
         try:
             warehouse.connection.execute("BEGIN")
@@ -381,7 +381,7 @@ class AcquisitionRunner:
         acquisition_deadline = deadline - min(reserve_seconds, remaining / 5)
         last_fetch_seconds = 0.0
         for index, window in enumerate(windows):
-            acquisition: CapturedSnapshot | HeartRateMinuteSnapshot | None = None
+            acquisition: Snapshot | HeartRateMinuteSnapshot | None = None
             try:
                 available = self._remaining(acquisition_deadline)
                 if index >= 500 or (completed and available <= last_fetch_seconds):
@@ -391,7 +391,7 @@ class AcquisitionRunner:
                         warehouse, owner, acquisition_deadline
                     )
                 started = self.monotonic()
-                fetched: CapturedSnapshot | HeartRateMinuteSnapshot
+                fetched: Snapshot | HeartRateMinuteSnapshot
                 with network_phase("fitbit_api"):
                     if window.data_type == "heart-rate":
                         if (
@@ -403,7 +403,7 @@ class AcquisitionRunner:
                             window, subject_key=self.subject_key
                         )
                     else:
-                        fetched = self.client.fetch_captured(window, subject_key=self.subject_key)
+                        fetched = self.client.fetch_snapshot(window, subject_key=self.subject_key)
                 last_fetch_seconds = max(last_fetch_seconds, self.monotonic() - started)
                 if (
                     fetched.subject_key != self.subject_key
