@@ -41,7 +41,6 @@ def _collector(tmp_path):
         uploader=repo,
         pseudonym_key=SECRET,
         allowed_device_keys=frozenset({build_device_key(SECRET, "phone")}),
-        destination=str(state.path),
         clock=lambda: NOW,
     )
     return collector, state, repo, remote

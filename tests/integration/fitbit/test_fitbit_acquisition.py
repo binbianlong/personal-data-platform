@@ -5,7 +5,7 @@ import duckdb
 import pytest
 
 from personal_data_platform.sources.fitbit.acquisition import AcquisitionRunner
-from personal_data_platform.sources.fitbit.models import CapturedSnapshot, Record, Snapshot, Window
+from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window
 from personal_data_platform.sources.fitbit.writer import FitbitBatch
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConnectionError
 
@@ -23,7 +23,7 @@ def direct_setup(tmp_path, states=(10, 10, 20, 10, None)):
         def __init__(self):
             self.calls = []
 
-        def fetch_captured(self, window, *, subject_key):
+        def fetch_snapshot(self, window, *, subject_key):
             self.calls.append(window)
             value = states[min(len(self.calls) - 1, len(states) - 1)]
             records = (
@@ -40,10 +40,7 @@ def direct_setup(tmp_path, states=(10, 10, 20, 10, None)):
                     ),
                 )
             )
-            return CapturedSnapshot(
-                Snapshot(subject_key, window, NOW + timedelta(seconds=len(self.calls)), records),
-                ({"unknown": "transient response"},),
-            )
+            return Snapshot(subject_key, window, NOW + timedelta(seconds=len(self.calls)), records)
 
     api = API()
     runner = AcquisitionRunner(
@@ -266,7 +263,6 @@ def test_minute_acquisition_logs_effective_range_separately_from_requested(tmp_p
                         effective.start, effective.start + timedelta(minutes=1), 60, 50, 70
                     ),
                 ),
-                (),
             )
 
     runner.client = Client()
@@ -285,14 +281,14 @@ def test_mismatched_api_snapshot_is_not_logged_as_a_complete_acquisition(tmp_pat
     from dataclasses import replace
 
     runner, api, factory = direct_setup(tmp_path)
-    fetch = api.fetch_captured
+    fetch = api.fetch_snapshot
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
 
     def wrong_subject(window, *, subject_key):
         result = fetch(window, subject_key=subject_key)
-        return replace(result, snapshot=replace(result.snapshot, subject_key="other"))
+        return replace(result, subject_key="other")
 
-    api.fetch_captured = wrong_subject
+    api.fetch_snapshot = wrong_subject
     assert run_range(runner, factory).failed_scopes == 1
     entries = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
     assert len(entries) == 1
@@ -334,10 +330,7 @@ def test_bounded_steps_rejects_shortened_acquisition_without_writes(tmp_path):
     runner, api, factory = direct_setup(tmp_path, states=(None,))
     window = Window("steps", NOW - timedelta(minutes=3), NOW - timedelta(minutes=1))
     shorter = Window("steps", window.start, window.end - timedelta(minutes=1))
-    api.fetch_captured = lambda requested, subject_key: CapturedSnapshot(
-        Snapshot(subject_key, shorter, NOW, ()),
-        (),
-    )
+    api.fetch_snapshot = lambda requested, subject_key: Snapshot(subject_key, shorter, NOW, ())
     result = runner.process_notification(
         Notification("partial", "self", (window,), NOW, acquisition_mode="bounded_steps")
     )

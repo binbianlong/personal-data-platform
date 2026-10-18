@@ -129,11 +129,7 @@ def test_minutes_and_records_share_coverage_without_affecting_each_other(warehou
     at = steps.window.start
     minute = HeartRateMinute(at, at + timedelta(minutes=1), 60, 50, 70, GOOGLE_WEARABLES)
     data = HeartRateMinuteSnapshot(
-        "self",
-        Window("heart-rate", at, at + timedelta(days=1)),
-        at + timedelta(days=1),
-        (minute,),
-        pages=(),
+        "self", Window("heart-rate", at, at + timedelta(days=1)), at + timedelta(days=1), (minute,)
     )
     apply(warehouse, steps)
     FitbitMinuteBatch(data).write_snapshot(warehouse.connection, source_key="minute", loaded_at=at)

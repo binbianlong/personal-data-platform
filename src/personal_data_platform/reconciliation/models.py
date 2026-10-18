@@ -30,16 +30,16 @@ class ReconciliationResult:
         return self.status == "succeeded"
 
     @property
-    def collector_receipt_count(self) -> int:
-        return self._detail_count("collector_receipt_count")
+    def collector_device_count(self) -> int:
+        return self._detail_count("collector_device_count")
 
     @property
     def stale_collector_count(self) -> int:
         return self._detail_count("stale_collector_count")
 
     @property
-    def missing_collector_receipt_count(self) -> int:
-        return self._detail_count("missing_collector_receipt_count")
+    def missing_collector_scan_count(self) -> int:
+        return self._detail_count("missing_collector_scan_count")
 
     def _detail_count(self, key: str) -> int:
         # Source-specific details have an open schema. Keep dynamic values at

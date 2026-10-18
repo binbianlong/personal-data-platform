@@ -24,22 +24,18 @@ def manual_env(monkeypatch, tmp_path):
     warehouse = factory()
     warehouse.migrate()
     warehouse.close()
-    fetch = api.fetch_captured
+    fetch = api.fetch_snapshot
 
     def daily_records(window, **kwargs):
         captured = fetch(window, **kwargs)
         return replace(
             captured,
-            snapshot=replace(
-                captured.snapshot,
-                records=tuple(
-                    replace(record, record_id=window.start.isoformat())
-                    for record in captured.snapshot.records
-                ),
+            records=tuple(
+                replace(record, record_id=window.start.isoformat()) for record in captured.records
             ),
         )
 
-    monkeypatch.setattr(api, "fetch_captured", daily_records)
+    monkeypatch.setattr(api, "fetch_snapshot", daily_records)
     monkeypatch.setenv("PDP_FITBIT_SUBJECT_KEY", "self")
     monkeypatch.setenv("PDP_FITBIT_PROCESSING_PAUSED", "false")
     monkeypatch.setattr(runtime, "_warehouse", factory)
@@ -61,14 +57,14 @@ def test_manual_retry_records_first_unfinished_day_and_preserves_committed_data(
     start = datetime(2026, 10, 1, 15, tzinfo=UTC)
     end = start + timedelta(days=3)
     failed_day = start + timedelta(days=1)
-    fetch = manual_env.api.fetch_captured
+    fetch = manual_env.api.fetch_snapshot
 
     def partial(window, **kwargs):
         if window.start == failed_day:
             raise TimeoutError("temporary API failure")
         return fetch(window, **kwargs)
 
-    monkeypatch.setattr(manual_env.api, "fetch_captured", partial)
+    monkeypatch.setattr(manual_env.api, "fetch_snapshot", partial)
     assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 1
     first = json.loads(capsys.readouterr().out)
     assert first["completed_scopes"] == 2 and first["failed_scopes"] == 1
@@ -78,7 +74,7 @@ def test_manual_retry_records_first_unfinished_day_and_preserves_committed_data(
     assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") > 0
     warehouse.close()
 
-    monkeypatch.setattr(manual_env.api, "fetch_captured", fetch)
+    monkeypatch.setattr(manual_env.api, "fetch_snapshot", fetch)
     assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 0
     retry = json.loads(capsys.readouterr().out)
     assert retry["completed_scopes"] == 3 and retry["first_incomplete"] is None
@@ -149,7 +145,7 @@ def test_daily_repair_fetches_ten_units_using_shared_warehouse_and_owner(tmp_pat
 
     def heart_rate(window, *, subject_key):
         api.calls.append(window)
-        return HeartRateMinuteSnapshot(subject_key, window, now, (), ())
+        return HeartRateMinuteSnapshot(subject_key, window, now, ())
 
     monkeypatch.setattr(api, "fetch_heart_rate_minutes", heart_rate, raising=False)
     monkeypatch.setattr(runtime, "_acquisition_runner", lambda: runner)

@@ -12,7 +12,7 @@ from personal_data_platform.reconciliation.job import _relation_names, run_recon
 from personal_data_platform.sources.contracts import SourceHealth
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
-from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
+from personal_data_platform.sources.screen_time.state import CollectorScan
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 
@@ -20,11 +20,9 @@ class _Repository:
     def list_raw(self, prefix):
         return []
 
-    def list_scan_receipts(self):
-        return [SimpleNamespace(device_key="a" * 64, completed_at=datetime.now(UTC))]
-
-    def get_device_manifest(self):
-        return SimpleNamespace(device_keys=("a" * 64,), completed_at=datetime.now(UTC))
+    def last_successful_scan(self):
+        now = datetime.now(UTC)
+        return CollectorScan(now, ("a" * 64,), {"a" * 64: now})
 
 
 def _raw(storage_created_at: datetime) -> RawObject:
@@ -37,13 +35,6 @@ def _raw(storage_created_at: datetime) -> RawObject:
     )
     return get_source().parse_raw_key(
         identity.object_key, storage_created_at=storage_created_at, storage_generation=1
-    )
-
-
-@pytest.fixture(autouse=True)
-def _ninety_day_source(monkeypatch):
-    monkeypatch.setattr(
-        "personal_data_platform.sources.screen_time.adapter.ScreenTimeSource.retention_days", 90
     )
 
 
@@ -137,54 +128,6 @@ def test_relation_inventory_ignores_other_attached_databases() -> None:
         warehouse.close()
 
 
-def test_successful_audit_persists_expected_lifecycle_expiry() -> None:
-    warehouse = _warehouse()
-    try:
-        now = datetime.now(UTC)
-        raw = _raw(now - timedelta(days=90))
-        warehouse.load_object(raw, byte_size=0, batch=ScreenTimeBatch([]))
-
-        result = run_reconciliation(_Repository(), warehouse, heartbeat=lambda _: None, now=now)
-
-        assert result.ok
-        assert result.loaded_object_count == 0
-        assert result.details["newly_expired_object_count"] == 1
-        assert (
-            warehouse.query_value(
-                "SELECT retention_expired_at FROM ops.ingestion_metadata WHERE object_key = ?",
-                [raw.key],
-            )
-            == now
-        )
-    finally:
-        warehouse.close()
-
-
-def test_failed_heartbeat_rolls_back_expected_expiry() -> None:
-    warehouse = _warehouse()
-    try:
-        now = datetime.now(UTC)
-        raw = _raw(now - timedelta(days=91))
-        warehouse.load_object(raw, byte_size=0, batch=ScreenTimeBatch([]))
-
-        def fail(_):
-            raise RuntimeError("external monitor unreachable")
-
-        result = run_reconciliation(_Repository(), warehouse, heartbeat=fail, now=now)
-
-        assert not result.ok
-        assert result.details["newly_expired_object_count"] == 0
-        assert (
-            warehouse.query_value(
-                "SELECT retention_expired_at FROM ops.ingestion_metadata WHERE object_key = ?",
-                [raw.key],
-            )
-            is None
-        )
-    finally:
-        warehouse.close()
-
-
 class _EmptyBatch:
     parser_version = "synthetic-1"
     record_count = 0
@@ -198,8 +141,6 @@ class _SyntheticSource:
     schema_versions = (1, 2)
     raw_suffixes = (".json.gz",)
     required_relations = ()
-    retention_days = 7
-    lifecycle_grace_days = 2
     dbt_selector = "tag:synthetic"
 
     def __init__(self, source_id: str, stream: str, observations: list[RawObject]):
@@ -256,7 +197,6 @@ def test_reconciliation_isolates_source_and_stream_and_repairs_all_supported_sch
     now = datetime.now(UTC)
     raw_v1 = _synthetic_raw("synthetic", "metrics", 1, now)
     raw_v2 = _synthetic_raw("synthetic", "metrics", 2, now)
-    expired = _synthetic_raw("synthetic", "metrics", 1, now - timedelta(days=7), name="expired")
     other_failed = _synthetic_raw(*other_scope, 1, now - timedelta(days=20), name="failed")
     other_old = _synthetic_raw(*other_scope, 1, now - timedelta(days=20), name="old")
     source = _SyntheticSource("synthetic", "metrics", [raw_v1, raw_v2])
@@ -273,7 +213,6 @@ def test_reconciliation_isolates_source_and_stream_and_repairs_all_supported_sch
     warehouse = _warehouse()
     try:
         warehouse.load_object(raw_v1, byte_size=0, batch=_EmptyBatch())
-        warehouse.load_object(expired, byte_size=0, batch=_EmptyBatch())
         warehouse.load_object(other_old, byte_size=0, batch=_EmptyBatch())
         warehouse.mark_failed(other_failed, byte_size=0, error=RuntimeError("unrelated failure"))
         result = run_reconciliation(
@@ -283,10 +222,9 @@ def test_reconciliation_isolates_source_and_stream_and_repairs_all_supported_sch
         assert result.ok
         assert result.failed_object_count == 0
         assert result.raw_object_count == result.loaded_object_count == 2
-        assert result.details["total_object_count"] == 3
-        assert result.details["expired_object_count"] == 1
+        assert result.details["total_object_count"] == 2
         assert result.details["synthetic_health"] == "fresh"
-        assert result.collector_receipt_count == 0
+        assert result.collector_device_count == 0
         assert source.audited == sorted(
             (raw_v1, raw_v2), key=lambda raw: (raw.observed_at, raw.key)
         )
@@ -309,18 +247,11 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
     from dataclasses import replace
 
     from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
-    from personal_data_platform.sources.screen_time.raw import (
-        CollectorDeviceManifest,
-        CollectorScanReceipt,
-    )
     from tests.screen_time_helpers import NOW, Repository, event, segb
 
     class LiveRepository(Repository):
-        def list_scan_receipts(self):
-            return [CollectorScanReceipt("a" * 64, NOW, 1)]
-
-        def get_device_manifest(self):
-            return CollectorDeviceManifest(("a" * 64,), NOW)
+        def last_successful_scan(self):
+            return CollectorScan(NOW, ("a" * 64,), {"a" * 64: NOW})
 
     class CorrectedSource(ScreenTimeSource):
         parser_version = "corrected-parser"

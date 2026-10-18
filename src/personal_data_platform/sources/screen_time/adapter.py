@@ -39,8 +39,6 @@ class ScreenTimeSource:
         "marts.daily_screen_time",
         "marts.daily_screen_time_total",
     )
-    retention_days: int | None = None
-    lifecycle_grace_days = 3
     dbt_selector = "tag:screen_time"
     monitor_name = "screen_time_reconciliation"
 
@@ -80,7 +78,7 @@ class ScreenTimeSource:
         name = kind = None
         if raw.schema_version == 2:
             payload, name, kind = decode_segment_envelope(payload)
-        records = parse_segb_bytes(raw, payload, segment_kind=kind)
+        records = [] if kind == "tombstones" else parse_segb_bytes(raw, payload, segment_kind=kind)
         if name is not None:
             records = [replace(record, segment_filename=name) for record in records]
         return ScreenTimeBatch(

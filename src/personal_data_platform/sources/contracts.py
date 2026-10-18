@@ -62,10 +62,6 @@ class SourceAdapter(RawCodec, Protocol):
     @property
     def raw_storage(self) -> Literal["gcs", "sqlite"]: ...
 
-    @property
-    def retention_days(self) -> int | None: ...
-
-    lifecycle_grace_days: int
     dbt_selector: str
     monitor_name: str
 
@@ -135,16 +131,7 @@ def list_source_raw(
 
 
 def validate_runtime_policy(source: SourceAdapter) -> None:
-    """Stop before cloud access if deployment and source retention contracts drift."""
-    for name, expected in (
-        ("PDP_RAW_RETENTION_DAYS", source.retention_days),
-        ("PDP_LIFECYCLE_GRACE_DAYS", source.lifecycle_grace_days),
-    ):
-        value = os.environ.get(name)
-        if source.retention_days is not None and value is not None and value != str(expected):
-            raise ValueError(
-                f"{name} does not match {source.source_id}/{source.stream}: {expected}"
-            )
+    """Stop before cloud access if the configured Raw namespace differs from the source."""
     for name, expected_values in (
         ("PDP_RAW_PREFIXES_JSON", source.raw_prefixes),
         ("PDP_RAW_SUFFIXES_JSON", source.raw_suffixes),

@@ -276,7 +276,7 @@ def test_minute_writer_reports_counts_and_stale_ranges(warehouse):
     rows = (HeartRateMinute(at, at + timedelta(minutes=1), 60, 50, 70),)
 
     def write(version, values=rows, window=scope):
-        data = HeartRateMinuteSnapshot("self", window, at + timedelta(hours=version), values, ())
+        data = HeartRateMinuteSnapshot("self", window, at + timedelta(hours=version), values)
         return FitbitMinuteBatch(data).write_snapshot(
             warehouse.connection, source_key=str(version), loaded_at=data.fetched_at
         )
@@ -316,7 +316,7 @@ def test_fragmented_coverage_uses_two_mutations_and_preserves_scopes_and_hashes(
     old = at + timedelta(days=1)
     new = at + timedelta(days=2, microseconds=7)
     coverage = [
-        _Coverage(at + timedelta(hours=i), at + timedelta(hours=i + 8), old, f"old-{i}", "c", "s")
+        _Coverage(at + timedelta(hours=i), at + timedelta(hours=i + 8), old, f"old-{i}", "c")
         for i in (0, 8, 16)
     ]
     other_scopes = [
@@ -345,7 +345,6 @@ def test_fragmented_coverage_uses_two_mutations_and_preserves_scopes_and_hashes(
         fetched_at=new,
         source_key="new",
         digest="new-content",
-        source_digest="new-source",
     )
     assert len(connection.mutations) == 2
     assert warehouse.query_rows(
@@ -355,9 +354,9 @@ def test_fragmented_coverage_uses_two_mutations_and_preserves_scopes_and_hashes(
         list(scope),
     ) == [
         (at, at + timedelta(hours=2), old, "old-0", "", ""),
-        (at + timedelta(hours=2), at + timedelta(hours=3), new, "new", "new-content", "new-source"),
+        (at + timedelta(hours=2), at + timedelta(hours=3), new, "new", "new-content", ""),
         (at + timedelta(hours=3), at + timedelta(hours=5), old, "old-0", "", ""),
-        (at + timedelta(hours=5), at + timedelta(hours=6), new, "new", "new-content", "new-source"),
+        (at + timedelta(hours=5), at + timedelta(hours=6), new, "new", "new-content", ""),
         (at + timedelta(hours=6), at + timedelta(hours=8), old, "old-0", "", ""),
         (at + timedelta(hours=8), at + timedelta(hours=10), old, "old-8", "", ""),
         (
@@ -366,7 +365,7 @@ def test_fragmented_coverage_uses_two_mutations_and_preserves_scopes_and_hashes(
             new,
             "new",
             "new-content",
-            "new-source",
+            "",
         ),
         (at + timedelta(hours=11), at + timedelta(hours=13), old, "old-8", "", ""),
         (
@@ -375,7 +374,7 @@ def test_fragmented_coverage_uses_two_mutations_and_preserves_scopes_and_hashes(
             new,
             "new",
             "new-content",
-            "new-source",
+            "",
         ),
         (at + timedelta(hours=14), at + timedelta(hours=16), old, "old-8", "", ""),
         (at + timedelta(hours=16), at + timedelta(hours=24), old, "old-16", "c", "s"),

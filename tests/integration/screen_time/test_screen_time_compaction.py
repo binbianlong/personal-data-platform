@@ -14,7 +14,7 @@ from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.migrations import DEFAULT_MIGRATIONS
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-from tests.screen_time_helpers import Repository, event, segb, tombstone
+from tests.screen_time_helpers import Repository, event, segb
 
 
 def _warehouse(path):
@@ -71,11 +71,9 @@ def test_tombstone_input_does_not_suppress_current_event(tmp_path):
     warehouse = _warehouse(tmp_path / "events.duckdb")
     repository = Repository()
     payload = event("app.a")
-    segment, offset = segb(payload)
+    segment, _ = segb(payload)
     _load(warehouse, repository, repository.add("100", segment))
-    deletion = repository.add(
-        "100", segb(tombstone("100", offset, len(payload)))[0], kind="tombstones"
-    )
+    deletion = repository.add("100", segb(b"unknown deletion marker")[0], kind="tombstones")
     _load(warehouse, repository, deletion)
     assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(True,)]
     assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_record") == 1

@@ -63,14 +63,13 @@ class _Coverage:
     fetched_at: datetime
     source_key: str
     content_sha256: str
-    source_sha256: str
 
 
 def _read_coverage(
     connection: DuckDBPyConnection, scope: tuple[str, str, str, str], window: Window
 ) -> list[_Coverage]:
     rows = connection.execute(
-        "SELECT range_start,range_end,fetched_at,source_key,content_sha256,source_sha256 "
+        "SELECT range_start,range_end,fetched_at,source_key,content_sha256 "
         f"FROM ops.fitbit_coverage WHERE {_SCOPE} "
         "AND range_start < ? AND range_end > ? ORDER BY range_start",
         [*scope, window.end, window.start],
@@ -106,7 +105,6 @@ def _replace_coverage(
     fetched_at: datetime,
     source_key: str,
     digest: str,
-    source_digest: str,
 ) -> None:
     # Split empty and nonempty acquisitions alike to protect newer subranges.
     deleted = []
@@ -119,7 +117,7 @@ def _replace_coverage(
             continue
         deleted.append(prior.start)
         for start, end in remaining:
-            # A fragment is not a complete acquisition; neither hash is reusable.
+            # A fragment is not a complete acquisition; its hash is not reusable.
             rows.append(
                 {
                     "start": start,
@@ -127,7 +125,6 @@ def _replace_coverage(
                     "fetched_at": prior.fetched_at,
                     "source_key": prior.source_key,
                     "content_sha256": "",
-                    "source_sha256": "",
                 }
             )
     rows.extend(
@@ -137,7 +134,6 @@ def _replace_coverage(
             "fetched_at": fetched_at,
             "source_key": source_key,
             "content_sha256": digest,
-            "source_sha256": source_digest,
         }
         for start, end in accepted
     )
@@ -148,10 +144,11 @@ def _replace_coverage(
             [*scope, deleted],
         )
     if rows:
+        # Keep the legacy source_sha256 column empty without changing the DB schema.
         connection.execute(
             "INSERT INTO ops.fitbit_coverage "
             "SELECT ?,?,?,?,r.start::TIMESTAMPTZ,r.end::TIMESTAMPTZ,r.fetched_at::TIMESTAMPTZ,"
-            "r.source_key::VARCHAR,r.content_sha256::VARCHAR,r.source_sha256::VARCHAR "
+            "r.source_key::VARCHAR,r.content_sha256::VARCHAR,'' "
             "FROM unnest(?) incoming(r)",
             [*scope, rows],
         )
@@ -233,7 +230,6 @@ def _record_fields(kind: str) -> tuple[tuple[str, ...], str]:
 @dataclass(frozen=True, slots=True)
 class FitbitBatch:
     snapshot: Snapshot
-    source_digest: str | None = None
 
     def write_snapshot(
         self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
@@ -253,9 +249,6 @@ class FitbitBatch:
         records = [asdict(record) for record in snapshot.records]
         records.sort(key=lambda item: json.dumps(item, default=str, sort_keys=True))
         digest = _digest(records)
-        source_digest = (
-            self.source_digest if self.source_digest is not None else snapshot.source_sha256()
-        )
         unchanged = _unchanged(coverage, window, digest)
         submitted = 0
         protected: set[str] = set()
@@ -265,15 +258,13 @@ class FitbitBatch:
             )
             unchanged = bool(coverage) and not changed
             if protected:
-                digest = source_digest = ""
+                digest = ""
         elif not unchanged:
             protected, submitted = self._replace_records(
                 connection, accepted, source_key=source_key, loaded_at=loaded_at
             )
             if protected:
-                digest = source_digest = ""
-        if accepted != [(window.start, window.end)]:
-            source_digest = ""
+                digest = ""
         _replace_coverage(
             connection,
             scope,
@@ -282,7 +273,6 @@ class FitbitBatch:
             fetched_at=snapshot.fetched_at,
             source_key=source_key,
             digest=digest,
-            source_digest=source_digest,
         )
         return WriteResult(
             "unchanged" if unchanged else "range_replaced",
@@ -421,7 +411,7 @@ class FitbitBatch:
             moved.extend(record.start for record in changed)
         if moved:
             connection.execute(
-                f"UPDATE ops.fitbit_coverage SET content_sha256='',source_sha256='' WHERE {_SCOPE} "
+                f"UPDATE ops.fitbit_coverage SET content_sha256='' WHERE {_SCOPE} "
                 "AND EXISTS (SELECT 1 FROM unnest(?::TIMESTAMPTZ[]) previous(cursor_at) "
                 "WHERE range_start <= previous.cursor_at AND range_end > previous.cursor_at)",
                 [*coverage_scope(snapshot.subject_key, "steps"), sorted(set(moved))],
@@ -546,7 +536,7 @@ class FitbitBatch:
                 moved.add(prior_cursor)
         if moved:
             connection.execute(
-                f"UPDATE ops.fitbit_coverage SET content_sha256='',source_sha256='' WHERE {_SCOPE} "
+                f"UPDATE ops.fitbit_coverage SET content_sha256='' WHERE {_SCOPE} "
                 "AND EXISTS (SELECT 1 FROM unnest(?::TIMESTAMPTZ[]) previous(cursor_at) "
                 "WHERE range_start <= previous.cursor_at AND range_end > previous.cursor_at)",
                 [*scope, sorted(moved)],
@@ -697,7 +687,6 @@ class FitbitMinuteBatch:
                     [snapshot.subject_key, snapshot.fetched_at, source_key, loaded_at, incoming],
                 )
                 submitted = len(incoming)
-        source_digest = snapshot.source_sha256() if accepted == [(window.start, window.end)] else ""
         _replace_coverage(
             connection,
             scope,
@@ -706,7 +695,6 @@ class FitbitMinuteBatch:
             fetched_at=snapshot.fetched_at,
             source_key=source_key,
             digest=digest,
-            source_digest=source_digest,
         )
         return WriteResult(
             "unchanged" if unchanged else "range_replaced", submitted, tuple(accepted)

@@ -29,17 +29,17 @@ worker・日次Jobは同じimageとruntime Service Accountを共有する。時�
 
 | 境界 | 責任 |
 |---|---|
-| `sources/contracts.py`・`sources/registry.py` | 登録済みsource/stream、Raw codec、decode、型付きbatch、監査、保持期限、dbt selector |
+| `sources/contracts.py`・`sources/registry.py` | 登録済みsource/stream、Raw codec、decode、型付きbatch、監査、dbt selector |
 | `storage/gcs.py` | OwnTracks Rawの保存・読取と保持済みGCS transport |
 | `loader/`・`storage/motherduck.py` | hash検証、再試行、object単位transaction、共通取込台帳 |
-| `reconciliation/`・`recovery/` | Rawと台帳の照合、期限切れ判定、scratchへの再生 |
+| `reconciliation/`・`recovery/` | Rawと台帳の照合、scratchへの再生 |
 | `sources/<source>/` | 認証・取得、control/pending状態、wire format、正規化、baseへの書込 |
 | `dbt/` | interval、日境界、日次集計、source横断JOINをViewとして提供 |
 
 Raw adapterは一つのsource/streamを担当し、保持中の全Raw schema版を再生できるようにする。
 FitbitはRaw adapterへ登録せず、API取得と直接Writerで処理する。dbt selectorはRaw adapterから独立して解決する。
 Raw schema版とparser versionは別で、parser versionを更新すると保持中の旧parser成功分も再解析する。
-取得状態・controlの意味はsourceが所有し、共通処理は他sourceへCollectorのreceiptを要求しない。
+取得状態・controlの意味はsourceが所有し、共通処理は他sourceへCollectorのscan記録を要求しない。
 未知のsource/streamを既存decoderへ流すfallbackは設けない。
 
 ## Rawと保持期限
