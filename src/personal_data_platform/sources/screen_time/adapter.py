@@ -80,7 +80,7 @@ class ScreenTimeSource:
         name = kind = None
         if raw.schema_version == 2:
             payload, name, kind = decode_segment_envelope(payload)
-        records = parse_segb_bytes(raw, payload, segment_kind=kind)
+        records = [] if kind == "tombstones" else parse_segb_bytes(raw, payload, segment_kind=kind)
         if name is not None:
             records = [replace(record, segment_filename=name) for record in records]
         return ScreenTimeBatch(
