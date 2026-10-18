@@ -85,20 +85,19 @@ def test_app_usage_rejects_invalid_required_fields(payload: bytes) -> None:
         decode_mac_app_usage_payload(payload)
 
 
-def test_app_usage_preserves_deleted_crc_and_tombstone_records() -> None:
+def test_app_usage_preserves_deleted_and_crc_records_but_skips_tombstones() -> None:
     deleted = _decode(_payload(), state=3).records[0]
     corrupt = _decode(_payload(), crc=0).records[0]
     erased = _decode(b"\0" * 8, state=3, crc=0).records[0]
-    deletion = _decode(tombstone("123456", 32, 64), kind="tombstones").records[0]
+    deletion = _decode(tombstone("123456", 32, 64), kind="tombstones")
 
     assert deleted.record_kind == "deleted" and deleted.event_key is None
     assert deleted.bundle_id == "com.example.mac"
     assert corrupt.record_kind == "crc_failure" and corrupt.event_key is None
     assert erased.record_kind == "deleted" and erased.bundle_id is None
-    assert deletion.record_kind == "tombstone" and deletion.target_segment_name == "123456"
-    assert {record.parser_version for record in (deleted, corrupt, erased, deletion)} == {
-        "app-usage-v1"
-    }
+    assert deletion.records == []
+    assert deletion.parser_version == "app-usage-v1"
+    assert {record.parser_version for record in (deleted, corrupt, erased)} == {"app-usage-v1"}
 
 
 def test_empty_mac_segment_records_its_own_parser_version() -> None:

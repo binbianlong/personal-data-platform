@@ -12,6 +12,7 @@ from personal_data_platform.reconciliation.job import _relation_names, run_recon
 from personal_data_platform.sources.contracts import SourceHealth
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
+from personal_data_platform.sources.screen_time.state import CollectorScan
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
@@ -20,11 +21,9 @@ class _Repository:
     def list_raw(self, prefix):
         return []
 
-    def list_scan_receipts(self):
-        return [SimpleNamespace(device_key="a" * 64, completed_at=datetime.now(UTC))]
-
-    def get_device_manifest(self):
-        return SimpleNamespace(device_keys=("a" * 64,), completed_at=datetime.now(UTC))
+    def last_successful_scan(self):
+        now = datetime.now(UTC)
+        return CollectorScan(now, ("a" * 64,), {"a" * 64: now})
 
 
 def _raw(storage_created_at: datetime) -> RawObject:
@@ -286,7 +285,7 @@ def test_reconciliation_isolates_source_and_stream_and_repairs_all_supported_sch
         assert result.details["total_object_count"] == 3
         assert result.details["expired_object_count"] == 1
         assert result.details["synthetic_health"] == "fresh"
-        assert result.collector_receipt_count == 0
+        assert result.collector_device_count == 0
         assert source.audited == sorted(
             (raw_v1, raw_v2), key=lambda raw: (raw.observed_at, raw.key)
         )
@@ -309,18 +308,11 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
     from dataclasses import replace
 
     from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
-    from personal_data_platform.sources.screen_time.raw import (
-        CollectorDeviceManifest,
-        CollectorScanReceipt,
-    )
     from tests.screen_time_helpers import NOW, Repository, event, segb
 
     class LiveRepository(Repository):
-        def list_scan_receipts(self):
-            return [CollectorScanReceipt("a" * 64, NOW, 1)]
-
-        def get_device_manifest(self):
-            return CollectorDeviceManifest(("a" * 64,), NOW)
+        def last_successful_scan(self):
+            return CollectorScan(NOW, ("a" * 64,), {"a" * 64: NOW})
 
     class CorrectedSource(ScreenTimeSource):
         parser_version = "corrected-parser"

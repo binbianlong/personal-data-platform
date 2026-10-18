@@ -10,13 +10,11 @@ from personal_data_platform.sources.screen_time.collector import (
     ScreenTimeCollector,
 )
 from personal_data_platform.sources.screen_time.raw import (
-    CollectorDeviceManifest,
-    CollectorScanReceipt,
     ScreenTimeRawIdentity,
     build_device_key,
     encode_segment_envelope,
 )
-from personal_data_platform.sources.screen_time.state import CollectorState
+from personal_data_platform.sources.screen_time.state import CollectorScan, CollectorState
 from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 from tests.screen_time_helpers import event, segb
@@ -25,22 +23,19 @@ NOW = datetime(2026, 10, 8, tzinfo=UTC)
 
 
 @pytest.mark.parametrize("stream", ["app-in-focus", "app-usage"])
-def test_local_control_objects_replace_latest_receipt_and_manifest(tmp_path, stream):
+def test_local_scan_records_latest_devices_and_explicit_inactivity(tmp_path, stream):
     state = CollectorState(tmp_path / "collector.db")
     repo = ScreenTimeLocalRepository(state=state, source=get_source("screen_time", stream))
-    assert repo.get_device_manifest() is None
-    original = CollectorScanReceipt("a" * 64, NOW, 1, stream=stream)
-    latest = CollectorScanReceipt("a" * 64, NOW + timedelta(hours=24), 2, stream=stream)
-    repo.put_scan_receipt(original)
-    repo.put_device_manifest(CollectorDeviceManifest(("a" * 64,), NOW, stream=stream))
-    repo.put_scan_receipt(latest)
-    inactive = CollectorDeviceManifest((), NOW + timedelta(hours=24), stream=stream)
-    repo.put_device_manifest(inactive)
+    assert repo.last_successful_scan() is None
+    state.record_successful_scan(CollectorScan(NOW, ("a" * 64,), {"a" * 64: NOW}), stream=stream)
+    latest = NOW + timedelta(hours=24)
+    state.record_successful_scan(CollectorScan(latest, ("a" * 64,), {}), stream=stream)
     restarted = ScreenTimeLocalRepository(
         state=CollectorState(state.path), source=get_source("screen_time", stream)
     )
-    assert restarted.list_scan_receipts() == [latest]
-    assert restarted.get_device_manifest() == inactive
+    assert restarted.last_successful_scan() == CollectorScan(latest, ("a" * 64,), {"a" * 64: NOW})
+    state.record_successful_scan(CollectorScan(latest, (), {}), stream=stream)
+    assert restarted.last_successful_scan() == CollectorScan(latest, (), {})
 
 
 def test_loaded_raw_survives_restart_and_only_superseded_success_is_removed(tmp_path):
@@ -85,7 +80,6 @@ def test_latest_segment_is_saved_pending_without_successor(tmp_path):
         uploader=repo,
         pseudonym_key=b"x" * 32,
         allowed_device_keys=frozenset({build_device_key(b"x" * 32, "phone")}),
-        destination=str(state.path),
         clock=lambda: NOW,
     )
     assert collector.collect_once().deferred == 0
@@ -117,13 +111,8 @@ def test_warehouse_commit_then_restart_acknowledges_without_duplicate_events(
     )
     source = get_source()
     repo = ScreenTimeLocalRepository(state=state, source=source)
-    repo.put_device_manifest(CollectorDeviceManifest(device_keys=("a" * 64,), completed_at=NOW))
-    repo.put_scan_receipt(
-        CollectorScanReceipt(device_key="a" * 64, completed_at=NOW, segment_count=1)
-    )
-    repo.put_device_manifest(
-        CollectorDeviceManifest(device_keys=(), completed_at=NOW, stream="app-usage")
-    )
+    state.record_successful_scan(CollectorScan(NOW, ("a" * 64,), {"a" * 64: NOW}))
+    state.record_successful_scan(CollectorScan(NOW, (), {}), stream="app-usage")
     wh = Warehouse(connect(WarehouseConfig(":memory:")))
     wh.migrate()
     from personal_data_platform.loader.job import run_loader_objects
@@ -156,65 +145,37 @@ def test_warehouse_commit_then_restart_acknowledges_without_duplicate_events(
     wh.close()
 
 
-def test_mac_audit_requires_its_own_receipt_even_when_iphone_is_fresh(tmp_path) -> None:
+def test_mac_audit_requires_its_own_device_scan_even_when_iphone_is_fresh(tmp_path):
     from personal_data_platform.sources.screen_time.audit import audit_source
 
-    now = datetime(2026, 9, 26, tzinfo=UTC)
     state = CollectorState(tmp_path / "collector.db")
-    phone_repository = ScreenTimeLocalRepository(state=state, source=get_source())
-    mac_repository = ScreenTimeLocalRepository(
-        state=state,
-        source=get_source("screen_time", "app-usage"),
+    state.record_successful_scan(CollectorScan(NOW, ("a" * 64,), {"a" * 64: NOW}))
+    repository = ScreenTimeLocalRepository(
+        state=state, source=get_source("screen_time", "app-usage")
     )
-    phone_receipt = CollectorScanReceipt("a" * 64, now, 1)
-    mac_receipt = CollectorScanReceipt("b" * 64, now, 1, stream="app-usage")
-    phone_repository.put_scan_receipt(phone_receipt)
-    phone_repository.put_device_manifest(CollectorDeviceManifest(("a" * 64,), now))
-    mac_source = get_source("screen_time", "app-usage")
-    assert mac_source.audit(mac_repository, [], now).ok
-
-    mac_repository.put_device_manifest(
-        CollectorDeviceManifest(("b" * 64,), now, stream="app-usage")
+    state.record_successful_scan(CollectorScan(NOW, ("b" * 64,), {}), stream="app-usage")
+    health = audit_source(repository, [], NOW)
+    assert not health.ok and health.details["missing_collector_scan_count"] == 1
+    state.record_successful_scan(
+        CollectorScan(NOW, ("b" * 64,), {"b" * 64: NOW}), stream="app-usage"
     )
-
-    health = audit_source(mac_repository, [], now)
-    assert not health.ok and health.details["missing_collector_receipt_count"] == 1
-
-    mac_repository.put_scan_receipt(mac_receipt)
-    assert audit_source(mac_repository, [], now).ok
+    assert audit_source(repository, [], NOW).ok
 
 
-def test_mac_audit_distinguishes_missing_manifest_from_explicit_deactivation(tmp_path) -> None:
-    now = datetime(2026, 9, 26, tzinfo=UTC)
-    state = CollectorState(tmp_path / "collector.db")
-    source = get_source("screen_time", "app-usage")
-    repository = ScreenTimeLocalRepository(state=state, source=source)
-    receipt = CollectorScanReceipt("b" * 64, now, 1, stream="app-usage")
-    repository.put_scan_receipt(receipt)
-    assert not source.audit(repository, [], now).ok
-
-    repository.put_device_manifest(
-        CollectorDeviceManifest((), now - timedelta(days=2), stream="app-usage")
-    )
-    health = source.audit(repository, [], now)
-    assert health.ok
-    assert health.details["collector_inactive"] is True
-
-
-def test_iphone_requires_manifest_until_explicitly_marked_inactive(tmp_path) -> None:
+def test_iphone_requires_scan_until_explicitly_marked_inactive(tmp_path) -> None:
     now = datetime(2026, 9, 26, tzinfo=UTC)
     state = CollectorState(tmp_path / "collector.db")
     source = get_source("screen_time", "app-in-focus")
     repository = ScreenTimeLocalRepository(state=state, source=source)
     assert not source.audit(repository, [], now).ok
 
-    repository.put_device_manifest(CollectorDeviceManifest((), now - timedelta(days=2)))
+    state.record_successful_scan(CollectorScan(now - timedelta(days=2), (), {}))
     health = source.audit(repository, [], now)
     assert health.ok
     assert health.details["collector_inactive"] is True
 
 
-def test_mac_raw_without_manifest_is_not_treated_as_never_activated(tmp_path) -> None:
+def test_mac_raw_without_scan_is_not_treated_as_never_activated(tmp_path) -> None:
     now = datetime(2026, 9, 26, tzinfo=UTC)
     source = get_source("screen_time", "app-usage")
     repository = ScreenTimeLocalRepository(

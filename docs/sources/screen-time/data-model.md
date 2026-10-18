@@ -60,27 +60,11 @@ segment_key = HMAC-SHA256(
 成功確認後だけ`uploaded`へ進める。各logical scopeの最新成功版と全pendingを残し、古い成功版を整理する。
 元ファイルがBiomeから消えても最新保存版は無期限に残す。更新前Rawの再解析やRawだけからの全履歴復元は保証しない。
 
-## Collector scan receipt
+## Collector scan
 
-全対象のローカル保存が成功したcomplete scanで、deviceごとのreceiptをSQLiteへ保存する。
-成功から24時間後か保存先・端末設定の変更時に更新する。下記keyのcontrol本文も同じSQLiteに保持する。
-
-```text
-raw/screen_time/v1/_control/collector/latest/<device_key>.json
-raw/screen_time/v1/_control/collector/app-usage/latest/<mac_device_key>.json
-```
-
-本文は`schema_version`、`device_key`、UTCの`completed_at`、待機分を含む`segment_count`、`status=succeeded`のみ。
-稼働確認用であり、端末identifier・path・Bundle IDを含めない。receiptの後にmutable manifestを更新する。
-
-```text
-raw/screen_time/v1/_control/collector/active.json
-raw/screen_time/v1/_control/collector/app-usage/active.json
-```
-
-本文は`schema_version`、sort済みの`device_keys`、UTCの`completed_at`、`status=succeeded`のみ。
-manifestは全allowlistを持つactive-device集合の正本で、空集合は明示的な休止状態である。
-manifestから外したdeviceのreceipt更新は要求しない。保存済み最新Rawは残す。streamごとに独立し、片方のreceiptで他方の稼働を証明しない。
+complete scanごとに、SQLiteの`collector_stream_scan`へstream別の最終scan時刻、有効なdevice集合、deviceごとの最終scan時刻を保存する。
+有効なdevice集合が空なら明示的な休止状態とする。集合から外したdeviceの更新は要求せず、保存済みRawは残す。
+streamと有効なdeviceのscan時刻を48時間の鮮度で監査し、片方のstreamで他方の稼働を証明しない。
 MotherDuckの既存stream別heartbeatは、全streamの取込成功・pending解消・ローカル監査成功後にMacが更新する。
 Cloud Runはその成功時刻と`scan_completed_at`が48時間以内であることを確認し、自身では更新しない。
 

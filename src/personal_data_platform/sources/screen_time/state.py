@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -32,33 +33,13 @@ CREATE INDEX IF NOT EXISTS segment_observation_latest
     ON segment_observation (device_key, stream, segment_key, id DESC);
 CREATE INDEX IF NOT EXISTS segment_observation_pending
     ON segment_observation (status, id);
-CREATE TABLE IF NOT EXISTS collector_scan (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    completed_at TEXT NOT NULL,
-    device_count INTEGER NOT NULL,
-    segment_count INTEGER NOT NULL,
-    uploaded_count INTEGER NOT NULL,
-    skipped_count INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS collector_control_configuration (
+CREATE TABLE IF NOT EXISTS collector_stream_scan (
     stream TEXT PRIMARY KEY,
-    destination TEXT NOT NULL,
-    config_digest TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS collector_control_publication (
-    stream TEXT NOT NULL,
-    device_key TEXT NOT NULL,
-    control_kind TEXT NOT NULL CHECK (control_kind IN ('receipt', 'manifest')),
-    published_at TEXT NOT NULL,
-    PRIMARY KEY (stream, device_key, control_kind)
-);
-CREATE TABLE IF NOT EXISTS collector_control_object (
-    object_key TEXT PRIMARY KEY,
-    body BLOB NOT NULL
+    completed_at TEXT NOT NULL,
+    device_keys TEXT NOT NULL,
+    device_scanned_at TEXT NOT NULL
 );
 """
-
-CONTROL_PUBLICATION_INTERVAL = timedelta(hours=24)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,12 +52,10 @@ class PendingObservation:
 
 
 @dataclass(frozen=True, slots=True)
-class SuccessfulScan:
+class CollectorScan:
     completed_at: datetime
-    device_count: int
-    segment_count: int
-    uploaded_count: int
-    skipped_count: int
+    device_keys: tuple[str, ...]
+    device_scanned_at: dict[str, datetime]
 
 
 class CollectorState:
@@ -260,113 +239,43 @@ class CollectorState:
             )
             connection.commit()
 
-    def record_successful_scan(self, scan: SuccessfulScan) -> None:
-        """Persist liveness only after all Raw uploads and due controls succeeded."""
+    def record_successful_scan(self, scan: CollectorScan, *, stream: str = "app-in-focus") -> None:
+        """Record a completed stream scan and retain each active device's latest scan."""
+        timestamp = format_observed_at(scan.completed_at)
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            previous = connection.execute(
+                "SELECT device_scanned_at FROM collector_stream_scan WHERE stream = ?", (stream,)
+            ).fetchone()
+            device_times = json.loads(previous[0]) if previous else {}
+            device_times.update(
+                {key: format_observed_at(value) for key, value in scan.device_scanned_at.items()}
+            )
+            device_times = {
+                key: value for key, value in device_times.items() if key in scan.device_keys
+            }
             connection.execute(
-                """
-                INSERT INTO collector_scan VALUES (1, ?, ?, ?, ?, ?)
-                ON CONFLICT (singleton) DO UPDATE SET
+                """INSERT INTO collector_stream_scan VALUES (?, ?, ?, ?)
+                ON CONFLICT (stream) DO UPDATE SET
                     completed_at = excluded.completed_at,
-                    device_count = excluded.device_count,
-                    segment_count = excluded.segment_count,
-                    uploaded_count = excluded.uploaded_count,
-                    skipped_count = excluded.skipped_count
-                """,
-                (
-                    format_observed_at(scan.completed_at),
-                    scan.device_count,
-                    scan.segment_count,
-                    scan.uploaded_count,
-                    scan.skipped_count,
-                ),
+                    device_keys = excluded.device_keys,
+                    device_scanned_at = excluded.device_scanned_at""",
+                (stream, timestamp, json.dumps(scan.device_keys), json.dumps(device_times)),
             )
 
-    def last_successful_scan(self) -> SuccessfulScan | None:
+    def last_successful_scan(self, *, stream: str = "app-in-focus") -> CollectorScan | None:
         with self._connect() as connection:
             row = connection.execute(
-                """
-                SELECT completed_at, device_count, segment_count, uploaded_count, skipped_count
-                FROM collector_scan WHERE singleton = 1
-                """
+                "SELECT completed_at, device_keys, device_scanned_at "
+                "FROM collector_stream_scan WHERE stream = ?",
+                (stream,),
             ).fetchone()
         if row is None:
             return None
-        return SuccessfulScan(
-            completed_at=parse_observed_at(row[0]),
-            device_count=row[1],
-            segment_count=row[2],
-            uploaded_count=row[3],
-            skipped_count=row[4],
-        )
-
-    def control_due(
-        self,
-        *,
-        stream: str,
-        device_key: str,
-        destination: str,
-        config_digest: str,
-        control_kind: str,
-        now: datetime,
-    ) -> bool:
-        """Check success age, retaining configuration transitions across restarts."""
-        format_observed_at(now)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._ensure_control_configuration(connection, stream, destination, config_digest)
-            row = connection.execute(
-                """SELECT published_at FROM collector_control_publication
-                WHERE stream = ? AND device_key = ? AND control_kind = ?""",
-                (stream, device_key, control_kind),
-            ).fetchone()
-        if row is None:
-            return True
-        published_at = parse_observed_at(row[0])
-        return now < published_at or now - published_at >= CONTROL_PUBLICATION_INTERVAL
-
-    def mark_control_published(
-        self,
-        *,
-        stream: str,
-        device_key: str,
-        destination: str,
-        config_digest: str,
-        control_kind: str,
-        published_at: datetime,
-    ) -> None:
-        """Record only a successful receipt or manifest publication."""
-        timestamp = format_observed_at(published_at)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._ensure_control_configuration(connection, stream, destination, config_digest)
-            connection.execute(
-                """INSERT INTO collector_control_publication
-                (stream, device_key, control_kind, published_at) VALUES (?, ?, ?, ?)
-                ON CONFLICT (stream, device_key, control_kind)
-                DO UPDATE SET published_at = excluded.published_at""",
-                (stream, device_key, control_kind, timestamp),
-            )
-
-    @staticmethod
-    def _ensure_control_configuration(
-        connection: sqlite3.Connection,
-        stream: str,
-        destination: str,
-        config_digest: str,
-    ) -> None:
-        current = connection.execute(
-            "SELECT destination, config_digest FROM collector_control_configuration WHERE stream = ?",
-            (stream,),
-        ).fetchone()
-        if current == (destination, config_digest):
-            return
-        connection.execute("DELETE FROM collector_control_publication WHERE stream = ?", (stream,))
-        connection.execute(
-            """INSERT INTO collector_control_configuration VALUES (?, ?, ?)
-            ON CONFLICT (stream) DO UPDATE SET
-                destination = excluded.destination, config_digest = excluded.config_digest""",
-            (stream, destination, config_digest),
+        return CollectorScan(
+            parse_observed_at(row[0]),
+            tuple(json.loads(row[1])),
+            {key: parse_observed_at(value) for key, value in json.loads(row[2]).items()},
         )
 
     def _connect(self) -> sqlite3.Connection:

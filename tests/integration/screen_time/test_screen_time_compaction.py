@@ -73,9 +73,7 @@ def test_tombstone_input_does_not_suppress_current_event(tmp_path):
     payload = event("app.a")
     segment, _ = segb(payload)
     _load(warehouse, repository, repository.add("100", segment))
-    deletion = repository.add(
-        "100", segb(b"unknown deletion marker")[0], kind="tombstones"
-    )
+    deletion = repository.add("100", segb(b"unknown deletion marker")[0], kind="tombstones")
     _load(warehouse, repository, deletion)
     assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(True,)]
     assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_record") == 1

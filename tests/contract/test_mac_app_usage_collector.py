@@ -45,7 +45,6 @@ def _collectors(tmp_path):
             uploader=repo,
             pseudonym_key=SECRET,
             allowed_device_keys=frozenset({build_device_key(SECRET, device)}),
-            destination=str(state.path),
             clock=lambda: NOW,
         )
         for device, source in [
@@ -88,12 +87,10 @@ def test_mac_only_collection_records_explicit_iphone_inactivity(tmp_path):
     _collect_all(
         [collectors[1]],
         inactive_streams=("app-in-focus",),
-        inactive_uploader=repo,
         inactive_state=state,
-        destination=str(state.path),
         clock=lambda: NOW,
     )
-    assert repo.get_device_manifest().device_keys == ()
+    assert repo.last_successful_scan().device_keys == ()
 
 
 def test_mac_source_requires_exactly_one_local_device(tmp_path):

@@ -15,6 +15,7 @@ from personal_data_platform.reconciliation.job import (
 from personal_data_platform.reconciliation.models import ReconciliationResult
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
+from personal_data_platform.sources.screen_time.state import CollectorScan
 from personal_data_platform.storage.motherduck import IngestionState
 
 DEVICE_KEY = "a" * 64
@@ -33,7 +34,7 @@ def _ninety_day_source(monkeypatch):
 
 @pytest.mark.parametrize(
     "key",
-    ["collector_receipt_count", "stale_collector_count", "missing_collector_receipt_count"],
+    ["collector_device_count", "stale_collector_count", "missing_collector_scan_count"],
 )
 def test_source_detail_counts_preserve_defaults_conversion_and_errors(key) -> None:
     result = ReconciliationResult(
@@ -92,15 +93,11 @@ class _Repository:
             if key.startswith(prefix)
         ]
 
-    def list_scan_receipts(self) -> list[SimpleNamespace]:
-        if self.receipt_at is None:
-            return []
-        return [SimpleNamespace(device_key=DEVICE_KEY, completed_at=self.receipt_at)]
-
-    def get_device_manifest(self) -> SimpleNamespace | None:
+    def last_successful_scan(self):
         if self.manifest_at is None:
             return None
-        return SimpleNamespace(device_keys=(DEVICE_KEY,), completed_at=self.manifest_at)
+        times = {DEVICE_KEY: self.receipt_at} if self.receipt_at is not None else {}
+        return CollectorScan(self.manifest_at, (DEVICE_KEY,), times)
 
 
 class _Warehouse:
@@ -292,7 +289,7 @@ def test_external_heartbeat_failure_marks_run_failed() -> None:
     assert warehouse.recorded_statuses == ["running", "failed"]
 
 
-def test_stale_collector_receipt_blocks_success() -> None:
+def test_stale_collector_scan_blocks_success() -> None:
     warehouse = _Warehouse({_key("one")})
     published: list[dict[str, object]] = []
 
@@ -515,18 +512,15 @@ def test_missing_device_manifest_blocks_success() -> None:
     )
 
     assert not result.ok
-    assert result.details["collector_manifest_present"] is False
+    assert result.details["collector_scan_present"] is False
 
 
 def test_manifest_device_without_a_receipt_blocks_success() -> None:
     missing_device_key = "b" * 64
 
     class Repository(_Repository):
-        def get_device_manifest(self) -> SimpleNamespace:
-            return SimpleNamespace(
-                device_keys=(DEVICE_KEY, missing_device_key),
-                completed_at=NOW,
-            )
+        def last_successful_scan(self):
+            return CollectorScan(NOW, (DEVICE_KEY, missing_device_key), {DEVICE_KEY: NOW})
 
     result = run_reconciliation(
         Repository([_key("one")]),
@@ -537,25 +531,16 @@ def test_manifest_device_without_a_receipt_blocks_success() -> None:
     )
 
     assert not result.ok
-    assert result.missing_collector_receipt_count == 1
-    assert result.details["missing_collector_receipt_devices"] == [missing_device_key]
+    assert result.missing_collector_scan_count == 1
+    assert result.details["missing_collector_scan_devices"] == [missing_device_key]
 
 
 def test_decommissioned_device_raw_does_not_require_a_fresh_receipt() -> None:
     active_device_key = "b" * 64
 
     class Repository(_Repository):
-        def get_device_manifest(self) -> SimpleNamespace:
-            return SimpleNamespace(device_keys=(active_device_key,), completed_at=NOW)
-
-        def list_scan_receipts(self) -> list[SimpleNamespace]:
-            return [
-                SimpleNamespace(device_key=active_device_key, completed_at=NOW),
-                SimpleNamespace(
-                    device_key=DEVICE_KEY,
-                    completed_at=NOW - timedelta(days=7),
-                ),
-            ]
+        def last_successful_scan(self):
+            return CollectorScan(NOW, (active_device_key,), {active_device_key: NOW})
 
     result = run_reconciliation(
         Repository([_key("retained-from-decommissioned-device")]),
