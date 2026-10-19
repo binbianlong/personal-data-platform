@@ -517,15 +517,18 @@ def test_failed_exact_coverage_update_rolls_back_changes(warehouse):
     at = datetime(2026, 9, 1, tzinfo=UTC)
     original = HeartRateMinuteSnapshot(
         "self",
-        Window("heart-rate", at, at + timedelta(minutes=1)),
-        at + timedelta(hours=1),
-        (HeartRateMinute(at, at + timedelta(minutes=1), 60, 50, 80),),
+        Window("heart-rate", at, at + timedelta(minutes=64)),
+        at + timedelta(hours=2),
+        tuple(
+            HeartRateMinute(at + timedelta(minutes=i), at + timedelta(minutes=i + 1), 60, 50, 80)
+            for i in range(64)
+        ),
     )
     FitbitMinuteBatch(original).write_snapshot(
         warehouse.connection, source_key="old", loaded_at=original.fetched_at
     )
     before = {
-        table: warehouse.query_rows(f"SELECT * FROM {table}")
+        table: warehouse.query_rows(f"SELECT * FROM {table} ORDER BY ALL")
         for table in ("base.fitbit_heart_rate_minute", "ops.fitbit_coverage")
     }
 
@@ -538,7 +541,7 @@ def test_failed_exact_coverage_update_rolls_back_changes(warehouse):
     data = replace(
         original,
         fetched_at=original.fetched_at + timedelta(hours=1),
-        minutes=(replace(original.minutes[0], average=70),),
+        minutes=(replace(original.minutes[0], average=70), *original.minutes[1:]),
     )
     warehouse.connection.execute("BEGIN")
     try:
@@ -548,10 +551,13 @@ def test_failed_exact_coverage_update_rolls_back_changes(warehouse):
                 source_key="new",
                 loaded_at=data.fetched_at,
             )
+        assert warehouse.query_rows(
+            "SELECT average,fetched_at FROM base.fitbit_heart_rate_minute ORDER BY start_at LIMIT 2"
+        ) == [(70, data.fetched_at), (60, original.fetched_at)]
     finally:
         warehouse.connection.execute("ROLLBACK")
     for table, rows in before.items():
-        assert warehouse.query_rows(f"SELECT * FROM {table}") == rows
+        assert warehouse.query_rows(f"SELECT * FROM {table} ORDER BY ALL") == rows
 
 
 def test_failed_coverage_insert_rolls_back_bulk_delete_and_record_changes(warehouse):
