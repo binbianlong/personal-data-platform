@@ -242,6 +242,37 @@ class InterruptedConnection:
         return getattr(self.connection, name)
 
 
+@pytest.mark.parametrize("stage", ["commit_before", "commit_after"])
+def test_receipt_pruning_stops_after_uncertain_commit(tmp_path, stage):
+    path = tmp_path / "receipts.duckdb"
+    warehouse = warehouse_at(path)
+    repository = Repository()
+    old = repository.add("100", segb(event("app.old"))[0])
+    current = repository.add("100", segb(event("app.current"))[0])
+    for raw in (old, current):
+        load(warehouse, repository, raw)
+    wrapper = InterruptedConnection(warehouse.connection, stage)
+    warehouse.connection = wrapper
+    try:
+        with pytest.raises(WarehouseConnectionError):
+            warehouse.prune_screen_time_receipts(
+                [current], parser_version=ScreenTimeSource().parser_version
+            )
+        assert warehouse.connection_usable is False
+        warehouse.release_job_lock("loader", "owner")
+        assert wrapper.calls_after_failure == []
+    finally:
+        warehouse.close()
+    warehouse = warehouse_at(path)
+    try:
+        expected = (current.key,) if stage == "commit_after" else (old.key, current.key)
+        assert warehouse.query_rows(
+            "SELECT object_key FROM ops.ingestion_metadata ORDER BY object_key"
+        ) == [(key,) for key in sorted(expected)]
+    finally:
+        warehouse.close()
+
+
 @pytest.mark.parametrize("stage", ["state", "events", "success", "commit_before", "commit_after"])
 def test_transaction_failure_and_reconnect_retry(tmp_path, stage):
     path = tmp_path / "events.duckdb"

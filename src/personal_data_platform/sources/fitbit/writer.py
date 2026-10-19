@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
 
 _SCOPE = "subject_key=? AND data_type=? AND data_source_family=? AND aggregation_version=?"
+# For small inputs, MERGE's cold-connection overhead exceeds its smaller row payload.
+_MINUTE_MERGE_MIN_ROWS = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +108,14 @@ def _replace_coverage(
     source_key: str,
     digest: str,
 ) -> None:
+    if len(coverage) == len(accepted) == 1 and (coverage[0].start, coverage[0].end) == accepted[0]:
+        connection.execute(
+            "UPDATE ops.fitbit_coverage "
+            "SET fetched_at=?,source_key=?,content_sha256=?,source_sha256='' "
+            f"WHERE {_SCOPE} AND range_start=? AND range_end=?",
+            [fetched_at, source_key, digest, *scope, *accepted[0]],
+        )
+        return
     # Split empty and nonempty acquisitions alike to protect newer subranges.
     deleted = []
     rows = []
@@ -660,33 +670,85 @@ class FitbitMinuteBatch:
         unchanged = _unchanged(coverage, window, digest)
         submitted = 0
         if not unchanged:
-            for start, end in accepted:
+            minutes = [
+                row
+                for row in snapshot.minutes
+                if any(start <= row.start < end for start, end in accepted)
+            ]
+            if len(minutes) >= _MINUTE_MERGE_MIN_ROWS:
+                incoming = [
+                    {
+                        "start": row.start,
+                        "average": row.average,
+                        "minimum": row.minimum,
+                        "maximum": row.maximum,
+                        "sample_count": row.sample_count,
+                    }
+                    for row in minutes
+                ]
+                range_filter = "t.start_at>=? AND t.start_at<?"
+                range_parameters: list[object] = list(accepted[0])
+                if len(accepted) > 1:
+                    range_filter = (
+                        "EXISTS (SELECT 1 FROM unnest(?) a(r) "
+                        "WHERE t.start_at>=r.start AND t.start_at<r.end)"
+                    )
+                    range_parameters = [[{"start": start, "end": end} for start, end in accepted]]
                 connection.execute(
-                    "DELETE FROM base.fitbit_heart_rate_minute WHERE subject_key=? AND data_source_family=? "
-                    "AND aggregation_version=? AND start_at>=? AND start_at<?",
+                    "MERGE INTO base.fitbit_heart_rate_minute t USING ("
+                    "SELECT ? subject_key,? data_source_family,r.start start_at,"
+                    "? aggregation_version,r.start+INTERVAL '1 minute' end_at,"
+                    "r.average,r.minimum,r.maximum,r.sample_count,"
+                    "? fetched_at,? source_key,? loaded_at FROM unnest(?) i(r)"
+                    ") s USING (subject_key,data_source_family,start_at,aggregation_version) "
+                    "WHEN MATCHED AND (t.average,t.minimum,t.maximum,t.sample_count) "
+                    "IS DISTINCT FROM (s.average,s.minimum,s.maximum,s.sample_count) THEN UPDATE "
+                    "WHEN NOT MATCHED THEN INSERT "
+                    "WHEN NOT MATCHED BY SOURCE AND (t.subject_key,t.data_source_family,"
+                    f"t.aggregation_version)=(?,?,?) AND {range_filter} THEN DELETE",
                     [
                         snapshot.subject_key,
                         GOOGLE_WEARABLES,
                         snapshot.aggregation_version,
-                        start,
-                        end,
+                        snapshot.fetched_at,
+                        source_key,
+                        loaded_at,
+                        incoming,
+                        snapshot.subject_key,
+                        GOOGLE_WEARABLES,
+                        snapshot.aggregation_version,
+                        *range_parameters,
                     ],
                 )
-            incoming = [
-                asdict(row)
-                for row in snapshot.minutes
-                if any(start <= row.start < end for start, end in accepted)
-            ]
-            if incoming:
-                connection.execute(
-                    """INSERT INTO base.fitbit_heart_rate_minute
-                    SELECT ?, r.data_source_family::VARCHAR, r.start::TIMESTAMPTZ,
-                        r.aggregation_version::VARCHAR, r.end::TIMESTAMPTZ,
-                        r.average::DOUBLE, r.minimum::DOUBLE, r.maximum::DOUBLE,
-                        r.sample_count::BIGINT, ?, ?, ? FROM unnest(?) incoming(r)""",
-                    [snapshot.subject_key, snapshot.fetched_at, source_key, loaded_at, incoming],
-                )
-                submitted = len(incoming)
+            else:
+                for start, end in accepted:
+                    connection.execute(
+                        "DELETE FROM base.fitbit_heart_rate_minute WHERE subject_key=? AND data_source_family=? "
+                        "AND aggregation_version=? AND start_at>=? AND start_at<?",
+                        [
+                            snapshot.subject_key,
+                            GOOGLE_WEARABLES,
+                            snapshot.aggregation_version,
+                            start,
+                            end,
+                        ],
+                    )
+                if minutes:
+                    connection.execute(
+                        "INSERT INTO base.fitbit_heart_rate_minute "
+                        "SELECT ?,r.data_source_family::VARCHAR,r.start::TIMESTAMPTZ,"
+                        "r.aggregation_version::VARCHAR,r.end::TIMESTAMPTZ,"
+                        "r.average::DOUBLE,r.minimum::DOUBLE,r.maximum::DOUBLE,"
+                        "r.sample_count::BIGINT,?,?,? FROM unnest(?) incoming(r)",
+                        [
+                            snapshot.subject_key,
+                            snapshot.fetched_at,
+                            source_key,
+                            loaded_at,
+                            [asdict(row) for row in minutes],
+                        ],
+                    )
+            submitted = len(minutes)
         _replace_coverage(
             connection,
             scope,

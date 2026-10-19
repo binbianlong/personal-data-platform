@@ -63,7 +63,7 @@ workerはその範囲を全て取得できた場合だけ置換・ackするた�
 `time_basis="civil"`なら通知の現地暦日を取得する。civilの開始・終了は内部の日付cursorであり、
 実際のUTC時刻を意味しない。発行ログの`summary.time_basis`にも同じ基準を記録する。
 `fetched_rows`は正規化後の取得行数で、心拍は分集計行、睡眠は親とstage/wake子行を含む。
-`submitted_rows`はINSERTへ渡した行数であり、変更・削除行数や通信バイト数ではない。追加のDB照会で数えない。
+`submitted_rows`はINSERT/MERGEへ渡した行数であり、変更・削除行数や通信バイト数ではない。追加のDB照会で数えない。
 `accepted_ranges`は古い取得結果から保護された範囲を除いた書き込み対象、`protected_records`は保護した主レコード数となる。
 
 | outcome | 意味 |

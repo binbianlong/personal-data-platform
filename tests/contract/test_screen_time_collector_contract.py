@@ -14,7 +14,12 @@ from personal_data_platform.sources.screen_time.collector import (
 from personal_data_platform.sources.screen_time.raw import build_device_key, decode_segment_envelope
 from personal_data_platform.sources.screen_time.state import CollectorState
 from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.motherduck import (
+    Warehouse,
+    WarehouseConfig,
+    WarehouseConnectionError,
+    connect,
+)
 from tests.screen_time_helpers import event, segb
 
 SECRET = b"x" * 32
@@ -118,6 +123,63 @@ def test_competing_lease_preserves_pending_and_does_not_publish_heartbeat(tmp_pa
         assert len(state.pending()) == 1
         assert wh.query_value("SELECT count(*) FROM ops.heartbeat") == 0
         assert wh.query_value("SELECT owner_id FROM ops.job_lock") == "competitor"
+    finally:
+        wh.close()
+
+
+@pytest.mark.parametrize("failure", ["release", "commit_before", "commit_after"])
+def test_liveness_and_lease_release_are_atomic(tmp_path, failure):
+    collector, state, _, _ = _collector(tmp_path)
+    collector.collect_once()
+    config = WarehouseConfig(str(tmp_path / "atomic.duckdb"))
+    wh = Warehouse(connect(config))
+    wh.migrate()
+
+    class InterruptedFinalization:
+        def __init__(self, connection):
+            self.connection = connection
+            self.publishing = self.failed = False
+            self.after_failure = []
+
+        def execute(self, sql, *args):
+            if self.failed:
+                self.after_failure.append(sql)
+            self.publishing |= "INSERT INTO ops.heartbeat" in sql
+            if (
+                self.publishing
+                and not self.failed
+                and (
+                    (failure == "release" and sql.startswith("DELETE FROM ops.job_lock"))
+                    or (failure.startswith("commit") and sql == "COMMIT")
+                )
+            ):
+                self.failed = True
+                if failure == "commit_after":
+                    self.connection.execute(sql, *args)
+                raise OSError("finalization response lost")
+            return self.connection.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+    wrapper = InterruptedFinalization(wh.connection)
+    wh.connection = wrapper
+    try:
+        with pytest.raises((OSError, WarehouseConnectionError)):
+            _load_pending(state, wh, now=NOW)
+        if failure.startswith("commit"):
+            assert wh.connection_usable is False
+            assert wrapper.after_failure == []
+    finally:
+        wh.close()
+    wh = Warehouse(connect(config))
+    try:
+        assert wh.query_value("SELECT count(*) FROM ops.heartbeat") == (
+            2 if failure == "commit_after" else 0
+        )
+        assert wh.query_value("SELECT count(*) FROM ops.job_lock") == (
+            1 if failure == "commit_before" else 0
+        )
     finally:
         wh.close()
 
