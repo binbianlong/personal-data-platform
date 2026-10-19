@@ -156,6 +156,8 @@ class Warehouse:
                 by_scope.setdefault((raw.subject_key, raw.stream, raw.logical_key), []).append(raw)
         candidates = [values[0] for values in by_scope.values() if len(values) == 1]
         confirmed = self.succeeded_keys_for(candidates, parser_version=parser_version)
+        if not confirmed:
+            return
         try:
             self.connection.execute("BEGIN TRANSACTION")
         except Exception as error:
