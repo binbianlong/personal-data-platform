@@ -106,6 +106,14 @@ def _replace_coverage(
     source_key: str,
     digest: str,
 ) -> None:
+    if len(coverage) == len(accepted) == 1 and (coverage[0].start, coverage[0].end) == accepted[0]:
+        connection.execute(
+            "UPDATE ops.fitbit_coverage "
+            "SET fetched_at=?,source_key=?,content_sha256=?,source_sha256='' "
+            f"WHERE {_SCOPE} AND range_start=? AND range_end=?",
+            [fetched_at, source_key, digest, *scope, *accepted[0]],
+        )
+        return
     # Split empty and nonempty acquisitions alike to protect newer subranges.
     deleted = []
     rows = []

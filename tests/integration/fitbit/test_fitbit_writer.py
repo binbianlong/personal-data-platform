@@ -302,7 +302,13 @@ class CoverageConnection:
         self.mutations = []
 
     def execute(self, sql, parameters):
-        if sql.startswith(("DELETE FROM ops.fitbit_coverage", "INSERT INTO ops.fitbit_coverage")):
+        if sql.startswith(
+            (
+                "DELETE FROM ops.fitbit_coverage",
+                "INSERT INTO ops.fitbit_coverage",
+                "UPDATE ops.fitbit_coverage",
+            )
+        ):
             self.mutations.append(sql)
         return self.connection.execute(sql, parameters)
 
@@ -401,7 +407,18 @@ def test_new_and_stale_snapshots_use_one_and_zero_coverage_mutations(warehouse):
     assert result.accepted_ranges == ((data.window.start, data.window.end),)
     assert len(connection.mutations) == 1
     connection.mutations.clear()
-    older = snapshot(10, version=1)
+    confirmed = replace(data, fetched_at=data.fetched_at + timedelta(days=1))
+    result = FitbitBatch(confirmed).write_snapshot(
+        connection, source_key="confirmed", loaded_at=confirmed.fetched_at
+    )
+    assert result.outcome == "unchanged"
+    assert len(connection.mutations) == 1
+    assert connection.mutations[0].startswith("UPDATE ops.fitbit_coverage")
+    assert warehouse.query_rows("SELECT fetched_at,source_key FROM ops.fitbit_coverage") == [
+        (confirmed.fetched_at, "confirmed")
+    ]
+    connection.mutations.clear()
+    older = snapshot(10, version=2)
     result = FitbitBatch(older).write_snapshot(
         connection, source_key="old", loaded_at=older.fetched_at
     )
@@ -409,6 +426,54 @@ def test_new_and_stale_snapshots_use_one_and_zero_coverage_mutations(warehouse):
     assert result.submitted_rows == 0
     assert result.accepted_ranges == ()
     assert connection.mutations == []
+
+
+def test_failed_exact_coverage_update_rolls_back_changes(warehouse):
+    from personal_data_platform.sources.fitbit.models import (
+        HeartRateMinute,
+        HeartRateMinuteSnapshot,
+        Window,
+    )
+    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+
+    at = datetime(2026, 9, 1, tzinfo=UTC)
+    original = HeartRateMinuteSnapshot(
+        "self",
+        Window("heart-rate", at, at + timedelta(minutes=1)),
+        at + timedelta(hours=1),
+        (HeartRateMinute(at, at + timedelta(minutes=1), 60, 50, 80),),
+    )
+    FitbitMinuteBatch(original).write_snapshot(
+        warehouse.connection, source_key="old", loaded_at=original.fetched_at
+    )
+    before = {
+        table: warehouse.query_rows(f"SELECT * FROM {table}")
+        for table in ("base.fitbit_heart_rate_minute", "ops.fitbit_coverage")
+    }
+
+    class FailingConnection(CoverageConnection):
+        def execute(self, sql, parameters):
+            if sql.startswith("UPDATE ops.fitbit_coverage"):
+                raise duckdb.ConstraintException("coverage update failed")
+            return super().execute(sql, parameters)
+
+    data = replace(
+        original,
+        fetched_at=original.fetched_at + timedelta(hours=1),
+        minutes=(replace(original.minutes[0], average=70),),
+    )
+    warehouse.connection.execute("BEGIN")
+    try:
+        with pytest.raises(duckdb.ConstraintException, match="coverage update failed"):
+            FitbitMinuteBatch(data).write_snapshot(
+                FailingConnection(warehouse.connection),
+                source_key="new",
+                loaded_at=data.fetched_at,
+            )
+    finally:
+        warehouse.connection.execute("ROLLBACK")
+    for table, rows in before.items():
+        assert warehouse.query_rows(f"SELECT * FROM {table}") == rows
 
 
 def test_failed_coverage_insert_rolls_back_bulk_delete_and_record_changes(warehouse):
