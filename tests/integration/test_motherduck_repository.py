@@ -12,6 +12,7 @@ from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
     Warehouse,
     WarehouseConfig,
+    WarehouseConnectionError,
     connect,
 )
 from tests.screen_time_helpers import _raw, _record
@@ -87,6 +88,24 @@ def test_screen_time_receipts_need_one_confirmed_live_raw(tmp_path):
     warehouse.prune_screen_time_receipts([unconfirmed], parser_version=source.parser_version)
     assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 2
     warehouse.close()
+
+
+@pytest.mark.parametrize("stage", ["commit_before", "commit_after"])
+def test_receipt_pruning_stops_after_uncertain_commit(stage):
+    from tests.integration.screen_time.test_screen_time_event_ingestion import InterruptedConnection
+
+    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    warehouse.migrate()
+    wrapper = InterruptedConnection(warehouse.connection, stage)
+    warehouse.connection = wrapper
+    try:
+        with pytest.raises(WarehouseConnectionError):
+            warehouse.prune_screen_time_receipts([], parser_version=PARSER_VERSION)
+        assert warehouse.connection_usable is False
+        warehouse.release_job_lock("loader", "owner")
+        assert wrapper.calls_after_failure == []
+    finally:
+        warehouse.close()
 
 
 def test_run_history_prunes_after_seven_days_but_keeps_daily_gap_marker():

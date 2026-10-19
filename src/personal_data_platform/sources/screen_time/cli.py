@@ -336,6 +336,7 @@ def _load_pending(
     if not warehouse.acquire_job_lock("loader", owner, lease_seconds=LOADER_LEASE_SECONDS):
         raise JobAlreadyRunning("loader already has an unexpired job lease")
     deadline = time.monotonic() + 20 * 60
+    released = False
     try:
         health_details = []
         for source in get_sources("screen_time", all_streams=True):
@@ -361,24 +362,37 @@ def _load_pending(
                 raise CollectorSourceError(f"{source.stream}: collector audit failed")
             warehouse.prune_screen_time_receipts(live_raw, parser_version=source.parser_version)
             health_details.append((source, health.details))
-        warehouse.require_job_lock(owner)
-        for source, details in health_details if publish_success else ():
-            warehouse.publish_heartbeat(
-                source.monitor_name,
+        if publish_success:
+            warehouse.finish_screen_time_collection(
                 owner,
-                {
-                    **details,
-                    "source_id": source.source_id,
-                    "stream": source.stream,
-                    "scan_completed_at": completed_at.isoformat(),
-                },
+                heartbeats=[
+                    (
+                        source.monitor_name,
+                        {
+                            **details,
+                            "source_id": source.source_id,
+                            "stream": source.stream,
+                            "scan_completed_at": completed_at.isoformat(),
+                        },
+                    )
+                    for source, details in health_details
+                ],
             )
+            released = True
+        else:
+            warehouse.require_job_lock(owner)
         with state._connect() as connection:
             if connection.execute("PRAGMA freelist_count").fetchone()[0]:
                 connection.execute("VACUUM")
     finally:
-        if warehouse.connection_usable:
-            warehouse.release_job_lock("loader", owner)
+        if not released and warehouse.connection_usable:
+            failure = sys.exception()
+            try:
+                warehouse.release_job_lock("loader", owner)
+            except Exception:
+                if failure is None:
+                    raise
+                failure.add_note("loader lease cleanup also failed")
 
 
 def _write_launch_agent(
