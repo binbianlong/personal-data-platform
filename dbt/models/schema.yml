@@ -15,7 +15,7 @@ models:
       - name: longitude
         data_tests: [not_null]
   - name: screen_time_transition
-    description: One current, decoded iPhone foreground transition per logical event.
+    description: One current, decoded iPhone or Mac foreground transition per logical event.
     columns:
       - name: event_key
         data_tests: [unique, not_null]

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import plistlib
 import stat
@@ -20,29 +19,10 @@ from personal_data_platform.sources.screen_time.launchd import (
 
 
 def _environment(tmp_path: Path) -> dict[str, str]:
-    service_account = "collector@synthetic-project.iam.gserviceaccount.com"
-    adc_path = tmp_path / "gcloud/application_default_credentials.json"
-    adc_path.parent.mkdir(parents=True, exist_ok=True)
-    adc_path.write_text(
-        json.dumps(
-            {
-                "type": "impersonated_service_account",
-                "service_account_impersonation_url": (
-                    "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
-                    f"{service_account}:generateAccessToken"
-                ),
-                "source_credentials": {"type": "authorized_user"},
-            }
-        )
-    )
-    os.chmod(adc_path, 0o600)
     return {
         "MOTHERDUCK_DATABASE": "production",
-        "GCS_BUCKET": "screen-time-raw",
-        "GOOGLE_APPLICATION_CREDENTIALS": str(adc_path),
-        "GOOGLE_CLOUD_PROJECT": "synthetic-project",
+        "PDP_SCREEN_TIME_MOTHERDUCK_TOKEN": "synthetic-secret",
         "PDP_COLLECTOR_POLL_SECONDS": "60",
-        "PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL": service_account,
         "PDP_COLLECTOR_STATE_DB_PATH": str(tmp_path / "state/collector.db"),
         "PDP_PSEUDONYM_KEY_HEX": "42" * 32,
         "PDP_APP_IN_FOCUS_REMOTE_DIR": str(tmp_path / "Biome/App.InFocus/remote"),
@@ -84,28 +64,8 @@ def test_builds_secret_free_keepalive_launch_agent(tmp_path) -> None:
     assert environment["PDP_SCREEN_TIME_DEVICE_ALLOWLIST"] == f"{'a' * 64},{'b' * 64}"
     assert environment["PDP_COLLECTOR_POLL_SECONDS"] == "60"
     assert environment["MOTHERDUCK_DATABASE"] == "production"
-    assert "GCS_BUCKET" not in environment
-    assert "GOOGLE_APPLICATION_CREDENTIALS" not in environment
     assert "PDP_SCREEN_TIME_MOTHERDUCK_TOKEN" not in environment
     assert "PDP_PSEUDONYM_KEY_HEX" not in environment
-
-
-def test_local_collector_plist_needs_only_database_and_does_not_embed_token(tmp_path):
-    environment = _environment(tmp_path)
-    environment["MOTHERDUCK_DATABASE"] = "production"
-    environment["PDP_SCREEN_TIME_MOTHERDUCK_TOKEN"] = "synthetic-secret"
-    for name in (
-        "GOOGLE_CLOUD_PROJECT",
-        "GCS_BUCKET",
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        "PDP_COLLECTOR_SERVICE_ACCOUNT_EMAIL",
-    ):
-        environment.pop(name)
-    settings = _settings(tmp_path, environ=environment)
-    emitted = plistlib.loads(build_launch_agent(settings))["EnvironmentVariables"]
-    assert emitted["MOTHERDUCK_DATABASE"] == "production"
-    assert "PDP_SCREEN_TIME_MOTHERDUCK_TOKEN" not in emitted
-    assert "GCS_BUCKET" not in emitted
 
 
 def test_preserves_collector_paths_in_launch_agent(tmp_path) -> None:

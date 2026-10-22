@@ -15,12 +15,10 @@ terraform apply bootstrap.tfplan
 stateはpublic access prevention・uniform access・versioning・prevent_destroyで保護する。
 bootstrap自身のstateはローカルに保存してbackupする。runtime backendにはoutput `state_bucket_name`を指定し、既存state backupは保持する。
 
-registryは`runtime_west`。作成から1日超のimageをtagの有無によらず削除し、各imageの最新1版を保持する。
+registryは`runtime`。作成から1日超のimageをtagの有無によらず削除し、各imageの最新1版を保持する。
 1日以内の版は複数残る。削除と容量反映は定期処理で行われ、OCIの子manifestも親manifestの削除後に整理される。
-Deploy CIの更新をmainへ反映してからcleanup policyをapplyする。
-過去のrevisionへ保護tagを付ける旧CIは、期限切れimageの削除後に失敗するためである。
 
 `state_bucket_name`・`artifact_repository`・plan/deploy WIF provider/SAのoutputをrepository variablesへ設定する。
-imageのfallbackは`GCP_WEST_RUNTIME_IMAGE_URI`。secret pinと一時停止は[runtime Terraform](../terraform/README.md)に従う。
+imageのfallbackは`GCP_RUNTIME_IMAGE_URI`。secret pinと一時停止は[runtime Terraform](../terraform/README.md)に従う。
 現行digestが削除済みの場合は手動deployでimageを再buildする。
 Terraformのstorage roleはbucket metadata/IAMだけで、object dataを読まない。

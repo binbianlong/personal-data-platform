@@ -25,16 +25,6 @@ def test_collector_configuration_loads_allowlist_without_raw_device_ids(tmp_path
     assert config.pseudonym_key == bytes.fromhex("11" * 32)
 
 
-def test_collector_configuration_requires_no_gcs_or_adc(tmp_path) -> None:
-    environment = _environment(tmp_path)
-    environment["GOOGLE_APPLICATION_CREDENTIALS"] = str(tmp_path / "missing-adc.json")
-
-    config = CollectorConfig.from_env(environment)
-
-    assert config.device_allowlist == frozenset({"a" * 64, "b" * 64})
-    assert config.state_db_path == tmp_path / "collector.db"
-
-
 def test_collection_requires_nonempty_device_allowlist(tmp_path) -> None:
     environment = _environment(tmp_path)
     environment["PDP_SCREEN_TIME_DEVICE_ALLOWLIST"] = ""

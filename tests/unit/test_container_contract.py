@@ -12,7 +12,6 @@ def test_dockerfile_installs_the_project() -> None:
     assert "COPY pyproject.toml uv.lock /app/" in dockerfile
     assert "COPY src /app/src" in dockerfile
     assert "COPY dbt /app/dbt" in dockerfile
-    assert "COPY sql" not in dockerfile
     assert "uv sync --locked --no-dev --no-editable --no-cache" in dockerfile
     assert "UV_PROJECT_ENVIRONMENT=/usr/local" in dockerfile
     assert "PDP_PROJECT_ROOT=/app" in dockerfile

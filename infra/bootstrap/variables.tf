@@ -20,7 +20,7 @@ variable "region" {
 }
 
 variable "state_bucket_name" {
-  description = "Retained state bucket name; the runtime backend uses the corresponding -west bucket."
+  description = "Retained state backup bucket name; the runtime backend uses its existing -west bucket."
   type        = string
 
   validation {

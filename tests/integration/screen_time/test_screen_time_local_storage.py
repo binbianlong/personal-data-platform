@@ -13,6 +13,7 @@ from personal_data_platform.sources.screen_time.raw import (
     ScreenTimeRawIdentity,
     build_device_key,
     encode_segment_envelope,
+    format_observed_at,
 )
 from personal_data_platform.sources.screen_time.state import CollectorScan, CollectorState
 from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
@@ -42,21 +43,38 @@ def test_loaded_raw_survives_restart_and_only_superseded_success_is_removed(tmp_
     state = CollectorState(tmp_path / "collector.db")
     args = dict(device_key="a" * 64, stream="app-in-focus", segment_key="b" * 64)
     first = state.prepare(**args, raw_bytes=b"first", observed_at=NOW)
-    state.mark_uploaded(first.identity.object_key, NOW)
+    state.mark_loaded(first.identity.object_key, NOW)
     second = state.prepare(**args, raw_bytes=b"second", observed_at=NOW + timedelta(seconds=1))
     third = state.prepare(**args, raw_bytes=b"third", observed_at=NOW + timedelta(seconds=2))
     repo = ScreenTimeLocalRepository(state=state, source=get_source())
     assert gzip.decompress(repo.get_raw(first.identity.object_key, generation=1)) == b"first"
     assert len(list(repo.list_raw("raw/screen_time/v1/"))) == 3
-    state.mark_uploaded(second.identity.object_key, NOW)
+    state.mark_loaded(second.identity.object_key, NOW)
     assert {r.key for r in repo.list_raw("raw/screen_time/v1/")} == {
         second.identity.object_key,
         third.identity.object_key,
     }
-    state.mark_uploaded(third.identity.object_key, NOW)
+    state.mark_loaded(third.identity.object_key, NOW)
+    storage_created_at = NOW - timedelta(days=2)
+    retention_started_at = NOW - timedelta(days=1)
+    with state._connect() as connection:
+        connection.execute(
+            """UPDATE segment_observation SET storage_created_at = ?, storage_generation = 7,
+                      retention_started_at = ? WHERE object_key = ?""",
+            (
+                format_observed_at(storage_created_at),
+                format_observed_at(retention_started_at),
+                third.identity.object_key,
+            ),
+        )
     restarted = ScreenTimeLocalRepository(state=CollectorState(state.path), source=get_source())
-    assert len(list(restarted.list_raw("raw/screen_time/v1/"))) == 1
-    assert gzip.decompress(restarted.get_raw(third.identity.object_key, generation=1)) == b"third"
+    retained = list(restarted.list_raw("raw/screen_time/v1/"))
+    assert len(retained) == 1
+    assert retained[0].key == third.identity.object_key
+    assert retained[0].storage_created_at == storage_created_at
+    assert retained[0].retention_started_at == retention_started_at
+    assert retained[0].storage_generation == 7
+    assert gzip.decompress(restarted.get_raw(third.identity.object_key, generation=7)) == b"third"
     with pytest.raises(ValueError, match="generation"):
         restarted.get_raw(third.identity.object_key, generation=2)
 
@@ -73,11 +91,9 @@ def test_latest_segment_is_saved_pending_without_successor(tmp_path):
     body, _ = segb(event("synthetic.app"))
     (remote / "100").write_bytes(body)
     state = CollectorState(tmp_path / "collector.db")
-    repo = ScreenTimeLocalRepository(state=state, source=get_source())
     collector = ScreenTimeCollector(
         source=BiomeScreenTimeSource(sync_db_path=sync, remote_dir=remote.parent),
         state=state,
-        uploader=repo,
         pseudonym_key=b"x" * 32,
         allowed_device_keys=frozenset({build_device_key(b"x" * 32, "phone")}),
         clock=lambda: NOW,
@@ -97,7 +113,7 @@ def test_latest_segment_is_saved_pending_without_successor(tmp_path):
 def test_warehouse_commit_then_restart_acknowledges_without_duplicate_events(
     tmp_path, publish_success
 ):
-    from personal_data_platform.sources.screen_time.cli import _load_pending
+    from personal_data_platform.sources.screen_time.runtime import load_pending
 
     state = CollectorState(tmp_path / "collector.db")
     body = encode_segment_envelope(segb(event("synthetic.app"))[0], name="100", kind="events")
@@ -120,7 +136,7 @@ def test_warehouse_commit_then_restart_acknowledges_without_duplicate_events(
     refs = tuple(repo.list_raw("raw/screen_time/v2/"))
     assert run_loader_objects(repo, wh, refs, source=source).ok
     assert state.pending()  # Process died before SQLite acknowledgement.
-    _load_pending(state, wh, now=NOW, publish_success=publish_success)
+    load_pending(state, wh, now=NOW, publish_success=publish_success)
     assert not state.pending()
     assert wh.query_value("SELECT count(*) FROM base.screen_time_event") == 1
     assert wh.query_value("SELECT count(*) FROM ops.heartbeat") == (2 if publish_success else 0)
@@ -135,7 +151,7 @@ def test_warehouse_commit_then_restart_acknowledges_without_duplicate_events(
         observed_at=NOW + timedelta(seconds=1),
         schema_version=2,
     )
-    _load_pending(state, wh, now=NOW + timedelta(seconds=1), publish_success=publish_success)
+    load_pending(state, wh, now=NOW + timedelta(seconds=1), publish_success=publish_success)
     assert wh.query_rows("SELECT object_key FROM ops.ingestion_metadata") == [
         (successor.identity.object_key,)
     ]

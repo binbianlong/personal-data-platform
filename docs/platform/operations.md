@@ -22,7 +22,7 @@ workspaceの他DBを自動attachせず、ローカルDuckDBへの接続方法は
 
 [bootstrap](../../infra/bootstrap/README.md)でstate・registry・WIFを作り、[runtime Terraform](../../infra/terraform/README.md)で通常資産を管理する。
 secret payloadはTerraform外で登録し、数値versionに固定する。常設preflight/dbt Jobは作らない。
-通常はpush配信・日次Scheduler・監視が有効で、`PDP_WEST_SCHEDULERS_ENABLED=false`で一時停止する。
+通常はpush配信・日次Scheduler・監視が有効で、`PDP_SCHEDULERS_ENABLED=false`で一時停止する。
 停止時はsubscriptionをpullへ戻して通知を保持し、workerも処理を保留する。
 
 CIはimageをbuild・登録し、そのdigestを指定してruntimeを更新する。
@@ -82,7 +82,7 @@ Pub/Sub滞留はFitbitがpullで75分超・pushで15分超、OwnTracksが15分�
 Fitbit workerの成功ログは通知受信時刻・commit時刻・反映までの秒数を含み、Rawやtokenは含めない。
 OwnTracksは`base.owntracks_location`の`received_at`と`loaded_at`から保存後の取込時間を確認する。
 Healthchecksはdaily 1件、Period 24h＋Grace 24h。新しいeventがないことだけを障害とみなさない。
-通常logは_Defaultから西部`pdp-west` bucketへ1経路で送り、30日保持する。_Requiredと既存backupは維持する。
+通常logは_Defaultから`pdp-west` bucketへ1経路で送り、30日保持する。_Requiredと既存backupは維持する。
 
 ```bash
 gcloud run jobs execute reconciliation-west --project=<project-id> --region=us-west1 --wait

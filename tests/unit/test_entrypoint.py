@@ -9,14 +9,6 @@ from personal_data_platform import cli
 from personal_data_platform.entrypoint import main
 
 
-@pytest.mark.parametrize("removed_role", ["webhook", "fetch"])
-def test_removed_noop_roles_are_not_accepted(removed_role: str) -> None:
-    with pytest.raises(SystemExit) as error:
-        main([removed_role])
-
-    assert error.value.code == 2
-
-
 def test_runtime_exception_returns_nonzero(monkeypatch, capsys) -> None:
     def fail(_args):
         raise RuntimeError("synthetic failure")

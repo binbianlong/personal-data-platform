@@ -25,7 +25,7 @@ read前後のinode・size・mtimeが変われば短く再読込し、構造不�
 全対象の保存を終えてから、既存Loaderを同じprocess・共通leaseで実行する。成功版の整理はDB確認後だけ行う。
 スキーマ初期化は最初に成功した後の周期では省略する。初期化に失敗した場合は次周期に再試行する。
 接続は周期ごとに開き直す。追加DDLやCollectorのコード変更は、停止・更新後の再起動で反映する。
-JSONには`devices`、`segments`、`archived`、`skipped`、`retried`、`deferred`と、取込結果の`loaded`、`pending`を出す。
+JSONには`devices`、`segments`、`archived`、`skipped`、`deferred`と、取込結果の`loaded`、`pending`を出す。
 保存だけ成功しても取込成功とはみなさない。不完全snapshotの回も保存済みpendingは取り込めるが、成功heartbeatは更新しない。
 
 `--watch`は通信障害・lease競合・走査失敗をstderrへ記録し、1800秒後に再試行する。

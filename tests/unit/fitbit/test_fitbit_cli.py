@@ -1,12 +1,25 @@
+import pytest
+
 from personal_data_platform.cli import main
 
 
-def test_sync_requires_explicit_range_and_rejects_resume_id():
-    import pytest
+def test_sync_requires_explicit_range():
+    with pytest.raises(SystemExit):
+        main(["fitbit", "sync"])
 
-    for args in (["fitbit", "sync"], ["fitbit", "sync", "--resume-id", "saved-range"]):
-        with pytest.raises(SystemExit):
-            main(args)
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["loader", "--source", "fitbit"],
+        ["rebuild", "--source", "fitbit", "--dry-run"],
+        ["rebuild", "--source", "fitbit", "--all-streams", "--dry-run"],
+    ],
+)
+def test_fitbit_raw_commands_redirect_to_api_sync(command, capsys, monkeypatch):
+    monkeypatch.delenv("GCS_BUCKET", raising=False)
+    assert main(command) == 1
+    assert "fitbit sync" in capsys.readouterr().err
 
 
 def test_sync_preserves_narrow_physical_bounds(monkeypatch):

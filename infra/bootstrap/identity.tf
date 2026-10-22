@@ -123,32 +123,32 @@ resource "google_project_iam_member" "github_plan_bucket_reader" {
   member  = "serviceAccount:${google_service_account.github_plan.email}"
 }
 
-resource "google_storage_bucket_iam_member" "github_plan_state" {
-  bucket = google_storage_bucket.terraform_state.name
+resource "google_storage_bucket_iam_member" "github_plan_state_backup" {
+  bucket = google_storage_bucket.terraform_state_backup.name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.github_plan.email}"
 }
 
-resource "google_storage_bucket_iam_member" "github_deploy_state" {
-  bucket = google_storage_bucket.terraform_state.name
+resource "google_storage_bucket_iam_member" "github_deploy_state_backup" {
+  bucket = google_storage_bucket.terraform_state_backup.name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.github_deploy.email}"
 }
 
-resource "google_storage_bucket_iam_member" "github_plan_state_west" {
-  bucket = google_storage_bucket.terraform_state_west.name
+resource "google_storage_bucket_iam_member" "github_plan_runtime_state" {
+  bucket = google_storage_bucket.runtime_state.name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.github_plan.email}"
 }
-resource "google_storage_bucket_iam_member" "github_deploy_state_west" {
-  bucket = google_storage_bucket.terraform_state_west.name
+resource "google_storage_bucket_iam_member" "github_deploy_runtime_state" {
+  bucket = google_storage_bucket.runtime_state.name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.github_deploy.email}"
 }
-resource "google_artifact_registry_repository_iam_member" "github_deploy_writer_west" {
+resource "google_artifact_registry_repository_iam_member" "github_deploy_writer" {
   project    = var.project_id
-  location   = google_artifact_registry_repository.runtime_west.location
-  repository = google_artifact_registry_repository.runtime_west.name
+  location   = google_artifact_registry_repository.runtime.location
+  repository = google_artifact_registry_repository.runtime.name
   role       = "roles/artifactregistry.writer"
   member     = "serviceAccount:${google_service_account.github_deploy.email}"
 }

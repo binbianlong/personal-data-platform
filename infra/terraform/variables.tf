@@ -45,59 +45,59 @@ variable "scheduler_time_zone" {
   default     = "Asia/Tokyo"
 }
 
-variable "west_region" {
+variable "region" {
   description = "Region for normal compute, Raw and Pub/Sub."
   type        = string
   default     = "us-west1"
   validation {
-    condition     = var.west_region == "us-west1"
-    error_message = "West resources must use us-west1."
+    condition     = var.region == "us-west1"
+    error_message = "Runtime resources must use us-west1."
   }
 }
-variable "west_image_uri" {
+variable "runtime_image_uri" {
   description = "Immutable image digest in the us-west1 Artifact Registry."
   type        = string
   default     = ""
   validation {
-    condition     = can(regex("^us-west1-docker\\.pkg\\.dev/${var.project_id}/[^/]+/[^@]+@sha256:[0-9a-f]{64}$", var.west_image_uri))
+    condition     = can(regex("^us-west1-docker\\.pkg\\.dev/${var.project_id}/[^/]+/[^@]+@sha256:[0-9a-f]{64}$", var.runtime_image_uri))
     error_message = "Runtime requires its own digest in the us-west1 repository."
   }
 }
-variable "west_secret_versions" {
-  description = "Non-secret numeric version pins for the west secret containers; secret payloads are provisioned outside Terraform."
+variable "secret_versions" {
+  description = "Non-secret numeric version pins for the runtime secret containers; secret payloads are provisioned outside Terraform."
   type        = map(string)
   default     = {}
   nullable    = false
   validation {
-    condition     = alltrue([for key, version in var.west_secret_versions : contains(keys(local.west_secret_ids), key) && can(regex("^[1-9][0-9]*$", version))])
-    error_message = "west_secret_versions must use existing west secret keys and positive numeric version strings; aliases such as latest are not allowed."
+    condition     = alltrue([for key, version in var.secret_versions : contains(keys(local.runtime_secret_ids), key) && can(regex("^[1-9][0-9]*$", version))])
+    error_message = "secret_versions must use existing runtime secret keys and positive numeric version strings; aliases such as latest are not allowed."
   }
   validation {
-    condition     = length(setsubtract(toset(["motherduck_token", "fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "owntracks_config"]), toset(keys(var.west_secret_versions)))) == 0
+    condition     = length(setsubtract(toset(["motherduck_token", "fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "owntracks_config"]), toset(keys(var.secret_versions)))) == 0
     error_message = "Runtime requires version pins for motherduck_token, fitbit_oauth_config, fitbit_webhook_config, heartbeat_config, and owntracks_config."
   }
 }
-variable "west_schedulers_enabled" {
+variable "schedulers_enabled" {
   description = "Run daily and Fitbit batch scheduling, notification processing and native alerts; false pauses schedules and processing."
   type        = bool
   default     = true
 }
-variable "west_logging_exclusions" {
-  description = "Existing _Default sink exclusions to preserve when routing ordinary logs west."
+variable "logging_exclusions" {
+  description = "Existing _Default sink exclusions to preserve when routing ordinary logs to the runtime bucket."
   type        = map(string)
   default     = {}
 }
-variable "west_motherduck_database" {
-  description = "Production database in the separate us-west-2 MotherDuck organization."
+variable "motherduck_database" {
+  description = "Production database in the us-west-2 MotherDuck organization."
   type        = string
   default     = "personal_data_platform"
 }
-variable "west_preflight_motherduck_database" {
-  description = "Isolated preflight database in the west organization."
+variable "preflight_motherduck_database" {
+  description = "Isolated preflight database in the production organization."
   type        = string
   default     = "personal_data_platform_west_preflight"
   validation {
-    condition     = var.west_preflight_motherduck_database != var.west_motherduck_database
-    error_message = "West preflight must use a separate database."
+    condition     = var.preflight_motherduck_database != var.motherduck_database
+    error_message = "Preflight must use a separate database."
   }
 }

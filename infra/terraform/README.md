@@ -4,7 +4,7 @@
 先に[bootstrap](../bootstrap/README.md)を適用し、`terraform.tfvars.example`から非公開入力を作る。
 
 ```bash
-terraform init -backend-config="bucket=<西部state bucket>" -input=false
+terraform init -backend-config="bucket=<state bucket>" -input=false
 terraform fmt -check
 terraform validate
 terraform test
@@ -12,10 +12,13 @@ terraform plan -var-file=<非公開tfvars> -out=runtime.tfplan
 terraform apply runtime.tfplan
 ```
 
-`west_image_uri`には西部registryのdigest、MotherDuck production/preflightには独立DBを指定する。
-backend bucketはGitHubの`TF_STATE_BUCKET`へ設定する。接続先・実行順・監視・復旧は[Platform運用](../../docs/platform/operations.md)に従う。
-通常はpush配信・日次Schedulerとnative警報が有効。`west_schedulers_enabled=false`とGitHubの`PDP_WEST_SCHEDULERS_ENABLED=false`で一時停止し、subscriptionをpullへ戻して通知を保持し、Fitbit・OwnTracks処理も延期する。
-Logging変更時は既存_Defaultの除外を`west_logging_exclusions`と`PDP_WEST_LOGGING_EXCLUSIONS`へ引き継ぐ。
+`runtime_image_uri`にはruntime registryのdigest、MotherDuck production/preflightには独立DBを指定する。
+backend bucketはGitHubの`TF_STATE_BUCKET`へ設定する。
+GitHub設定は地域名を含まない変数を優先し、未設定なら既存の`GCP_WEST_*`・`PDP_WEST_*`も参照する。
+registryは`GCP_RUNTIME_ARTIFACT_REPOSITORY`、image fallbackは`GCP_RUNTIME_IMAGE_URI`を使う。
+ローカルtfvarsは`terraform.tfvars.example`の入力名に合わせる。既存のcloud resource名とbackendのbucket/prefixは維持する。接続先・実行順・監視・復旧は[Platform運用](../../docs/platform/operations.md)に従う。
+通常はpush配信・日次Schedulerとnative警報が有効。`schedulers_enabled=false`とGitHubの`PDP_SCHEDULERS_ENABLED=false`で一時停止し、subscriptionをpullへ戻して通知を保持し、Fitbit・OwnTracks処理も延期する。
+Logging変更時は既存_Defaultの除外を`logging_exclusions`と`PDP_LOGGING_EXCLUSIONS`へ引き継ぐ。
 
 ## Fitbitの配信切替
 
@@ -23,10 +26,10 @@ Logging変更時は既存_Defaultの除外を`west_logging_exclusions`と`PDP_WE
 `pull`では既存subscriptionのpush設定だけを外し、`pdp-fitbit-batch-west`が60分ごと（毎時00分）に非公開workerの`/notifications/fitbit/drain`をOIDC認証で呼ぶ。通知は全種類を同じqueueに保持する。
 subscriptionの7日保持・600秒ack deadline、workerの540秒timeout・最大1instance・同時処理1は維持する。未ack通知の警報はFitbitがpullで75分超・pushで15分超、OwnTracksが15分超の状態が5分続いた場合に発報する。
 
-切替は`west_schedulers_enabled`を変更せず、次の順で行う。
+切替は`schedulers_enabled`を変更せず、次の順で行う。
 
 1. `push`のまま新Schedulerを停止状態で作成し、drain endpointを持つworker imageとsubscriptionのsubscriber権限を先に適用する。
-2. workerの準備完了後、`fitbit_delivery_mode=pull`で`google_pubsub_subscription.west`だけをtargetにplan/applyし、既存subscriptionを再作成せずpullへ変える。新Schedulerは停止を維持する。
+2. workerの準備完了後、`fitbit_delivery_mode=pull`で`google_pubsub_subscription.fitbit`だけをtargetにplan/applyし、既存subscriptionを再作成せずpullへ変える。新Schedulerは停止を維持する。
 3. Scheduler SAでdrain endpointを手動実行し、処理とackを確認する。その後、同じ`pull`設定で新Schedulerだけを再開する。imageの共有変数によってreceiverや日次Jobが更新されないことをplanで確認する。GitHubの`PDP_FITBIT_DELIVERY_MODE`にも`pull`を保持する。
 
 rollbackは新Schedulerだけを停止し、実行中drainの終了を待ってから`fitbit_delivery_mode=push`へ戻す。日次SchedulerやOwnTracksは停止しない。
@@ -34,8 +37,8 @@ rollbackは新Schedulerだけを停止し、実行中drainの終了を待って�
 ## Secretと資格情報
 
 secretはglobal resource＋単一`us-west1` replica。Terraformはcontainerだけを作り、payloadは外部で登録する。
-`west_secret_versions`は正の整数文字列へ固定し、`latest`・alias・未知のkeyを拒否する。
-GitHubの`PDP_WEST_SECRET_VERSIONS`にも同じmapをJSONで設定する。`heartbeat_config`のpayloadは
+`secret_versions`は正の整数文字列へ固定し、`latest`・alias・未知のkeyを拒否する。
+GitHubの`PDP_SECRET_VERSIONS`にも同じmapをJSONで設定する。`heartbeat_config`のpayloadは
 `PDP_HEARTBEAT_CONFIG`へ渡す`{"daily":"https://..."}`形式で、HTTPS URLを使う。
 
 | key | Secret Manager ID | 利用先 |
@@ -52,4 +55,4 @@ pushのOIDCには既存Scheduler SAを使う。workerは非公開で最大1insta
 切替完了前に参照中versionを無効化・破棄しない。秘密値をtfvars・state・GitHub variablesへ含めない。
 JSON fieldは[Fitbit環境変数](../../docs/sources/fitbit/operations.md#環境変数)、権限境界は[セキュリティ](../../docs/platform/security.md)を参照する。
 
-OwnTracksの初回secretは`google_secret_manager_secret.west["owntracks_config"]`を先に適用してcontainerを作り、payloadを登録後に全体を適用する。
+OwnTracksの初回secretは`google_secret_manager_secret.runtime["owntracks_config"]`を先に適用してcontainerを作り、payloadを登録後に全体を適用する。

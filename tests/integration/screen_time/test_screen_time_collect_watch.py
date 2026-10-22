@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from personal_data_platform.sources.screen_time import cli
+from personal_data_platform.sources.screen_time import runtime
 from personal_data_platform.sources.screen_time.raw import build_device_key
 from personal_data_platform.sources.screen_time.state import CollectorState
 from personal_data_platform.storage.motherduck import (
@@ -38,7 +38,7 @@ def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatc
     }.items():
         monkeypatch.setenv(name, value)
     warehouse_config = WarehouseConfig(str(tmp_path / "warehouse.duckdb"))
-    monkeypatch.setattr(cli, "_warehouse_config", lambda: warehouse_config)
+    monkeypatch.setattr(runtime, "warehouse_config", lambda: warehouse_config)
 
     connections = []
     migrations = []
@@ -74,12 +74,12 @@ def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatc
         if len(scans) == 3:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli, "connect", open_connection)
+    monkeypatch.setattr(runtime, "connect", open_connection)
     monkeypatch.setattr(Warehouse, "migrate", migrate)
     monkeypatch.setattr(Warehouse, "acquire_job_lock", acquire)
-    monkeypatch.setattr(cli.time, "sleep", next_scan)
+    monkeypatch.setattr(runtime.time, "sleep", next_scan)
 
-    assert cli._run_collect(watch=True) == 0
+    assert runtime.collect(watch=True) == 0
     assert len(migrations) == (2 if failure == "migration" else 1)
     assert scans == ([1, 0, 0] if failure else [0, 0, 0])
     warehouse = Warehouse(connect(warehouse_config))

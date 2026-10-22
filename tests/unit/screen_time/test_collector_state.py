@@ -13,17 +13,6 @@ def test_raw_database_is_private(tmp_path):
     assert path.parent.stat().st_mode & 0o777 == 0o700
 
 
-def test_legacy_uploaded_without_payload_is_archived_again(tmp_path):
-    state = CollectorState(tmp_path / "collector.db")
-    old = _prepare(state, b"still-readable")
-    with state._connect() as db:
-        db.execute("UPDATE segment_observation SET status='uploaded', compressed_payload=NULL")
-    fresh = _prepare(state, b"still-readable")
-    assert fresh is not None and fresh.created
-    assert fresh.identity.object_key != old.identity.object_key
-    assert gzip.decompress(fresh.compressed_payload) == b"still-readable"
-
-
 def _prepare(state: CollectorState, raw_bytes: bytes):
     return state.prepare(
         device_key="a" * 64,
@@ -34,7 +23,7 @@ def _prepare(state: CollectorState, raw_bytes: bytes):
     )
 
 
-def test_pending_payload_survives_restart_and_uploaded_latest_is_skipped(tmp_path) -> None:
+def test_pending_payload_survives_restart_and_loaded_latest_is_skipped(tmp_path) -> None:
     state_path = tmp_path / "collector.db"
     first_state = CollectorState(state_path)
     first = _prepare(first_state, b"state-a")
@@ -49,7 +38,7 @@ def test_pending_payload_survives_restart_and_uploaded_latest_is_skipped(tmp_pat
     assert retried.compressed_payload == first.compressed_payload
     assert gzip.decompress(retried.compressed_payload) == b"state-a"
 
-    restarted_state.mark_uploaded(retried.identity.object_key, NOW)
+    restarted_state.mark_loaded(retried.identity.object_key, NOW)
 
     assert _prepare(restarted_state, b"state-a") is None
     assert restarted_state.pending() == []
@@ -63,7 +52,7 @@ def test_return_to_old_content_is_a_new_observation(tmp_path) -> None:
         pending = _prepare(state, raw_bytes)
         assert pending is not None
         keys.append(pending.identity.object_key)
-        state.mark_uploaded(pending.identity.object_key, NOW)
+        state.mark_loaded(pending.identity.object_key, NOW)
 
     assert len(set(keys)) == 3
     assert keys[0].rsplit("/", 1)[1] == keys[2].rsplit("/", 1)[1]

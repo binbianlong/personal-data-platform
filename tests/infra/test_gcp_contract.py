@@ -32,7 +32,7 @@ def test_deploy_identity_and_workflow_are_restricted() -> None:
     assert "roles/resourcemanager.projectIamAdmin" not in bootstrap
     assert "roles/iam.serviceAccountUser" not in bootstrap
     assert "github.ref == 'refs/heads/main'" in deploy
-    assert "TF_VAR_west_image_uri=${current_image}" in deploy
+    assert "TF_VAR_runtime_image_uri=${current_image}" in deploy
 
 
 def test_plan_identity_is_separate_and_read_only() -> None:
@@ -45,8 +45,8 @@ def test_plan_identity_is_separate_and_read_only() -> None:
     assert 'role   = "roles/storage.objectAdmin"' in identity
     assert "roles/viewer" in main
     assert "roles/iam.securityReviewer" not in main
-    assert "west_deployer" in _read("infra/terraform/runtime.tf")
-    assert "west_scheduler_deployer" in _read("infra/terraform/runtime.tf")
+    assert "processing_deployer" in _read("infra/terraform/runtime.tf")
+    assert "scheduler_deployer" in _read("infra/terraform/runtime.tf")
 
 
 def test_runtime_bucket_manager_has_no_object_data_permissions() -> None:
@@ -99,8 +99,8 @@ def test_bootstrap_service_accounts_wait_for_api_enablement(account: str) -> Non
 
 def test_preflight_bucket_isolated_and_orphans_expire_after_one_day() -> None:
     storage = _read("infra/terraform/runtime.tf")
-    preflight = storage.split('resource "google_storage_bucket" "preflight_west" {', 1)[1]
-    preflight = preflight.split('resource "google_service_account" "west" {', 1)[0]
+    preflight = storage.split('resource "google_storage_bucket" "preflight" {', 1)[1]
+    preflight = preflight.split('resource "google_service_account" "processing" {', 1)[0]
 
     assert re.search(
         r'preflight_bucket_name\s*= "\$\{var.project_id\}-pdp-preflight-west"', storage
@@ -121,18 +121,6 @@ def test_rebuild_uses_a_separate_read_only_impersonated_identity() -> None:
     assert 'role               = "roles/iam.serviceAccountTokenCreator"' in jobs
     assert "google_service_account.rebuild_operator.email" in storage
     assert re.search(r'role\s*= "roles/storage.objectViewer"', storage)
-
-
-def test_former_b2_secrets_are_retained_but_not_injected() -> None:
-    jobs = _read("infra/terraform/jobs.tf")
-    secrets = _read("infra/terraform/secrets.tf")
-    outputs = _read("infra/terraform/outputs.tf")
-
-    assert secrets.count("\nmoved {\n") == 6
-    assert secrets.count("\nremoved {\n") == 6
-    assert secrets.count("destroy = false") == 6
-    assert "B2_" not in jobs
-    assert "for key, secret in google_secret_manager_secret.west" in outputs
 
 
 def test_analytics_day_boundaries_are_not_advertised_as_configurable() -> None:
@@ -158,14 +146,14 @@ def _runtime_job(name: str, image: str) -> dict:
 def test_runtime_resources_preserve_backups_and_support_pausing() -> None:
     bootstrap = _read("infra/bootstrap/main.tf")
     runtime = _read("infra/terraform/runtime.tf")
-    assert 'resource "google_storage_bucket" "terraform_state"' in bootstrap
-    assert 'resource "google_storage_bucket" "terraform_state_west"' in bootstrap
-    assert 'resource "google_artifact_registry_repository" "runtime_west"' in bootstrap
-    assert 'resource "google_storage_bucket" "raw_west"' in runtime
-    assert 'resource "google_storage_bucket" "preflight_west"' in runtime
-    assert 'resource "google_cloud_run_v2_job" "west"' in runtime
-    assert 'resource "google_cloud_scheduler_job" "west"' in runtime
-    assert re.search(r"paused\s*= !var.west_schedulers_enabled", runtime)
+    assert 'resource "google_storage_bucket" "terraform_state_backup"' in bootstrap
+    assert 'resource "google_storage_bucket" "runtime_state"' in bootstrap
+    assert 'resource "google_artifact_registry_repository" "runtime"' in bootstrap
+    assert 'resource "google_storage_bucket" "raw"' in runtime
+    assert 'resource "google_storage_bucket" "preflight"' in runtime
+    assert 'resource "google_cloud_run_v2_job" "runtime"' in runtime
+    assert 'resource "google_cloud_scheduler_job" "runtime"' in runtime
+    assert re.search(r"paused\s*= !var.schedulers_enabled", runtime)
     assert "days_since_custom_time" not in runtime
     assert "raw/screen_time/" not in runtime
     assert "raw/fitbit/v3/" not in runtime
@@ -176,7 +164,7 @@ def test_runtime_resources_preserve_backups_and_support_pausing() -> None:
 def test_pubsub_and_receiver_access_are_separate() -> None:
     queue = _read("infra/terraform/pubsub.tf")
     runtime = _read("infra/terraform/runtime.tf")
-    assert "allowed_persistence_regions = [var.west_region]" in queue
+    assert "allowed_persistence_regions = [var.region]" in queue
     assert re.search(r"enforce_in_transit\s*= true", queue)
     assert re.search(r'message_retention_duration\s*= "604800s"', queue)
     assert re.search(r"retain_acked_messages\s*= false", queue)
@@ -186,15 +174,17 @@ def test_pubsub_and_receiver_access_are_separate() -> None:
         1
     ]
     subscriber = subscriber.split("\n}", 1)[0]
-    assert re.search(r"subscription\s*= google_pubsub_subscription.west.name", subscriber)
+    assert re.search(r"subscription\s*= google_pubsub_subscription.fitbit.name", subscriber)
     assert re.search(r'role\s*= "roles/pubsub.subscriber"', subscriber)
-    assert 'member       = "serviceAccount:${google_service_account.west.email}"' in subscriber
-    publisher = queue.split('resource "google_pubsub_topic_iam_member" "west_receiver"', 1)[1]
+    assert (
+        'member       = "serviceAccount:${google_service_account.processing.email}"' in subscriber
+    )
+    publisher = queue.split('resource "google_pubsub_topic_iam_member" "fitbit_receiver"', 1)[1]
     publisher = publisher.split("\n}", 1)[0]
     assert "roles/pubsub.subscriber" not in publisher
-    assert "google_service_account.west_receiver.email" in publisher
+    assert "google_service_account.fitbit_receiver.email" in publisher
     assert "push_config" in queue
-    receiver = runtime.split('resource "google_cloud_run_v2_service" "west"', 1)[1]
+    receiver = runtime.split('resource "google_cloud_run_v2_service" "fitbit_receiver"', 1)[1]
     receiver = receiver.split('resource "google_cloud_run_v2_service_iam_member"', 1)[0]
     assert re.search(r"PDP_FITBIT_WEBHOOK_CONFIG\s*=", receiver)
     assert "PDP_FITBIT_OAUTH_CONFIG" not in receiver
@@ -242,7 +232,7 @@ RUNTIME_SECRET_VERSIONS = {
         for version in ("latest", "0", "-1", "1.5", "", "01", " 1", "1\n", 1, None)
     ],
 )
-def test_west_workflows_require_numeric_pins_before_cloud_work(
+def test_runtime_workflows_require_numeric_pins_before_cloud_work(
     workflow: str, versions: dict[str, object], accepted: bool
 ) -> None:
     result = subprocess.run(
@@ -255,9 +245,9 @@ def test_west_workflows_require_numeric_pins_before_cloud_work(
             **os.environ,
             **dict.fromkeys(
                 [
-                    "WEST_ARTIFACT_REPOSITORY",
+                    "ARTIFACT_REPOSITORY",
                     "GCP_PROJECT_ID",
-                    "WEST_REGION",
+                    "GCP_REGION",
                     "IMAGE_NAME",
                     "GCP_PLAN_SERVICE_ACCOUNT",
                     "TF_STATE_BUCKET",
@@ -265,11 +255,10 @@ def test_west_workflows_require_numeric_pins_before_cloud_work(
                     "TF_VAR_rebuild_impersonator_member",
                     "TF_VAR_deployer_service_account_email",
                     "TF_VAR_project_id",
-                    "WEST_REGION",
                 ],
                 "example",
             ),
-            "TF_VAR_west_secret_versions": json.dumps(versions),
+            "TF_VAR_secret_versions": json.dumps(versions),
         },
         capture_output=True,
         text=True,
@@ -321,7 +310,7 @@ def test_deploy_prepares_image_without_retaining_history(
             "bash",
             "-c",
             _workflow_step_script(
-                ".github/workflows/terraform-deploy.yml", "Prepare west runtime image"
+                ".github/workflows/terraform-deploy.yml", "Prepare runtime image"
             ),
         ],
         env={
@@ -333,8 +322,8 @@ def test_deploy_prepares_image_without_retaining_history(
             "IMAGE_PATH": IMAGE_PATH,
             "DOCKER_LOG": str(docker_log),
             "GCP_PROJECT_ID": "example-project",
-            "WEST_REGION": "us-west1",
-            "WEST_ARTIFACT_REPOSITORY": "runtime",
+            "GCP_REGION": "us-west1",
+            "ARTIFACT_REPOSITORY": "runtime",
             "IMAGE_NAME": "runtime",
             "GITHUB_EVENT_NAME": event,
             "GITHUB_SHA": sha,
@@ -351,7 +340,7 @@ def test_deploy_prepares_image_without_retaining_history(
         assert not docker_log.exists()
         return
     assert result.returncode == 0, result.stderr
-    assert output.read_text() == f"TF_VAR_west_image_uri={expected_image}\n"
+    assert output.read_text() == f"TF_VAR_runtime_image_uri={expected_image}\n"
     if event == "workflow_dispatch":
         assert docker_log.read_text().splitlines() == [
             f"build --tag {IMAGE_PATH}:{sha} .",
@@ -362,7 +351,7 @@ def test_deploy_prepares_image_without_retaining_history(
 
 
 @pytest.mark.parametrize("fallback_region", ["us-central1", "us-west1"])
-def test_plan_west_fallback_rejects_legacy_repository(tmp_path: Path, fallback_region: str) -> None:
+def test_plan_fallback_requires_runtime_region(tmp_path: Path, fallback_region: str) -> None:
     gcloud = tmp_path / "gcloud"
     gcloud.write_text("#!/bin/bash\nexit 1\n")
     gcloud.chmod(0o755)
@@ -374,17 +363,15 @@ def test_plan_west_fallback_rejects_legacy_repository(tmp_path: Path, fallback_r
         [
             "bash",
             "-c",
-            _workflow_step_script(
-                ".github/workflows/terraform-plan.yml", "Resolve west runtime image"
-            ),
+            _workflow_step_script(".github/workflows/terraform-plan.yml", "Resolve runtime image"),
         ],
         env={
             **os.environ,
             "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
             "TF_VAR_project_id": "example-project",
-            "WEST_REGION": "us-west1",
-            "WEST_ARTIFACT_REPOSITORY": "runtime",
-            "TF_VAR_west_image_uri": fallback,
+            "GCP_REGION": "us-west1",
+            "ARTIFACT_REPOSITORY": "runtime",
+            "TF_VAR_runtime_image_uri": fallback,
             "GITHUB_ENV": str(output),
         },
         capture_output=True,
@@ -396,4 +383,4 @@ def test_plan_west_fallback_rejects_legacy_repository(tmp_path: Path, fallback_r
         assert not output.exists()
     else:
         assert result.returncode == 0, result.stderr
-        assert output.read_text() == f"TF_VAR_west_image_uri={fallback}\n"
+        assert output.read_text() == f"TF_VAR_runtime_image_uri={fallback}\n"

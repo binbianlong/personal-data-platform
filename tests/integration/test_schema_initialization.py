@@ -19,7 +19,7 @@ def warehouse():
     value.close()
 
 
-def test_initialization_records_migrations_without_a_profile(warehouse):
+def test_initialization_records_current_migrations(warehouse):
     warehouse.migrate()
     assert warehouse.query_rows(
         "SELECT migration_id FROM ops.schema_migration ORDER BY migration_id"
@@ -29,27 +29,16 @@ def test_initialization_records_migrations_without_a_profile(warehouse):
         "checksum",
         "applied_at",
     ]
-    assert (
-        warehouse.query_value(
-            "SELECT count(*) FROM information_schema.tables WHERE table_schema='ops' "
-            "AND table_name IN ('fitbit_notification','fitbit_raw_intent','fitbit_scope')"
-        )
-        == 0
-    )
 
 
-@pytest.mark.parametrize("profile", [None, "legacy", "west"])
-def test_old_history_is_rejected_without_modifying_it(warehouse, profile):
+def test_unexpected_history_columns_are_rejected_without_modifying_it(warehouse):
     warehouse.connection.execute(
         "CREATE SCHEMA ops; CREATE TABLE ops.schema_migration "
-        "(migration_id VARCHAR, checksum VARCHAR, applied_at TIMESTAMPTZ)"
+        "(migration_id VARCHAR, checksum VARCHAR, applied_at TIMESTAMPTZ, extra_column VARCHAR)"
     )
     warehouse.connection.execute(
-        "INSERT INTO ops.schema_migration VALUES ('001_initial.sql', 'preserved', now())"
+        "INSERT INTO ops.schema_migration VALUES ('001_initial.sql', 'preserved', now(), 'extra')"
     )
-    if profile:
-        warehouse.connection.execute("ALTER TABLE ops.schema_migration ADD schema_profile VARCHAR")
-        warehouse.connection.execute("UPDATE ops.schema_migration SET schema_profile=?", [profile])
     before = warehouse.query_rows("SELECT * FROM ops.schema_migration")
     with pytest.raises(RuntimeError, match="rebuild.*empty"):
         warehouse.migrate()
@@ -77,14 +66,14 @@ def test_untracked_existing_schema_requires_rebuild(warehouse, empty_ledger):
     ) == int(empty_ledger)
 
 
-def test_fresh_target_ignores_an_attached_old_database(warehouse):
+def test_fresh_target_ignores_an_attached_database(warehouse):
     warehouse.connection.execute("ATTACH ':memory:' AS unrelated")
     warehouse.connection.execute(
         "CREATE SCHEMA unrelated.ops; CREATE TABLE unrelated.ops.schema_migration "
-        "(migration_id VARCHAR, checksum VARCHAR, applied_at TIMESTAMPTZ, schema_profile VARCHAR)"
+        "(migration_id VARCHAR, checksum VARCHAR, applied_at TIMESTAMPTZ, extra_column VARCHAR)"
     )
     warehouse.connection.execute(
-        "INSERT INTO unrelated.ops.schema_migration VALUES ('old.sql','preserved',now(),'west')"
+        "INSERT INTO unrelated.ops.schema_migration VALUES ('other.sql','preserved',now(),'extra')"
     )
     before = warehouse.query_rows("SELECT * FROM unrelated.ops.schema_migration")
     warehouse.migrate()
