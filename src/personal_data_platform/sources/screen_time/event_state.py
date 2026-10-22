@@ -45,16 +45,9 @@ EVENT_COLUMNS = (
     "bundle_id",
     "event_at",
     "state",
-    "transition_reason",
     "kind",
-    "app_version",
-    "app_build",
-    "platform_flag",
     "object_key",
     "segment_key",
-    "segment_filename",
-    "record_offset",
-    "record_metadata_offset",
     "observed_at",
     "parser_version",
     "unknown_field_count",
@@ -67,9 +60,6 @@ ANALYTICAL_COLUMNS = tuple(
     not in {
         "object_key",
         "segment_key",
-        "segment_filename",
-        "record_offset",
-        "record_metadata_offset",
         "observed_at",
     }
 )
