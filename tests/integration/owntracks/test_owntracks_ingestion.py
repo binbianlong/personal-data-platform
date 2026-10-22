@@ -64,16 +64,16 @@ def test_loader_commits_one_location_and_redelivery_is_idempotent():
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     try:
         warehouse.migrate()
-        assert not {"altitude_m", "monitoring_mode", "trigger"} & {
+        assert not {"altitude_m", "monitoring_mode", "trigger", "battery_percent"} & {
             row[0] for row in warehouse.query_rows("DESCRIBE base.owntracks_location")
         }
         assert run_loader(store, warehouse, source=source).records == 1
         assert run_loader(store, warehouse, source=source).skipped == 1
         assert warehouse.query_rows(
             "SELECT device_key,event_at,latitude,longitude,accuracy_m,velocity_kmh,"
-            "battery_percent,object_key "
+            "object_key "
             "FROM base.owntracks_location"
-        ) == [("a" * 64, datetime(2026, 10, 9, tzinfo=UTC), 35.0, 139.0, 7.0, 12.0, 80, key)]
+        ) == [("a" * 64, datetime(2026, 10, 9, tzinfo=UTC), 35.0, 139.0, 7.0, 12.0, key)]
         assert warehouse.query_rows(
             "SELECT source_id,status,record_count FROM ops.ingestion_metadata"
         ) == [("owntracks", "succeeded", 1)]

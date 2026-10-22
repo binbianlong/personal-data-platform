@@ -260,7 +260,6 @@ class HeartRateMinute:
     minimum: float
     maximum: float
     data_source_family: str = GOOGLE_WEARABLES
-    sample_count: int | None = None
     origin: str = "api"
     aggregation_version: str = HEART_RATE_AGGREGATION_VERSION
 
@@ -291,10 +290,6 @@ class HeartRateMinute:
             or self.aggregation_version != HEART_RATE_AGGREGATION_VERSION
         ):
             raise ValueError("unsupported heart rate aggregation source")
-        if self.sample_count is not None and (
-            type(self.sample_count) is not int or self.sample_count <= 0
-        ):
-            raise ValueError("sample count must be positive or unknown")
 
 
 @dataclass(frozen=True, slots=True)

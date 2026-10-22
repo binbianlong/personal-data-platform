@@ -292,8 +292,8 @@ def test_minute_writer_reports_counts_and_stale_ranges(warehouse):
     assert partial.submitted_rows == 1
     assert partial.accepted_ranges == ((at, middle.start),)
     replaced = warehouse.query_rows("SELECT * FROM base.fitbit_heart_rate_minute")
-    assert replaced[0][:9] == original[0][:9]
-    assert replaced[0][9] == at + timedelta(hours=3)
+    assert replaced[0][:7] == original[0][:7]
+    assert replaced[0][7] == at + timedelta(hours=3)
     assert write(1).outcome == "stale"
     empty = write(5, ())
     assert empty.outcome == "range_replaced"
@@ -333,17 +333,17 @@ def test_minute_writer_changes_only_different_or_missing_rows(warehouse):
     changed = replace(
         original,
         fetched_at=at + timedelta(hours=3),
-        minutes=(rows[0], replace(rows[1], average=70, sample_count=2), *rows[3:]),
+        minutes=(rows[0], replace(rows[1], average=70, minimum=55), *rows[3:]),
     )
     assert write(changed).submitted_rows == 64
     after = warehouse.query_rows(
         "SELECT * FROM base.fitbit_heart_rate_minute WHERE subject_key='self' ORDER BY start_at"
     )
     assert after[0] == before[0]
-    assert [(row[2], row[5], row[8]) for row in after[:3]] == [
-        (at, 60, None),
-        (at + timedelta(minutes=1), 70, 2),
-        (at + timedelta(minutes=3), 60, None),
+    assert [(row[2], row[4], row[5]) for row in after[:3]] == [
+        (at, 60, 50),
+        (at + timedelta(minutes=1), 70, 55),
+        (at + timedelta(minutes=3), 60, 50),
     ]
     assert (
         warehouse.query_value(
@@ -356,16 +356,16 @@ def test_minute_writer_changes_only_different_or_missing_rows(warehouse):
             changed,
             fetched_at=at + timedelta(hours=4),
             minutes=(
-                replace(rows[0], sample_count=3),
+                replace(rows[0], maximum=90),
                 rows[1],
                 *rows[3:],
             ),
         )
     )
     assert warehouse.query_rows(
-        "SELECT average,sample_count FROM base.fitbit_heart_rate_minute "
+        "SELECT average,maximum FROM base.fitbit_heart_rate_minute "
         "WHERE subject_key='self' ORDER BY start_at"
-    )[:3] == [(60, 3), (60, None), (60, None)]
+    )[:3] == [(60, 90), (60, 80), (60, 80)]
     assert (
         warehouse.query_rows(
             "SELECT * FROM base.fitbit_heart_rate_minute WHERE subject_key='self' ORDER BY start_at"

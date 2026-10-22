@@ -189,3 +189,86 @@ def test_initialization_sets_iphone_and_mac_platform(warehouse):
     assert warehouse.query_rows(
         "SELECT event_key, platform, source_stream FROM base.screen_time_event ORDER BY event_key"
     ) == [("event", "ios", "App.InFocus"), ("mac-event", "macos", "app-usage")]
+
+
+def test_screen_time_column_removal_preserves_history_and_current_copy_state(warehouse, tmp_path):
+    for path in DEFAULT_MIGRATIONS.glob("00[123]_*.sql"):
+        shutil.copyfile(path, tmp_path / path.name)
+    warehouse.migrate(tmp_path)
+    at = _raw().observed_at
+    warehouse.connection.execute(
+        "INSERT INTO ops.screen_time_segment VALUES ('device','app-in-focus','segment',?, 'raw')",
+        [at],
+    )
+    warehouse.connection.execute(
+        "INSERT INTO ops.screen_time_record VALUES "
+        "('physical','device','app-in-focus','segment',32,128,'event','app',?,'start',"
+        "'reason',1,'1.2','123',2,'parser',0,'100')",
+        [at],
+    )
+    warehouse.connection.execute(
+        "INSERT INTO base.screen_time_event SELECT *, ? FROM ops.screen_time_resolve(['event'])",
+        [at],
+    )
+    warehouse.connection.execute(
+        "INSERT INTO base.screen_time_event SELECT 'inactive', * EXCLUDE (event_key) "
+        "FROM base.screen_time_event WHERE event_key='event'"
+    )
+    warehouse.connection.execute(
+        "UPDATE base.screen_time_event SET is_active=false WHERE event_key='inactive'"
+    )
+    removed = {
+        "app_version",
+        "app_build",
+        "transition_reason",
+        "platform_flag",
+        "segment_filename",
+        "record_offset",
+        "record_metadata_offset",
+    }
+    retained = [
+        row[0]
+        for row in warehouse.query_rows("DESCRIBE base.screen_time_event")
+        if row[0] not in removed
+    ]
+    projection = ",".join(retained)
+    history = warehouse.query_rows(
+        f"SELECT {projection} FROM base.screen_time_event ORDER BY event_key"
+    )
+    copies = warehouse.query_rows("SELECT * FROM ops.screen_time_record")
+
+    warehouse.migrate()
+
+    assert not removed & {row[0] for row in warehouse.query_rows("DESCRIBE base.screen_time_event")}
+    assert (
+        warehouse.query_rows(f"SELECT {projection} FROM base.screen_time_event ORDER BY event_key")
+        == history
+    )
+    assert warehouse.query_rows("SELECT * FROM ops.screen_time_record") == copies
+    assert warehouse.query_rows("SELECT event_key FROM base.screen_time_transition") == [("event",)]
+    assert not removed & {
+        row[0] for row in warehouse.query_rows("DESCRIBE base.screen_time_transition")
+    }
+    assert warehouse.query_rows("SELECT event_key FROM ops.screen_time_resolve(['event'])") == [
+        ("event",)
+    ]
+
+
+def test_owntracks_battery_column_removal_preserves_location_and_provenance(warehouse, tmp_path):
+    for path in DEFAULT_MIGRATIONS.glob("00[12345]_*.sql"):
+        shutil.copyfile(path, tmp_path / path.name)
+    warehouse.migrate(tmp_path)
+    at = _raw().observed_at
+    warehouse.connection.execute(
+        "INSERT INTO base.owntracks_location VALUES "
+        "('event','device',?,35,139,7,12,80,'raw',1,?,?,'parser')",
+        [at, at, at],
+    )
+    before = warehouse.query_rows("SELECT * EXCLUDE (battery_percent) FROM base.owntracks_location")
+
+    warehouse.migrate()
+
+    assert "battery_percent" not in {
+        row[0] for row in warehouse.query_rows("DESCRIBE base.owntracks_location")
+    }
+    assert warehouse.query_rows("SELECT * FROM base.owntracks_location") == before

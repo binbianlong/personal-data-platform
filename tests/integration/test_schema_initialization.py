@@ -4,7 +4,12 @@ import duckdb
 import pytest
 
 from personal_data_platform.cli import main
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.motherduck import (
+    DEFAULT_MIGRATIONS,
+    Warehouse,
+    WarehouseConfig,
+    connect,
+)
 
 
 @pytest.fixture
@@ -16,11 +21,9 @@ def warehouse():
 
 def test_initialization_records_migrations_without_a_profile(warehouse):
     warehouse.migrate()
-    assert warehouse.query_rows("SELECT migration_id FROM ops.schema_migration") == [
-        ("001_initial.sql",),
-        ("002_owntracks.sql",),
-        ("003_screen_time_current_state.sql",),
-    ]
+    assert warehouse.query_rows(
+        "SELECT migration_id FROM ops.schema_migration ORDER BY migration_id"
+    ) == [(path.name,) for path in sorted(DEFAULT_MIGRATIONS.glob("*.sql"))]
     assert [row[0] for row in warehouse.query_rows("DESCRIBE ops.schema_migration")] == [
         "migration_id",
         "checksum",
@@ -86,7 +89,9 @@ def test_fresh_target_ignores_an_attached_old_database(warehouse):
     before = warehouse.query_rows("SELECT * FROM unrelated.ops.schema_migration")
     warehouse.migrate()
     warehouse.migrate()
-    assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 3
+    assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == len(
+        list(DEFAULT_MIGRATIONS.glob("*.sql"))
+    )
     assert warehouse.query_rows("SELECT * FROM unrelated.ops.schema_migration") == before
 
 
@@ -94,11 +99,9 @@ def test_platform_migrate_initializes_a_local_database(tmp_path):
     database = tmp_path / "local.duckdb"
     assert main(["migrate", "--database", str(database)]) == 0
     with duckdb.connect(str(database)) as connection:
-        assert connection.execute("SELECT migration_id FROM ops.schema_migration").fetchall() == [
-            ("001_initial.sql",),
-            ("002_owntracks.sql",),
-            ("003_screen_time_current_state.sql",),
-        ]
+        assert connection.execute(
+            "SELECT migration_id FROM ops.schema_migration ORDER BY migration_id"
+        ).fetchall() == [(path.name,) for path in sorted(DEFAULT_MIGRATIONS.glob("*.sql"))]
         assert connection.execute(
             "SELECT count(*) FROM base.fitbit_activity_interval"
         ).fetchone() == (0,)

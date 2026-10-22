@@ -682,7 +682,6 @@ class FitbitMinuteBatch:
                         "average": row.average,
                         "minimum": row.minimum,
                         "maximum": row.maximum,
-                        "sample_count": row.sample_count,
                     }
                     for row in minutes
                 ]
@@ -697,12 +696,11 @@ class FitbitMinuteBatch:
                 connection.execute(
                     "MERGE INTO base.fitbit_heart_rate_minute t USING ("
                     "SELECT ? subject_key,? data_source_family,r.start start_at,"
-                    "? aggregation_version,r.start+INTERVAL '1 minute' end_at,"
-                    "r.average,r.minimum,r.maximum,r.sample_count,"
+                    "? aggregation_version,r.average,r.minimum,r.maximum,"
                     "? fetched_at,? source_key,? loaded_at FROM unnest(?) i(r)"
                     ") s USING (subject_key,data_source_family,start_at,aggregation_version) "
-                    "WHEN MATCHED AND (t.average,t.minimum,t.maximum,t.sample_count) "
-                    "IS DISTINCT FROM (s.average,s.minimum,s.maximum,s.sample_count) THEN UPDATE "
+                    "WHEN MATCHED AND (t.average,t.minimum,t.maximum) "
+                    "IS DISTINCT FROM (s.average,s.minimum,s.maximum) THEN UPDATE "
                     "WHEN NOT MATCHED THEN INSERT "
                     "WHEN NOT MATCHED BY SOURCE AND (t.subject_key,t.data_source_family,"
                     f"t.aggregation_version)=(?,?,?) AND {range_filter} THEN DELETE",
@@ -737,9 +735,9 @@ class FitbitMinuteBatch:
                     connection.execute(
                         "INSERT INTO base.fitbit_heart_rate_minute "
                         "SELECT ?,r.data_source_family::VARCHAR,r.start::TIMESTAMPTZ,"
-                        "r.aggregation_version::VARCHAR,r.end::TIMESTAMPTZ,"
+                        "r.aggregation_version::VARCHAR,"
                         "r.average::DOUBLE,r.minimum::DOUBLE,r.maximum::DOUBLE,"
-                        "r.sample_count::BIGINT,?,?,? FROM unnest(?) incoming(r)",
+                        "?,?,? FROM unnest(?) incoming(r)",
                         [
                             snapshot.subject_key,
                             snapshot.fetched_at,

@@ -137,12 +137,11 @@ def test_minute_daily_average_has_observed_minute_semantics(
             avg - 5,
             avg + 5,
             "users/me/dataSourceFamilies/google-wearables",
-            sample_count=count,
         )
-        for at, avg, count in [
-            (base, 60, 1),
-            (base + timedelta(minutes=1), 100, 50),
-            (base + timedelta(minutes=2), 60, 10),
+        for at, avg in [
+            (base, 60),
+            (base + timedelta(minutes=1), 100),
+            (base + timedelta(minutes=2), 60),
         ]
     )
     snapshot = HeartRateMinuteSnapshot(
@@ -159,6 +158,13 @@ def test_minute_daily_average_has_observed_minute_semantics(
     run_dbt(target="local", project_dir=dbt_project, selector="tag:fitbit tag:screen_time")
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
+        assert not warehouse.query_rows(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema='marts' "
+            "AND table_name='fitbit_heart_rate_minute_time_series' AND column_name='sample_count'"
+        )
+        assert warehouse.query_rows(
+            "SELECT start_at,end_at FROM marts.fitbit_heart_rate_minute_time_series ORDER BY start_at"
+        ) == [(minute.start, minute.end) for minute in minutes]
         assert warehouse.query_rows(
             "SELECT activity_date,mean_minute_heart_rate,observed_heart_rate_minutes,min_heart_rate,max_heart_rate FROM marts.daily_fitbit_heart_rate_minute ORDER BY activity_date"
         ) == [(date(2026, 9, 1), 60, 1, 55, 65), (date(2026, 9, 2), 80, 2, 55, 105)]
@@ -210,8 +216,8 @@ def test_minute_writer_empty_deletes_and_stale_snapshot_protects_newer_subrange(
             warehouse.connection, source_key="stale", loaded_at=base
         )
         assert warehouse.query_rows(
-            "SELECT start_at,average,sample_count FROM base.fitbit_heart_rate_minute"
-        ) == [(narrow.start, 100, None)]
+            "SELECT start_at,average FROM base.fitbit_heart_rate_minute"
+        ) == [(narrow.start, 100)]
         FitbitMinuteBatch(snapshot(base + timedelta(hours=4), [])).write_snapshot(
             warehouse.connection, source_key="empty", loaded_at=base
         )

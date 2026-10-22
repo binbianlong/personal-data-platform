@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from personal_data_platform.raw.models import RawObject
 
 RAW_PREFIX = "raw/owntracks/v1/"
-RAW_FIELDS = frozenset({"tst", "lat", "lon", "acc", "vel", "batt", "bs", "motionactivities"})
+RAW_FIELDS = frozenset({"tst", "lat", "lon", "acc", "vel", "motionactivities"})
 _KEY = re.compile(
     r"raw/owntracks/v1/(?P<device>[0-9a-f]{64})/location/"
     r"(?P<date>\d{4}/\d{2}/\d{2})/(?P<timestamp>\d{8}T\d{6}Z)_"
@@ -73,7 +73,7 @@ def location_message(payload: bytes, *, from_raw: bool = False) -> dict[str, obj
             or not math.isfinite(value)
         ):
             raise ValueError(f"invalid OwnTracks {name}")
-    for name in ("batt", "m"):
+    for name in ("m",):
         value = message.get(name)
         if value is not None and (
             isinstance(value, bool) or not isinstance(value, int) or not -1 <= value <= 100

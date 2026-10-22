@@ -17,7 +17,7 @@ APIレスポンスと未知フィールドは処理中のメモリだけで扱�
 | `fitbit_resting_heart_rate_daily` | `source_date`と`beats_per_minute`。提供元の日付をDATEで保存 |
 | `fitbit_sleep_session` | 開始・終了、API summaryの`sleep_minutes`、種別、main sleep区分、提供元の日付 |
 | `fitbit_sleep_detail` | `kind`で段階と短い覚醒を区別。`sleep_id`、親の日付、区間、category |
-| `fitbit_heart_rate_minute` | UTC分ごとの平均・最小・最大bpm、未知のsample countはNULL |
+| `fitbit_heart_rate_minute` | UTC分の開始時刻と平均・最小・最大bpm |
 
 全テーブルはsubject・取得時刻・入力key・取込時刻を保持する。
 区間には元UTCオフセットを残す。取得元はGoogle wearables APIに統一し、origin列は持たない。
@@ -31,9 +31,9 @@ IDのないサンプルはsubject・種別・時刻/区間から決定的なID�
 段階と短い覚醒は重なりを保持し、秒数は開始・終了から算出する。
 睡眠分数はAPI summaryを使い、セッションの経過分数で代用しない。
 
-分心拍は`average`・`minimum`・`maximum`とUTC分の開始/終了を持ち、主キーは
+分心拍は`average`・`minimum`・`maximum`とUTC分の開始時刻を持ち、主キーは
 `(subject_key, data_source_family, start_at, aggregation_version)`である。
-`sample_count`はNULLのままとする。
+終了時刻はmartsで開始時刻から1分後として計算する。APIで不明な測定回数は保存しない。
 
 ## 範囲置換と再実行
 

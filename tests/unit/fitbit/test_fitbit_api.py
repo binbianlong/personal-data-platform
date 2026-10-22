@@ -630,7 +630,7 @@ def test_rollup_uses_complete_utc_minutes_and_all_pages():
     )
     assert result.window.end == START + timedelta(minutes=2)
     assert len(result.minutes) == 2
-    assert result.minutes[0].sample_count is None
+    assert result.minutes[0].end == result.minutes[0].start + timedelta(minutes=1)
     request = json.loads(transport.calls[0][3])
     assert transport.calls[0][0] == "POST"
     assert transport.calls[0][1].endswith("/dataPoints:rollUp")

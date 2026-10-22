@@ -72,6 +72,8 @@ Cloud Runはその成功時刻と`scan_completed_at`が48時間以内である�
 
 分析入口tableで、`event_key`がprimary key。同じイベントは1行とし、無効化は`is_active=false`へ更新する。
 列は後述のtransitionに`is_active`と`loaded_at`を加えたもので、`original_payload`や観測ごとの本文を保存しない。
+アプリversion・build・遷移理由・platformフラグと元ファイル内の位置は、分析行へ保存しない。
+現行の物理recordの診断・選択に必要な情報は`ops.screen_time_record`に保持する。
 分析項目・parser version・物理コピー数・有効状態が変わった場合だけ更新し、provenanceは採用した代表recordを指す。
 `observed_at`は全再観測の最新日時ではない。現在保存しているRawの取込時刻・件数は`ops.ingestion_metadata`で確認する。
 
@@ -123,8 +125,7 @@ eventが別segmentに現れるため`event_key`へ含めない。
 ```text
 event_key / device_key / platform / source_stream
 bundle_id / event_at / state
-transition_reason / kind / app_version / app_build / platform_flag
-object_key / segment_key / segment_filename / record_offset / observed_at
+kind / object_key / segment_key / observed_at
 parser_version / unknown_field_count / duplicate_occurrence_count
 ```
 
