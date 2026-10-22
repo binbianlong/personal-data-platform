@@ -3,6 +3,7 @@ import os
 import pytest
 
 from personal_data_platform import dbt_runner
+from personal_data_platform.storage.motherduck import DEFAULT_MIGRATIONS
 
 
 @pytest.mark.parametrize("stream", [None, "health"])
@@ -47,11 +48,7 @@ def test_cloud_dbt_migrates_before_models(monkeypatch) -> None:
     def run_models(**kwargs):
         assert warehouse.query_rows(
             "SELECT migration_id FROM ops.schema_migration ORDER BY migration_id"
-        ) == [
-            ("001_initial.sql",),
-            ("002_owntracks.sql",),
-            ("003_screen_time_current_state.sql",),
-        ]
+        ) == [(path.name,) for path in sorted(DEFAULT_MIGRATIONS.glob("*.sql"))]
         assert (
             warehouse.query_value("SELECT count(*) FROM ops.job_lock WHERE expires_at > now()") == 1
         )

@@ -290,8 +290,11 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
             assert result.ok
             assert result.missing_object_count == 0
             assert len(published) == 1
+            assert warehouse.query_rows("SELECT parser_version FROM base.screen_time_event") == [
+                ("corrected-parser",)
+            ]
             assert warehouse.query_rows(
-                "SELECT parser_version, app_version FROM base.screen_time_event"
+                "SELECT parser_version, app_version FROM ops.screen_time_record"
             ) == [("corrected-parser", "corrected")]
             assert (
                 warehouse.query_value("SELECT parser_version FROM ops.ingestion_metadata")

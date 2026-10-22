@@ -11,7 +11,7 @@ def test_location_raw_keeps_only_selected_fields_and_retry_identity():
 
     first = prepare_location(
         b'{"lon":139.0,"tst":1791504000,"_type":"location","lat":35.0,'
-        b'"acc":7,"vel":12,"batt":80,"bs":2,"motionactivities":["walking"],'
+        b'"acc":7,"vel":12,"batt":79,"bs":1,"motionactivities":["walking"],'
         b'"alt":30,"vac":4,"m":1,"t":"u","ssid":"home","inregions":["home"],'
         b'"created_at":1791504001,"tid":"AB","topic":"owntracks/user/phone","p":100}',
         device_key="a" * 64,
@@ -25,8 +25,7 @@ def test_location_raw_keeps_only_selected_fields_and_retry_identity():
     assert first == retry
     key, payload, compressed = first
     assert payload == (
-        b'{"acc":7,"batt":80,"bs":2,"lat":35.0,"lon":139.0,'
-        b'"motionactivities":["walking"],"tst":1791504000,"vel":12}'
+        b'{"acc":7,"lat":35.0,"lon":139.0,"motionactivities":["walking"],"tst":1791504000,"vel":12}'
     )
     import gzip
 

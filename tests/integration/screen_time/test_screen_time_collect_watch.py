@@ -5,7 +5,12 @@ import pytest
 from personal_data_platform.sources.screen_time import cli
 from personal_data_platform.sources.screen_time.raw import build_device_key
 from personal_data_platform.sources.screen_time.state import CollectorState
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.motherduck import (
+    DEFAULT_MIGRATIONS,
+    Warehouse,
+    WarehouseConfig,
+    connect,
+)
 from tests.screen_time_helpers import event, segb
 
 
@@ -83,10 +88,6 @@ def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatc
         assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == 2
         assert warehouse.query_rows(
             "SELECT migration_id FROM ops.schema_migration ORDER BY migration_id"
-        ) == [
-            ("001_initial.sql",),
-            ("002_owntracks.sql",),
-            ("003_screen_time_current_state.sql",),
-        ]
+        ) == [(path.name,) for path in sorted(DEFAULT_MIGRATIONS.glob("*.sql"))]
     finally:
         warehouse.close()
