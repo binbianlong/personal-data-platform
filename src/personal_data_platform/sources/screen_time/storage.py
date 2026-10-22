@@ -72,13 +72,5 @@ class ScreenTimeLocalRepository:
             raise ValueError(f"Raw generation mismatch: {key}")
         return bytes(row[1])
 
-    def put_compressed_raw(self, key: str, compressed_bytes: bytes) -> None:
-        with self.state._connect() as connection:
-            row = connection.execute(
-                "SELECT compressed_payload FROM segment_observation WHERE object_key = ?", (key,)
-            ).fetchone()
-        if row is None or row[0] != compressed_bytes:
-            raise ValueError("Raw must be durably staged before collection completes")
-
     def last_successful_scan(self) -> CollectorScan | None:
         return self.state.last_successful_scan(stream=self._source.stream)

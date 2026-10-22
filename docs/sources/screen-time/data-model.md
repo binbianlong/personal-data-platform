@@ -57,7 +57,7 @@ segment_key = HMAC-SHA256(
 
 `device_key + stream + segment_key`をlogical scopeとする。直前の保存済み観測とSHA-256が同じ場合だけskipし、`A→B→A`は3回の観測として取り込む。
 最新segmentも検査済みbytesを観測版にする。予定keyと決定的gzipをSQLiteへ先にcommitし、MotherDuck台帳の
-成功確認後だけ`uploaded`へ進める。各logical scopeの最新成功版と全pendingを残し、古い成功版を整理する。
+成功確認後だけ`uploaded`へ進める。この状態名はwarehouse取込済みを表す。各logical scopeの最新成功版と全pendingを残し、古い成功版を整理する。
 元ファイルがBiomeから消えても最新保存版は無期限に残す。更新前Rawの再解析やRawだけからの全履歴復元は保証しない。
 
 ## Collector scan

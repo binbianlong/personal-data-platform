@@ -9,7 +9,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
 from urllib.parse import quote
 
 from personal_data_platform.loader.models import RawDecodeError
@@ -23,7 +22,6 @@ from personal_data_platform.sources.screen_time.raw import (
 from personal_data_platform.sources.screen_time.state import (
     CollectorScan,
     CollectorState,
-    PendingObservation,
 )
 
 from .parser import validate_segb_snapshot
@@ -31,12 +29,6 @@ from .parser import validate_segb_snapshot
 
 class CollectorSourceError(RuntimeError):
     """Raised when the local Biome source cannot be inspected safely."""
-
-
-class CompressedRawUploader(Protocol):
-    """Minimal capability required by the write-only local collector."""
-
-    def put_compressed_raw(self, key: str, compressed_bytes: bytes) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,26 +41,13 @@ class BiomeDevice:
 
 
 @dataclass(frozen=True, slots=True)
-class DeviceSummary:
-    """Pseudonymized device information safe for object paths and diagnostics."""
-
-    device_key: str
-    name: str | None
-    model: str | None
-    stream_directory_exists: bool
-    allowed: bool
-    platform: str = "ios"
-
-
-@dataclass(frozen=True, slots=True)
 class CollectionStats:
     """One complete local scan result."""
 
     devices: int = 0
     segments: int = 0
-    uploaded: int = 0
+    archived: int = 0
     skipped: int = 0
-    retried: int = 0
     deferred: int = 0
 
 
@@ -192,21 +171,19 @@ def select_completed_segments(segments: list[tuple[Path, str]]) -> list[tuple[Pa
 
 
 class ScreenTimeCollector:
-    """Persist each changed segment before uploading it with write-only credentials."""
+    """Archive each changed segment in durable local state before warehouse loading."""
 
     def __init__(
         self,
         *,
         source: BiomeScreenTimeSource | BiomeMacAppUsageSource,
         state: CollectorState,
-        uploader: CompressedRawUploader,
         pseudonym_key: bytes,
         allowed_device_keys: frozenset[str],
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._source = source
         self._state = state
-        self._uploader = uploader
         self._pseudonym_key = pseudonym_key
         self._allowed_device_keys = allowed_device_keys
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -215,33 +192,11 @@ class ScreenTimeCollector:
     def stream(self) -> str:
         return self._source.raw_stream
 
-    def devices(self) -> list[DeviceSummary]:
-        """List selected devices without exposing their stable Apple identifiers."""
-        return [
-            DeviceSummary(
-                device_key=build_device_key(self._pseudonym_key, device.identifier),
-                name=device.name,
-                model=device.model,
-                stream_directory_exists=self._source.device_directory(device).is_dir(),
-                allowed=(
-                    build_device_key(self._pseudonym_key, device.identifier)
-                    in self._allowed_device_keys
-                ),
-                platform=self._source.platform,
-            )
-            for device in self._source.list_devices()
-        ]
-
     def collect_once(self) -> CollectionStats:
-        """Retry this stream's pending uploads, then scan its completed segments."""
+        """Archive valid snapshots while retaining all observations awaiting loading."""
         if not self._allowed_device_keys:
             raise CollectorSourceError("Screen Time device allowlist is empty")
-        retried = 0
-        uploaded = 0
-        for pending_observation in self._state.pending(stream=self._source.raw_stream):
-            # The observation was allowlisted when this durable upload intent was created.
-            self._upload(pending_observation)
-            retried += 1
+        archived = 0
 
         discovered_devices = self._source.list_devices()
         devices = [
@@ -303,16 +258,14 @@ class ScreenTimeCollector:
                     skipped += 1
                     continue
                 if observation.created:
-                    self._upload(observation)
-                    uploaded += 1
+                    archived += 1
             device_segment_counts[device_key] = len(segments)
 
         stats = CollectionStats(
             devices=len(devices),
             segments=segment_count,
-            uploaded=uploaded,
+            archived=archived,
             skipped=skipped,
-            retried=retried,
             deferred=deferred,
         )
         if deferred:
@@ -328,12 +281,6 @@ class ScreenTimeCollector:
         )
         return stats
 
-    def _upload(self, observation: PendingObservation) -> None:
-        self._uploader.put_compressed_raw(
-            observation.identity.object_key,
-            observation.compressed_payload,
-        )
-
 
 def _validate_device_identifier(identifier: object) -> None:
     if not isinstance(identifier, str) or not identifier:
@@ -343,7 +290,7 @@ def _validate_device_identifier(identifier: object) -> None:
 
 
 def _read_stable_bytes(path: Path, *, attempts: int = 3, delay_seconds: float = 0.05) -> bytes:
-    """Avoid uploading a segment while Biome is still replacing or extending it."""
+    """Avoid archiving a segment while Biome is still replacing or extending it."""
     for attempt in range(attempts):
         try:
             before = path.stat()

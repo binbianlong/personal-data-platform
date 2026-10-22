@@ -1,4 +1,4 @@
-"""Crash-safe local state for Screen Time Raw uploads."""
+"""Crash-safe local Screen Time Raw and warehouse loading state."""
 
 from __future__ import annotations
 
@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS segment_observation (
     object_key TEXT NOT NULL UNIQUE,
     compressed_payload BLOB,
     status TEXT NOT NULL CHECK (status IN ('pending', 'uploaded')),
-    uploaded_at TEXT
+    uploaded_at TEXT,
+    storage_created_at TEXT,
+    storage_generation INTEGER NOT NULL DEFAULT 1,
+    retention_started_at TEXT
 );
 CREATE INDEX IF NOT EXISTS segment_observation_latest
     ON segment_observation (device_key, stream, segment_key, id DESC);
@@ -44,7 +47,7 @@ CREATE TABLE IF NOT EXISTS collector_stream_scan (
 
 @dataclass(frozen=True, slots=True)
 class PendingObservation:
-    """A durable upload intent and its deterministic gzip payload."""
+    """A durable observation awaiting warehouse loading and its gzip payload."""
 
     identity: ScreenTimeRawIdentity
     compressed_payload: bytes
@@ -59,7 +62,7 @@ class CollectorScan:
 
 
 class CollectorState:
-    """SQLite-backed pending-to-uploaded state machine."""
+    """SQLite-backed Raw archive and warehouse acknowledgement state."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -68,18 +71,6 @@ class CollectorState:
         self.path.chmod(0o600)
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
-            columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(segment_observation)")
-            }
-            for name, definition in (
-                ("storage_created_at", "TEXT"),
-                ("storage_generation", "INTEGER NOT NULL DEFAULT 1"),
-                ("retention_started_at", "TEXT"),
-            ):
-                if name not in columns:
-                    connection.execute(
-                        f"ALTER TABLE segment_observation ADD COLUMN {name} {definition}"
-                    )
 
     def prepare(
         self,
@@ -91,7 +82,7 @@ class CollectorState:
         observed_at: datetime,
         schema_version: int = 1,
     ) -> PendingObservation | None:
-        """Persist an upload intent, or skip a consecutive uploaded duplicate."""
+        """Archive a new observation, or reuse a consecutive pending/loaded duplicate."""
         format_observed_at(observed_at)
         content_sha256 = sha256_hex(raw_bytes)
         compressed_payload = gzip_raw_bytes(raw_bytes)
@@ -107,11 +98,7 @@ class CollectorState:
                 """,
                 (device_key, stream, segment_key),
             ).fetchone()
-            if (
-                latest is not None
-                and latest[1] == content_sha256
-                and (latest[4] == "pending" or latest[3] is not None)
-            ):
+            if latest is not None and latest[1] == content_sha256:
                 if latest[4] == "uploaded":
                     connection.commit()
                     return None
@@ -173,7 +160,7 @@ class CollectorState:
             )
 
     def pending(self, *, stream: str | None = None) -> list[PendingObservation]:
-        """Return durable upload intents in their original creation order."""
+        """Return observations awaiting warehouse loading in their creation order."""
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -208,9 +195,9 @@ class CollectorState:
             )
         return pending
 
-    def mark_uploaded(self, object_key: str, uploaded_at: datetime) -> None:
+    def mark_loaded(self, object_key: str, loaded_at: datetime) -> None:
         """Retain the latest warehouse-confirmed Raw and all unconfirmed observations."""
-        timestamp = format_observed_at(uploaded_at)
+        timestamp = format_observed_at(loaded_at)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(

@@ -38,7 +38,7 @@ def sha256_hex(raw_bytes: bytes) -> str:
 
 
 def gzip_raw_bytes(raw_bytes: bytes) -> bytes:
-    """Compress Raw deterministically so crash retries upload identical bytes."""
+    """Compress Raw deterministically so crash recovery retains identical bytes."""
     return gzip.compress(raw_bytes, compresslevel=9, mtime=0)
 
 

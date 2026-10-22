@@ -5,13 +5,13 @@ from datetime import UTC, datetime
 import pytest
 
 from personal_data_platform.sources.registry import get_source
-from personal_data_platform.sources.screen_time.cli import _load_pending
 from personal_data_platform.sources.screen_time.collector import (
     BiomeScreenTimeSource,
     CollectorSourceError,
     ScreenTimeCollector,
 )
 from personal_data_platform.sources.screen_time.raw import build_device_key, decode_segment_envelope
+from personal_data_platform.sources.screen_time.runtime import load_pending
 from personal_data_platform.sources.screen_time.state import CollectorState
 from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
 from personal_data_platform.storage.motherduck import (
@@ -43,7 +43,6 @@ def _collector(tmp_path):
     collector = ScreenTimeCollector(
         source=BiomeScreenTimeSource(sync_db_path=sync, remote_dir=remote.parent),
         state=state,
-        uploader=repo,
         pseudonym_key=SECRET,
         allowed_device_keys=frozenset({build_device_key(SECRET, "phone")}),
         clock=lambda: NOW,
@@ -61,7 +60,7 @@ def test_a_b_a_and_unchanged_snapshot_are_durable_and_idempotent(tmp_path):
             (remote / "100").write_bytes(segb(event(bundle))[0])
             collector.collect_once()
             keys.append(state.pending()[0].identity.object_key)
-            _load_pending(state, wh, now=NOW)
+            load_pending(state, wh, now=NOW)
             assert state.pending() == []
             assert len(list(repo.list_raw("raw/screen_time/v2/"))) == 1
         assert len(set(keys)) == 3
@@ -72,7 +71,7 @@ def test_a_b_a_and_unchanged_snapshot_are_durable_and_idempotent(tmp_path):
         wh.close()
 
 
-def test_failed_transfer_keeps_every_changed_pending_snapshot(tmp_path):
+def test_repeated_scans_keep_every_changed_pending_snapshot_until_load(tmp_path):
     collector, state, repo, remote = _collector(tmp_path)
     (remote / "100").write_bytes(segb(event("a"))[0])
     collector.collect_once()
@@ -97,7 +96,7 @@ def test_crc_valid_unsupported_payload_remains_pending_for_parser_recovery(tmp_p
     wh.migrate()
     try:
         with pytest.raises(CollectorSourceError, match="Raw ingestion failed"):
-            _load_pending(state, wh, now=NOW)
+            load_pending(state, wh, now=NOW)
         assert [p.identity.object_key for p in state.pending()] == [pending.identity.object_key]
         assert wh.query_value("SELECT count(*) FROM ops.heartbeat") == 0
         assert (
@@ -119,7 +118,7 @@ def test_competing_lease_preserves_pending_and_does_not_publish_heartbeat(tmp_pa
     try:
         wh.acquire_job_lock("loader", "competitor", lease_seconds=7500)
         with pytest.raises(RuntimeError, match="lease"):
-            _load_pending(state, wh, now=NOW)
+            load_pending(state, wh, now=NOW)
         assert len(state.pending()) == 1
         assert wh.query_value("SELECT count(*) FROM ops.heartbeat") == 0
         assert wh.query_value("SELECT owner_id FROM ops.job_lock") == "competitor"
@@ -166,7 +165,7 @@ def test_liveness_and_lease_release_are_atomic(tmp_path, failure):
     wh.connection = wrapper
     try:
         with pytest.raises((OSError, WarehouseConnectionError)):
-            _load_pending(state, wh, now=NOW)
+            load_pending(state, wh, now=NOW)
         if failure.startswith("commit"):
             assert wh.connection_usable is False
             assert wrapper.after_failure == []
@@ -190,7 +189,7 @@ def test_removed_source_file_keeps_its_local_raw(tmp_path):
     (remote / "100").write_bytes(body)
     collector.collect_once()
     raw = state.pending()[0]
-    state.mark_uploaded(raw.identity.object_key, NOW)
+    state.mark_loaded(raw.identity.object_key, NOW)
     (remote / "100").unlink()
     collector.collect_once()
     assert (
