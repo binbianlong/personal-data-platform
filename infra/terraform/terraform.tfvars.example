@@ -4,18 +4,18 @@ rebuild_impersonator_member    = "user:operator@example.com"
 alert_email                    = "operator@example.com"
 fitbit_subject_key             = "owner"
 
-west_region    = "us-west1"
-west_image_uri = "us-west1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+region    = "us-west1"
+runtime_image_uri = "us-west1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 # Replace these pins with registered numeric secret versions.
-west_secret_versions = {
+secret_versions = {
   motherduck_token      = "1"
   fitbit_oauth_config   = "1"
   fitbit_webhook_config = "1"
   heartbeat_config     = "1"
   owntracks_config     = "1"
 }
-west_schedulers_enabled           = true
-west_motherduck_database           = "personal_data_platform"
-west_preflight_motherduck_database = "personal_data_platform_west_preflight"
+schedulers_enabled           = true
+motherduck_database           = "personal_data_platform"
+preflight_motherduck_database = "personal_data_platform_west_preflight"
 # Preserve existing _Default sink exclusions.
-west_logging_exclusions = {}
+logging_exclusions = {}

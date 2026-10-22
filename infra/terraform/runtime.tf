@@ -4,9 +4,9 @@ locals {
   runtime_common_environment = {
     APP_ENV                        = "production"
     GOOGLE_CLOUD_PROJECT           = var.project_id
-    MOTHERDUCK_DATABASE            = var.west_motherduck_database
+    MOTHERDUCK_DATABASE            = var.motherduck_database
     PDP_FITBIT_SUBJECT_KEY         = var.fitbit_subject_key
-    PDP_FITBIT_PROCESSING_PAUSED   = tostring(!var.west_schedulers_enabled)
+    PDP_FITBIT_PROCESSING_PAUSED   = tostring(!var.schedulers_enabled)
     PDP_FITBIT_PUBSUB_SUBSCRIPTION = "projects/${var.project_id}/subscriptions/pdp-fitbit-west-pull"
   }
   runtime_jobs = {
@@ -22,10 +22,10 @@ locals {
   runtime_scheduled_jobs    = { daily = "10 4 * * *" }
 }
 
-resource "google_storage_bucket" "raw_west" {
+resource "google_storage_bucket" "raw" {
   name                        = local.raw_bucket_name
   project                     = var.project_id
-  location                    = var.west_region
+  location                    = var.region
   storage_class               = "STANDARD"
   force_destroy               = false
   uniform_bucket_level_access = true
@@ -34,10 +34,10 @@ resource "google_storage_bucket" "raw_west" {
   lifecycle { prevent_destroy = true }
   depends_on = [google_project_service.runtime]
 }
-resource "google_storage_bucket" "preflight_west" {
+resource "google_storage_bucket" "preflight" {
   name                        = local.preflight_bucket_name
   project                     = var.project_id
-  location                    = var.west_region
+  location                    = var.region
   storage_class               = "STANDARD"
   force_destroy               = false
   uniform_bucket_level_access = true
@@ -53,28 +53,28 @@ resource "google_storage_bucket" "preflight_west" {
   lifecycle { prevent_destroy = true }
   depends_on = [google_project_service.runtime]
 }
-resource "google_service_account" "west" {
+resource "google_service_account" "processing" {
   project      = var.project_id
   account_id   = "pdp-runtime-west"
-  display_name = "PDP west processing"
+  display_name = "PDP processing"
   depends_on   = [google_project_service.runtime]
 }
-resource "google_service_account_iam_member" "west_deployer" {
-  service_account_id = google_service_account.west.name
+resource "google_service_account_iam_member" "processing_deployer" {
+  service_account_id = google_service_account.processing.name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${var.deployer_service_account_email}"
 }
-resource "google_secret_manager_secret_iam_member" "west_job" {
+resource "google_secret_manager_secret_iam_member" "jobs" {
   for_each  = local.runtime_job_secret_access
   project   = var.project_id
-  secret_id = google_secret_manager_secret.west[each.key].secret_id
+  secret_id = google_secret_manager_secret.runtime[each.key].secret_id
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.west.email}"
+  member    = "serviceAccount:${google_service_account.processing.email}"
 }
-resource "google_cloud_run_v2_job" "west" {
+resource "google_cloud_run_v2_job" "runtime" {
   for_each            = local.runtime_jobs
   project             = var.project_id
-  location            = var.west_region
+  location            = var.region
   name                = each.value.name
   deletion_protection = true
   labels              = { application = "personal-data-platform", role = each.key }
@@ -82,11 +82,11 @@ resource "google_cloud_run_v2_job" "west" {
     parallelism = 1
     task_count  = 1
     template {
-      service_account = google_service_account.west.email
+      service_account = google_service_account.processing.email
       timeout         = each.value.timeout
       max_retries     = 0
       containers {
-        image = var.west_image_uri
+        image = var.runtime_image_uri
         args  = each.value.args
         resources { limits = { cpu = "1", memory = "2Gi" } }
         dynamic "env" {
@@ -102,8 +102,8 @@ resource "google_cloud_run_v2_job" "west" {
             name = env.key
             value_source {
               secret_key_ref {
-                secret  = google_secret_manager_secret.west[env.value].secret_id
-                version = var.west_secret_versions[env.value]
+                secret  = google_secret_manager_secret.runtime[env.value].secret_id
+                version = var.secret_versions[env.value]
               }
             }
           }
@@ -111,34 +111,34 @@ resource "google_cloud_run_v2_job" "west" {
       }
     }
   }
-  depends_on = [google_service_account_iam_member.west_deployer, google_secret_manager_secret_iam_member.west_job, google_storage_bucket_iam_policy.raw_west, google_storage_bucket_iam_policy.preflight_west]
+  depends_on = [google_service_account_iam_member.processing_deployer, google_secret_manager_secret_iam_member.jobs, google_storage_bucket_iam_policy.raw, google_storage_bucket_iam_policy.preflight]
 }
-resource "google_service_account" "west_receiver" {
+resource "google_service_account" "fitbit_receiver" {
   project      = var.project_id
   account_id   = "pdp-fitbit-receiver-west"
-  display_name = "PDP west notification publisher"
+  display_name = "PDP Fitbit notification publisher"
   depends_on   = [google_project_service.runtime]
 }
-resource "google_service_account_iam_member" "west_receiver_deployer" {
-  service_account_id = google_service_account.west_receiver.name
+resource "google_service_account_iam_member" "fitbit_receiver_deployer" {
+  service_account_id = google_service_account.fitbit_receiver.name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${var.deployer_service_account_email}"
 }
-resource "google_secret_manager_secret_iam_member" "west_receiver" {
+resource "google_secret_manager_secret_iam_member" "fitbit_receiver" {
   project   = var.project_id
-  secret_id = google_secret_manager_secret.west["fitbit_webhook_config"].secret_id
+  secret_id = google_secret_manager_secret.runtime["fitbit_webhook_config"].secret_id
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.west_receiver.email}"
+  member    = "serviceAccount:${google_service_account.fitbit_receiver.email}"
 }
-resource "google_cloud_run_v2_service" "west" {
+resource "google_cloud_run_v2_service" "fitbit_receiver" {
   project             = var.project_id
-  location            = var.west_region
+  location            = var.region
   name                = "pdp-fitbit-west"
   deletion_protection = true
   ingress             = "INGRESS_TRAFFIC_ALL"
   labels              = { application = "personal-data-platform", role = "receiver" }
   template {
-    service_account                  = google_service_account.west_receiver.email
+    service_account                  = google_service_account.fitbit_receiver.email
     timeout                          = "60s"
     max_instance_request_concurrency = 16
     scaling {
@@ -146,7 +146,7 @@ resource "google_cloud_run_v2_service" "west" {
       max_instance_count = 1
     }
     containers {
-      image = var.west_image_uri
+      image = var.runtime_image_uri
       args  = ["fitbit", "serve"]
       resources {
         limits   = { cpu = "1", memory = "512Mi" }
@@ -170,66 +170,66 @@ resource "google_cloud_run_v2_service" "west" {
           name = env.key
           value_source {
             secret_key_ref {
-              secret  = google_secret_manager_secret.west[env.value].secret_id
-              version = var.west_secret_versions[env.value]
+              secret  = google_secret_manager_secret.runtime[env.value].secret_id
+              version = var.secret_versions[env.value]
             }
           }
         }
       }
     }
   }
-  depends_on = [google_service_account_iam_member.west_receiver_deployer, google_secret_manager_secret_iam_member.west_receiver, google_pubsub_topic_iam_member.west_receiver]
+  depends_on = [google_service_account_iam_member.fitbit_receiver_deployer, google_secret_manager_secret_iam_member.fitbit_receiver, google_pubsub_topic_iam_member.fitbit_receiver]
 }
-resource "google_cloud_run_v2_service_iam_member" "west_public" {
+resource "google_cloud_run_v2_service_iam_member" "fitbit_public" {
   project  = var.project_id
-  location = var.west_region
-  name     = google_cloud_run_v2_service.west.name
+  location = var.region
+  name     = google_cloud_run_v2_service.fitbit_receiver.name
   role     = "roles/run.invoker"
   member   = "allUsers"
 }
-resource "google_service_account" "west_scheduler" {
+resource "google_service_account" "scheduler" {
   project      = var.project_id
   account_id   = "scheduler-invoker-west"
-  display_name = "PDP west Scheduler invoker"
+  display_name = "PDP Scheduler invoker"
   depends_on   = [google_project_service.runtime]
 }
-resource "google_service_account_iam_member" "west_scheduler_deployer" {
-  service_account_id = google_service_account.west_scheduler.name
+resource "google_service_account_iam_member" "scheduler_deployer" {
+  service_account_id = google_service_account.scheduler.name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${var.deployer_service_account_email}"
 }
-resource "google_cloud_run_v2_job_iam_member" "west_scheduler" {
+resource "google_cloud_run_v2_job_iam_member" "scheduler" {
   for_each = local.runtime_scheduled_jobs
   project  = var.project_id
-  location = var.west_region
-  name     = google_cloud_run_v2_job.west[each.key].name
+  location = var.region
+  name     = google_cloud_run_v2_job.runtime[each.key].name
   role     = "roles/run.invoker"
-  member   = "serviceAccount:${google_service_account.west_scheduler.email}"
+  member   = "serviceAccount:${google_service_account.scheduler.email}"
 }
-resource "google_cloud_scheduler_job" "west" {
+resource "google_cloud_scheduler_job" "runtime" {
   for_each         = local.runtime_scheduled_jobs
   project          = var.project_id
-  region           = var.west_region
+  region           = var.region
   name             = "pdp-${each.key}-west"
   schedule         = each.value
   time_zone        = var.scheduler_time_zone
-  paused           = !var.west_schedulers_enabled
+  paused           = !var.schedulers_enabled
   attempt_deadline = "320s"
   retry_config { retry_count = 0 }
   http_target {
     http_method = "POST"
-    uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.west_region}/jobs/${google_cloud_run_v2_job.west[each.key].name}:run"
+    uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/${google_cloud_run_v2_job.runtime[each.key].name}:run"
     body        = base64encode("{}")
     headers     = { "Content-Type" = "application/json" }
     oauth_token {
-      service_account_email = google_service_account.west_scheduler.email
+      service_account_email = google_service_account.scheduler.email
       scope                 = "https://www.googleapis.com/auth/cloud-platform"
     }
   }
-  depends_on = [google_cloud_run_v2_job_iam_member.west_scheduler, google_service_account_iam_member.west_scheduler_deployer]
+  depends_on = [google_cloud_run_v2_job_iam_member.scheduler, google_service_account_iam_member.scheduler_deployer]
 }
 
-data "google_iam_policy" "raw_west" {
+data "google_iam_policy" "raw" {
   binding {
     role    = "roles/storage.objectCreator"
     members = ["serviceAccount:${google_service_account.owntracks_receiver.email}"]
@@ -244,34 +244,34 @@ data "google_iam_policy" "raw_west" {
   }
   binding {
     role    = "roles/storage.objectViewer"
-    members = ["serviceAccount:${google_service_account.rebuild_operator.email}", "serviceAccount:${google_service_account.west.email}"]
+    members = ["serviceAccount:${google_service_account.rebuild_operator.email}", "serviceAccount:${google_service_account.processing.email}"]
   }
 }
-resource "google_storage_bucket_iam_policy" "raw_west" {
-  bucket      = google_storage_bucket.raw_west.name
-  policy_data = data.google_iam_policy.raw_west.policy_data
+resource "google_storage_bucket_iam_policy" "raw" {
+  bucket      = google_storage_bucket.raw.name
+  policy_data = data.google_iam_policy.raw.policy_data
 }
-data "google_iam_policy" "preflight_west" {
+data "google_iam_policy" "preflight" {
   binding {
     role    = "roles/storage.admin"
     members = [var.rebuild_impersonator_member]
   }
 
 }
-resource "google_storage_bucket_iam_policy" "preflight_west" {
-  bucket      = google_storage_bucket.preflight_west.name
-  policy_data = data.google_iam_policy.preflight_west.policy_data
+resource "google_storage_bucket_iam_policy" "preflight" {
+  bucket      = google_storage_bucket.preflight.name
+  policy_data = data.google_iam_policy.preflight.policy_data
 }
 
 resource "google_cloud_run_v2_service" "fitbit_worker" {
   project             = var.project_id
-  location            = var.west_region
+  location            = var.region
   name                = "pdp-fitbit-worker-west"
   deletion_protection = true
   ingress             = "INGRESS_TRAFFIC_ALL"
   labels              = { application = "personal-data-platform", role = "worker" }
   template {
-    service_account                  = google_service_account.west.email
+    service_account                  = google_service_account.processing.email
     timeout                          = "540s"
     max_instance_request_concurrency = 1
     scaling {
@@ -279,7 +279,7 @@ resource "google_cloud_run_v2_service" "fitbit_worker" {
       max_instance_count = 1
     }
     containers {
-      image = var.west_image_uri
+      image = var.runtime_image_uri
       args  = ["fitbit", "serve-worker"]
       resources {
         limits   = { cpu = "1", memory = "2Gi" }
@@ -298,20 +298,20 @@ resource "google_cloud_run_v2_service" "fitbit_worker" {
           name = env.key
           value_source {
             secret_key_ref {
-              secret  = google_secret_manager_secret.west[env.value].secret_id
-              version = var.west_secret_versions[env.value]
+              secret  = google_secret_manager_secret.runtime[env.value].secret_id
+              version = var.secret_versions[env.value]
             }
           }
         }
       }
     }
   }
-  depends_on = [google_service_account_iam_member.west_deployer, google_secret_manager_secret_iam_member.west_job]
+  depends_on = [google_service_account_iam_member.processing_deployer, google_secret_manager_secret_iam_member.jobs]
 }
 resource "google_cloud_run_v2_service_iam_member" "fitbit_worker" {
   project  = var.project_id
-  location = var.west_region
+  location = var.region
   name     = google_cloud_run_v2_service.fitbit_worker.name
   role     = "roles/run.invoker"
-  member   = "serviceAccount:${google_service_account.west_scheduler.email}"
+  member   = "serviceAccount:${google_service_account.scheduler.email}"
 }

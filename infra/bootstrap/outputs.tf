@@ -1,11 +1,11 @@
 output "state_bucket_name" {
   description = "GCS bucket passed to the runtime backend configuration."
-  value       = google_storage_bucket.terraform_state_west.name
+  value       = google_storage_bucket.runtime_state.name
 }
 
 output "artifact_repository" {
   description = "Artifact Registry repository resource name."
-  value       = google_artifact_registry_repository.runtime_west.name
+  value       = google_artifact_registry_repository.runtime.name
 }
 
 output "storage_custom_roles" {

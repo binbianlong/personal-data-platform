@@ -1,27 +1,27 @@
-resource "google_pubsub_topic" "west" {
+resource "google_pubsub_topic" "fitbit" {
   project = var.project_id
   name    = "pdp-fitbit-west"
   message_storage_policy {
-    allowed_persistence_regions = [var.west_region]
+    allowed_persistence_regions = [var.region]
     enforce_in_transit          = true
   }
   lifecycle { prevent_destroy = true }
   depends_on = [google_project_service.runtime]
 }
-resource "google_pubsub_subscription" "west" {
+resource "google_pubsub_subscription" "fitbit" {
   project                    = var.project_id
   name                       = "pdp-fitbit-west-pull"
-  topic                      = google_pubsub_topic.west.id
+  topic                      = google_pubsub_topic.fitbit.id
   ack_deadline_seconds       = 600
   message_retention_duration = "604800s"
   retain_acked_messages      = false
   expiration_policy { ttl = "" }
   dynamic "push_config" {
-    for_each = var.west_schedulers_enabled && var.fitbit_delivery_mode == "push" ? [true] : []
+    for_each = var.schedulers_enabled && var.fitbit_delivery_mode == "push" ? [true] : []
     content {
       push_endpoint = "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit"
       oidc_token {
-        service_account_email = google_service_account.west_scheduler.email
+        service_account_email = google_service_account.scheduler.email
         audience              = google_cloud_run_v2_service.fitbit_worker.uri
       }
     }
@@ -35,22 +35,22 @@ resource "google_pubsub_subscription" "west" {
 }
 resource "google_pubsub_subscription_iam_member" "fitbit_worker" {
   project      = var.project_id
-  subscription = google_pubsub_subscription.west.name
+  subscription = google_pubsub_subscription.fitbit.name
   role         = "roles/pubsub.subscriber"
-  member       = "serviceAccount:${google_service_account.west.email}"
+  member       = "serviceAccount:${google_service_account.processing.email}"
 }
-resource "google_pubsub_topic_iam_member" "west_receiver" {
+resource "google_pubsub_topic_iam_member" "fitbit_receiver" {
   project = var.project_id
-  topic   = google_pubsub_topic.west.name
+  topic   = google_pubsub_topic.fitbit.name
   role    = "roles/pubsub.publisher"
-  member  = "serviceAccount:${google_service_account.west_receiver.email}"
+  member  = "serviceAccount:${google_service_account.fitbit_receiver.email}"
 }
 
 data "google_project" "runtime" {
   project_id = var.project_id
 }
 resource "google_service_account_iam_member" "pubsub_push_token" {
-  service_account_id = google_service_account.west_scheduler.name
+  service_account_id = google_service_account.scheduler.name
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = "serviceAccount:service-${data.google_project.runtime.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
 }

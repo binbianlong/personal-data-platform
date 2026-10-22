@@ -36,7 +36,7 @@ resource "google_project_service" "bootstrap" {
   disable_dependent_services = false
 }
 
-resource "google_storage_bucket" "terraform_state" {
+resource "google_storage_bucket" "terraform_state_backup" {
   name                        = var.state_bucket_name
   project                     = var.project_id
   location                    = var.state_bucket_location
@@ -55,16 +55,7 @@ resource "google_storage_bucket" "terraform_state" {
   depends_on = [google_project_service.bootstrap]
 }
 
-# Preserve images in the former registry when releasing its Terraform address.
-removed {
-  from = google_artifact_registry_repository.runtime
-
-  lifecycle {
-    destroy = false
-  }
-}
-
-resource "google_storage_bucket" "terraform_state_west" {
+resource "google_storage_bucket" "runtime_state" {
   name                        = "${var.state_bucket_name}-west"
   project                     = var.project_id
   location                    = "us-west1"
@@ -76,7 +67,7 @@ resource "google_storage_bucket" "terraform_state_west" {
   depends_on = [google_project_service.bootstrap]
 }
 
-resource "google_artifact_registry_repository" "runtime_west" {
+resource "google_artifact_registry_repository" "runtime" {
   project       = var.project_id
   location      = var.region
   repository_id = var.artifact_repository_id

@@ -1,12 +1,12 @@
-resource "google_monitoring_alert_policy" "west_job_failed" {
+resource "google_monitoring_alert_policy" "job_failed" {
   project      = var.project_id
-  display_name = "PDP west processing Job failed"
+  display_name = "PDP processing Job failed"
   combiner     = "OR"
-  enabled      = var.west_schedulers_enabled
+  enabled      = var.schedulers_enabled
   conditions {
     display_name = "Failed daily execution"
     condition_threshold {
-      filter          = "resource.type = \"cloud_run_job\" AND resource.labels.location = \"${var.west_region}\" AND resource.labels.project_id = \"${var.project_id}\" AND resource.labels.job_name = \"${local.runtime_jobs.daily.name}\" AND metric.type = \"run.googleapis.com/job/completed_execution_count\" AND metric.labels.result != \"succeeded\""
+      filter          = "resource.type = \"cloud_run_job\" AND resource.labels.location = \"${var.region}\" AND resource.labels.project_id = \"${var.project_id}\" AND resource.labels.job_name = \"${local.runtime_jobs.daily.name}\" AND metric.type = \"run.googleapis.com/job/completed_execution_count\" AND metric.labels.result != \"succeeded\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -21,15 +21,15 @@ resource "google_monitoring_alert_policy" "west_job_failed" {
   notification_channels = [google_monitoring_notification_channel.email.name]
   depends_on            = [google_project_service.runtime]
 }
-resource "google_monitoring_alert_policy" "west_pubsub_backlog" {
+resource "google_monitoring_alert_policy" "pubsub_backlog" {
   project      = var.project_id
-  enabled      = var.west_schedulers_enabled
-  display_name = "PDP west: overdue unacked notifications"
+  enabled      = var.schedulers_enabled
+  display_name = "PDP overdue unacked notifications"
   combiner     = "OR"
   conditions {
     display_name = var.fitbit_delivery_mode == "pull" ? "Fitbit unacked message age exceeds 75 minutes" : "Fitbit unacked message age exceeds 15 minutes"
     condition_threshold {
-      filter          = "resource.type = \"pubsub_subscription\" AND resource.labels.subscription_id = \"${google_pubsub_subscription.west.name}\" AND metric.type = \"pubsub.googleapis.com/subscription/oldest_unacked_message_age\""
+      filter          = "resource.type = \"pubsub_subscription\" AND resource.labels.subscription_id = \"${google_pubsub_subscription.fitbit.name}\" AND metric.type = \"pubsub.googleapis.com/subscription/oldest_unacked_message_age\""
       comparison      = "COMPARISON_GT"
       threshold_value = var.fitbit_delivery_mode == "pull" ? 4500 : 900
       duration        = "300s"
@@ -54,15 +54,15 @@ resource "google_monitoring_alert_policy" "west_pubsub_backlog" {
   }
   notification_channels = [google_monitoring_notification_channel.email.name]
 }
-resource "google_monitoring_alert_policy" "west_receiver_failure" {
+resource "google_monitoring_alert_policy" "receiver_failure" {
   project      = var.project_id
-  enabled      = var.west_schedulers_enabled
-  display_name = "PDP west receiver or worker error"
+  enabled      = var.schedulers_enabled
+  display_name = "PDP receiver or worker error"
   combiner     = "OR"
   conditions {
     display_name = "Receiver or worker ERROR log"
     condition_matched_log {
-      filter = "resource.type=\"cloud_run_revision\" AND resource.labels.location=\"${var.west_region}\" AND resource.labels.service_name=(\"pdp-fitbit-west\" OR \"pdp-fitbit-worker-west\" OR \"pdp-owntracks-west\" OR \"pdp-owntracks-worker-west\") AND severity>=ERROR"
+      filter = "resource.type=\"cloud_run_revision\" AND resource.labels.location=\"${var.region}\" AND resource.labels.service_name=(\"pdp-fitbit-west\" OR \"pdp-fitbit-worker-west\" OR \"pdp-owntracks-west\" OR \"pdp-owntracks-worker-west\") AND severity>=ERROR"
     }
   }
   alert_strategy {

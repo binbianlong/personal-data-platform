@@ -3,7 +3,7 @@ mock_provider "google" {}
 run "secure_bootstrap_contract" {
   command = plan
   override_resource {
-    target          = google_artifact_registry_repository.runtime_west
+    target          = google_artifact_registry_repository.runtime
     override_during = plan
     values          = { name = "projects/example-project/locations/us-west1/repositories/personal-data-platform" }
   }
@@ -14,56 +14,56 @@ run "secure_bootstrap_contract" {
   }
 
   assert {
-    condition     = output.artifact_repository == google_artifact_registry_repository.runtime_west.name && !contains(local.deploy_project_roles, "roles/cloudtasks.admin")
-    error_message = "Normal deployment must use the west registry without Cloud Tasks administration."
+    condition     = output.artifact_repository == google_artifact_registry_repository.runtime.name && !contains(local.deploy_project_roles, "roles/cloudtasks.admin")
+    error_message = "Normal deployment must use the runtime registry without Cloud Tasks administration."
   }
 
   assert {
-    condition     = output.state_bucket_name == google_storage_bucket.terraform_state_west.name
-    error_message = "The runtime backend output must point to the active west state bucket."
+    condition     = output.state_bucket_name == google_storage_bucket.runtime_state.name
+    error_message = "The runtime backend output must point to the active runtime state bucket."
   }
 
   assert {
-    condition     = google_storage_bucket.terraform_state.uniform_bucket_level_access
+    condition     = google_storage_bucket.terraform_state_backup.uniform_bucket_level_access
     error_message = "Terraform state must use uniform bucket-level access."
   }
 
   assert {
-    condition     = google_storage_bucket.terraform_state.public_access_prevention == "enforced"
+    condition     = google_storage_bucket.terraform_state_backup.public_access_prevention == "enforced"
     error_message = "Terraform state must prevent public access."
   }
 
   assert {
-    condition     = google_storage_bucket.terraform_state.versioning[0].enabled
+    condition     = google_storage_bucket.terraform_state_backup.versioning[0].enabled
     error_message = "Terraform state versioning must be enabled."
   }
 
   assert {
-    condition     = google_storage_bucket.terraform_state.location == "ASIA"
+    condition     = google_storage_bucket.terraform_state_backup.location == "ASIA"
     error_message = "The existing Terraform state location contract must remain ASIA by default."
   }
 
   assert {
-    condition     = google_artifact_registry_repository.runtime_west.format == "DOCKER" && google_artifact_registry_repository.runtime_west.location == "us-west1"
+    condition     = google_artifact_registry_repository.runtime.format == "DOCKER" && google_artifact_registry_repository.runtime.location == "us-west1"
     error_message = "The runtime registry must be a Docker repository."
   }
 
   assert {
-    condition     = length(google_artifact_registry_repository.runtime_west.cleanup_policies) == 2
+    condition     = length(google_artifact_registry_repository.runtime.cleanup_policies) == 2
     error_message = "Cleanup must have only one expiration rule and one latest-version exception."
   }
 
   assert {
     condition = anytrue([
-      for policy in google_artifact_registry_repository.runtime_west.cleanup_policies :
+      for policy in google_artifact_registry_repository.runtime.cleanup_policies :
       policy.action == "KEEP" && try(policy.most_recent_versions[0].keep_count == 1, false)
     ])
     error_message = "Cleanup must retain exactly one most recent version of each image."
   }
 
   assert {
-    condition = !google_artifact_registry_repository.runtime_west.cleanup_policy_dry_run && anytrue([
-      for policy in google_artifact_registry_repository.runtime_west.cleanup_policies :
+    condition = !google_artifact_registry_repository.runtime.cleanup_policy_dry_run && anytrue([
+      for policy in google_artifact_registry_repository.runtime.cleanup_policies :
       policy.action == "DELETE" && try(
         policy.condition[0].tag_state == "ANY" &&
         policy.condition[0].older_than == "86400s", false
@@ -105,12 +105,12 @@ run "secure_bootstrap_contract" {
   }
 
   assert {
-    condition     = google_storage_bucket_iam_member.github_plan_state.role == "roles/storage.objectViewer"
+    condition     = google_storage_bucket_iam_member.github_plan_state_backup.role == "roles/storage.objectViewer"
     error_message = "The plan identity must have read-only state access."
   }
 
   assert {
-    condition     = google_storage_bucket_iam_member.github_deploy_state.role == "roles/storage.objectAdmin"
+    condition     = google_storage_bucket_iam_member.github_deploy_state_backup.role == "roles/storage.objectAdmin"
     error_message = "The deploy identity must be able to update and lock state."
   }
 
@@ -123,18 +123,18 @@ run "secure_bootstrap_contract" {
   }
 }
 
-run "west_bootstrap_preserves_legacy" {
+run "runtime_state_preserves_backup" {
   command = plan
   variables {
     project_id        = "example-project"
     state_bucket_name = "example-project-personal-data-platform-tfstate"
   }
   assert {
-    condition     = google_storage_bucket.terraform_state.location == "ASIA" && google_storage_bucket.terraform_state_west.location == "us-west1" && google_storage_bucket.terraform_state.name != google_storage_bucket.terraform_state_west.name
-    error_message = "West state must use a distinct protected bucket while legacy state stays in place."
+    condition     = google_storage_bucket.terraform_state_backup.location == "ASIA" && google_storage_bucket.runtime_state.location == "us-west1" && google_storage_bucket.terraform_state_backup.name != google_storage_bucket.runtime_state.name
+    error_message = "Runtime state and retained backup must use distinct protected buckets."
   }
   assert {
-    condition     = google_artifact_registry_repository.runtime_west.location == "us-west1" && contains(local.deploy_project_roles, "roles/pubsub.admin") && local.plan_project_roles == toset(["roles/viewer"])
-    error_message = "Normal registry must be in west and only deploy may administer Pub/Sub."
+    condition     = google_artifact_registry_repository.runtime.location == "us-west1" && contains(local.deploy_project_roles, "roles/pubsub.admin") && local.plan_project_roles == toset(["roles/viewer"])
+    error_message = "Normal registry must be in us-west1 and only deploy may administer Pub/Sub."
   }
 }

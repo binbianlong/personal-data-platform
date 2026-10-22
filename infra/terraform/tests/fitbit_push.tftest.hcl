@@ -9,10 +9,10 @@ variables {
   project_id                     = "example-project"
   deployer_service_account_email = "github-tf-deploy@example-project.iam.gserviceaccount.com"
   rebuild_impersonator_member    = "user:operator@example.com"
-  west_image_uri                 = "us-west1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  runtime_image_uri              = "us-west1-docker.pkg.dev/example-project/personal-data-platform/runtime@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   alert_email                    = "operator@example.com"
   fitbit_subject_key             = "owner"
-  west_secret_versions           = { motherduck_token = "7", fitbit_oauth_config = "11", fitbit_webhook_config = "13", heartbeat_config = "17", owntracks_config = "19" }
+  secret_versions                = { motherduck_token = "7", fitbit_oauth_config = "11", fitbit_webhook_config = "13", heartbeat_config = "17", owntracks_config = "19" }
 }
 
 run "push_processing_contract" {
@@ -23,7 +23,7 @@ run "push_processing_contract" {
     values          = { uri = "https://worker.example.run.app" }
   }
   override_resource {
-    target          = google_service_account.west_scheduler
+    target          = google_service_account.scheduler
     override_during = plan
     values          = { email = "scheduler@example-project.iam.gserviceaccount.com", name = "projects/example-project/serviceAccounts/scheduler@example-project.iam.gserviceaccount.com" }
   }
@@ -36,11 +36,11 @@ run "push_processing_contract" {
     error_message = "Push processing must be serialized, scale to zero, and finish before acknowledgement expiry."
   }
   assert {
-    condition     = google_pubsub_subscription.west.ack_deadline_seconds == 600 && google_pubsub_subscription.west.push_config[0].push_endpoint == "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit" && google_pubsub_subscription.west.push_config[0].oidc_token[0].audience == google_cloud_run_v2_service.fitbit_worker.uri && google_pubsub_subscription.west.push_config[0].oidc_token[0].service_account_email == google_service_account.west_scheduler.email
+    condition     = google_pubsub_subscription.fitbit.ack_deadline_seconds == 600 && google_pubsub_subscription.fitbit.push_config[0].push_endpoint == "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit" && google_pubsub_subscription.fitbit.push_config[0].oidc_token[0].audience == google_cloud_run_v2_service.fitbit_worker.uri && google_pubsub_subscription.fitbit.push_config[0].oidc_token[0].service_account_email == google_service_account.scheduler.email
     error_message = "Existing notifications must be delivered to the IAM-authenticated worker."
   }
   assert {
-    condition     = google_cloud_run_v2_service_iam_member.fitbit_worker.member == "serviceAccount:${google_service_account.west_scheduler.email}" && google_cloud_run_v2_service_iam_member.fitbit_worker.role == "roles/run.invoker" && !contains(keys(local.runtime_common_environment), "GCS_BUCKET")
+    condition     = google_cloud_run_v2_service_iam_member.fitbit_worker.member == "serviceAccount:${google_service_account.scheduler.email}" && google_cloud_run_v2_service_iam_member.fitbit_worker.role == "roles/run.invoker" && !contains(keys(local.runtime_common_environment), "GCS_BUCKET")
     error_message = "Only the trigger identity may invoke the worker and ingestion must not require GCS."
   }
   assert {
@@ -58,17 +58,17 @@ run "pull_batches_existing_subscription" {
     values          = { uri = "https://worker.example.run.app" }
   }
   override_resource {
-    target          = google_service_account.west_scheduler
+    target          = google_service_account.scheduler
     override_during = plan
     values          = { email = "scheduler@example-project.iam.gserviceaccount.com", name = "projects/example-project/serviceAccounts/scheduler@example-project.iam.gserviceaccount.com" }
   }
   override_resource {
-    target          = google_service_account.west
+    target          = google_service_account.processing
     override_during = plan
     values          = { email = "runtime@example-project.iam.gserviceaccount.com", name = "projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com" }
   }
   assert {
-    condition     = google_pubsub_subscription.west.name == "pdp-fitbit-west-pull" && google_pubsub_topic.west.name == "pdp-fitbit-west" && length(google_pubsub_subscription.west.push_config) == 0 && google_pubsub_subscription.west.filter == null && google_pubsub_subscription.west.ack_deadline_seconds == 600 && google_pubsub_subscription.west.message_retention_duration == "604800s"
+    condition     = google_pubsub_subscription.fitbit.name == "pdp-fitbit-west-pull" && google_pubsub_topic.fitbit.name == "pdp-fitbit-west" && length(google_pubsub_subscription.fitbit.push_config) == 0 && google_pubsub_subscription.fitbit.filter == null && google_pubsub_subscription.fitbit.ack_deadline_seconds == 600 && google_pubsub_subscription.fitbit.message_retention_duration == "604800s"
     error_message = "Pull mode must retain the existing unfiltered queue with its acknowledgement deadline and seven-day retention."
   }
   assert {
@@ -80,11 +80,11 @@ run "pull_batches_existing_subscription" {
     error_message = "The batch Scheduler must invoke the private drain endpoint using the existing Scheduler identity and worker audience."
   }
   assert {
-    condition     = google_pubsub_subscription_iam_member.fitbit_worker.subscription == google_pubsub_subscription.west.name && google_pubsub_subscription_iam_member.fitbit_worker.role == "roles/pubsub.subscriber" && google_pubsub_subscription_iam_member.fitbit_worker.member == "serviceAccount:runtime@example-project.iam.gserviceaccount.com"
+    condition     = google_pubsub_subscription_iam_member.fitbit_worker.subscription == google_pubsub_subscription.fitbit.name && google_pubsub_subscription_iam_member.fitbit_worker.role == "roles/pubsub.subscriber" && google_pubsub_subscription_iam_member.fitbit_worker.member == "serviceAccount:runtime@example-project.iam.gserviceaccount.com"
     error_message = "Only the existing worker runtime identity must receive subscription-scoped pull access."
   }
   assert {
-    condition     = length(google_pubsub_subscription.owntracks.push_config) == 1 && google_cloud_scheduler_job.west["daily"].schedule == "10 4 * * *" && !google_cloud_scheduler_job.west["daily"].paused && local.runtime_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "false" && google_cloud_run_v2_service.owntracks["worker"].template[0].containers[0].image == var.west_image_uri && google_cloud_run_v2_job.west["daily"].template[0].template[0].containers[0].image == var.west_image_uri
+    condition     = length(google_pubsub_subscription.owntracks.push_config) == 1 && google_cloud_scheduler_job.runtime["daily"].schedule == "10 4 * * *" && !google_cloud_scheduler_job.runtime["daily"].paused && local.runtime_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "false" && google_cloud_run_v2_service.owntracks["worker"].template[0].containers[0].image == var.runtime_image_uri && google_cloud_run_v2_job.runtime["daily"].template[0].template[0].containers[0].image == var.runtime_image_uri
     error_message = "Fitbit pull mode must preserve OwnTracks push, the daily schedule, processing state, and runtime image pins."
   }
   assert {
@@ -92,7 +92,7 @@ run "pull_batches_existing_subscription" {
     error_message = "Operators need the active delivery mode, batch schedule, and drain endpoint in runtime outputs."
   }
   assert {
-    condition     = google_monitoring_alert_policy.west_pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 4500
+    condition     = google_monitoring_alert_policy.pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 4500
     error_message = "Hourly Fitbit batches need a 75-minute backlog threshold."
   }
 }
@@ -100,11 +100,11 @@ run "pull_batches_existing_subscription" {
 run "paused_pull_keeps_queue_and_stops_batch_scheduler" {
   command = plan
   variables {
-    fitbit_delivery_mode    = "pull"
-    west_schedulers_enabled = false
+    fitbit_delivery_mode = "pull"
+    schedulers_enabled   = false
   }
   assert {
-    condition     = google_cloud_scheduler_job.fitbit_batch.paused && length(google_pubsub_subscription.west.push_config) == 0 && local.runtime_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "true"
+    condition     = google_cloud_scheduler_job.fitbit_batch.paused && length(google_pubsub_subscription.fitbit.push_config) == 0 && local.runtime_common_environment.PDP_FITBIT_PROCESSING_PAUSED == "true"
     error_message = "The global pause must stop the batch schedule without restoring push delivery."
   }
 }
