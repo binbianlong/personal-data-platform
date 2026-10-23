@@ -8,11 +8,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml uv.lock /app/
 COPY src /app/src
 COPY dbt /app/dbt
 
-RUN --mount=from=ghcr.io/astral-sh/uv:0.12.5,source=/uv,target=/bin/uv \
+RUN --mount=from=ghcr.io/astral-sh/uv:0.13.5,source=/uv,target=/bin/uv \
     uv sync --locked --no-dev --no-editable --no-cache \
     && useradd --uid 10001 --create-home app \
     && chown -R app:app /app
