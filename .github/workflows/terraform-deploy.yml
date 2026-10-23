@@ -10,6 +10,7 @@ on:
       - "dbt/**"
       - "infra/terraform/**"
       - "pyproject.toml"
+      - "uv.lock"
       - "src/**"
       - ".github/workflows/terraform-deploy.yml"
   workflow_dispatch:
@@ -100,7 +101,7 @@ jobs:
           current_image="$(jq -r '.[] | select(.metadata.name == "reconciliation-west") | .spec.template.spec.template.spec.containers[0].image' <<< "${jobs}")"
           build=true
           if [[ "${GITHUB_EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
-            changed="$(git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" -- Dockerfile .dockerignore pyproject.toml src/ dbt/)"
+            changed="$(git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" -- Dockerfile .dockerignore pyproject.toml uv.lock src/ dbt/)"
             if [[ -z "${changed}" && -n "${current_image}" ]]; then build=false; fi
           fi
           if [[ "${build}" == "true" ]]; then
