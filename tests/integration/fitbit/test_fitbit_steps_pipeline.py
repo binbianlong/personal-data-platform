@@ -1,4 +1,4 @@
-"""Real notification, API, push and DuckDB boundaries with synthetic steps."""
+"""Real notification, pull, API and DuckDB boundaries with synthetic steps."""
 
 import base64
 import json
@@ -16,8 +16,10 @@ from personal_data_platform.sources.fitbit.notifications import PubSubNotificati
 from personal_data_platform.sources.fitbit.service import create_pubsub_app, create_worker_app
 from personal_data_platform.sources.fitbit.webhook import GoogleHealthAuthenticator
 from personal_data_platform.storage.motherduck import Warehouse
+from tests.integration.fitbit.helpers import drainer
 from tests.integration.fitbit.test_fitbit_service import NOW
 from tests.unit.fitbit.test_fitbit_api import FakeTransport, client, steps
+from tests.unit.fitbit.test_fitbit_batch import Subscriber, raw_message
 from tests.unit.fitbit.test_fitbit_webhook import Signature, notification
 
 
@@ -49,8 +51,8 @@ def test_civil_full_partial_full_trace_exact_filters_and_changed_rows(tmp_path, 
         subject_key="self",
         clock=lambda: NOW + timedelta(hours=1),
     )
-    subscription = "projects/test/subscriptions/fitbit"
-    worker = TestClient(create_worker_app(runner=runner, subscription=subscription))
+    subscriber = Subscriber()
+    worker = TestClient(create_worker_app(drainer=drainer(runner, subscriber)))
 
     class Publisher:
         def __init__(self):
@@ -106,17 +108,10 @@ def test_civil_full_partial_full_trace_exact_filters_and_changed_rows(tmp_path, 
         assert len(publisher.payloads) == index
         payload = publisher.payloads[-1]
         assert json.loads(payload)["schema_version"] == 2
-        response = worker.post(
-            "/notifications/fitbit",
-            json={
-                "message": {
-                    "data": base64.b64encode(payload).decode(),
-                    "messageId": "message-" + str(index),
-                },
-                "subscription": subscription,
-            },
-        )
-        assert response.status_code == 204
+        subscriber.responses.append([raw_message(str(index), payload=payload)])
+        response = worker.post("/notifications/fitbit/drain")
+        assert response.status_code == 200
+        assert subscriber.acks[-1] == f"secret-ack-{index}"
     queries = [parse_qs(urlsplit(call[1]).query)["filter"][0] for call in transport.calls]
     civil = (
         'steps.interval.civil_start_time >= "2026-09-26" AND '
@@ -142,13 +137,18 @@ def test_civil_full_partial_full_trace_exact_filters_and_changed_rows(tmp_path, 
         for r in caplog.records
         if getattr(r, "event", None) == "fitbit_notification_publish"
     ]
-    pushes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_push"]
+    processed = [
+        r for r in caplog.records if getattr(r, "event", None) == "fitbit_notification_processed"
+    ]
     assert len({entry["source_notification_id"] for entry in received}) == 3
-    for received_entry, published_entry, scope, push in zip(received, published, scopes, pushes):
+    for received_entry, published_entry, scope, result in zip(
+        received, published, scopes, processed
+    ):
         assert received_entry["source_notification_id"] == published_entry["source_notification_id"]
-        assert published_entry["notification_id"] == scope.summary["notification_id"]
-        assert published_entry["pubsub_message_id"] == push.summary["pubsub_message_id"]
-        assert scope.summary["attempt_id"] == push.summary["attempt_id"]
+        assert published_entry["notification_id"] == result.summary["notification_id"]
+        assert scope.summary["notification_id"] == result.summary["group_id"]
+        assert published_entry["pubsub_message_id"] == result.summary["pubsub_message_id"]
+        assert scope.summary["attempt_id"] == result.summary["attempt_id"]
     with closing(factory()) as warehouse:
         assert warehouse.query_rows(
             "SELECT record_id,value,fetched_at FROM base.fitbit_activity_interval ORDER BY record_id"
@@ -197,8 +197,8 @@ def test_same_http_steps_coalesce_once_and_preserve_corrections_deletions_and_li
         subject_key="self",
         clock=lambda: NOW + timedelta(hours=1),
     )
-    subscription = "projects/test/subscriptions/fitbit"
-    worker = TestClient(create_worker_app(runner=runner, subscription=subscription))
+    subscriber = Subscriber()
+    worker = TestClient(create_worker_app(drainer=drainer(runner, subscriber)))
 
     class Publisher:
         def __init__(self):
@@ -277,19 +277,9 @@ def test_same_http_steps_coalesce_once_and_preserve_corrections_deletions_and_li
                 == "daily-resting-heart-rate"
             )
         for message_index, payload in enumerate(payloads, start=before + 1):
-            assert (
-                worker.post(
-                    "/notifications/fitbit",
-                    json={
-                        "message": {
-                            "data": base64.b64encode(payload).decode(),
-                            "messageId": f"message-{message_index}",
-                        },
-                        "subscription": subscription,
-                    },
-                ).status_code
-                == 204
-            )
+            subscriber.responses.append([raw_message(str(message_index), payload=payload)])
+            assert worker.post("/notifications/fitbit/drain").status_code == 200
+            assert subscriber.acks[-1] == f"secret-ack-{message_index}"
         assert len(opened) == 2 * index + 1
     civil = 'steps.interval.civil_start_time >= "2026-09-26" AND steps.interval.civil_start_time < "2026-09-27"'
     utc = 'steps.interval.start_time >= "2026-09-26T14:00:00Z" AND steps.interval.start_time < "2026-09-26T14:16:00Z"'
@@ -318,7 +308,11 @@ def test_same_http_steps_coalesce_once_and_preserve_corrections_deletions_and_li
         for r in caplog.records
         if getattr(r, "event", None) == "fitbit_notification_publish"
     ]
-    pushes = [r.summary for r in caplog.records if getattr(r, "event", None) == "fitbit_push"]
+    processed = [
+        r.summary
+        for r in caplog.records
+        if getattr(r, "event", None) == "fitbit_notification_processed"
+    ]
     assert len(received) == 15
     assert received[3]["operation"] == "DELETE" and received[3]["record_id"] == "b"
     for offset, published_index in ((1, 1), (8, 4)):
@@ -330,12 +324,13 @@ def test_same_http_steps_coalesce_once_and_preserve_corrections_deletions_and_li
         assert all(entry["source_notification_id"] is None for entry in entries)
         assert [len(entry["source_notification_ids"]) for entry in entries] == [2, 4]
         assert [entry["time_basis"] for entry in entries] == ["civil", "utc"]
-    for entry, scope, push in zip((published[index] for index in (0, 1, 2, 4, 5)), scopes, pushes):
-        assert (
-            entry["notification_id"] == scope.summary["notification_id"] == push["notification_id"]
-        )
-        assert entry["pubsub_message_id"] == push["pubsub_message_id"]
-        assert scope.summary["attempt_id"] == push["attempt_id"]
+    for entry, scope, result in zip(
+        (published[index] for index in (0, 1, 2, 4, 5)), scopes, processed
+    ):
+        assert entry["notification_id"] == result["notification_id"]
+        assert scope.summary["notification_id"] == result["group_id"]
+        assert entry["pubsub_message_id"] == result["pubsub_message_id"]
+        assert scope.summary["attempt_id"] == result["attempt_id"]
     assert published[1]["notification_id"] != published[4]["notification_id"]
     assert received[1]["notification_hash"] == received[8]["notification_hash"]
     summaries = json.dumps(
@@ -414,23 +409,16 @@ def test_slow_coalesced_scopes_can_each_commit_without_retry_starvation(tmp_path
         ).status_code
         == 204
     )
-    worker = TestClient(
-        create_worker_app(runner=runner, subscription="projects/test/subscriptions/fitbit")
+    subscriber = Subscriber()
+    worker = TestClient(create_worker_app(drainer=drainer(runner, subscriber)))
+    subscriber.responses.append(
+        [
+            raw_message(str(index), payload=payload)
+            for index, payload in enumerate(publisher.payloads)
+        ]
     )
-    for index, payload in enumerate(publisher.payloads):
-        assert (
-            worker.post(
-                "/notifications/fitbit",
-                json={
-                    "message": {
-                        "data": base64.b64encode(payload).decode(),
-                        "messageId": f"message-{index}",
-                    },
-                    "subscription": "projects/test/subscriptions/fitbit",
-                },
-            ).status_code
-            == 204
-        )
+    assert worker.post("/notifications/fitbit/drain").status_code == 200
+    assert subscriber.acks == ["secret-ack-0", "secret-ack-1"]
     assert len(api.calls) == 2
     with closing(Warehouse(duckdb.connect(path))) as warehouse:
         assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 2

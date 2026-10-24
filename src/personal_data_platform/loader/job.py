@@ -9,7 +9,6 @@ import os
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import asdict
 
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import (
@@ -94,9 +93,7 @@ def run_loader_objects(
     succeeded = 0
     failed = 0
     record_count = 0
-    job_started = False
     timer = None
-    scope_details = {"source_id": source.source_id, "stream": source.stream}
 
     def guard() -> None:
         seconds = int(deadline - time.monotonic())
@@ -107,8 +104,6 @@ def run_loader_objects(
     try:
         guard()
         timer = interrupt_after(warehouse, deadline - time.monotonic())
-        warehouse.begin_job(f"loader:{source.source_id}:{source.stream}", run_id)
-        job_started = True
         already_loaded = warehouse.succeeded_keys_for(refs, parser_version=source.parser_version)
         pending = [raw for raw in refs if raw.key not in already_loaded]
         for raw in pending:
@@ -141,17 +136,7 @@ def run_loader_objects(
             records=record_count,
         )
         guard()
-        warehouse.finish_job(
-            run_id, succeeded=summary.ok, details={**scope_details, **asdict(summary)}
-        )
         return summary
-    except Exception as error:
-        if job_started and warehouse.connection_usable:
-            guard()
-            warehouse.finish_job(
-                run_id, succeeded=False, details={**scope_details, "error": str(error)}
-            )
-        raise
     finally:
         if timer is not None:
             timer.cancel()

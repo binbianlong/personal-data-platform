@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import replace
 
 import google.cloud.storage as storage
 import google_crc32c
@@ -77,11 +76,8 @@ class GCSRawRepository:
                 raise RuntimeError("existing immutable Raw differs from upload bytes")
         if blob.time_created is None or blob.generation is None:
             raise RuntimeError("GCS omitted immutable object metadata")
-        return replace(
-            self._source.parse_raw_key(
-                key, storage_created_at=blob.time_created, storage_generation=int(blob.generation)
-            ),
-            retention_started_at=getattr(blob, "custom_time", None),
+        return self._source.parse_raw_key(
+            key, storage_created_at=blob.time_created, storage_generation=int(blob.generation)
         )
 
     def get_raw(self, key: str, *, generation: int) -> bytes:
@@ -126,7 +122,6 @@ class GCSRawRepository:
                         storage_created_at=storage_created_at,
                         storage_generation=int(storage_generation),
                     )
-                    raw = replace(raw, retention_started_at=getattr(blob, "custom_time", None))
                     if raw.source_id != self._source.source_id:
                         raise RuntimeError("Raw codec returned a mismatched source")
                     if raw.schema_version not in self._source.schema_versions:

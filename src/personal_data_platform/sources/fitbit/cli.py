@@ -18,7 +18,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
     sync.add_argument("--to", dest="end", required=True)
     sync.add_argument("--data-type", action="append", choices=DATA_TYPES)
     commands.add_parser("serve", help="start the webhook notification receiver")
-    commands.add_parser("serve-worker", help="process authenticated Pub/Sub push notifications")
+    commands.add_parser("serve-worker", help="drain queued Pub/Sub notifications")
 
 
 def _physical(value: str) -> datetime:

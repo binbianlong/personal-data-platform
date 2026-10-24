@@ -6,9 +6,12 @@ import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
+
+    from personal_data_platform.storage.motherduck import Warehouse
 
 DEFAULT_MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 _REBUILD = "unsupported schema history; rebuild into an empty target database"
@@ -46,7 +49,8 @@ def _read_applied(connection: DuckDBPyConnection, checksums: dict[str, str]) -> 
     return applied
 
 
-def apply_migrations(connection: DuckDBPyConnection, migrations: Path | None = None) -> None:
+def apply_migrations(warehouse: Warehouse, migrations: Path | None = None) -> None:
+    connection = warehouse.connection
     migrations = migrations or DEFAULT_MIGRATIONS
     paths = sorted(migrations.glob("*.sql"))
     if not paths:
@@ -64,19 +68,46 @@ def apply_migrations(connection: DuckDBPyConnection, migrations: Path | None = N
             applied_at TIMESTAMPTZ NOT NULL
         )"""
     )
-    for path, sql in prepared:
-        # Startup precedes the writer lease; recheck receipts another startup
-        # may have committed since the initial validation.
-        if path.name in _read_applied(connection, checksums):
-            continue
-        connection.execute("BEGIN TRANSACTION")
-        try:
-            connection.execute(sql)
-            connection.execute(
-                "INSERT INTO ops.schema_migration VALUES (?, ?, ?)",
-                [path.name, checksums[path.name], datetime.now(UTC)],
-            )
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
+    owner = str(uuid4())
+    acquired = False
+    try:
+        for path, sql in prepared:
+            applied = _read_applied(connection, checksums)
+            if path.name in applied:
+                continue
+            # The initial migration creates job_lock. All later schema changes
+            # share the ingestion lease, including copying and replacing tables.
+            if applied and not acquired:
+                acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=125 * 60)
+                if not acquired:
+                    raise RuntimeError("schema update requires an idle writer lease")
+                if path.name in _read_applied(connection, checksums):
+                    continue
+            try:
+                connection.execute("BEGIN TRANSACTION")
+            except Exception:
+                warehouse.connection_usable = False
+                raise
+            try:
+                connection.execute(sql)
+                connection.execute(
+                    "INSERT INTO ops.schema_migration VALUES (?, ?, ?)",
+                    [path.name, checksums[path.name], datetime.now(UTC)],
+                )
+                if acquired:
+                    warehouse.require_job_lock(owner)
+            except Exception:
+                try:
+                    connection.execute("ROLLBACK")
+                except Exception:
+                    warehouse.connection_usable = False
+                    raise
+                raise
+            try:
+                connection.execute("COMMIT")
+            except Exception:
+                warehouse.connection_usable = False
+                raise
+    finally:
+        if acquired and warehouse.connection_usable:
+            warehouse.release_job_lock("loader", owner)

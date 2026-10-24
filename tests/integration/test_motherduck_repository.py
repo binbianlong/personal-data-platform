@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from personal_data_platform.reconciliation.models import ReconciliationResult
 from personal_data_platform.sources.screen_time.parser import PARSER_VERSION
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
@@ -114,17 +112,11 @@ def test_run_history_prunes_after_seven_days_but_keeps_daily_gap_marker():
         "('recent', 'loader', 'succeeded', ?, ?, NULL)",
         [old, old, '{"last_completed_target_date":"2026-10-02"}', old, old, recent, recent],
     )
-    warehouse.connection.execute(
-        "INSERT INTO ops.reconciliation_run (run_id,status,started_at,completed_at) "
-        "VALUES ('old','succeeded',?,?), ('recent','succeeded',?,?)",
-        [old, old, recent, recent],
-    )
     warehouse.prune_run_history(now=now)
     assert warehouse.query_rows("SELECT run_id FROM ops.job_run ORDER BY run_id") == [
         ("old-daily",),
         ("recent",),
     ]
-    assert warehouse.query_rows("SELECT run_id FROM ops.reconciliation_run") == [("recent",)]
     warehouse.close()
 
 
@@ -150,35 +142,6 @@ def test_run_history_keeps_latest_daily_marker_across_previous_and_current_names
     warehouse.prune_run_history(now=now)
     assert warehouse.query_rows("SELECT run_id FROM ops.job_run") == [("current",)]
     warehouse.close()
-
-
-@pytest.mark.parametrize("as_mapping", [False, True])
-def test_reconciliation_accepts_result_and_dictionary(as_mapping) -> None:
-    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
-    now = datetime(2026, 9, 23, tzinfo=UTC)
-    result = ReconciliationResult(
-        run_id="typed-audit",
-        status="succeeded",
-        started_at=now,
-        completed_at=now,
-        raw_object_count=3,
-        loaded_object_count=3,
-        missing_object_count=0,
-        failed_object_count=0,
-        orphaned_loaded_object_count=0,
-        details={"collector_device_count": 2},
-    )
-    try:
-        warehouse.migrate()
-        warehouse.record_reconciliation(asdict(result) if as_mapping else result)
-        row = warehouse.query_rows(
-            "SELECT run_id, status, raw_object_count, loaded_object_count, details "
-            "FROM ops.reconciliation_run"
-        )[0]
-        assert row[:4] == ("typed-audit", "succeeded", 3, 3)
-        assert json.loads(row[4]) == {"collector_device_count": 2}
-    finally:
-        warehouse.close()
 
 
 def test_migration_and_object_load_are_idempotent(tmp_path) -> None:
@@ -221,51 +184,6 @@ def test_failed_load_can_be_retried(tmp_path) -> None:
         warehouse.close()
 
 
-def test_expired_key_can_be_reloaded_with_a_new_storage_creation_time(tmp_path) -> None:
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "test.duckdb"))))
-    try:
-        warehouse.migrate()
-        original = _raw()
-        assert (
-            warehouse.load_object(
-                original, byte_size=100, batch=ScreenTimeBatch([_record(original)])
-            )
-            == 1
-        )
-        warehouse.connection.execute(
-            "UPDATE ops.ingestion_metadata SET retention_expired_at = current_timestamp "
-            "WHERE object_key = ?",
-            [original.key],
-        )
-        assert warehouse.succeeded_keys(source_id="screen_time", stream="App.InFocus") == set()
-
-        recreated = _raw(
-            storage_created_at=datetime(2026, 10, 27, 1, tzinfo=UTC),
-            storage_generation=2,
-        )
-        assert (
-            warehouse.load_object(
-                recreated, byte_size=100, batch=ScreenTimeBatch([_record(recreated)])
-            )
-            == 1
-        )
-
-        assert warehouse.succeeded_keys(source_id="screen_time", stream="App.InFocus") == {
-            original.key
-        }
-        assert warehouse.query_rows(
-            """
-            SELECT storage_created_at, retention_expired_at
-            FROM ops.ingestion_metadata
-            WHERE object_key = ?
-            """,
-            [original.key],
-        ) == [(recreated.storage_created_at, None)]
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
-    finally:
-        warehouse.close()
-
-
 def test_new_generation_is_not_trusted_until_it_is_reloaded(tmp_path) -> None:
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "test.duckdb"))))
     try:
@@ -291,10 +209,10 @@ def test_new_generation_is_not_trusted_until_it_is_reloaded(tmp_path) -> None:
         assert warehouse.succeeded_keys_for([recreated]) == {original.key}
         assert warehouse.query_rows(
             """
-            SELECT storage_created_at, storage_generation, retention_expired_at
+            SELECT storage_created_at, storage_generation
             FROM ops.ingestion_metadata
             """
-        ) == [(recreated_at, 2, None)]
+        ) == [(recreated_at, 2)]
         assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
     finally:
         warehouse.close()

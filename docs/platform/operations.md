@@ -22,13 +22,14 @@ workspaceの他DBを自動attachせず、ローカルDuckDBへの接続方法は
 
 [bootstrap](../../infra/bootstrap/README.md)でstate・registry・WIFを作り、[runtime Terraform](../../infra/terraform/README.md)で通常資産を管理する。
 secret payloadはTerraform外で登録し、数値versionに固定する。常設preflight/dbt Jobは作らない。
-通常はpush配信・日次Scheduler・監視が有効で、`PDP_SCHEDULERS_ENABLED=false`で一時停止する。
-停止時はsubscriptionをpullへ戻して通知を保持し、workerも処理を保留する。
+通常はFitbitの毎時バッチ・OwnTracksのpush配信・日次Scheduler・監視が有効で、
+`PDP_SCHEDULERS_ENABLED=false`で一時停止する。Fitbitの通知はpull queueへ保持し、
+OwnTracksはpush設定を外して通知を保持する。workerも処理を保留する。
 
 CIはimageをbuild・登録し、そのdigestを指定してruntimeを更新する。
 source・dbt・依存・Dockerfileに変更がないpushでは現行日次Jobのdigestを再利用する。
 無効な比較元やJob一覧取得失敗はdeployを止める。アプリdeploy失敗後の再反映には手動deployを使う。
-手動`run_daily`で日次全体を実行できる。rollbackには直接取込・push受付に対応したimageを使い、削除済みなら再build・登録する。
+手動`run_daily`で日次全体を実行できる。rollbackにはFitbitのpull処理と現行DBスキーマに対応したimageを使い、削除済みなら再build・登録する。
 Deploy workflowが停止中の場合は、ローカルで`linux/amd64` imageを登録し、digestを指定してTerraformを手動反映する。
 
 ## 依存関係の更新
@@ -76,17 +77,29 @@ pdp migrate --database /private/path/scratch.duckdb
 `--database`を省略すると`MOTHERDUCK_DATABASE`・`MOTHERDUCK_TOKEN`の接続先へ適用する。
 各SQLとchecksum記録は同じtransactionで確定する。再実行は適用済みの一致を確認し、変更は新しいforward migrationへ追加する。
 全SQLが適用済みの場合は、台帳の構造・ID・checksumの確認だけで終了し、DDLは実行しない。
+未適用SQLは共通の`loader` leaseを保持して適用する。取込が実行中なら移行を中断し、終了後に再試行する。
 適用済みSQLや台帳は変更しない。checksumの不一致や未対応のスキーマ履歴があるDBへの適用は拒否する。
 再構築には空のscratch DBを使い、[Rebuild](#rebuild)の保持範囲を確認する。
 
-追加DDLはCollector・push配信・日次Schedulerを止め、実行中Jobと`loader` leaseの終了を確認してから適用する。
+追加DDLはCollector・Fitbitバッチ・OwnTracksのpush配信・日次Schedulerを止め、実行中Jobと`loader` leaseの終了を確認してから適用する。
 MacのCollectorはeditable installのcheckoutを参照するため、そのcheckoutへmigrationを追加する前に停止する。
 Collectorは起動後にスキーマを初期化し、成功後の周期では省略する。DDL・コード・接続設定の変更後は再起動し、
 取込成功と日次全段階の成功を確認して通常運用を再開する。
 
+`007_operational_state.sql`は重複した照合履歴と日次DB heartbeatを削除する。
+適用後のrollbackにも、このスキーマに対応したimageを使う。
+
+`008_terminal_ingestion_receipts.sql`はRaw台帳を成功・失敗の確定結果に絞る。
+まだ試行していないRawは台帳なしで表し、データと成功台帳は同じtransactionで確定する。
+旧`loading`行は再試行できる失敗行へ移行する。実行中の排他は`ops.job_lock`で管理する。
+旧期限切れ台帳を移行対象から外し、保持期限の起点・期限切れ列を削除する。
+分析データと有効な取込台帳は保持する。MacのCollectorも起動時にSQLiteの旧起点列を削除し、
+保存済みRaw・未取込状態・収集成功記録を維持する。適用後は両方の現行スキーマに対応したコードを使う。
+
 ## 収集・日次処理
 
-Fitbit通知とOwnTracksのGCS保存完了通知はPub/Subから非公開workerへ配信し、DB commit後に204を返す。
+Fitbit通知はPub/Subへ蓄積し、毎時00分に非公開workerがpullしてDB commit後にACKする。
+OwnTracksのGCS保存完了通知はPub/Subから非公開workerへpushし、DB commit後に204を返す。
 既存martsはViewであり、取込ごとにdbtを実行しなくても次のqueryへ反映される。
 `pdp reconciliation`は日次04:10 Asia/Tokyoの処理全体を実行する。
 
@@ -94,11 +107,11 @@ Fitbit通知とOwnTracksのGCS保存完了通知はPub/Subから非公開worker�
 2. dbt run/testを実行する。
 3. OwnTracksの無期限Rawと台帳を照合し、未取込分を補修する。
 4. Macが更新したScreen Time両streamの取込成功heartbeatを48時間の鮮度とDB relationで監査する。
-5. 完了対象日と内部daily heartbeatを同じtransactionでcommitする。
+5. 完了対象日と照合結果を`ops.job_run`へcommitする。
 6. Healthchecksへ外部成功pingを1回送る。
 
 Screen Timeの収集・保存・取り込みはMacのCollectorが30分周期で実行する。日次Jobはstream heartbeatを更新しない。
-日次成功時に`ops.job_run`と`ops.reconciliation_run`の7日を超えた履歴を整理する。
+日次成功時に`ops.job_run`の7日を超えた履歴を整理する。
 欠測判定に使う最新の日次成功記録は7日を超えても保持する。
 
 workerは最小0・最大1instance、同時処理1。処理予算480秒、サービスtimeout540秒。
@@ -112,7 +125,7 @@ FitbitはAPIの各HTTP要求前、書き込み開始前、COMMIT前にDB上のle
 ## 監視とLogging
 
 native警報は日次Job失敗、Pub/Sub滞留、receiver/worker ERRORの3件。
-Pub/Sub滞留はFitbitがpullで75分超・pushで15分超、OwnTracksが15分超の最古未ackが5分継続した場合に発報する。
+Pub/Sub滞留はFitbitが75分超、OwnTracksが15分超の最古未ackが5分継続した場合に発報する。
 Fitbit workerの成功ログは通知受信時刻・commit時刻・反映までの秒数を含み、Rawやtokenは含めない。
 OwnTracksは`base.owntracks_location`の`received_at`と`loaded_at`から保存後の取込時間を確認する。
 Healthchecksはdaily 1件、Period 24h＋Grace 24h。新しいeventがないことだけを障害とみなさない。
@@ -171,10 +184,33 @@ jsonPayload.summary.valid=true
 
 ## 停止と復旧
 
-push配信と日次Schedulerを止め、実行中worker/Jobとleaseを確認する。
+障害時は、対象の処理に対応する次の入口から確認する。
+
+| 対象 | 最初に確認する情報 | 復旧判断 |
+|---|---|---|
+| 日次処理 | `ops.job_run`の最新日次行の`status`・`details.failed_stage` | 失敗段階のログを確認し、原因解消後に日次Jobを再実行する |
+| Fitbitの通常取込 | `fitbit_batch`ログの`failed`・`deferred`・`acked`とPub/Sub滞留 | 未ACKは次回バッチで再試行する。7日の保持期限を越えた欠測は期間指定同期する |
+| OwnTracks・Screen TimeのRaw取込 | `ops.ingestion_metadata`の失敗行 | Rawを残して原因を修正し、Loaderを再実行する |
+| Macの収集停止 | `ops.heartbeat`のScreen Time両streamの成功時刻 | MacのCollectorを確認する。日次Jobの成功でMacの成功時刻は更新されない |
+
+日次の照合結果は同じ行の`details.owntracks`、古いFitbit欠測は`details.manual_repair_required`に含む。
+LoaderはRaw単位の台帳とログを使い、別のジョブ履歴は作らない。
+Fitbitの手動同期もJSON出力と終了コードで確認し、`ops.job_run`は日次結果の確認に使う。
+`ops.job_lock`は排他制御、Fitbitのcoverageと削除記録は取得順位の保護に使う内部状態であり、成功・失敗の判定元には使わない。
+競合が続く場合だけleaseの所有者と有効期限を確認し、実行中処理の終了を待つ。
+
+```sql
+SELECT run_id, status, started_at, completed_at, details
+FROM ops.job_run
+WHERE job_name IN ('daily-reconciliation', 'daily-reconciliation-west')
+ORDER BY started_at DESC
+LIMIT 1;
+```
+
+Fitbitバッチ・OwnTracksのpush配信・日次Schedulerを止め、実行中worker/Jobとleaseを確認する。
 異常終了で残ったleaseはFitbit workerが10分、OwnTracks worker・日次・手動処理が125分の期限後に再試行する。
 日次補完の直近2完了日より前のFitbitの空白は[Fitbitの期間指定補修](../sources/fitbit/operations.md)で補う。
-DB成功と外部pingが一致しない場合はrun_id・log・監査を照合する。外部送信失敗で先に確定した取込記録は巻き戻らない。
+外部ping失敗は日次履歴の`failed_stage="heartbeat"`に記録する。先に確定した取込記録は巻き戻らない。
 
 Screen TimeのDB復元はイベント・補助状態・台帳を同じ時点へ戻す。Rawは各元ファイルの最新版だけを保存するため、
 更新前の再解析やRawだけからの全履歴復元を保証しない。復元元のDB・backupは検証が終わるまで保持する。

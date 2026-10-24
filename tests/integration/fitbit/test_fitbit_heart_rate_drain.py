@@ -1,7 +1,5 @@
-import base64
 import json
 from contextlib import closing
-from dataclasses import asdict
 from datetime import timedelta
 
 import pytest
@@ -13,22 +11,19 @@ from personal_data_platform.sources.fitbit.models import (
     Window,
 )
 from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+from tests.integration.fitbit.helpers import drain_notification
 from tests.integration.fitbit.test_fitbit_acquisition import NOW, direct_setup
-from tests.integration.fitbit.test_fitbit_push import SUBSCRIPTION, push_client
 from tests.unit.fitbit.test_fitbit_api import FakeTransport, client, rollup
+from tests.unit.fitbit.test_fitbit_batch import Subscriber
 
 
-def envelope(window, *, mode="bounded_minutes"):
-    notice = Notification("heart-notice", "self", (window,), NOW, acquisition_mode=mode)
-    body = json.dumps({"schema_version": 1, **asdict(notice)}, default=str).encode()
-    return {
-        "message": {"data": base64.b64encode(body).decode(), "messageId": "heart-message"},
-        "subscription": SUBSCRIPTION,
-    }
+def notice(window, *, mode="bounded_minutes"):
+    return Notification("heart-notice", "self", (window,), NOW, acquisition_mode=mode)
 
 
 def test_waits_for_tail_before_api_and_warehouse_and_retry_completes(tmp_path, caplog):
     runner, _, factory = direct_setup(tmp_path)
+    subscriber = Subscriber()
     now = [NOW + timedelta(minutes=1, seconds=30)]
     runner.clock = lambda: now[0]
     transport = FakeTransport(
@@ -42,15 +37,15 @@ def test_waits_for_tail_before_api_and_warehouse_and_retry_completes(tmp_path, c
         return factory()
 
     runner.warehouse_factory = tracked_factory
-    push = push_client(runner)
     window = Window("heart-rate", NOW, NOW + timedelta(minutes=2))
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
-    assert push.post("/notifications/fitbit", json=envelope(window)).status_code == 503
-    assert opened == []
+    assert not drain_notification(runner, notice(window), subscriber=subscriber).ok
+    assert opened == [] and not subscriber.acks
     assert transport.calls == []
     now[0] = NOW + timedelta(minutes=2, seconds=1)
-    assert push.post("/notifications/fitbit", json=envelope(window)).status_code == 204
+    assert drain_notification(runner, notice(window), subscriber=subscriber).ok
     assert len(opened) == len(transport.calls) == 1
+    assert subscriber.acks == ["secret-ack-notice"]
     assert json.loads(transport.calls[0][3])["range"] == {
         "startTime": "2026-10-09T15:00:00Z",
         "endTime": "2026-10-09T15:02:00Z",
@@ -58,16 +53,20 @@ def test_waits_for_tail_before_api_and_warehouse_and_retry_completes(tmp_path, c
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 2
     scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
-    assert [r.status for r in scopes] == ["deferred", "succeeded"]
-    assert scopes[0].summary["submitted_rows"] is None
+    assert [r.status for r in scopes] == ["succeeded"]
     assert scopes[0].summary["acquisition_mode"] == "bounded_minutes"
-    attempts = [r.summary for r in caplog.records if getattr(r, "event", None) == "fitbit_push"]
+    attempts = [
+        r.summary
+        for r in caplog.records
+        if getattr(r, "event", None) == "fitbit_notification_processed"
+    ]
     assert attempts[0]["pubsub_message_id"] == attempts[1]["pubsub_message_id"]
     assert attempts[0]["attempt_id"] != attempts[1]["attempt_id"]
 
 
 def test_shortened_api_range_is_not_committed_or_acknowledged(tmp_path, caplog):
     runner, _, factory = direct_setup(tmp_path)
+    subscriber = Subscriber()
     runner.clock = lambda: NOW + timedelta(minutes=3)
     runner.client = client(
         FakeTransport([{"rollupDataPoints": [rollup(NOW)]}]),
@@ -75,9 +74,8 @@ def test_shortened_api_range_is_not_committed_or_acknowledged(tmp_path, caplog):
     )
     window = Window("heart-rate", NOW, NOW + timedelta(minutes=2))
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
-    assert (
-        push_client(runner).post("/notifications/fitbit", json=envelope(window)).status_code == 503
-    )
+    assert not drain_notification(runner, notice(window), subscriber=subscriber).ok
+    assert not subscriber.acks
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 0
         assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 0
@@ -90,6 +88,7 @@ def test_shortened_api_range_is_not_committed_or_acknowledged(tmp_path, caplog):
 @pytest.mark.parametrize("state", ["changed", "empty", "stale"])
 def test_replaces_only_target_minutes_and_preserves_newer_data(tmp_path, caplog, state):
     runner, _, factory = direct_setup(tmp_path)
+    subscriber = Subscriber()
     wide = Window("heart-rate", NOW, NOW + timedelta(minutes=3))
     rows = tuple(
         HeartRateMinute(NOW + timedelta(minutes=i), NOW + timedelta(minutes=i + 1), 60, 50, 70)
@@ -115,9 +114,7 @@ def test_replaces_only_target_minutes_and_preserves_newer_data(tmp_path, caplog,
     runner.client = client(transport, clock=lambda: fetched)
     window = Window("heart-rate", NOW + timedelta(minutes=1), NOW + timedelta(minutes=2))
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
-    assert (
-        push_client(runner).post("/notifications/fitbit", json=envelope(window)).status_code == 204
-    )
+    assert drain_notification(runner, notice(window), subscriber=subscriber).ok
     expected = (
         [(NOW, 60), (NOW + timedelta(minutes=2), 60)]
         if state == "empty"
@@ -151,15 +148,11 @@ def test_replaces_only_target_minutes_and_preserves_newer_data(tmp_path, caplog,
 
 def test_legacy_notification_still_expands_to_tokyo_day(tmp_path):
     runner, _, _ = direct_setup(tmp_path)
+    subscriber = Subscriber()
     transport = FakeTransport([{"rollupDataPoints": [rollup(NOW + timedelta(minutes=10))]}])
     runner.client = client(transport, clock=lambda: NOW + timedelta(hours=1))
     window = Window("heart-rate", NOW + timedelta(minutes=10), NOW + timedelta(minutes=11))
-    assert (
-        push_client(runner)
-        .post("/notifications/fitbit", json=envelope(window, mode="legacy"))
-        .status_code
-        == 204
-    )
+    assert drain_notification(runner, notice(window, mode="legacy"), subscriber=subscriber).ok
     assert json.loads(transport.calls[0][3])["range"] == {
         "startTime": "2026-10-09T15:00:00Z",
         "endTime": "2026-10-09T16:00:00Z",
@@ -169,6 +162,7 @@ def test_legacy_notification_still_expands_to_tokyo_day(tmp_path):
 @pytest.mark.parametrize("failure", ["api", "write"])
 def test_api_or_write_failure_does_not_commit(tmp_path, monkeypatch, caplog, failure):
     runner, _, factory = direct_setup(tmp_path)
+    subscriber = Subscriber()
     response = (
         TimeoutError("unavailable") if failure == "api" else {"rollupDataPoints": [rollup(NOW)]}
     )
@@ -183,9 +177,8 @@ def test_api_or_write_failure_does_not_commit(tmp_path, monkeypatch, caplog, fai
         monkeypatch.setattr(FitbitMinuteBatch, "write_snapshot", fail_after_write)
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
     window = Window("heart-rate", NOW, NOW + timedelta(minutes=1))
-    assert (
-        push_client(runner).post("/notifications/fitbit", json=envelope(window)).status_code == 503
-    )
+    assert not drain_notification(runner, notice(window), subscriber=subscriber).ok
+    assert not subscriber.acks
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 0
         assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 0
@@ -197,6 +190,7 @@ def test_api_or_write_failure_does_not_commit(tmp_path, monkeypatch, caplog, fai
 
 def test_uncertain_commit_retries_and_redelivery_does_not_duplicate_minutes(tmp_path, caplog):
     runner, _, factory = direct_setup(tmp_path)
+    subscriber = Subscriber()
     runner.client = client(
         FakeTransport([{"rollupDataPoints": [rollup(NOW)]}] * 2),
         clock=lambda: NOW + timedelta(minutes=2),
@@ -227,9 +221,9 @@ def test_uncertain_commit_retries_and_redelivery_does_not_duplicate_minutes(tmp_
     runner.warehouse_factory = uncertain_factory
     window = Window("heart-rate", NOW, NOW + timedelta(minutes=1))
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
-    push = push_client(runner)
-    assert push.post("/notifications/fitbit", json=envelope(window)).status_code == 503
+    assert not drain_notification(runner, notice(window), subscriber=subscriber).ok
     scope = next(r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition")
+    assert not subscriber.acks
     assert scope.status == "unknown"
     assert scope.summary["submitted_rows"] is None
     with closing(factory()) as warehouse:
@@ -238,6 +232,6 @@ def test_uncertain_commit_retries_and_redelivery_does_not_duplicate_minutes(tmp_
             "UPDATE ops.job_lock SET expires_at=current_timestamp - INTERVAL '1 second'"
         )
     runner.warehouse_factory = factory
-    assert push.post("/notifications/fitbit", json=envelope(window)).status_code == 204
+    assert drain_notification(runner, notice(window), subscriber=subscriber).ok
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 1

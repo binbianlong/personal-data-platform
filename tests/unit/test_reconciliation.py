@@ -97,33 +97,17 @@ class _Warehouse:
         loaded: set[str],
         *,
         failed: int = 0,
-        loading: int = 0,
         relations: set[str] | None = None,
         created_at: dict[str, datetime | None] | None = None,
     ) -> None:
         self.states = {key: IngestionState(key, "succeeded") for key in loaded}
-        for status, count in (("failed", failed), ("loading", loading)):
-            self.states.update(
-                {
-                    _key(f"{status}-{index}"): IngestionState(_key(f"{status}-{index}"), status)
-                    for index in range(count)
-                }
-            )
+        self.states.update(
+            {
+                _key(f"failed-{index}"): IngestionState(_key(f"failed-{index}"), "failed")
+                for index in range(failed)
+            }
+        )
         self.relations = relations if relations is not None else set(REQUIRED_RELATIONS)
-        self.reconciliations: list[object] = []
-        self.heartbeats: list[tuple[str, str, dict[str, object]]] = []
-        self.connection = self
-        self.recorded_statuses: list[str] = []
-
-    def execute(self, sql: str) -> None:
-        if sql == "BEGIN TRANSACTION":
-            self._saved_heartbeats = list(self.heartbeats)
-            self._saved_reconciliations = list(self.reconciliations)
-            self._saved_states = dict(self.states)
-        elif sql == "ROLLBACK":
-            self.heartbeats = self._saved_heartbeats
-            self.reconciliations = self._saved_reconciliations
-            self.states = self._saved_states
 
     def succeeded_keys_for(
         self, raw_objects: list[SimpleNamespace], *, parser_version: str | None = None
@@ -149,42 +133,27 @@ class _Warehouse:
     def query_value(self, sql: str) -> int:
         return 0
 
-    def record_reconciliation(self, result: object) -> None:
-        self.recorded_statuses.append(result.status)
-        self.reconciliations = [row for row in self.reconciliations if row.run_id != result.run_id]
-        self.reconciliations.append(result)
 
-    def publish_heartbeat(self, monitor_name: str, run_id: str, details: dict[str, object]) -> None:
-        self.heartbeats.append((monitor_name, run_id, details))
-
-
-def test_success_publishes_external_and_warehouse_heartbeat() -> None:
+def test_success_returns_audit_without_writing_another_outcome() -> None:
     warehouse = _Warehouse({_key("one"), _key("two")})
-    published: list[dict[str, object]] = []
-
     result = run_reconciliation(
         _Repository([_key("one"), _key("two")]),
         warehouse,  # type: ignore[arg-type]
-        heartbeat=published.append,
         repair_missing=False,
         now=NOW,
     )
 
     assert result.ok
-    assert len(published) == 1
-    assert len(warehouse.heartbeats) == 1
-    assert warehouse.reconciliations == [result]
-    assert warehouse.recorded_statuses == ["running", "succeeded"]
+    assert result.raw_object_count == result.loaded_object_count == 2
+    assert set(warehouse.states) == {_key("one"), _key("two")}
 
 
-def test_parity_failure_never_publishes_heartbeat() -> None:
+def test_parity_failure_reports_missing_failed_and_orphaned_objects() -> None:
     warehouse = _Warehouse({_key("one"), _key("orphan")}, failed=1)
-    published: list[dict[str, object]] = []
 
     result = run_reconciliation(
         _Repository([_key("one"), _key("missing")]),
         warehouse,  # type: ignore[arg-type]
-        heartbeat=published.append,
         repair_missing=False,
         now=NOW,
     )
@@ -193,45 +162,20 @@ def test_parity_failure_never_publishes_heartbeat() -> None:
     assert result.missing_object_count == 1
     assert result.orphaned_loaded_object_count == 1
     assert result.failed_object_count == 1
-    assert published == []
-    assert warehouse.heartbeats == []
-
-
-def test_external_heartbeat_failure_marks_run_failed() -> None:
-    warehouse = _Warehouse({_key("one")})
-
-    def fail(_: dict[str, object]) -> None:
-        raise RuntimeError("unreachable")
-
-    result = run_reconciliation(
-        _Repository([_key("one")]),
-        warehouse,  # type: ignore[arg-type]
-        heartbeat=fail,
-        repair_missing=False,
-        now=NOW,
-    )
-
-    assert not result.ok
-    assert result.details["heartbeat_error"] == "unreachable"
-    assert warehouse.heartbeats == []
-    assert warehouse.recorded_statuses == ["running", "failed"]
 
 
 def test_stale_collector_scan_blocks_success() -> None:
     warehouse = _Warehouse({_key("one")})
-    published: list[dict[str, object]] = []
 
     result = run_reconciliation(
         _Repository([_key("one")], receipt_at=NOW - timedelta(hours=49)),
         warehouse,  # type: ignore[arg-type]
-        heartbeat=published.append,
         repair_missing=False,
         now=NOW,
     )
 
     assert not result.ok
     assert result.stale_collector_count == 1
-    assert published == []
 
 
 def test_missing_raw_blocks_success() -> None:
@@ -242,7 +186,6 @@ def test_missing_raw_blocks_success() -> None:
     result = run_reconciliation(
         _Repository([]),
         warehouse,  # type: ignore[arg-type]
-        heartbeat=lambda _: None,
         repair_missing=False,
         now=NOW,
     )
@@ -252,18 +195,16 @@ def test_missing_raw_blocks_success() -> None:
     assert result.details["missing_raw_object_count"] == 1
 
 
-@pytest.mark.parametrize("status", ["failed", "loading"])
-def test_uningested_raw_that_disappears_blocks_success(status: str) -> None:
+def test_uningested_raw_that_disappears_blocks_success() -> None:
     warehouse = _Warehouse(set())
     warehouse.states[_key("unrecoverable")] = IngestionState(
         object_key=_key("unrecoverable"),
-        status=status,
+        status="failed",
     )
 
     result = run_reconciliation(
         _Repository([]),
         warehouse,  # type: ignore[arg-type]
-        heartbeat=lambda _: None,
         repair_missing=False,
         now=NOW,
     )
@@ -279,7 +220,6 @@ def test_old_raw_remains_valid_without_a_retention_limit() -> None:
     result = run_reconciliation(
         _Repository([_key("overdue")], created_at={_key("overdue"): created_at}),
         warehouse,  # type: ignore[arg-type]
-        heartbeat=lambda _: None,
         repair_missing=False,
         now=NOW,
     )
@@ -292,7 +232,6 @@ def test_missing_device_manifest_blocks_success() -> None:
     result = run_reconciliation(
         _Repository([], manifest_at=None),
         _Warehouse(set()),  # type: ignore[arg-type]
-        heartbeat=lambda _: None,
         repair_missing=False,
         now=NOW,
     )
@@ -311,7 +250,6 @@ def test_manifest_device_without_a_receipt_blocks_success() -> None:
     result = run_reconciliation(
         Repository([_key("one")]),
         _Warehouse({_key("one")}),  # type: ignore[arg-type]
-        heartbeat=lambda _: None,
         repair_missing=False,
         now=NOW,
     )
@@ -331,7 +269,6 @@ def test_decommissioned_device_raw_does_not_require_a_fresh_receipt() -> None:
     result = run_reconciliation(
         Repository([_key("retained-from-decommissioned-device")]),
         _Warehouse({_key("retained-from-decommissioned-device")}),  # type: ignore[arg-type]
-        heartbeat=lambda _: None,
         repair_missing=False,
         now=NOW,
     )
@@ -344,7 +281,6 @@ def test_decommissioned_device_raw_does_not_require_a_fresh_receipt() -> None:
 def test_repair_rechecks_objects_uploaded_after_initial_inventory(monkeypatch) -> None:
     repository = _Repository([_key("original")])
     warehouse = _Warehouse(set())
-    published: list[dict[str, object]] = []
 
     def repair(repository, warehouse, *, source, prefix):
         assert (source.source_id, source.stream) == ("screen_time", "app-in-focus")
@@ -356,60 +292,11 @@ def test_repair_rechecks_objects_uploaded_after_initial_inventory(monkeypatch) -
 
     monkeypatch.setattr("personal_data_platform.reconciliation.job.run_loader", repair)
 
-    result = run_reconciliation(repository, warehouse, heartbeat=published.append, now=NOW)
+    result = run_reconciliation(repository, warehouse, now=NOW)
 
     assert result.ok
     assert result.raw_object_count == result.loaded_object_count == 2
     assert result.missing_object_count == result.orphaned_loaded_object_count == 0
-    assert len(published) == 1
-
-
-def test_external_heartbeat_follows_pending_audit_and_warehouse_write() -> None:
-    warehouse = _Warehouse({_key("one")})
-
-    def publish(_: dict[str, object]) -> None:
-        assert warehouse.recorded_statuses == ["running"]
-        assert len(warehouse.heartbeats) == 1
-
-    result = run_reconciliation(_Repository([_key("one")]), warehouse, heartbeat=publish, now=NOW)
-
-    assert result.ok
-
-
-def test_audit_write_failure_blocks_external_heartbeat(monkeypatch) -> None:
-    warehouse = _Warehouse({_key("one")})
-    published: list[dict[str, object]] = []
-
-    def fail(_):
-        raise RuntimeError("audit write unavailable")
-
-    monkeypatch.setattr(warehouse, "record_reconciliation", fail)
-    with pytest.raises(RuntimeError, match="audit write unavailable"):
-        run_reconciliation(
-            _Repository([_key("one")]), warehouse, heartbeat=published.append, now=NOW
-        )
-
-    assert published == []
-    assert warehouse.heartbeats == []
-
-
-def test_warehouse_heartbeat_failure_blocks_external_heartbeat(monkeypatch) -> None:
-    warehouse = _Warehouse({_key("one")})
-    published: list[dict[str, object]] = []
-
-    def fail(*_):
-        raise RuntimeError("warehouse write unavailable")
-
-    monkeypatch.setattr(warehouse, "publish_heartbeat", fail)
-    result = run_reconciliation(
-        _Repository([_key("one")]), warehouse, heartbeat=published.append, now=NOW
-    )
-
-    assert not result.ok
-    assert result.details["warehouse_heartbeat_error"] == "warehouse write unavailable"
-    assert warehouse.reconciliations == [result]
-    assert warehouse.heartbeats == []
-    assert published == []
 
 
 def test_reconciliation_rejects_partial_inventory_before_auditing_warehouse():
@@ -420,5 +307,4 @@ def test_reconciliation_rejects_partial_inventory_before_auditing_warehouse():
             _Warehouse(set()),
             source=source,
             prefix=source.raw_prefixes[0] + DEVICE_KEY + "/",
-            heartbeat=lambda _: None,
         )

@@ -130,11 +130,11 @@ def test_unlimited_raw_audit_repairs_missing_load_and_detects_deleted_raw(monkey
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate()
     try:
-        result = run_reconciliation(store, warehouse, source=source, heartbeat=lambda _: None)
+        result = run_reconciliation(store, warehouse, source=source)
         assert result.ok
         assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 1
         store.objects.clear()
-        result = run_reconciliation(store, warehouse, source=source, heartbeat=lambda _: None)
+        result = run_reconciliation(store, warehouse, source=source)
         assert not result.ok
         assert result.details["missing_raw_object_count"] == 1
     finally:

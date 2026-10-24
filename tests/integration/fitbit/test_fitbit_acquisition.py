@@ -8,6 +8,7 @@ from personal_data_platform.sources.fitbit.acquisition import AcquisitionRunner
 from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window
 from personal_data_platform.sources.fitbit.writer import FitbitBatch
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConnectionError
+from tests.integration.fitbit.helpers import drain_notification
 
 NOW = datetime(2026, 10, 9, 15, tzinfo=UTC)
 WINDOW = Window("steps", NOW - timedelta(days=1), NOW)
@@ -309,7 +310,7 @@ def test_schema_two_steps_acquires_only_the_notified_provider_date(tmp_path):
         NOW,
         acquisition_mode="bounded_steps",
     )
-    assert runner.process_notification(notice).ok
+    assert drain_notification(runner, notice).ok
     assert api.calls == list(notice.windows)
 
 
@@ -318,8 +319,8 @@ def test_bounded_steps_partial_does_not_expand_to_a_day(tmp_path):
 
     runner, api, factory = direct_setup(tmp_path, states=(None,))
     window = Window("steps", NOW - timedelta(minutes=3), NOW - timedelta(minutes=1))
-    assert runner.process_notification(
-        Notification("partial", "self", (window,), NOW, acquisition_mode="bounded_steps")
+    assert drain_notification(
+        runner, Notification("partial", "self", (window,), NOW, acquisition_mode="bounded_steps")
     ).ok
     assert api.calls == [window]
 
@@ -331,11 +332,11 @@ def test_bounded_steps_rejects_shortened_acquisition_without_writes(tmp_path):
     window = Window("steps", NOW - timedelta(minutes=3), NOW - timedelta(minutes=1))
     shorter = Window("steps", window.start, window.end - timedelta(minutes=1))
     api.fetch_snapshot = lambda requested, subject_key: Snapshot(subject_key, shorter, NOW, ())
-    result = runner.process_notification(
-        Notification("partial", "self", (window,), NOW, acquisition_mode="bounded_steps")
+    result = drain_notification(
+        runner, Notification("partial", "self", (window,), NOW, acquisition_mode="bounded_steps")
     )
     assert not result.ok
-    assert result.deferred_scopes == 1
+    assert result.deferred == 1
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 0
 
@@ -357,17 +358,6 @@ def test_borrowed_notification_uses_existing_session_and_preserves_owner(tmp_pat
         assert result.ok and api.calls == [WINDOW]
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "batch"
         assert warehouse.connection_usable
-
-
-def test_notification_session_arguments_must_be_paired(tmp_path):
-    from personal_data_platform.sources.fitbit.models import Notification
-
-    runner, _, factory = direct_setup(tmp_path)
-    with closing(factory()) as warehouse:
-        with pytest.raises(ValueError, match="paired"):
-            runner.process_notification(
-                Notification("borrowed", "self", (WINDOW,), NOW), warehouse=warehouse
-            )
 
 
 def test_acquisition_timer_is_joined_before_shared_connection_reuse(tmp_path, monkeypatch):

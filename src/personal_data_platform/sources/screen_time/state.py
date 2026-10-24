@@ -29,8 +29,7 @@ CREATE TABLE IF NOT EXISTS segment_observation (
     status TEXT NOT NULL CHECK (status IN ('pending', 'uploaded')),
     uploaded_at TEXT,
     storage_created_at TEXT,
-    storage_generation INTEGER NOT NULL DEFAULT 1,
-    retention_started_at TEXT
+    storage_generation INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS segment_observation_latest
     ON segment_observation (device_key, stream, segment_key, id DESC);
@@ -71,6 +70,14 @@ class CollectorState:
         self.path.chmod(0o600)
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(segment_observation)")
+            }
+            if "retention_started_at" in columns:
+                connection.execute(
+                    "ALTER TABLE segment_observation DROP COLUMN retention_started_at"
+                )
 
     def prepare(
         self,

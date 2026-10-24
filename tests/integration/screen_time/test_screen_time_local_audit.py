@@ -37,14 +37,10 @@ def test_local_audit_accepts_compacted_history_but_requires_current_raw(tmp_path
             repo, wh, tuple(repo.list_raw("raw/screen_time/v2/")), source=source
         ).ok
         state.mark_loaded(pending.identity.object_key, NOW)
-    assert run_reconciliation(
-        repo, wh, source=source, heartbeat=lambda _: None, now=NOW, repair_missing=False
-    ).ok
+    assert run_reconciliation(repo, wh, source=source, now=NOW, repair_missing=False).ok
     with state._connect() as db:
         db.execute("DELETE FROM segment_observation")
-    assert not run_reconciliation(
-        repo, wh, source=source, heartbeat=lambda _: None, now=NOW, repair_missing=False
-    ).ok
+    assert not run_reconciliation(repo, wh, source=source, now=NOW, repair_missing=False).ok
     wh.close()
 
 

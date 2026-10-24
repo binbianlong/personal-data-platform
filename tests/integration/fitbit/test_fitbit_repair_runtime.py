@@ -72,6 +72,8 @@ def test_manual_retry_records_first_unfinished_day_and_preserves_committed_data(
     warehouse = manual_env.warehouse()
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 2
     assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") > 0
+    assert warehouse.query_value("SELECT count(*) FROM ops.job_run") == 0
+    assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     warehouse.close()
 
     monkeypatch.setattr(manual_env.api, "fetch_snapshot", fetch)
@@ -80,6 +82,8 @@ def test_manual_retry_records_first_unfinished_day_and_preserves_committed_data(
     assert retry["completed_scopes"] == 3 and retry["first_incomplete"] is None
     warehouse = manual_env.warehouse()
     assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 3
+    assert warehouse.query_value("SELECT count(*) FROM ops.job_run") == 0
+    assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     warehouse.close()
     assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 0
     warehouse = manual_env.warehouse()
@@ -102,6 +106,7 @@ def test_manual_old_narrow_range_keeps_exact_bounds(manual_env, capsys):
         (start, end)
     ]
     assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+    assert warehouse.query_value("SELECT count(*) FROM ops.job_run") == 0
     warehouse.close()
 
 

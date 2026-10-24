@@ -8,23 +8,13 @@ variable "fitbit_subject_key" {
   }
 }
 
-variable "fitbit_delivery_mode" {
-  description = "Fitbit notification delivery: push for immediate delivery or pull for scheduled batches."
-  type        = string
-  default     = "push"
-  validation {
-    condition     = contains(["push", "pull"], var.fitbit_delivery_mode)
-    error_message = "fitbit_delivery_mode must be push or pull."
-  }
-}
-
 resource "google_cloud_scheduler_job" "fitbit_batch" {
   project          = var.project_id
   region           = var.region
   name             = "pdp-fitbit-batch-west"
   schedule         = "0 * * * *"
   time_zone        = var.scheduler_time_zone
-  paused           = !var.schedulers_enabled || var.fitbit_delivery_mode != "pull"
+  paused           = !var.schedulers_enabled
   attempt_deadline = "540s"
   retry_config { retry_count = 0 }
   http_target {

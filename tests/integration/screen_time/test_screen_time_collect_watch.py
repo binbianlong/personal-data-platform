@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -39,6 +40,8 @@ def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatc
         monkeypatch.setenv(name, value)
     warehouse_config = WarehouseConfig(str(tmp_path / "warehouse.duckdb"))
     monkeypatch.setattr(runtime, "warehouse_config", lambda: warehouse_config)
+    with closing(Warehouse(connect(warehouse_config))) as warehouse:
+        warehouse.migrate()
 
     connections = []
     migrations = []

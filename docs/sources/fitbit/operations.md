@@ -8,7 +8,7 @@ Jobの実行・監視・停止、DB更新、共通資格情報は[Platform運用
 | --- | --- |
 | `PDP_FITBIT_WEBHOOK_CONFIG` | `authorization`・`health_user_id`のJSON。receiverだけに渡す |
 | `PDP_FITBIT_OAUTH_CONFIG` | `client_id`・`client_secret`・`refresh_token`・`health_user_id`のJSON。処理Jobに渡す |
-| `PDP_FITBIT_PUBSUB_TOPIC` / `PDP_FITBIT_PUBSUB_SUBSCRIPTION` | receiverの発行先topic名 / workerが受理するsubscription名 |
+| `PDP_FITBIT_PUBSUB_TOPIC` / `PDP_FITBIT_PUBSUB_SUBSCRIPTION` | receiverの発行先topic名 / workerがpullするsubscription名 |
 | `PDP_FITBIT_PUBSUB_ENDPOINT` | `pubsub.us-west1.rep.googleapis.com` |
 | `PDP_FITBIT_SUBJECT_KEY` | 安定した疑似subject key。receiverと処理Jobで一致させる |
 | `PDP_FITBIT_PROCESSING_PAUSED` | `true`で取得処理を保留する。通常は`false` |
@@ -24,7 +24,8 @@ Cloud Loggingの`pdp-west` bucketに30日保持する。通知の主要項目と
 | --- | --- |
 | `fitbit_notification_received` | 元の区間ごとのUTC/civil開始・終了、種類、操作、`record_id`、受信時刻、区間番号 |
 | `fitbit_notification_publish` | 統合・分割後のキュー範囲、元通知IDの対応、発行結果、`notification_id`、`pubsub_message_id` |
-| `fitbit_push` | workerの実行結果、時刻、完了・失敗・保留の件数、実行ごとの`attempt_id` |
+| `fitbit_batch` | バッチ全体の結果、受信・統合・完了・失敗・保留・ACK件数 |
+| `fitbit_notification_processed` | 元通知ごとの処理結果、`batch_id`と取得単位の対応 |
 | `fitbit_acquisition` | API要求範囲、完了した実取得範囲、取得行数、INSERT投入行数、範囲置換の結果 |
 
 `delivery_id`はHTTP受信ごと、`source_notification_id`は元通知ごとに変わる。
@@ -110,7 +111,7 @@ jsonPayload.summary.acquisition_mode="bounded_steps"
 ## CLIと再試行
 
 取得・成功応答の条件は[取得仕様](acquisition.md#webhookとpubsub)、範囲置換は[データモデル](data-model.md)に従う。
-古い成功だけで新通知をackせず、新しくAPI取得してcommitを確認する。workerの保留は503として再配信を受ける。
+古い成功だけで新通知をackせず、新しくAPI取得してcommitを確認する。保留した通知は未ACKのまま残し、次回以降のバッチで再試行する。
 
 ```bash
 pdp fitbit sync --from YYYY-MM-DD --to YYYY-MM-DD
@@ -118,12 +119,13 @@ pdp fitbit sync --from YYYY-MM-DD --to YYYY-MM-DD
 
 直近2完了日に収まらない空白や広い期間の補修は明示的な`--from`/`--to`で行う。終了日は排他的で、`--resume-id`は提供しない。
 途中終了時に出る最初の未完了日・種別から再実行し、日次の2完了日だけで過去の空白を埋めたと判断しない。
+手動同期は`ops.job_run`に履歴を保存せず、標準出力のJSON・終了コードと取得ログで結果を確認する。
 手動の物理時刻範囲を日全体へ拡大せず、睡眠・日次指標はproviderのcivil dateを使う。
 
 ## 停止と復旧
 
 Schedulerの停止とlease確認は[Platform運用](../../platform/operations.md)に従う。receiverを止めなければ通知は7日保持される。
-通常のAPI・DB失敗はPub/Subの再配信と日次の2完了日再照合で再試行する。
+通常のAPI・DB失敗は次回以降のバッチと日次の2完了日再照合で再試行する。
 不正通知は成功応答せず、原因を修正するか、期間指定同期で補修する。
 日次補完の直近2完了日より前の空白は期間を確認して上記の期間指定取得を行う。
 本番DBを空にせず、`MOTHERDUCK_DATABASE`を独立したscratch DBへ向けて期間指定同期とdbtを実行し比較する。
@@ -148,16 +150,15 @@ schema 1だけの旧worker・旧Jobへ戻さない。
 
 ## 60分バッチの確認
 
-`fitbit_delivery_mode=pull`ではCloud Scheduler `pdp-fitbit-batch-west`が既存workerの
+Cloud Scheduler `pdp-fitbit-batch-west`が既存workerの
 `POST /notifications/fitbit/drain`を毎時00分にOIDC認証で起動する。日次補完は直近2完了日を対象とする。
-通常の追加待機は0〜60分と処理時間。Fitbitの滞留警報はpullで75分超・pushで15分超が5分継続した場合に発報する。
-30分運用へ戻す場合は、このSchedulerを毎時00・30分、Fitbitの滞留警報を45分超へ戻す。
-切替と切り戻しは[Runtime Terraform](../../../infra/terraform/README.md#fitbitの配信切替)を参照する。
+通常の追加待機は0〜60分と処理時間。Fitbitの滞留警報は75分超が5分継続した場合に発報する。
+設定は[Runtime Terraform](../../../infra/terraform/README.md)を参照する。
 
 `fitbit_batch`のsummaryは`received`（pullした件数）、`grouped`（統合後の取得単位）、
 `completed`・`failed`・`deferred`、`acked`（ACK応答を確認した元メッセージ数）、
 `session_opens`、`elapsed_seconds`を持つ。`failed`は不正通知・通信・後始末の失敗も含み、単位件数だけを意味しない。
-元通知の`fitbit_push`は`batch_id`と`group_id`／`group_ids`を持ち、
+元通知の`fitbit_notification_processed`は`batch_id`と`group_id`／`group_ids`を持ち、
 取得ログの`notification_id`へ対応する。`attempt_id`はバッチ実行ごとに変わる。
 COMMIT後のACKが不明なら`retry`となるため、`completed`と`acked`は一致しない場合がある。
 ACK ID、通知JSON全体、健康値、資格情報は記録しない。

@@ -272,3 +272,280 @@ def test_owntracks_battery_column_removal_preserves_location_and_provenance(ware
         row[0] for row in warehouse.query_rows("DESCRIBE base.owntracks_location")
     }
     assert warehouse.query_rows("SELECT * FROM base.owntracks_location") == before
+
+
+def test_audit_cleanup_preserves_operational_and_collector_state(warehouse, tmp_path):
+    for migration in DEFAULT_MIGRATIONS.glob("*.sql"):
+        if migration.name < "007_":
+            shutil.copyfile(migration, tmp_path / migration.name)
+    warehouse.migrate(tmp_path)
+    raw = _raw()
+    warehouse.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
+    warehouse.begin_job("daily-reconciliation", "daily-run")
+    warehouse.finish_job(
+        "daily-run", succeeded=True, details={"last_completed_target_date": "2026-10-23"}
+    )
+    for monitor in ("daily", "screen_time_reconciliation", "screen_time_app_usage_reconciliation"):
+        warehouse.publish_heartbeat(monitor, "previous", {"scan_completed_at": "2026-10-24"})
+    warehouse.connection.execute(
+        "INSERT INTO ops.reconciliation_run (run_id,status,started_at) "
+        "VALUES ('old-audit','succeeded',current_timestamp)"
+    )
+    tables = ("ops.ingestion_metadata", "ops.job_run", "ops.job_lock", "base.screen_time_event")
+    before = {name: warehouse.query_rows(f"SELECT * FROM {name}") for name in tables}
+    collectors = warehouse.query_rows(
+        "SELECT * FROM ops.heartbeat WHERE monitor_name <> 'daily' ORDER BY monitor_name"
+    )
+
+    shutil.copyfile(
+        DEFAULT_MIGRATIONS / "007_operational_state.sql",
+        tmp_path / "007_operational_state.sql",
+    )
+    warehouse.migrate(tmp_path)
+
+    assert {name: warehouse.query_rows(f"SELECT * FROM {name}") for name in tables} == before
+    assert warehouse.query_rows("SELECT * FROM ops.heartbeat ORDER BY monitor_name") == collectors
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema='ops' "
+            "AND table_name='reconciliation_run'"
+        )
+        == 0
+    )
+    warehouse.migrate(tmp_path)
+    assert warehouse.query_rows("SELECT * FROM ops.heartbeat ORDER BY monitor_name") == collectors
+
+
+def test_terminal_receipt_migration_preserves_success_and_makes_interrupted_load_retryable(
+    warehouse, tmp_path
+):
+    for migration in DEFAULT_MIGRATIONS.glob("*.sql"):
+        if migration.name < "008_":
+            shutil.copyfile(migration, tmp_path / migration.name)
+    warehouse.migrate(tmp_path)
+    raw = _raw()
+    warehouse.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
+    success = warehouse.query_rows(
+        "SELECT * EXCLUDE (retention_expired_at,retention_started_at) FROM ops.ingestion_metadata"
+    )
+    data = warehouse.query_rows("SELECT * FROM base.screen_time_event")
+    interrupted = replace(raw, key="raw/interrupted", logical_key="interrupted")
+    warehouse.mark_failed(interrupted, byte_size=0, error=ValueError("interrupted"))
+    warehouse.connection.execute(
+        "UPDATE ops.ingestion_metadata SET status='loading', completed_at=NULL, "
+        "error_type=NULL, error_message=NULL WHERE object_key=?",
+        [interrupted.key],
+    )
+
+    shutil.copyfile(
+        DEFAULT_MIGRATIONS / "008_terminal_ingestion_receipts.sql",
+        tmp_path / "008_terminal_ingestion_receipts.sql",
+    )
+    warehouse.migrate(tmp_path)
+
+    assert (
+        warehouse.query_rows("SELECT * FROM ops.ingestion_metadata WHERE object_key=?", [raw.key])
+        == success
+    )
+    assert warehouse.query_rows("SELECT * FROM base.screen_time_event") == data
+    assert warehouse.query_rows(
+        "SELECT status,error_type FROM ops.ingestion_metadata WHERE object_key=?", [interrupted.key]
+    ) == [("failed", "InterruptedIngestion")]
+    assert warehouse.succeeded_keys_for([interrupted]) == set()
+    warehouse.load_object(interrupted, byte_size=10, batch=ScreenTimeBatch([_record(interrupted)]))
+    assert warehouse.succeeded_keys_for([interrupted]) == {interrupted.key}
+    with pytest.raises(duckdb.ConstraintException):
+        warehouse.connection.execute(
+            "UPDATE ops.ingestion_metadata SET status='loading' WHERE object_key=?", [raw.key]
+        )
+
+
+@pytest.mark.parametrize("expired_status", ["succeeded", "failed"])
+def test_retention_cleanup_preserves_active_receipts_and_analytical_history(
+    warehouse, tmp_path, expired_status
+):
+    for migration in DEFAULT_MIGRATIONS.glob("*.sql"):
+        if migration.name < "008_":
+            shutil.copyfile(migration, tmp_path / migration.name)
+    warehouse.migrate(tmp_path)
+    raw = _raw()
+    expired = replace(raw, key="raw/expired", logical_key="expired")
+    failed = replace(raw, key="raw/failed", logical_key="failed")
+    warehouse.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
+    warehouse.load_object(
+        expired,
+        byte_size=20,
+        batch=ScreenTimeBatch([replace(_record(expired), event_key="old-event")]),
+    )
+    warehouse.mark_failed(failed, byte_size=0, error=ValueError("retry me"))
+    warehouse.connection.execute(
+        "UPDATE ops.ingestion_metadata SET status=?, retention_expired_at=current_timestamp "
+        "WHERE object_key=?",
+        [expired_status, expired.key],
+    )
+    warehouse.connection.execute(
+        "UPDATE ops.ingestion_metadata SET retention_started_at=observed_at"
+    )
+    active = warehouse.query_rows(
+        "SELECT * EXCLUDE (retention_expired_at,retention_started_at) "
+        "FROM ops.ingestion_metadata WHERE retention_expired_at IS NULL ORDER BY object_key"
+    )
+    tables = ("base.screen_time_event", "ops.screen_time_record", "ops.screen_time_segment")
+    before = {table: warehouse.query_rows(f"SELECT * FROM {table} ORDER BY 1") for table in tables}
+
+    warehouse.migrate()
+
+    assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 2
+    assert (
+        warehouse.query_rows("SELECT * FROM ops.ingestion_metadata ORDER BY object_key") == active
+    )
+    assert {
+        table: warehouse.query_rows(f"SELECT * FROM {table} ORDER BY 1") for table in tables
+    } == before
+    assert warehouse.succeeded_keys_for([raw, expired, failed]) == {raw.key}
+    recreated = replace(expired, storage_generation=2)
+    warehouse.load_object(
+        recreated,
+        byte_size=20,
+        batch=ScreenTimeBatch([replace(_record(recreated), event_key="old-event")]),
+    )
+    assert warehouse.succeeded_keys_for([recreated]) == {expired.key}
+    assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 2
+    warehouse.migrate()
+    assert warehouse.succeeded_keys_for([raw, recreated]) == {raw.key, expired.key}
+
+
+def test_pending_migration_preserves_active_writer_and_retries_after_release(warehouse, tmp_path):
+    for migration in DEFAULT_MIGRATIONS.glob("*.sql"):
+        if migration.name < "008_":
+            shutil.copyfile(migration, tmp_path / migration.name)
+    warehouse.migrate(tmp_path)
+    warehouse.acquire_job_lock("loader", "collector", lease_seconds=7500)
+    lease = warehouse.query_rows("SELECT * FROM ops.job_lock")
+    ledger = warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
+
+    with pytest.raises(RuntimeError, match="writer lease"):
+        warehouse.migrate()
+
+    assert warehouse.query_rows("SELECT * FROM ops.job_lock") == lease
+    assert (
+        warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id") == ledger
+    )
+    warehouse.release_job_lock("loader", "collector")
+    warehouse.migrate()
+    assert warehouse.query_rows("SELECT * FROM ops.job_lock") == []
+    assert "retention_expired_at" not in {
+        row[0] for row in warehouse.query_rows("DESCRIBE ops.ingestion_metadata")
+    }
+
+
+@pytest.mark.parametrize("stage", ["copy", "commit"])
+def test_migration_excludes_new_writers_until_ledger_replacement_commits(tmp_path, stage):
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    for migration in DEFAULT_MIGRATIONS.glob("*.sql"):
+        if migration.name < "008_":
+            shutil.copyfile(migration, legacy / migration.name)
+    database = str(tmp_path / "concurrent.duckdb")
+    warehouse = Warehouse(connect(WarehouseConfig(database)))
+    warehouse.migrate(legacy)
+    writer = Warehouse(connect(WarehouseConfig(database)))
+    connection = warehouse.connection
+    attempted = []
+    raw = _raw()
+
+    class ConcurrentWriter:
+        copied = False
+
+        def execute(self, sql, *args):
+            copy = "CREATE TABLE ops.ingestion_metadata_next" in sql
+            if copy:
+                self.copied = True
+            if not attempted and (
+                (stage == "copy" and copy)
+                or (stage == "commit" and self.copied and sql == "COMMIT")
+            ):
+                acquired = writer.acquire_job_lock("loader", "worker", lease_seconds=7500)
+                attempted.append(acquired)
+                if acquired:
+                    writer.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
+                    writer.release_job_lock("loader", "worker")
+            return connection.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(connection, name)
+
+    warehouse.connection = ConcurrentWriter()
+    try:
+        warehouse.migrate()
+        assert attempted == [False]
+        assert writer.acquire_job_lock("loader", "worker", lease_seconds=7500)
+        writer.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
+        writer.release_job_lock("loader", "worker")
+        assert writer.succeeded_keys_for([raw]) == {raw.key}
+        assert writer.query_value("SELECT count(*) FROM base.screen_time_event") == 1
+    finally:
+        warehouse.close()
+        writer.close()
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_uncertain_migration_commit_stops_writes_until_reconnected(tmp_path, committed):
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    for migration in DEFAULT_MIGRATIONS.glob("*.sql"):
+        if migration.name < "008_":
+            shutil.copyfile(migration, legacy / migration.name)
+    database = str(tmp_path / "uncertain.duckdb")
+    warehouse = Warehouse(connect(WarehouseConfig(database)))
+    warehouse.migrate(legacy)
+    raw = _raw()
+    warehouse.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
+    connection = warehouse.connection
+    after_failure = []
+
+    class UncertainCommit:
+        copying = False
+        failed = False
+
+        def execute(self, sql, *args):
+            if self.failed:
+                after_failure.append(sql)
+            if "CREATE TABLE ops.ingestion_metadata_next" in sql:
+                self.copying = True
+            if self.copying and sql == "COMMIT":
+                if committed:
+                    connection.execute(sql, *args)
+                self.failed = True
+                raise OSError("migration response lost")
+            return connection.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(connection, name)
+
+    warehouse.connection = UncertainCommit()
+    try:
+        with pytest.raises(OSError, match="migration response lost"):
+            warehouse.migrate()
+        assert warehouse.connection_usable is False
+        assert after_failure == []
+    finally:
+        warehouse.close()
+    warehouse = Warehouse(connect(WarehouseConfig(database)))
+    try:
+        assert warehouse.query_value(
+            "SELECT count(*) FROM ops.schema_migration WHERE migration_id='008_terminal_ingestion_receipts.sql'"
+        ) == int(committed)
+        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
+        assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 1
+        warehouse.connection.execute(
+            "UPDATE ops.job_lock SET expires_at=current_timestamp - INTERVAL '1 second'"
+        )
+        warehouse.migrate()
+        assert warehouse.succeeded_keys_for([raw]) == {raw.key}
+        assert warehouse.acquire_job_lock("loader", "retry", lease_seconds=120)
+        assert warehouse.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)])) == 0
+        warehouse.release_job_lock("loader", "retry")
+        assert warehouse.query_rows("SELECT * FROM ops.job_lock") == []
+    finally:
+        warehouse.close()

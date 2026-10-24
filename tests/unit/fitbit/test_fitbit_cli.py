@@ -53,7 +53,7 @@ def test_sync_preserves_narrow_physical_bounds(monkeypatch):
     ]
 
 
-def test_worker_command_starts_push_service(monkeypatch):
+def test_worker_command_starts_pull_service(monkeypatch):
     from personal_data_platform.sources.fitbit import runtime
 
     monkeypatch.setattr(runtime, "run_worker_from_env", lambda: 0)

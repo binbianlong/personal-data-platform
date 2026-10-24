@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -113,7 +113,7 @@ def validate_observations(source: RawCodec, observations: Iterable[RawObject]) -
             storage_created_at=raw.storage_created_at,
             storage_generation=raw.storage_generation,
         )
-        if replace(parsed, retention_started_at=raw.retention_started_at) != raw:
+        if parsed != raw:
             raise ValueError(f"Raw object metadata does not match its key: {raw.key}")
     return sorted(materialized, key=lambda value: (value.observed_at, value.key))
 

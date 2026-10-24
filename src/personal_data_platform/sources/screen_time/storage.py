@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
-from dataclasses import replace
 from pathlib import Path
 
 from personal_data_platform.raw.models import RawObject
@@ -42,22 +41,17 @@ class ScreenTimeLocalRepository:
         with self.state._connect() as connection:
             rows = connection.execute(
                 """SELECT object_key, coalesce(storage_created_at, observed_at),
-                          storage_generation, retention_started_at
+                          storage_generation
                 FROM segment_observation WHERE stream = ? AND compressed_payload IS NOT NULL
                 ORDER BY observed_at, object_key""",
                 (self._source.stream,),
             ).fetchall()
-        for key, created_at, generation, retention_at in rows:
+        for key, created_at, generation in rows:
             if key.startswith(prefix):
-                raw = parse_raw_object_key(
+                yield parse_raw_object_key(
                     key,
                     storage_created_at=parse_observed_at(created_at),
                     storage_generation=generation,
-                )
-                yield (
-                    replace(raw, retention_started_at=parse_observed_at(retention_at))
-                    if retention_at
-                    else raw
                 )
 
     def get_raw(self, key: str, *, generation: int) -> bytes:

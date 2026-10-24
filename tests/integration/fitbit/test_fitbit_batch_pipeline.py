@@ -82,7 +82,9 @@ def test_drain_groups_duplicates_with_one_session_and_commits_before_ack(tmp_pat
     assert result.ok and result.received == result.acked == 2
     assert result.grouped == result.completed == result.session_opens == len(api.calls) == 1
     assert set(subscriber.acks) == {m.ack_id for m in messages}
-    entries = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_push"]
+    entries = [
+        r for r in caplog.records if getattr(r, "event", None) == "fitbit_notification_processed"
+    ]
     assert len(entries) == 2
     scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
     assert {r.summary["group_id"] for r in entries} == {scopes[0].summary["notification_id"]}
@@ -267,7 +269,7 @@ def test_drain_endpoint_returns_safe_json_without_reading_request_body(tmp_path)
 
     runner, _, _ = direct_setup(tmp_path)
     drain = drainer(runner, Subscriber())
-    client = TestClient(create_worker_app(runner=runner, subscription=SUBSCRIPTION, drainer=drain))
+    client = TestClient(create_worker_app(drainer=drain))
     response = client.post("/notifications/fitbit/drain", content="private ignored body")
     assert response.status_code == 200
     assert set(response.json()) == set(asdict(drain.run()))
@@ -301,6 +303,8 @@ def test_one_hundred_independent_units_share_lifecycle_and_preserve_each_commit(
     import collections
 
     runner, api, factory = direct_setup(tmp_path, states=(None,))
+    with closing(factory()) as warehouse:
+        warehouse.migrate()
     calls = collections.Counter()
 
     def counted_factory():

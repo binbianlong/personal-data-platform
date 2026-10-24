@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from urllib.request import Request, urlopen
 
 from personal_data_platform.config import secret_config
@@ -27,6 +26,3 @@ def publish_http_heartbeat(url: str, payload: dict[str, object], *, timeout: flo
     with urlopen(request, timeout=timeout) as response:  # noqa: S310 -- configured HTTPS endpoint
         if not 200 <= response.status < 300:
             raise RuntimeError(f"heartbeat endpoint returned HTTP {response.status}")
-
-
-HeartbeatPublisher = Callable[[dict[str, object]], None]

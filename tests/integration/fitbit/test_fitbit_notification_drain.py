@@ -1,39 +1,24 @@
-import base64
-import json
 import logging
 from contextlib import closing
-from dataclasses import asdict
 
 import pytest
-from fastapi.testclient import TestClient
 
 from personal_data_platform.sources.fitbit.models import Notification
+from tests.integration.fitbit.helpers import drain_notification
 from tests.integration.fitbit.test_fitbit_acquisition import NOW, WINDOW, direct_setup
-
-SUBSCRIPTION = "projects/test/subscriptions/pdp-fitbit-west-pull"
-
-
-def envelope(subject="self", subscription=SUBSCRIPTION):
-    notification = Notification("notice", subject, (WINDOW,), NOW)
-    body = json.dumps({"schema_version": 1, **asdict(notification)}, default=str).encode()
-    return {
-        "message": {"data": base64.b64encode(body).decode(), "messageId": "message"},
-        "subscription": subscription,
-    }
+from tests.unit.fitbit.test_fitbit_batch import Subscriber
 
 
-def push_client(runner):
-    from personal_data_platform.sources.fitbit.service import create_worker_app
-
-    return TestClient(create_worker_app(runner=runner, subscription=SUBSCRIPTION))
+def notice():
+    return Notification("notice", "self", (WINDOW,), NOW)
 
 
-def test_push_commits_before_success_and_redelivery_does_not_duplicate(tmp_path, caplog):
+def test_drain_commits_before_success_and_redelivery_does_not_duplicate(tmp_path, caplog):
     runner, api, factory = direct_setup(tmp_path)
-    client = push_client(runner)
+    subscriber = Subscriber()
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
     for _ in range(2):
-        assert client.post("/notifications/fitbit", json=envelope()).status_code == 204
+        assert drain_notification(runner, notice(), subscriber=subscriber).ok
         with closing(factory()) as warehouse:
             assert warehouse.query_rows("SELECT value FROM base.fitbit_activity_interval") == [
                 (10,)
@@ -42,7 +27,9 @@ def test_push_commits_before_success_and_redelivery_does_not_duplicate(tmp_path,
             assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 0
             assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     assert api.calls == [WINDOW, WINDOW]
-    entries = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_push"]
+    entries = [
+        r for r in caplog.records if getattr(r, "event", None) == "fitbit_notification_processed"
+    ]
     assert len(entries) == 2
     assert (
         entries[0].summary["pubsub_message_id"]
@@ -52,18 +39,20 @@ def test_push_commits_before_success_and_redelivery_does_not_duplicate(tmp_path,
     assert entries[0].summary["attempt_id"] != entries[1].summary["attempt_id"]
     assert entries[0].summary["completed_scopes"] == 1
     assert entries[0].summary["failed_scopes"] == 0
+    assert subscriber.acks == ["secret-ack-notice", "secret-ack-notice"]
     assert entries[0].summary["deferred_scopes"] == 0
     scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
     assert len(scopes) == 2
-    assert scopes[0].summary["notification_id"] == "notice"
+    assert scopes[0].summary["notification_id"] == entries[0].summary["group_id"]
+    assert entries[0].summary["notification_id"] == "notice"
     assert scopes[0].summary["attempt_id"] == entries[0].summary["attempt_id"]
     assert scopes[1].summary["attempt_id"] == entries[1].summary["attempt_id"]
 
 
-def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monkeypatch, caplog):
+def test_drain_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monkeypatch, caplog):
     runner, api, factory = direct_setup(tmp_path, states=(10, 20))
-    client = push_client(runner)
-    assert client.post("/notifications/fitbit", json=envelope()).status_code == 204
+    subscriber = Subscriber()
+    assert drain_notification(runner, notice(), subscriber=subscriber).ok
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
     fetch = api.fetch_snapshot
     monkeypatch.setattr(
@@ -71,7 +60,8 @@ def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monke
         "fetch_snapshot",
         lambda *a, **kw: (_ for _ in ()).throw(TimeoutError("API unavailable")),
     )
-    assert client.post("/notifications/fitbit", json=envelope()).status_code == 503
+    assert not drain_notification(runner, notice(), subscriber=subscriber).ok
+    assert subscriber.acks == ["secret-ack-notice"]
     scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
     assert len(scopes) == 1
     assert scopes[0].status == "failed"
@@ -80,21 +70,23 @@ def test_push_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monke
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 10
     monkeypatch.setattr(api, "fetch_snapshot", fetch)
-    assert client.post("/notifications/fitbit", json=envelope()).status_code == 204
+    assert drain_notification(runner, notice(), subscriber=subscriber).ok
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 20
 
 
-def test_push_busy_preserves_owner_and_expired_lease_can_retry(tmp_path, caplog):
+def test_drain_busy_preserves_owner_and_expired_lease_can_retry(tmp_path, caplog):
     runner, api, factory = direct_setup(tmp_path)
+    subscriber = Subscriber()
     with closing(factory()) as warehouse:
         warehouse.migrate()
         warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
-    client = push_client(runner)
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
-    assert client.post("/notifications/fitbit", json=envelope()).status_code == 503
-    assert api.calls == []
-    entries = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_push"]
+    assert not drain_notification(runner, notice(), subscriber=subscriber).ok
+    assert api.calls == [] and subscriber.acks == []
+    entries = [
+        r for r in caplog.records if getattr(r, "event", None) == "fitbit_notification_processed"
+    ]
     assert len(entries) == 1
     assert entries[0].status == "retry"
     assert entries[0].summary["pubsub_message_id"] == "message"
@@ -104,19 +96,21 @@ def test_push_busy_preserves_owner_and_expired_lease_can_retry(tmp_path, caplog)
         warehouse.connection.execute(
             "UPDATE ops.job_lock SET expires_at=current_timestamp - INTERVAL '1 second'"
         )
-    assert client.post("/notifications/fitbit", json=envelope()).status_code == 204
+    assert drain_notification(runner, notice(), subscriber=subscriber).ok
 
 
-def test_push_paused_does_not_open_warehouse(tmp_path):
+def test_drain_paused_does_not_open_warehouse(tmp_path):
     runner, api, _ = direct_setup(tmp_path)
+    subscriber = Subscriber()
     runner.paused = True
     runner.warehouse_factory = lambda: pytest.fail("paused worker must not open warehouse")
-    assert push_client(runner).post("/notifications/fitbit", json=envelope()).status_code == 503
-    assert api.calls == []
+    assert not drain_notification(runner, notice(), subscriber=subscriber).ok
+    assert api.calls == [] and subscriber.acks == []
 
 
-def test_push_unknown_commit_returns_retry_and_redelivery_keeps_one_row(tmp_path, caplog):
+def test_drain_unknown_commit_returns_retry_and_redelivery_keeps_one_row(tmp_path, caplog):
     runner, api, factory = direct_setup(tmp_path)
+    subscriber = Subscriber()
 
     def uncertain_factory():
         warehouse = factory()
@@ -141,38 +135,24 @@ def test_push_unknown_commit_returns_retry_and_redelivery_keeps_one_row(tmp_path
         return warehouse
 
     runner.warehouse_factory = uncertain_factory
-    client = push_client(runner)
-    assert client.post("/notifications/fitbit", json=envelope()).status_code == 503
+    assert not drain_notification(runner, notice(), subscriber=subscriber).ok
     assert any(record.levelno >= logging.ERROR for record in caplog.records)
+    assert not subscriber.acks
     with closing(factory()) as warehouse:
         assert warehouse.query_rows("SELECT value FROM base.fitbit_activity_interval") == [(10,)]
         warehouse.connection.execute(
             "UPDATE ops.job_lock SET expires_at=current_timestamp - INTERVAL '1 second'"
         )
     runner.warehouse_factory = factory
-    assert client.post("/notifications/fitbit", json=envelope()).status_code == 204
+    assert drain_notification(runner, notice(), subscriber=subscriber).ok
     assert api.calls == [WINDOW, WINDOW]
     with closing(factory()) as warehouse:
         assert warehouse.query_rows("SELECT value FROM base.fitbit_activity_interval") == [(10,)]
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        envelope(subject="other"),
-        envelope(subscription="projects/other/subscriptions/wrong"),
-        {},
-        {"message": {"data": "!not-base64"}, "subscription": SUBSCRIPTION},
-    ],
-)
-def test_push_invalid_notification_is_not_acknowledged_or_written(tmp_path, body):
-    runner, _, _ = direct_setup(tmp_path)
-    runner.warehouse_factory = lambda: pytest.fail("invalid notification must not open warehouse")
-    assert push_client(runner).post("/notifications/fitbit", json=body).status_code == 400
-
-
-def test_push_deadline_keeps_unfinished_scope_for_redelivery(tmp_path):
+def test_drain_deadline_keeps_unfinished_scope_for_redelivery(tmp_path):
     runner, api, factory = direct_setup(tmp_path)
+    subscriber = Subscriber()
     elapsed = [0.0]
     runner.monotonic = lambda: elapsed[0]
     original = api.fetch_snapshot
@@ -183,10 +163,11 @@ def test_push_deadline_keeps_unfinished_scope_for_redelivery(tmp_path):
         return value
 
     api.fetch_snapshot = slow
-    assert push_client(runner).post("/notifications/fitbit", json=envelope()).status_code == 503
+    assert not drain_notification(runner, notice(), subscriber=subscriber).ok
+    assert not subscriber.acks
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
         assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 0
     api.fetch_snapshot = original
     runner.monotonic = lambda: 0.0
-    assert push_client(runner).post("/notifications/fitbit", json=envelope()).status_code == 204
+    assert drain_notification(runner, notice(), subscriber=subscriber).ok
