@@ -144,19 +144,11 @@ def run_sync_from_env(
     warehouse = _warehouse()
     owner = str(uuid4())
     acquired = False
-    job_started = False
-    details: dict[str, object] = {
-        "start": start.isoformat(),
-        "end": end.isoformat(),
-        "data_types": list(data_types),
-    }
     try:
         warehouse.migrate()
         acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=LOADER_LEASE_SECONDS)
         if not acquired:
             raise JobAlreadyRunning("loader already has an unexpired job lease")
-        warehouse.begin_job("fitbit-sync", owner)
-        job_started = True
         result = _acquisition_runner().run_windows(
             sync_windows(start, end, data_types),
             warehouse=warehouse,
@@ -166,13 +158,9 @@ def run_sync_from_env(
         payload = json.loads(json.dumps(asdict(result), default=str))
         if payload["first_incomplete"] is not None:
             payload["first_incomplete"].pop("time_basis", None)
-        warehouse.finish_job(owner, succeeded=result.ok, details={**details, **payload})
-        job_started = False
         print(json.dumps(payload, sort_keys=True))
         return int(not result.ok)
     finally:
-        if job_started and warehouse.connection_usable:
-            warehouse.finish_job(owner, succeeded=False, details=details)
         if acquired and warehouse.connection_usable:
             warehouse.release_job_lock("loader", owner)
         warehouse.close()
