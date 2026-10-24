@@ -1,0 +1,40 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "group:allNonMajor", ":approveMajorUpdates"],
+  "enabledManagers": ["pep621", "github-actions", "dockerfile", "terraform"],
+  "timezone": "Asia/Tokyo",
+  "schedule": ["* * 1 1,4,7,10 *"],
+  "updateNotScheduled": false,
+  "minimumReleaseAge": "14 days",
+  "automerge": false,
+  "prConcurrentLimit": 1,
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["digest", "pin", "pinDigest"],
+      "groupName": "all non-major dependencies",
+      "groupSlug": "all-minor-patch"
+    },
+    {
+      "matchManagers": ["pep621"],
+      "rangeStrategy": "update-lockfile"
+    },
+    {
+      "matchPackageNames": ["python", "duckdb", "dbt-*", "ccl-segb"],
+      "dependencyDashboardApproval": true,
+      "groupName": null
+    },
+    {
+      "matchManagers": ["terraform"],
+      "dependencyDashboardApproval": true,
+      "groupName": null
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": [],
+    "minimumReleaseAge": null,
+    "dependencyDashboardApproval": false,
+    "groupName": null,
+    "automerge": false
+  }
+}
