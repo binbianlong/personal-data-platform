@@ -5,11 +5,11 @@ Screen TimeはMac、OwnTracksはGCP `us-west1`でRawを保存し、FitbitはAPI�
 ```text
 Screen Time Collector -> SQLite Raw -> Loader -> MotherDuck -> stream heartbeat
 OwnTracks -> receiver -> GCS Raw -> Pub/Sub push -> 非公開worker -> Loader -> MotherDuck
-Google Health Webhook -> receiver -> Pub/Sub push -> 非公開worker
-  -> API完全取得 -> MotherDuckへ直接書込 -> DB commit後204
+Google Health Webhook -> receiver -> Pub/Sub queue -> 毎時workerがpull
+  -> API完全取得 -> MotherDuckへ直接書込 -> DB commit後ACK
 
 Loader -> MotherDuck base -> dbt View -> read-only share / Remote MCP
-日次Job -> Fitbit補修 -> dbt -> OwnTracks Raw補修 -> Macの取込heartbeat・DB監査 -> daily heartbeat
+日次Job -> Fitbit補修 -> dbt -> OwnTracks Raw補修 -> Macの取込heartbeat・DB監査 -> 日次結果 -> Healthchecks
 ```
 
 | source / stream | 取得元 | Raw形式 | 保存先 |
@@ -68,6 +68,8 @@ Fitbitは完全取得範囲をWriterで直接commitする。結果不明では�
 Macは全対象のローカル保存後に既存Loaderを同じprocessで実行し、DB成功確認後に旧成功Rawを整理する。
 Screen Timeは現行の物理recordだけを運用状態に残し、ローカルRawの整理と成功確認が済んだscopeの旧成功台帳も整理する。
 pending・失敗・不完全snapshotがある回はstream heartbeatを更新しない。日次JobはMacの成功記録とDBを監査する。
+日次結果は`ops.job_run`へ集約し、照合結果はその`details`へ含める。
+Raw単位の再試行には取込台帳、Macの鮮度確認にはstream heartbeatを使う。
 DBと外部HTTPはatomicではないため、外部送信失敗はJob失敗として扱う。
 
 ## Source・stream追加手順

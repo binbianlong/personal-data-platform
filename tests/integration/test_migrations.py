@@ -272,3 +272,42 @@ def test_owntracks_battery_column_removal_preserves_location_and_provenance(ware
         row[0] for row in warehouse.query_rows("DESCRIBE base.owntracks_location")
     }
     assert warehouse.query_rows("SELECT * FROM base.owntracks_location") == before
+
+
+def test_audit_cleanup_preserves_operational_and_collector_state(warehouse, tmp_path):
+    for migration in DEFAULT_MIGRATIONS.glob("*.sql"):
+        if not migration.name.startswith("007_"):
+            shutil.copyfile(migration, tmp_path / migration.name)
+    warehouse.migrate(tmp_path)
+    raw = _raw()
+    warehouse.load_object(raw, byte_size=10, batch=ScreenTimeBatch([_record(raw)]))
+    warehouse.begin_job("daily-reconciliation", "daily-run")
+    warehouse.finish_job(
+        "daily-run", succeeded=True, details={"last_completed_target_date": "2026-10-23"}
+    )
+    warehouse.acquire_job_lock("loader", "collector", lease_seconds=120)
+    for monitor in ("daily", "screen_time_reconciliation", "screen_time_app_usage_reconciliation"):
+        warehouse.publish_heartbeat(monitor, "previous", {"scan_completed_at": "2026-10-24"})
+    warehouse.connection.execute(
+        "INSERT INTO ops.reconciliation_run (run_id,status,started_at) "
+        "VALUES ('old-audit','succeeded',current_timestamp)"
+    )
+    tables = ("ops.ingestion_metadata", "ops.job_run", "ops.job_lock", "base.screen_time_event")
+    before = {name: warehouse.query_rows(f"SELECT * FROM {name}") for name in tables}
+    collectors = warehouse.query_rows(
+        "SELECT * FROM ops.heartbeat WHERE monitor_name <> 'daily' ORDER BY monitor_name"
+    )
+
+    warehouse.migrate()
+
+    assert {name: warehouse.query_rows(f"SELECT * FROM {name}") for name in tables} == before
+    assert warehouse.query_rows("SELECT * FROM ops.heartbeat ORDER BY monitor_name") == collectors
+    assert (
+        warehouse.query_value(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema='ops' "
+            "AND table_name='reconciliation_run'"
+        )
+        == 0
+    )
+    warehouse.migrate()
+    assert warehouse.query_rows("SELECT * FROM ops.heartbeat ORDER BY monitor_name") == collectors

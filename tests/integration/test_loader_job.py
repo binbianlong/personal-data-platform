@@ -448,7 +448,7 @@ def test_loader_uses_source_decoder_across_schema_versions_and_preserves_other_s
             warehouse.query_value(
                 "SELECT count(*) FROM ops.job_run WHERE job_name = 'loader:synthetic:activity'"
             )
-            == 3
+            == 0
         )
 
         phone_content = b"synthetic-segb"

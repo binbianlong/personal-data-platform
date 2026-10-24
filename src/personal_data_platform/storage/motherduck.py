@@ -5,17 +5,14 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from personal_data_platform.network_diagnostics import instrument_connection, network_phase
 from personal_data_platform.raw.models import RawObject
-from personal_data_platform.reconciliation.models import (
-    DAILY_JOB_HISTORY_NAMES,
-    ReconciliationResult,
-)
+from personal_data_platform.reconciliation.models import DAILY_JOB_HISTORY_NAMES
 from personal_data_platform.sources.contracts import DecodedBatch
 from personal_data_platform.storage.migrations import DEFAULT_MIGRATIONS as DEFAULT_MIGRATIONS
 from personal_data_platform.storage.migrations import apply_migrations
@@ -475,10 +472,6 @@ class Warehouse:
     def prune_run_history(self, *, now: datetime) -> None:
         cutoff = now - timedelta(days=7)
         self.connection.execute(
-            "DELETE FROM ops.reconciliation_run WHERE coalesce(completed_at, started_at) < ?",
-            [cutoff],
-        )
-        self.connection.execute(
             "DELETE FROM ops.job_run "
             "WHERE coalesce(completed_at, started_at) < ? "
             "AND run_id <> coalesce(( "
@@ -495,33 +488,6 @@ class Warehouse:
 
     def query_rows(self, sql: str, parameters: list[Any] | None = None) -> list[tuple[Any, ...]]:
         return self.connection.execute(sql, parameters or []).fetchall()
-
-    def record_reconciliation(self, values: ReconciliationResult | dict[str, object]) -> None:
-        row = asdict(values) if isinstance(values, ReconciliationResult) else values
-        self.connection.execute(
-            """
-            INSERT INTO ops.reconciliation_run VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (run_id) DO UPDATE SET
-                status = excluded.status,
-                completed_at = excluded.completed_at,
-                raw_object_count = excluded.raw_object_count,
-                loaded_object_count = excluded.loaded_object_count,
-                missing_object_count = excluded.missing_object_count,
-                failed_object_count = excluded.failed_object_count,
-                details = excluded.details
-            """,
-            [
-                row["run_id"],
-                row["status"],
-                row["started_at"],
-                row["completed_at"],
-                row["raw_object_count"],
-                row["loaded_object_count"],
-                row["missing_object_count"],
-                row["failed_object_count"],
-                json.dumps(row.get("details", {}), sort_keys=True),
-            ],
-        )
 
     def finish_screen_time_collection(
         self, owner_id: str, *, heartbeats: list[tuple[str, dict[str, object]]]

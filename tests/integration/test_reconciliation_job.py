@@ -51,35 +51,20 @@ def _warehouse() -> Warehouse:
     return warehouse
 
 
-def test_external_failure_preserves_previous_heartbeat_and_records_failure() -> None:
+@pytest.mark.parametrize("missing_view", [False, True])
+def test_raw_audit_returns_result_without_changing_collector_success(missing_view) -> None:
     warehouse = _warehouse()
     try:
-        warehouse.publish_heartbeat("screen_time_reconciliation", "previous", {})
+        warehouse.publish_heartbeat("screen_time_reconciliation", "collector", {})
+        previous = warehouse.query_rows("SELECT * FROM ops.heartbeat")
+        if missing_view:
+            warehouse.connection.execute("DROP VIEW marts.daily_screen_time_total")
+        result = run_reconciliation(_Repository(), warehouse)
 
-        def fail(_):
-            raise RuntimeError("external monitor unreachable")
-
-        result = run_reconciliation(_Repository(), warehouse, heartbeat=fail)
-
-        assert not result.ok
-        assert warehouse.query_value("SELECT status FROM ops.reconciliation_run") == "failed"
-        assert warehouse.query_value("SELECT run_id FROM ops.heartbeat") == "previous"
-    finally:
-        warehouse.close()
-
-
-def test_success_finalizes_the_pending_audit_and_warehouse_heartbeat() -> None:
-    warehouse = _warehouse()
-    try:
-        published = []
-        result = run_reconciliation(_Repository(), warehouse, heartbeat=published.append)
-
-        assert result.ok
-        assert warehouse.query_rows("SELECT run_id, status FROM ops.reconciliation_run") == [
-            (result.run_id, "succeeded")
-        ]
-        assert warehouse.query_value("SELECT run_id FROM ops.heartbeat") == result.run_id
-        assert len(published) == 1
+        assert result.ok is not missing_view
+        assert warehouse.query_rows("SELECT * FROM ops.heartbeat") == previous
+        assert warehouse.query_rows("SELECT * FROM ops.job_run") == []
+        assert "ops.reconciliation_run" not in _relation_names(warehouse)
     finally:
         warehouse.close()
 
@@ -88,27 +73,11 @@ def test_missing_daily_total_view_fails_reconciliation() -> None:
     warehouse = _warehouse()
     try:
         warehouse.connection.execute("DROP VIEW marts.daily_screen_time_total")
-        published = []
 
-        result = run_reconciliation(_Repository(), warehouse, heartbeat=published.append)
+        result = run_reconciliation(_Repository(), warehouse)
 
         assert not result.ok
         assert result.missing_relations == ("marts.daily_screen_time_total",)
-        assert published == []
-    finally:
-        warehouse.close()
-
-
-def test_warehouse_write_failure_never_sends_external_success() -> None:
-    warehouse = _warehouse()
-    try:
-        warehouse.connection.execute("DROP TABLE ops.heartbeat")
-        published = []
-        result = run_reconciliation(_Repository(), warehouse, heartbeat=published.append)
-
-        assert not result.ok
-        assert warehouse.query_value("SELECT status FROM ops.reconciliation_run") == "failed"
-        assert published == []
     finally:
         warehouse.close()
 
@@ -215,9 +184,7 @@ def test_reconciliation_isolates_source_and_stream_and_repairs_all_supported_sch
         warehouse.load_object(raw_v1, byte_size=0, batch=_EmptyBatch())
         warehouse.load_object(other_old, byte_size=0, batch=_EmptyBatch())
         warehouse.mark_failed(other_failed, byte_size=0, error=RuntimeError("unrelated failure"))
-        result = run_reconciliation(
-            Repository(), warehouse, source=source, heartbeat=lambda _: None, now=now
-        )
+        result = run_reconciliation(Repository(), warehouse, source=source, now=now)
 
         assert result.ok
         assert result.failed_object_count == 0
@@ -229,9 +196,7 @@ def test_reconciliation_isolates_source_and_stream_and_repairs_all_supported_sch
             (raw_v1, raw_v2), key=lambda raw: (raw.observed_at, raw.key)
         )
         assert reads == [(raw_v2.key, raw_v2.storage_generation)]
-        assert (
-            warehouse.query_value("SELECT monitor_name FROM ops.heartbeat") == source.monitor_name
-        )
+        assert warehouse.query_rows("SELECT * FROM ops.heartbeat") == []
         assert warehouse.query_rows(
             "SELECT status, retention_expired_at FROM ops.ingestion_metadata "
             "WHERE source_id = ? AND source_stream = ? ORDER BY object_key",
@@ -273,7 +238,6 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
     repository = LiveRepository()
     raw = repository.add("100", segb(event("app.versioned"))[0])
     warehouse = _warehouse()
-    published = []
     try:
         old_batch = ScreenTimeSource().decode(raw, gzip.decompress(repository.objects[raw.key][1]))
         warehouse.load_object(raw, byte_size=1, batch=old_batch)
@@ -281,7 +245,6 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
             repository,
             warehouse,
             source=CorrectedSource(),
-            heartbeat=published.append,
             repair_missing=repair_mode != "disabled",
             now=NOW,
         )
@@ -289,7 +252,6 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
         if repair_mode == "success":
             assert result.ok
             assert result.missing_object_count == 0
-            assert len(published) == 1
             assert warehouse.query_rows("SELECT parser_version FROM base.screen_time_event") == [
                 ("corrected-parser",)
             ]
@@ -303,7 +265,6 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
         else:
             assert not result.ok
             assert result.missing_object_count == 1
-            assert published == []
             assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == 0
         if repair_mode == "disabled":
             assert result.details["repair_summary"] is None
@@ -328,11 +289,13 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
         "gap-covered",
         "gap-edge",
         "busy",
-        "marker",
+        "completion",
+        "heartbeat",
+        "old-marker-heartbeat",
     ],
 )
 @pytest.mark.parametrize("measure_network", [False, True])
-def test_daily_failure_does_not_advance_success_heartbeat(
+def test_daily_records_one_outcome_and_preserves_collector_heartbeats(
     monkeypatch, capfd, failure, measure_network
 ):
     from personal_data_platform import dbt_runner
@@ -389,7 +352,7 @@ def test_daily_failure_does_not_advance_success_heartbeat(
 
     def reconcile(repository, warehouse, **kwargs):
         result = phase("owntracks", kwargs)
-        return SimpleNamespace(ok=result.ok, details={})
+        return SimpleNamespace(ok=result.ok, details={"raw_object_count": 3})
 
     monkeypatch.setattr(job, "run_reconciliation", reconcile)
 
@@ -401,13 +364,25 @@ def test_daily_failure_does_not_advance_success_heartbeat(
     monkeypatch.setattr(job, "_audit_screen_time_heartbeat", audit)
     if failure == "busy":
         warehouse.acquire_job_lock("loader", "competitor", lease_seconds=7500)
-    if failure == "marker":
+    for source in sources:
+        warehouse.publish_heartbeat(source.monitor_name, "collector", {"scan_completed_at": "old"})
+    collector_heartbeats = warehouse.query_rows("SELECT * FROM ops.heartbeat ORDER BY monitor_name")
+    if failure == "completion":
+        finish_job = warehouse.finish_job
 
-        def broken_marker(*args, **kwargs):
-            raise RuntimeError("marker write failed")
+        def broken_completion(run_id, *, succeeded, details):
+            if succeeded:
+                raise RuntimeError("job completion write failed")
+            return finish_job(run_id, succeeded=succeeded, details=details)
 
-        monkeypatch.setattr(warehouse, "publish_heartbeat", broken_marker)
-    if failure.startswith("gap"):
+        monkeypatch.setattr(warehouse, "finish_job", broken_completion)
+    if failure in ("heartbeat", "old-marker-heartbeat"):
+
+        def broken_ping(*args, **kwargs):
+            raise RuntimeError("external monitor unreachable")
+
+        monkeypatch.setattr(job, "publish_http_heartbeat", broken_ping)
+    if failure.startswith("gap") or failure == "old-marker-heartbeat":
 
         class Clock(datetime):
             @classmethod
@@ -424,17 +399,45 @@ def test_daily_failure_does_not_advance_success_heartbeat(
                     "gap": "2026-09-01",
                     "gap-covered": "2026-10-03",
                     "gap-edge": "2026-10-02",
+                    "old-marker-heartbeat": "2026-09-01",
                 }[failure]
             },
+        )
+        warehouse.connection.execute(
+            "UPDATE ops.job_run SET started_at=?, completed_at=? WHERE run_id='previous'",
+            [Clock.now() - timedelta(days=8)] * 2,
         )
     try:
         assert job.run_reconciliation_from_env() == int(
             failure not in ("none", "gap", "gap-covered", "gap-edge", "busy")
         )
         assert len(successes) == (1 if failure in ("none", "gap", "gap-covered", "gap-edge") else 0)
-        assert warehouse.query_value("SELECT count(*) FROM ops.heartbeat") == (
-            1 if failure in ("none", "gap", "gap-covered", "gap-edge") else 0
+        assert (
+            warehouse.query_rows("SELECT * FROM ops.heartbeat ORDER BY monitor_name")
+            == collector_heartbeats
         )
+        outcomes = warehouse.query_rows(
+            "SELECT status,details FROM ops.job_run WHERE job_name='daily-reconciliation'"
+        )
+        if failure == "busy":
+            assert outcomes == []
+        else:
+            assert len(outcomes) == 1
+            status, encoded = outcomes[0]
+            details = json.loads(encoded)
+            succeeded = failure in ("none", "gap", "gap-covered", "gap-edge")
+            assert status == ("succeeded" if succeeded else "failed")
+            if succeeded:
+                assert "failed_stage" not in details
+                assert "last_completed_target_date" in details
+            else:
+                expected_stage = "audit:" + failure if failure.startswith("app-") else failure
+                if failure == "old-marker-heartbeat":
+                    expected_stage = "heartbeat"
+                assert details["failed_stage"] == expected_stage
+            if failure not in ("fitbit", "dbt"):
+                assert details["owntracks"] == {"raw_object_count": 3}
+        assert "ops.reconciliation_run" not in _relation_names(warehouse)
         if failure in ("none", "gap", "gap-covered", "gap-edge"):
             assert phases == ["fitbit", "dbt", "owntracks", "app-in-focus", "app-usage"]
             entries = [json.loads(line) for line in capfd.readouterr().err.splitlines()]
@@ -474,6 +477,28 @@ def test_daily_failure_does_not_advance_success_heartbeat(
                 assert details["manual_repair_required"] == expected_gap
                 assert len(warnings) == 1
             assert details["last_completed_target_date"] == "2026-10-05"
+        if failure == "old-marker-heartbeat":
+            assert warehouse.query_rows(
+                "SELECT status,json_extract_string(details,'$.last_completed_target_date') "
+                "FROM ops.job_run WHERE run_id='previous'"
+            ) == [("succeeded", "2026-09-01")]
+            monkeypatch.setattr(job, "publish_http_heartbeat", lambda *args: successes.append(args))
+            assert job.run_reconciliation_from_env() == 0
+            recovered = json.loads(
+                warehouse.query_value(
+                    "SELECT details FROM ops.job_run "
+                    "WHERE job_name='daily-reconciliation' AND status='succeeded'"
+                )
+            )
+            assert recovered["manual_repair_required"] == {
+                "from": "2026-09-02",
+                "through": "2026-10-03",
+            }
+            assert recovered["last_completed_target_date"] == "2026-10-05"
+            assert (
+                warehouse.query_rows("SELECT * FROM ops.heartbeat ORDER BY monitor_name")
+                == collector_heartbeats
+            )
         if failure == "busy":
             assert phases == []
             assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "competitor"

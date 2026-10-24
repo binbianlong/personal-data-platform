@@ -6,7 +6,6 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from personal_data_platform.loader.deadline import interrupt_after
@@ -32,14 +31,10 @@ from personal_data_platform.storage.motherduck import (
     connect,
 )
 
-from .heartbeat import HeartbeatPublisher, daily_heartbeat_urls, publish_http_heartbeat
+from .heartbeat import daily_heartbeat_urls, publish_http_heartbeat
 from .models import DAILY_JOB_HISTORY_NAMES, DAILY_JOB_NAME, ReconciliationResult
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _no_external_heartbeat(_payload: dict[str, object]) -> None:
-    """Cloud Monitoring observes the Job completion instead of an HTTP ping."""
 
 
 def _relation_names(warehouse: Warehouse) -> set[str]:
@@ -89,16 +84,14 @@ def run_reconciliation(
     repository: RawRepository,
     warehouse: Warehouse,
     *,
-    heartbeat: HeartbeatPublisher,
     source: SourceAdapter | None = None,
     prefix: str | None = None,
     repair_missing: bool = True,
     now: datetime | None = None,
     raw_objects: tuple[RawObject, ...] | None = None,
     _lease_owner: str | None = None,
-    publish_success: bool = True,
 ) -> ReconciliationResult:
-    """Audit raw/warehouse parity, repair missing loads, and publish success."""
+    """Audit Raw/warehouse parity and repair missing loads."""
 
     source = source or get_source()
     if selected_prefixes(source, prefix) != source.raw_prefixes:
@@ -221,43 +214,6 @@ def run_reconciliation(
         failed_relation_queries=failed_relation_queries,
         details=details,
     )
-    if not result.ok:
-        warehouse.record_reconciliation(result)
-        return result
-
-    heartbeat_payload = {
-        "source_id": source.source_id,
-        "stream": source.stream,
-        "run_id": result.run_id,
-        "completed_at": result.completed_at.isoformat(),
-        "raw_object_count": result.raw_object_count,
-        "loaded_object_count": result.loaded_object_count,
-    }
-    warehouse.record_reconciliation(replace(result, status="running"))
-    warehouse.connection.execute("BEGIN TRANSACTION")
-    stage = "warehouse_heartbeat"
-    try:
-        if _lease_owner is not None:
-            warehouse.require_job_lock(_lease_owner)
-        if publish_success:
-            warehouse.publish_heartbeat(source.monitor_name, result.run_id, heartbeat_payload)
-        stage = "heartbeat"
-        if publish_success:
-            heartbeat(heartbeat_payload)
-        stage = "completion"
-        warehouse.record_reconciliation(result)
-        warehouse.connection.execute("COMMIT")
-    except Exception as error:
-        warehouse.connection.execute("ROLLBACK")
-        result = replace(
-            result,
-            status="failed",
-            details={
-                **result.details,
-                f"{stage}_error": str(error),
-            },
-        )
-        warehouse.record_reconciliation(result)
     return result
 
 
@@ -382,9 +338,7 @@ def _run_daily_reconciliation() -> int:
                 owntracks.repository_from_env(),
                 warehouse,
                 source=owntracks,
-                heartbeat=_no_external_heartbeat,
                 _lease_owner=owner,
-                publish_success=False,
             )
         details["owntracks"] = owntracks_result.details
         if not owntracks_result.ok:
@@ -414,9 +368,8 @@ def _run_daily_reconciliation() -> int:
         details["last_completed_target_date"] = target_date.isoformat()
         warehouse.connection.execute("BEGIN TRANSACTION")
         try:
-            warehouse.publish_heartbeat("daily", owner, payload)
-            warehouse.finish_job(owner, succeeded=True, details=details)
             warehouse.prune_run_history(now=datetime.now(UTC))
+            warehouse.finish_job(owner, succeeded=True, details=details)
             remaining()
             warehouse.connection.execute("COMMIT")
         except Exception:
