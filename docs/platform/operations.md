@@ -31,6 +31,36 @@ source・dbt・依存・Dockerfileに変更がないpushでは現行日次Jobの
 手動`run_daily`で日次全体を実行できる。rollbackには直接取込・push受付に対応したimageを使い、削除済みなら再build・登録する。
 Deploy workflowが停止中の場合は、ローカルで`linux/amd64` imageを登録し、digestを指定してTerraformを手動反映する。
 
+## 依存関係の更新
+
+[Renovate設定](../../renovate.json)でPython依存と`uv.lock`、GitHub Actions、Docker image、Terraform providerを管理する。
+通常更新は1・4・7・10月の1日（Asia/Tokyo）に確認し、マイナー・パッチ更新を1本のPRへまとめる。
+公開日時を取得できる更新には14日の待機期間を設ける。
+未マージの通常PRは次の四半期に同じPRを更新する。定期実行の時間外は既存branchも自動更新せず、CIの再実行を抑える。
+image digestやpinの更新も同じgroupに含める。待機期間は間接依存すべての公開時刻を保証するものではない。
+
+メジャー更新とPython本体・DuckDB・dbt・Terraform providerはDependency Dashboardで承認してから個別PRを作成する。
+commitに固定した`ccl-segb`は参照先を個別確認する。Pythonの範囲内更新はlockfileを更新し、固定値や範囲外の変更はPRで確認する。
+すべて手動マージとし、既存の`CI`必須・PR必須のbranch保護を使う。
+
+既知の脆弱性はDependabot alertsから検知し、Renovateが対応できる依存には修正PRを作成する。
+修正PRには四半期schedule・14日の待機・Dashboard承認・通常PRの同時数上限を適用せず、マージは手動とする。
+GitHubでDependency graphとDependabot alertsを有効にし、Dependabot security updatesによるPR作成は無効にして重複を避ける。
+`uv.lock`の間接依存がDependency graphへ登録されていることも確認する。
+Renovateの`pep621` managerは、lockfileにしかない間接依存のalertからは修正PRを作成できない。
+その場合はalertの修正versionを確認し、`uv lock --upgrade-package <package>`で対象を更新してPRを作成する。
+上位依存の制約で更新できなければ、その依存の更新も個別に確認する。これらの修正も四半期を待たず対応する。
+未登録の依存やDocker内のOS packageなど、GitHubのalert対象外のcomponentはこの経路では検知できない。
+
+導入時は[Renovate GitHub App](https://github.com/apps/renovate)をこのrepositoryに限定してinstallし、
+設定をdefault branchへ反映する。onboarding PRが作成された場合は設定を確認してマージする。
+初回はDependency Dashboardの検出対象・エラーと、通常PRの集約、脆弱性alertの読み取り権限を確認する。
+
+更新時はPRの差分とCIを確認し、deploy結果を確認できる日にマージする。
+開発用依存だけでも`uv.lock`の変更は本番imageの再build・deployを起動する。
+MacではCollectorを停止してからcheckoutを更新し、`just sync`で依存を同期して再起動する。Cloud Runのdeploy成功に加え、
+次の日次Jobの成功とScreen Timeの取込成功heartbeatを確認する。復旧には上記Deployのrollback手順を使う。
+
 ## DBの初期化と更新
 
 通常runtimeとscratch DBは共通の現行スキーマを使い、SQLは`src/personal_data_platform/migrations/`を正本とする。
