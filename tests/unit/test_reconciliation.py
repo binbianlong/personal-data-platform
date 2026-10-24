@@ -97,18 +97,16 @@ class _Warehouse:
         loaded: set[str],
         *,
         failed: int = 0,
-        loading: int = 0,
         relations: set[str] | None = None,
         created_at: dict[str, datetime | None] | None = None,
     ) -> None:
         self.states = {key: IngestionState(key, "succeeded") for key in loaded}
-        for status, count in (("failed", failed), ("loading", loading)):
-            self.states.update(
-                {
-                    _key(f"{status}-{index}"): IngestionState(_key(f"{status}-{index}"), status)
-                    for index in range(count)
-                }
-            )
+        self.states.update(
+            {
+                _key(f"failed-{index}"): IngestionState(_key(f"failed-{index}"), "failed")
+                for index in range(failed)
+            }
+        )
         self.relations = relations if relations is not None else set(REQUIRED_RELATIONS)
 
     def succeeded_keys_for(
@@ -197,12 +195,11 @@ def test_missing_raw_blocks_success() -> None:
     assert result.details["missing_raw_object_count"] == 1
 
 
-@pytest.mark.parametrize("status", ["failed", "loading"])
-def test_uningested_raw_that_disappears_blocks_success(status: str) -> None:
+def test_uningested_raw_that_disappears_blocks_success() -> None:
     warehouse = _Warehouse(set())
     warehouse.states[_key("unrecoverable")] = IngestionState(
         object_key=_key("unrecoverable"),
-        status=status,
+        status="failed",
     )
 
     result = run_reconciliation(

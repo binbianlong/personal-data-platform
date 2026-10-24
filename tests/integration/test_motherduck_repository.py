@@ -184,51 +184,6 @@ def test_failed_load_can_be_retried(tmp_path) -> None:
         warehouse.close()
 
 
-def test_expired_key_can_be_reloaded_with_a_new_storage_creation_time(tmp_path) -> None:
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "test.duckdb"))))
-    try:
-        warehouse.migrate()
-        original = _raw()
-        assert (
-            warehouse.load_object(
-                original, byte_size=100, batch=ScreenTimeBatch([_record(original)])
-            )
-            == 1
-        )
-        warehouse.connection.execute(
-            "UPDATE ops.ingestion_metadata SET retention_expired_at = current_timestamp "
-            "WHERE object_key = ?",
-            [original.key],
-        )
-        assert warehouse.succeeded_keys(source_id="screen_time", stream="App.InFocus") == set()
-
-        recreated = _raw(
-            storage_created_at=datetime(2026, 10, 27, 1, tzinfo=UTC),
-            storage_generation=2,
-        )
-        assert (
-            warehouse.load_object(
-                recreated, byte_size=100, batch=ScreenTimeBatch([_record(recreated)])
-            )
-            == 1
-        )
-
-        assert warehouse.succeeded_keys(source_id="screen_time", stream="App.InFocus") == {
-            original.key
-        }
-        assert warehouse.query_rows(
-            """
-            SELECT storage_created_at, retention_expired_at
-            FROM ops.ingestion_metadata
-            WHERE object_key = ?
-            """,
-            [original.key],
-        ) == [(recreated.storage_created_at, None)]
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
-    finally:
-        warehouse.close()
-
-
 def test_new_generation_is_not_trusted_until_it_is_reloaded(tmp_path) -> None:
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "test.duckdb"))))
     try:
@@ -254,10 +209,10 @@ def test_new_generation_is_not_trusted_until_it_is_reloaded(tmp_path) -> None:
         assert warehouse.succeeded_keys_for([recreated]) == {original.key}
         assert warehouse.query_rows(
             """
-            SELECT storage_created_at, storage_generation, retention_expired_at
+            SELECT storage_created_at, storage_generation
             FROM ops.ingestion_metadata
             """
-        ) == [(recreated_at, 2, None)]
+        ) == [(recreated_at, 2)]
         assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
     finally:
         warehouse.close()

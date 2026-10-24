@@ -77,6 +77,7 @@ pdp migrate --database /private/path/scratch.duckdb
 `--database`を省略すると`MOTHERDUCK_DATABASE`・`MOTHERDUCK_TOKEN`の接続先へ適用する。
 各SQLとchecksum記録は同じtransactionで確定する。再実行は適用済みの一致を確認し、変更は新しいforward migrationへ追加する。
 全SQLが適用済みの場合は、台帳の構造・ID・checksumの確認だけで終了し、DDLは実行しない。
+未適用SQLは共通の`loader` leaseを保持して適用する。取込が実行中なら移行を中断し、終了後に再試行する。
 適用済みSQLや台帳は変更しない。checksumの不一致や未対応のスキーマ履歴があるDBへの適用は拒否する。
 再構築には空のscratch DBを使い、[Rebuild](#rebuild)の保持範囲を確認する。
 
@@ -87,6 +88,13 @@ Collectorは起動後にスキーマを初期化し、成功後の周期では�
 
 `007_operational_state.sql`は重複した照合履歴と日次DB heartbeatを削除する。
 適用後のrollbackにも、このスキーマに対応したimageを使う。
+
+`008_terminal_ingestion_receipts.sql`はRaw台帳を成功・失敗の確定結果に絞る。
+まだ試行していないRawは台帳なしで表し、データと成功台帳は同じtransactionで確定する。
+旧`loading`行は再試行できる失敗行へ移行する。実行中の排他は`ops.job_lock`で管理する。
+旧期限切れ台帳を移行対象から外し、保持期限の起点・期限切れ列を削除する。
+分析データと有効な取込台帳は保持する。MacのCollectorも起動時にSQLiteの旧起点列を削除し、
+保存済みRaw・未取込状態・収集成功記録を維持する。適用後は両方の現行スキーマに対応したコードを使う。
 
 ## 収集・日次処理
 
@@ -187,6 +195,7 @@ jsonPayload.summary.valid=true
 
 日次の照合結果は同じ行の`details.owntracks`、古いFitbit欠測は`details.manual_repair_required`に含む。
 LoaderはRaw単位の台帳とログを使い、別のジョブ履歴は作らない。
+Fitbitの手動同期もJSON出力と終了コードで確認し、`ops.job_run`は日次結果の確認に使う。
 `ops.job_lock`は排他制御、Fitbitのcoverageと削除記録は取得順位の保護に使う内部状態であり、成功・失敗の判定元には使わない。
 競合が続く場合だけleaseの所有者と有効期限を確認し、実行中処理の終了を待つ。
 

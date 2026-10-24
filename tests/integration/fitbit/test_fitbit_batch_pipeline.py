@@ -303,6 +303,8 @@ def test_one_hundred_independent_units_share_lifecycle_and_preserve_each_commit(
     import collections
 
     runner, api, factory = direct_setup(tmp_path, states=(None,))
+    with closing(factory()) as warehouse:
+        warehouse.migrate()
     calls = collections.Counter()
 
     def counted_factory():

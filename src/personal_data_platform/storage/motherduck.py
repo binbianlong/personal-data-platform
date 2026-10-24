@@ -93,7 +93,7 @@ class Warehouse:
         self.connection.close()
 
     def migrate(self, migrations: Path | None = None) -> None:
-        apply_migrations(self.connection, migrations)
+        apply_migrations(self, migrations)
 
     def succeeded_keys(self, *, source_id: str, stream: str) -> set[str]:
         rows = self.connection.execute(
@@ -101,7 +101,7 @@ class Warehouse:
             SELECT object_key
             FROM ops.ingestion_metadata
             WHERE source_id = ? AND source_stream = ?
-              AND status = 'succeeded' AND retention_expired_at IS NULL
+              AND status = 'succeeded'
             """,
             [source_id, stream],
         ).fetchall()
@@ -130,7 +130,7 @@ class Warehouse:
                            content_sha256, storage_generation
                     FROM ops.ingestion_metadata
                     WHERE source_id = ? AND source_stream = ?
-                      AND status = 'succeeded' AND retention_expired_at IS NULL
+                      AND status = 'succeeded'
                       AND (? IS NULL OR parser_version = ?)
                     """,
                     [source_id, stream, parser_version, parser_version],
@@ -191,7 +191,7 @@ class Warehouse:
             """
             SELECT status, count(*)
             FROM ops.ingestion_metadata
-            WHERE source_id = ? AND source_stream = ? AND retention_expired_at IS NULL
+            WHERE source_id = ? AND source_stream = ?
             GROUP BY status
             """,
             [source_id, stream],
@@ -199,10 +199,10 @@ class Warehouse:
         return {str(status): int(count) for status, count in rows}
 
     def active_ingestion_states(self, *, source_id: str, stream: str) -> dict[str, IngestionState]:
-        """Return current statuses, excluding previously expired legacy receipts."""
+        """Return the confirmed outcomes for a source stream."""
         rows = self.connection.execute(
             """SELECT object_key, status FROM ops.ingestion_metadata
-            WHERE source_id = ? AND source_stream = ? AND retention_expired_at IS NULL""",
+            WHERE source_id = ? AND source_stream = ?""",
             [source_id, stream],
         ).fetchall()
         return {key: IngestionState(key, status) for key, status in rows}
@@ -210,7 +210,7 @@ class Warehouse:
     def _existing_object(self, raw: RawObject) -> tuple[Any, ...] | None:
         current = self.connection.execute(
             """
-            SELECT status, content_sha256, retention_expired_at, storage_generation,
+            SELECT status, content_sha256, storage_generation,
                    source_id, schema_version, subject_key, source_stream,
                    logical_key, observed_at, parser_version
             FROM ops.ingestion_metadata
@@ -218,7 +218,7 @@ class Warehouse:
             """,
             [raw.key],
         ).fetchone()
-        if current and (*current[4:10], current[1]) != _raw_identity(raw):
+        if current and (*current[3:9], current[1]) != _raw_identity(raw):
             raise RuntimeError(f"immutable object identity changed: {raw.key}")
         return current
 
@@ -246,33 +246,31 @@ class Warehouse:
             if (
                 current
                 and current[0] == "succeeded"
-                and current[2] is None
-                and current[3] == raw.storage_generation
-                and current[10] == batch.parser_version
+                and current[2] == raw.storage_generation
+                and current[9] == batch.parser_version
             ):
                 if not _in_transaction:
                     self.connection.execute("ROLLBACK")
                 return 0
 
+            batch.write(self.connection, raw, byte_size=byte_size, loaded_at=now)
             self.connection.execute(
                 """
                 INSERT INTO ops.ingestion_metadata (
                     object_key, source_id, schema_version, subject_key, source_stream,
                     logical_key, observed_at, content_sha256, byte_size, status,
                     parser_version, record_count, started_at, completed_at, error_type,
-                    error_message, retry_count, storage_created_at, storage_generation,
-                    retention_expired_at, retention_started_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'loading', ?, NULL, ?, NULL,
-                          NULL, NULL, 0, ?, ?, NULL, ?)
+                    error_message, retry_count, storage_created_at, storage_generation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, ?,
+                          NULL, NULL, 0, ?, ?)
                 ON CONFLICT (object_key) DO UPDATE SET
-                    status = 'loading', parser_version = excluded.parser_version,
+                    status = 'succeeded', parser_version = excluded.parser_version,
                     subject_key = excluded.subject_key, logical_key = excluded.logical_key,
-                    started_at = excluded.started_at, completed_at = NULL,
+                    byte_size = excluded.byte_size, record_count = excluded.record_count,
+                    started_at = excluded.started_at, completed_at = excluded.completed_at,
                     error_type = NULL, error_message = NULL,
                     storage_created_at = excluded.storage_created_at,
                     storage_generation = excluded.storage_generation,
-                    retention_started_at = excluded.retention_started_at,
-                    retention_expired_at = NULL,
                     retry_count = ops.ingestion_metadata.retry_count + 1
                 """,
                 [
@@ -286,20 +284,12 @@ class Warehouse:
                     raw.sha256,
                     byte_size,
                     batch.parser_version,
+                    batch.record_count,
+                    now,
                     now,
                     raw.storage_created_at,
                     raw.storage_generation,
-                    raw.retention_started_at,
                 ],
-            )
-            batch.write(self.connection, raw, byte_size=byte_size, loaded_at=now)
-            self.connection.execute(
-                """
-                UPDATE ops.ingestion_metadata
-                SET status = 'succeeded', record_count = ?, completed_at = ?
-                WHERE object_key = ?
-                """,
-                [batch.record_count, now, raw.key],
             )
         except Exception:
             if _in_transaction:
@@ -365,18 +355,15 @@ class Warehouse:
                     object_key, source_id, schema_version, subject_key, source_stream, logical_key,
                     observed_at, content_sha256, byte_size, status, parser_version, record_count,
                     started_at, completed_at, error_type, error_message, retry_count,
-                    storage_created_at, storage_generation, retention_expired_at,
-                    retention_started_at
+                    storage_created_at, storage_generation
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'failed', NULL, NULL, ?, ?, ?, ?,
-                          0, ?, ?, NULL, ?)
+                          0, ?, ?)
                 ON CONFLICT (object_key) DO UPDATE SET
                     status = 'failed', completed_at = excluded.completed_at,
                     subject_key = excluded.subject_key, logical_key = excluded.logical_key,
                     error_type = excluded.error_type, error_message = excluded.error_message,
                     storage_created_at = excluded.storage_created_at,
                     storage_generation = excluded.storage_generation,
-                    retention_started_at = excluded.retention_started_at,
-                    retention_expired_at = NULL,
                     retry_count = ops.ingestion_metadata.retry_count + 1
                 """,
                 [
@@ -395,7 +382,6 @@ class Warehouse:
                     str(error)[:4000],
                     raw.storage_created_at,
                     raw.storage_generation,
-                    raw.retention_started_at,
                 ],
             )
             self.connection.execute("COMMIT")

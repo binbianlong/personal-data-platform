@@ -39,6 +39,61 @@ def test_local_scan_records_latest_devices_and_explicit_inactivity(tmp_path, str
     assert restarted.last_successful_scan() == CollectorScan(latest, (), {})
 
 
+@pytest.mark.parametrize("stream", ["app-in-focus", "app-usage"])
+def test_legacy_retention_upgrade_preserves_raw_pending_and_scan(tmp_path, stream):
+    state = CollectorState(tmp_path / "legacy.db")
+    args = dict(device_key="a" * 64, stream=stream, segment_key="b" * 64)
+    loaded = state.prepare(**args, raw_bytes=b"retained", observed_at=NOW)
+    state.mark_loaded(loaded.identity.object_key, NOW)
+    pending = state.prepare(**args, raw_bytes=b"pending", observed_at=NOW + timedelta(seconds=1))
+    scan = CollectorScan(NOW, ("a" * 64,), {"a" * 64: NOW})
+    state.record_successful_scan(scan, stream=stream)
+    projection = (
+        "id,device_key,stream,segment_key,observed_at,sha256,object_key,compressed_payload,"
+        "status,uploaded_at,storage_created_at,storage_generation"
+    )
+    with state._connect() as connection:
+        if "retention_started_at" not in {
+            r[1] for r in connection.execute("PRAGMA table_info(segment_observation)")
+        }:
+            connection.execute(
+                "ALTER TABLE segment_observation ADD COLUMN retention_started_at TEXT"
+            )
+        connection.execute("UPDATE segment_observation SET retention_started_at=observed_at")
+        before = connection.execute(
+            f"SELECT {projection} FROM segment_observation ORDER BY id"
+        ).fetchall()
+
+    restarted = CollectorState(state.path)
+
+    with restarted._connect() as connection:
+        assert "retention_started_at" not in {
+            r[1] for r in connection.execute("PRAGMA table_info(segment_observation)")
+        }
+        assert (
+            connection.execute(
+                f"SELECT {projection} FROM segment_observation ORDER BY id"
+            ).fetchall()
+            == before
+        )
+    assert restarted.last_successful_scan(stream=stream) == scan
+    assert [p.identity for p in restarted.pending()] == [pending.identity]
+    repository = ScreenTimeLocalRepository(
+        state=restarted, source=get_source("screen_time", stream)
+    )
+    assert (
+        gzip.decompress(repository.get_raw(loaded.identity.object_key, generation=1)) == b"retained"
+    )
+    assert (
+        gzip.decompress(repository.get_raw(pending.identity.object_key, generation=1)) == b"pending"
+    )
+    restarted.mark_loaded(pending.identity.object_key, NOW)
+    assert restarted.pending() == []
+    assert [r.key for r in repository.list_raw(f"raw/screen_time/v1/{'a' * 64}/{stream}/")] == [
+        pending.identity.object_key
+    ]
+
+
 def test_loaded_raw_survives_restart_and_only_superseded_success_is_removed(tmp_path):
     state = CollectorState(tmp_path / "collector.db")
     args = dict(device_key="a" * 64, stream="app-in-focus", segment_key="b" * 64)
@@ -56,14 +111,12 @@ def test_loaded_raw_survives_restart_and_only_superseded_success_is_removed(tmp_
     }
     state.mark_loaded(third.identity.object_key, NOW)
     storage_created_at = NOW - timedelta(days=2)
-    retention_started_at = NOW - timedelta(days=1)
     with state._connect() as connection:
         connection.execute(
-            """UPDATE segment_observation SET storage_created_at = ?, storage_generation = 7,
-                      retention_started_at = ? WHERE object_key = ?""",
+            """UPDATE segment_observation SET storage_created_at = ?, storage_generation = 7
+                      WHERE object_key = ?""",
             (
                 format_observed_at(storage_created_at),
-                format_observed_at(retention_started_at),
                 third.identity.object_key,
             ),
         )
@@ -72,7 +125,6 @@ def test_loaded_raw_survives_restart_and_only_superseded_success_is_removed(tmp_
     assert len(retained) == 1
     assert retained[0].key == third.identity.object_key
     assert retained[0].storage_created_at == storage_created_at
-    assert retained[0].retention_started_at == retention_started_at
     assert retained[0].storage_generation == 7
     assert gzip.decompress(restarted.get_raw(third.identity.object_key, generation=7)) == b"third"
     with pytest.raises(ValueError, match="generation"):

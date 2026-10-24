@@ -198,10 +198,10 @@ def test_reconciliation_isolates_source_and_stream_and_repairs_all_supported_sch
         assert reads == [(raw_v2.key, raw_v2.storage_generation)]
         assert warehouse.query_rows("SELECT * FROM ops.heartbeat") == []
         assert warehouse.query_rows(
-            "SELECT status, retention_expired_at FROM ops.ingestion_metadata "
+            "SELECT status FROM ops.ingestion_metadata "
             "WHERE source_id = ? AND source_stream = ? ORDER BY object_key",
             list(other_scope),
-        ) == [("failed", None), ("succeeded", None)]
+        ) == [("failed",), ("succeeded",)]
     finally:
         warehouse.close()
 

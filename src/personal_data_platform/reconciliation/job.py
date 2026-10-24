@@ -156,7 +156,6 @@ def run_reconciliation(
     checked_at = started_at if now is not None else datetime.now(UTC)
     succeeded_keys = warehouse.succeeded_keys_for(raw_refs, parser_version=parser_version)
     failed_keys = _active_status_keys(states, "failed")
-    loading_keys = _active_status_keys(states, "loading")
     live_loaded_keys = raw_keys & succeeded_keys
     missing = raw_keys - succeeded_keys
 
@@ -166,7 +165,6 @@ def run_reconciliation(
     } - raw_keys
     source_health = source.audit(repository, raw_refs, checked_at)
     failed = len(failed_keys)
-    loading = len(loading_keys)
     available_relations = _relation_names(warehouse)
     missing_relations = tuple(sorted(set(source.required_relations) - available_relations))
     failed_relation_queries = _failed_relation_queries(
@@ -178,7 +176,6 @@ def run_reconciliation(
         and not absent_loaded
         and not absent_uningested
         and failed == 0
-        and loading == 0
         and not missing_relations
         and not failed_relation_queries
     )
@@ -195,7 +192,6 @@ def run_reconciliation(
         "unrecoverable_uningested_object_count": len(absent_uningested),
         "live_loaded_object_count": len(live_loaded_keys),
         "live_unloaded_object_count": len(missing),
-        "active_loading_object_count": loading,
         "orphaned_loaded_object_count": len(absent_loaded),
         "missing_relations": list(missing_relations),
         "failed_relation_queries": list(failed_relation_queries),

@@ -227,7 +227,7 @@ class InterruptedConnection:
             self.calls_after_failure.append(sql)
         match = (
             (self.stage in ("commit_before", "commit_after") and sql == "COMMIT")
-            or (self.stage == "success" and "SET status = 'succeeded'" in sql)
+            or (self.stage == "success" and "INSERT INTO ops.ingestion_metadata" in sql)
             or (self.stage == "events" and "INSERT INTO base.screen_time_event" in sql)
             or (self.stage == "state" and "INSERT INTO ops.screen_time_record" in sql)
         )
