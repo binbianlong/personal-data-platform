@@ -38,6 +38,11 @@ worker・日次Jobは同じimageとruntime Service Accountを共有する。時�
 
 Raw adapterは一つのsource/streamを担当し、保持中の全Raw schema版を再生できるようにする。
 FitbitはRaw adapterへ登録せず、API取得と直接Writerで処理する。dbt selectorはRaw adapterから独立して解決する。
+
+dbtのmodelは`dbt/models/<schema>/<source>/`へ配置し、`base/screen_time/`に遷移・区間View、
+`marts/<source>/`に分析Viewを置く。既存baseテーブルのsource定義は`dbt/models/base/sources.yml`、
+model定義・列テストは各modelディレクトリの`schema.yml`、単独SQLテストは`dbt/tests/<source>/`へまとめる。
+
 Raw schema版とparser versionは別で、parser versionを更新すると保持中の旧parser成功分も再解析する。
 取得状態・controlの意味はsourceが所有し、共通処理は他sourceへCollectorのscan記録を要求しない。
 未知のsource/streamを既存decoderへ流すfallbackは設けない。
