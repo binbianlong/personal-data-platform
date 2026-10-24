@@ -8,6 +8,12 @@
   "minimumReleaseAge": "14 days",
   "automerge": false,
   "prConcurrentLimit": 1,
+  "pep621": {
+    "lockFileMaintenance": {
+      "enabled": true,
+      "schedule": ["* * 1 1,4,7,10 *"]
+    }
+  },
   "packageRules": [
     {
       "matchUpdateTypes": ["digest", "pin", "pinDigest"],

@@ -39,6 +39,10 @@ Deploy workflowが停止中の場合は、ローカルで`linux/amd64` imageを�
 未マージの通常PRは次の四半期に同じPRを更新する。定期実行の時間外は既存branchも自動更新せず、CIの再実行を抑える。
 image digestやpinの更新も同じgroupに含める。待機期間は間接依存すべての公開時刻を保証するものではない。
 
+`uv.lock`全体は同じ四半期scheduleの専用PRで更新し、間接依存も`pyproject.toml`の制約内で更新する。
+このPRも同時に開く通常PRの上限1本に含めるため、他の通常PRが開いていれば作成を待つ。
+lockfile全体更新は個別依存のDashboard承認や14日待機で対象を絞らない。制約内のdbt等の更新も含め、差分とCIを確認して手動マージする。
+
 メジャー更新とPython本体・DuckDB・dbt・Terraform providerはDependency Dashboardで承認してから個別PRを作成する。
 commitに固定した`ccl-segb`は参照先を個別確認する。Pythonの範囲内更新はlockfileを更新し、固定値や範囲外の変更はPRで確認する。
 すべて手動マージとし、既存の`CI`必須・PR必須のbranch保護を使う。
