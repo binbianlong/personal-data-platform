@@ -16,21 +16,10 @@ resource "google_pubsub_subscription" "fitbit" {
   message_retention_duration = "604800s"
   retain_acked_messages      = false
   expiration_policy { ttl = "" }
-  dynamic "push_config" {
-    for_each = var.schedulers_enabled && var.fitbit_delivery_mode == "push" ? [true] : []
-    content {
-      push_endpoint = "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit"
-      oidc_token {
-        service_account_email = google_service_account.scheduler.email
-        audience              = google_cloud_run_v2_service.fitbit_worker.uri
-      }
-    }
-  }
   retry_policy {
     minimum_backoff = "10s"
     maximum_backoff = "600s"
   }
-  depends_on = [google_cloud_run_v2_service_iam_member.fitbit_worker, google_service_account_iam_member.pubsub_push_token]
   lifecycle { prevent_destroy = true }
 }
 resource "google_pubsub_subscription_iam_member" "fitbit_worker" {

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
-import json
 import logging
 import uuid
 from dataclasses import asdict
@@ -15,9 +12,7 @@ from fastapi import FastAPI, Request, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
-from .acquisition import AcquisitionRunner
 from .models import DATE_TYPES, Notification, Window, parse_time
-from .notifications import decode_notification
 from .webhook import (
     AuthenticationError,
     GoogleHealthAuthenticator,
@@ -213,10 +208,8 @@ def create_pubsub_app(
     return app
 
 
-def create_worker_app(
-    *, runner: AcquisitionRunner, subscription: str, drainer: NotificationDrainer | None = None
-) -> FastAPI:
-    """Cloud Run IAM authenticates the push caller before requests reach this app."""
+def create_worker_app(*, drainer: NotificationDrainer) -> FastAPI:
+    """Serve the scheduled pull worker behind Cloud Run IAM."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/healthz")
@@ -225,90 +218,7 @@ def create_worker_app(
 
     @app.post("/notifications/fitbit/drain")
     async def drain() -> Response:
-        if drainer is None:
-            return Response(status_code=503)
         result = await run_in_threadpool(drainer.run)
         return JSONResponse(asdict(result), status_code=200 if result.ok else 503)
-
-    @app.post("/notifications/fitbit")
-    async def ingest(request: Request) -> Response:
-        try:
-            envelope = json.loads(await _body(request))
-            if not isinstance(envelope, dict) or envelope.get("subscription") != subscription:
-                raise ValueError("unexpected push subscription")
-            message = envelope["message"]
-            encoded = message["data"]
-            if not isinstance(encoded, str):
-                raise ValueError("push data must be base64 text")
-            notification = decode_notification(base64.b64decode(encoded, validate=True))
-            if notification.subject_key != runner.subject_key:
-                raise ValueError("unexpected notification subject")
-        except (ValueError, KeyError, TypeError, binascii.Error, PayloadError):
-            LOGGER.error("fitbit invalid push notification")
-            return Response(status_code=400)
-        started_at = datetime.now(UTC)
-        message_id = message.get("messageId")
-        attempt_id = uuid.uuid4().hex
-        summary: dict[str, object] = {
-            "notification_id": notification.notification_id,
-            "pubsub_message_id": message_id if isinstance(message_id, str) else None,
-            "attempt_id": attempt_id,
-            "acquisition_mode": notification.acquisition_mode,
-            "received_at": notification.received_at.isoformat(),
-            "started_at": started_at.isoformat(),
-            **_queue_range(notification.windows[0]),
-        }
-        try:
-            result = await run_in_threadpool(
-                runner.process_notification, notification, attempt_id=attempt_id
-            )
-            finished_at = datetime.now(UTC)
-            summary.update(
-                {
-                    "finished_at": finished_at.isoformat(),
-                    "completed_scopes": result.completed_scopes,
-                    "failed_scopes": result.failed_scopes,
-                    "deferred_scopes": result.deferred_scopes,
-                }
-            )
-            if not result.ok:
-                LOGGER.log(
-                    logging.ERROR if result.failed_scopes else logging.INFO,
-                    "fitbit push deferred or failed",
-                    extra={"event": "fitbit_push", "status": "retry", "summary": summary},
-                )
-                return Response(status_code=503)
-            committed_at = finished_at
-            LOGGER.info(
-                "fitbit push committed",
-                extra={
-                    "event": "fitbit_push",
-                    "status": "succeeded",
-                    "summary": {
-                        **summary,
-                        "committed_at": committed_at.isoformat(),
-                        "lag_seconds": (committed_at - notification.received_at).total_seconds(),
-                    },
-                },
-            )
-            return Response(status_code=204)
-        except Exception as error:
-            LOGGER.error(
-                "fitbit push failed error_type=%s",
-                type(error).__name__,
-                extra={
-                    "event": "fitbit_push",
-                    "status": "retry",
-                    "summary": {
-                        **summary,
-                        "finished_at": datetime.now(UTC).isoformat(),
-                        "completed_scopes": None,
-                        "failed_scopes": None,
-                        "deferred_scopes": None,
-                        "error_type": type(error).__name__,
-                    },
-                },
-            )
-            return Response(status_code=503)
 
     return app

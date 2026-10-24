@@ -46,7 +46,6 @@ jobs:
       TF_VAR_rebuild_impersonator_member: ${{ vars.GCP_COLLECTOR_IMPERSONATOR_MEMBER }}
       TF_VAR_deployer_service_account_email: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
       TF_VAR_fitbit_subject_key: ${{ vars.PDP_FITBIT_SUBJECT_KEY }}
-      TF_VAR_fitbit_delivery_mode: ${{ vars.PDP_FITBIT_DELIVERY_MODE || 'push' }}
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
       GCP_REGION: us-west1
       ARTIFACT_REPOSITORY: ${{ vars.GCP_RUNTIME_ARTIFACT_REPOSITORY || vars.GCP_WEST_ARTIFACT_REPOSITORY || vars.GCP_ARTIFACT_REPOSITORY }}

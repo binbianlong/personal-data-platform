@@ -63,9 +63,7 @@ output "runtime_resources" {
     preflight_bucket       = google_storage_bucket.preflight.name
     jobs                   = { for key, job in google_cloud_run_v2_job.runtime : key => job.name }
     receiver_url           = "${google_cloud_run_v2_service.fitbit_receiver.uri}/webhooks/fitbit"
-    worker_url             = "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit"
     fitbit_drain_url       = "${google_cloud_run_v2_service.fitbit_worker.uri}/notifications/fitbit/drain"
-    fitbit_delivery_mode   = var.fitbit_delivery_mode
     secrets                = { for key, secret in google_secret_manager_secret.runtime : key => secret.secret_id }
     pubsub_topic           = google_pubsub_topic.fitbit.id
     pubsub_subscription    = google_pubsub_subscription.fitbit.id

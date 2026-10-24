@@ -72,8 +72,6 @@ def run_worker_from_env() -> int:
     subscription = required("PDP_FITBIT_PUBSUB_SUBSCRIPTION")
     subscriber = pubsub_v1.SubscriberClient(client_options={"api_endpoint": ENDPOINT})
     app = create_worker_app(
-        runner=runner,
-        subscription=subscription,
         drainer=NotificationDrainer(
             runner=runner, subscriber=subscriber, subscription=subscription
         ),

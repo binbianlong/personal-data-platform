@@ -164,15 +164,13 @@ class AcquisitionRunner:
         notification: Notification,
         *,
         attempt_id: str | None = None,
-        warehouse: Warehouse | None = None,
-        lease_owner: str | None = None,
+        warehouse: Warehouse,
+        lease_owner: str,
         timeout_seconds: int = 480,
     ) -> AcquisitionSummary:
-        """Process one push delivery; the HTTP boundary acknowledges confirmed commits."""
+        """Acquire a notification scope; the caller acknowledges confirmed commits."""
         if notification.subject_key != self.subject_key:
             raise ValueError("notification subject does not match configured subject")
-        if (warehouse is None) != (lease_owner is None):
-            raise ValueError("warehouse and lease_owner must be paired")
         if not 0 < timeout_seconds <= 6000:
             raise ValueError("invalid acquisition budget")
         mode = notification.acquisition_mode
@@ -205,62 +203,16 @@ class AcquisitionRunner:
                     acquisition_mode=mode,
                 )
             return AcquisitionSummary(deferred_scopes=len(windows), first_incomplete=windows[0])
-        if warehouse is not None and lease_owner is not None:
-            return self.run_windows(
-                windows,
-                warehouse=warehouse,
-                lease_owner=lease_owner,
-                timeout_seconds=timeout_seconds,
-                notification_id=notification.notification_id,
-                attempt_id=attempt_id,
-                acquisition_mode=mode,
-                reserve_seconds=0,
-            )
-        deadline = self.monotonic() + timeout_seconds
-        warehouse = self.warehouse_factory()
-        owner = uuid.uuid4().hex
-        acquired = False
-        try:
-            warehouse.migrate()
-            acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=600)
-            if not acquired:
-                for window in windows:
-                    _log_acquisition(
-                        window,
-                        status="deferred",
-                        notification_id=notification.notification_id,
-                        attempt_id=attempt_id,
-                        reason="loader_busy",
-                        acquisition_mode=mode,
-                    )
-                return AcquisitionSummary(deferred_scopes=len(windows))
-            seconds = int(deadline - self.monotonic())
-            if seconds <= 0:
-                for window in windows:
-                    _log_acquisition(
-                        window,
-                        status="deferred",
-                        notification_id=notification.notification_id,
-                        attempt_id=attempt_id,
-                        reason="execution_budget_exhausted",
-                        acquisition_mode=mode,
-                    )
-                return AcquisitionSummary(deferred_scopes=len(windows))
-            return self.run_windows(
-                windows,
-                warehouse=warehouse,
-                lease_owner=owner,
-                timeout_seconds=seconds,
-                notification_id=notification.notification_id,
-                attempt_id=attempt_id,
-                acquisition_mode=mode,
-            )
-        except WarehouseConnectionError:
-            return AcquisitionSummary(failed_scopes=len(windows))
-        finally:
-            if acquired and warehouse.connection_usable:
-                warehouse.release_job_lock("loader", owner)
-            warehouse.close()
+        return self.run_windows(
+            windows,
+            warehouse=warehouse,
+            lease_owner=lease_owner,
+            timeout_seconds=timeout_seconds,
+            notification_id=notification.notification_id,
+            attempt_id=attempt_id,
+            acquisition_mode=mode,
+            reserve_seconds=0,
+        )
 
     def run_windows(
         self,

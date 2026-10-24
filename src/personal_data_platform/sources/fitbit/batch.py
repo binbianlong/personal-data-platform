@@ -354,7 +354,7 @@ class NotificationDrainer:
                 LOGGER.info(
                     "fitbit batch original completed",
                     extra={
-                        "event": "fitbit_push",
+                        "event": "fitbit_notification_processed",
                         "status": "succeeded" if message.ack_id in acked else "retry",
                         "summary": {
                             "notification_id": notice.notification_id,

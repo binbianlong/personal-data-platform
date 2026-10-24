@@ -183,7 +183,7 @@ def test_pubsub_and_receiver_access_are_separate() -> None:
     publisher = publisher.split("\n}", 1)[0]
     assert "roles/pubsub.subscriber" not in publisher
     assert "google_service_account.fitbit_receiver.email" in publisher
-    assert "push_config" in queue
+    assert "push_config" not in queue
     receiver = runtime.split('resource "google_cloud_run_v2_service" "fitbit_receiver"', 1)[1]
     receiver = receiver.split('resource "google_cloud_run_v2_service_iam_member"', 1)[0]
     assert re.search(r"PDP_FITBIT_WEBHOOK_CONFIG\s*=", receiver)

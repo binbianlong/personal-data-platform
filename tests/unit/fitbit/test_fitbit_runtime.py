@@ -119,7 +119,7 @@ def test_daily_repair_uses_two_completed_tokyo_days_without_device_cursor(
         warehouse.close()
 
 
-def test_worker_composes_regional_pull_client_and_keeps_push_route(monkeypatch):
+def test_worker_composes_regional_pull_client_and_rejects_push_delivery(monkeypatch):
     import time
     from datetime import UTC, datetime
     from types import SimpleNamespace
@@ -160,8 +160,9 @@ def test_worker_composes_regional_pull_client_and_keeps_push_route(monkeypatch):
     monkeypatch.setattr(runtime, "_acquisition_runner", lambda: runner)
 
     def serve(app, **kwargs):
-        assert "/notifications/fitbit" in {route.path for route in app.routes}
-        response = TestClient(app).post("/notifications/fitbit/drain")
+        client = TestClient(app)
+        assert client.post("/notifications/fitbit", json={}).status_code == 404
+        response = client.post("/notifications/fitbit/drain")
         assert response.status_code == 200 and response.json()["session_opens"] == 0
 
     monkeypatch.setattr(runtime.uvicorn, "run", serve)
