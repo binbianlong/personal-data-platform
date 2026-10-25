@@ -9,13 +9,13 @@ from personal_data_platform.sources.screen_time.collector import (
     BiomeScreenTimeSource,
     ScreenTimeCollector,
 )
+from personal_data_platform.sources.screen_time.collector_state import CollectorScan, CollectorState
 from personal_data_platform.sources.screen_time.raw import (
     ScreenTimeRawIdentity,
     build_device_key,
     encode_segment_envelope,
     format_observed_at,
 )
-from personal_data_platform.sources.screen_time.state import CollectorScan, CollectorState
 from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 from tests.screen_time_helpers import event, segb

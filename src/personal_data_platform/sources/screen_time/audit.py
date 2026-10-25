@@ -1,14 +1,18 @@
-"""Screen Time collector liveness checks for the common reconciliation job."""
+"""Screen Time collector liveness and ingestion-state audits."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
-from datetime import datetime, timedelta
-from typing import Protocol, cast
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Protocol, cast
 
 from personal_data_platform.raw.models import RawObject
-from personal_data_platform.sources.contracts import RawRepository, SourceHealth
-from personal_data_platform.sources.screen_time.state import CollectorScan
+from personal_data_platform.sources.contracts import RawRepository, SourceAdapter, SourceHealth
+from personal_data_platform.sources.screen_time.collector_state import CollectorScan
+
+if TYPE_CHECKING:
+    from personal_data_platform.storage.motherduck import IngestionState, Warehouse
 
 COLLECTOR_FRESHNESS = timedelta(hours=48)
 MAX_CLOCK_SKEW = timedelta(minutes=10)
@@ -59,3 +63,61 @@ def audit_source(
             "stale_collector_scan_devices": sorted(stale_devices),
         },
     )
+
+
+def _aware_utc(value: object) -> datetime | None:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        return None
+    return value.astimezone(UTC)
+
+
+def audit_collector_heartbeat(
+    warehouse: Warehouse, source: SourceAdapter, now: datetime
+) -> SourceHealth:
+    """Cloud jobs check only collector-owned success; they never renew it."""
+    rows = warehouse.query_rows(
+        "SELECT succeeded_at, details FROM ops.heartbeat WHERE monitor_name = ?",
+        [source.monitor_name],
+    )
+    if not rows:
+        return SourceHealth(False, {"collector_heartbeat_missing": True})
+    succeeded_at, serialized = rows[0]
+    try:
+        details = json.loads(str(serialized))
+        scan_at = _aware_utc(datetime.fromisoformat(details["scan_completed_at"]))
+        loaded_at = _aware_utc(succeeded_at)
+        ok = all(
+            value is not None and now - COLLECTOR_FRESHNESS <= value <= now + MAX_CLOCK_SKEW
+            for value in (scan_at, loaded_at)
+        )
+        return SourceHealth(
+            ok,
+            {
+                "collector_inactive": details.get("collector_inactive") is True,
+                "collector_heartbeat_stale": not ok,
+            },
+        )
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return SourceHealth(False, {"collector_heartbeat_invalid": True})
+
+
+def filter_ingestion_states(
+    warehouse: Warehouse,
+    states: dict[str, IngestionState],
+    *,
+    raw_keys: set[str],
+    stream: str,
+) -> dict[str, IngestionState]:
+    """Ignore compacted successes outside the live Raw and current segments."""
+    current_keys = {
+        row[0]
+        for row in warehouse.query_rows(
+            "SELECT object_key FROM ops.screen_time_segment WHERE source_stream = ?",
+            [stream],
+        )
+    }
+    return {
+        key: value
+        for key, value in states.items()
+        if key in raw_keys or key in current_keys or value.status != "succeeded"
+    }

@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from personal_data_platform.sources.screen_time.audit import audit_source
-from personal_data_platform.sources.screen_time.state import CollectorScan
+from personal_data_platform.sources.screen_time.collector_state import CollectorScan
 
 NOW = datetime(2026, 10, 5, tzinfo=UTC)
 DEVICE = "a" * 64

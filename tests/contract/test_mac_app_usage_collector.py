@@ -9,9 +9,9 @@ from personal_data_platform.sources.screen_time.collector import (
     BiomeScreenTimeSource,
     ScreenTimeCollector,
 )
+from personal_data_platform.sources.screen_time.collector_state import CollectorState
 from personal_data_platform.sources.screen_time.raw import build_device_key
 from personal_data_platform.sources.screen_time.runtime import collect_all, load_pending
-from personal_data_platform.sources.screen_time.state import CollectorState
 from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 from tests.screen_time_helpers import event, mac_usage_event, segb

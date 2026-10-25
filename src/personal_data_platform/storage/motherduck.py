@@ -142,50 +142,6 @@ class Warehouse:
             if live_identities.get(str(object_key)) == tuple(identity)
         }
 
-    def prune_screen_time_receipts(
-        self, live_raw: Iterable[RawObject], *, parser_version: str
-    ) -> None:
-        """Remove superseded successes only where one live Raw is warehouse-confirmed."""
-
-        by_scope: dict[tuple[str, str, str], list[RawObject]] = {}
-        for raw in live_raw:
-            if raw.source_id == "screen_time":
-                by_scope.setdefault((raw.subject_key, raw.stream, raw.logical_key), []).append(raw)
-        candidates = [values[0] for values in by_scope.values() if len(values) == 1]
-        confirmed = self.succeeded_keys_for(candidates, parser_version=parser_version)
-        if not confirmed:
-            return
-        try:
-            self.connection.execute("BEGIN TRANSACTION")
-        except Exception as error:
-            self.connection_usable = False
-            raise WarehouseConnectionError(
-                "cannot begin receipt pruning; reopen warehouse"
-            ) from error
-        try:
-            for raw in candidates:
-                if raw.key not in confirmed:
-                    continue
-                self.connection.execute(
-                    "DELETE FROM ops.ingestion_metadata "
-                    "WHERE source_id = 'screen_time' AND status = 'succeeded' "
-                    "AND subject_key = ? AND source_stream = ? AND logical_key = ? "
-                    "AND (observed_at, object_key) < (?, ?)",
-                    [raw.subject_key, raw.stream, raw.logical_key, raw.observed_at, raw.key],
-                )
-        except Exception as error:
-            try:
-                self.connection.execute("ROLLBACK")
-            except Exception:
-                self.connection_usable = False
-                raise WarehouseConnectionError("receipt pruning rollback failed") from error
-            raise
-        try:
-            self.connection.execute("COMMIT")
-        except Exception as error:
-            self.connection_usable = False
-            raise WarehouseConnectionError("receipt pruning commit outcome unknown") from error
-
     def ingestion_counts(self, *, source_id: str, stream: str) -> dict[str, int]:
         rows = self.connection.execute(
             """
@@ -475,7 +431,7 @@ class Warehouse:
     def query_rows(self, sql: str, parameters: list[Any] | None = None) -> list[tuple[Any, ...]]:
         return self.connection.execute(sql, parameters or []).fetchall()
 
-    def finish_screen_time_collection(
+    def finish_collection(
         self, owner_id: str, *, heartbeats: list[tuple[str, dict[str, object]]]
     ) -> None:
         """Publish stream successes and release their lease in one transaction."""
