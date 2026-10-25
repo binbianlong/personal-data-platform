@@ -11,8 +11,8 @@ from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.job import _relation_names, run_reconciliation
 from personal_data_platform.sources.contracts import SourceHealth
 from personal_data_platform.sources.registry import get_source
+from personal_data_platform.sources.screen_time.collector_state import CollectorScan
 from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
-from personal_data_platform.sources.screen_time.state import CollectorScan
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 

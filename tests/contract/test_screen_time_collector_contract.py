@@ -10,9 +10,9 @@ from personal_data_platform.sources.screen_time.collector import (
     CollectorSourceError,
     ScreenTimeCollector,
 )
+from personal_data_platform.sources.screen_time.collector_state import CollectorState
 from personal_data_platform.sources.screen_time.raw import build_device_key, decode_segment_envelope
 from personal_data_platform.sources.screen_time.runtime import load_pending
-from personal_data_platform.sources.screen_time.state import CollectorState
 from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
 from personal_data_platform.storage.motherduck import (
     Warehouse,

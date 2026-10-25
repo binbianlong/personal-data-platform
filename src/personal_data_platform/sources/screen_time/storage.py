@@ -9,11 +9,11 @@ from pathlib import Path
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import RawCodec
 
+from .collector_state import CollectorScan, CollectorState
 from .raw import (
     parse_observed_at,
     parse_raw_object_key,
 )
-from .state import CollectorScan, CollectorState
 
 
 class ScreenTimeLocalRepository:

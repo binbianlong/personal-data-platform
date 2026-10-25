@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import RawRepository, SourceAdapter, SourceHealth
-from personal_data_platform.sources.screen_time.state import CollectorScan
+from personal_data_platform.sources.screen_time.collector_state import CollectorScan
 
 if TYPE_CHECKING:
     from personal_data_platform.storage.motherduck import IngestionState, Warehouse

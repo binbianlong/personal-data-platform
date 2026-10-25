@@ -1,8 +1,8 @@
 from datetime import UTC, datetime, timedelta
 
 from personal_data_platform.sources.registry import get_source
+from personal_data_platform.sources.screen_time.collector_state import CollectorScan, CollectorState
 from personal_data_platform.sources.screen_time.raw import encode_segment_envelope
-from personal_data_platform.sources.screen_time.state import CollectorScan, CollectorState
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 from tests.screen_time_helpers import event, segb
 

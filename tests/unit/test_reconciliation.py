@@ -13,8 +13,8 @@ from personal_data_platform.reconciliation.job import (
 )
 from personal_data_platform.reconciliation.models import ReconciliationResult
 from personal_data_platform.sources.registry import get_source
+from personal_data_platform.sources.screen_time.collector_state import CollectorScan
 from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
-from personal_data_platform.sources.screen_time.state import CollectorScan
 from personal_data_platform.storage.motherduck import IngestionState
 
 DEVICE_KEY = "a" * 64

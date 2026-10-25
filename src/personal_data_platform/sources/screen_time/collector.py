@@ -12,16 +12,16 @@ from pathlib import Path
 from urllib.parse import quote
 
 from personal_data_platform.loader.models import RawDecodeError
+from personal_data_platform.sources.screen_time.collector_state import (
+    CollectorScan,
+    CollectorState,
+)
 from personal_data_platform.sources.screen_time.raw import (
     APP_IN_FOCUS_STREAM,
     APP_USAGE_STREAM,
     build_device_key,
     build_segment_key,
     encode_segment_envelope,
-)
-from personal_data_platform.sources.screen_time.state import (
-    CollectorScan,
-    CollectorState,
 )
 
 from .parser import validate_segb_snapshot
