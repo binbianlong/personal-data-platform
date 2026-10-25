@@ -15,7 +15,10 @@ raw/owntracks/v1/<device_key>/location/YYYY/MM/DD/YYYYMMDDThhmmssZ_<sha256>.json
 | `event_key` / `device_key` | 端末と内容hashから作るイベントkey / 疑似化端末key |
 | `event_at` / `latitude` / `longitude` | 測位時刻と緯度経度 |
 | `accuracy_m` / `velocity_kmh` | 受信時に存在した場合の位置精度・速度 |
+| `motionactivities` | iOSが検出した活動状態の文字列配列。欠損・nullは`NULL`、空配列は`[]`として区別する |
 | `object_key` / `storage_generation` | 取込元Rawの識別子 |
 | `received_at` / `loaded_at` / `parser_version` | GCS保存時刻・DB取込時刻・parser版 |
 
 `marts.owntracks_location_time_series`は分析行にTokyo時刻`event_at_jst`と日付`activity_date`を加えるViewである。測位点を日次に集約しない。
+
+`motionactivities`は配列のまま保存し、未知の活動名も保持する。活動状態は推定値として扱い、欠損を静止中と解釈しない。

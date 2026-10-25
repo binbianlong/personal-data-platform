@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -68,3 +69,15 @@ def test_non_location_has_no_raw(body):
     from personal_data_platform.sources.owntracks.raw import prepare_location
 
     assert prepare_location(body, device_key="a" * 64) is None
+
+
+@pytest.mark.parametrize("value", ["walking", {}, [1], [True], [None], [["walking"]]])
+@pytest.mark.parametrize("from_raw", [False, True])
+def test_motionactivities_rejects_values_other_than_string_arrays(value, from_raw):
+    from personal_data_platform.sources.owntracks.raw import location_message
+
+    payload = json.dumps(
+        {"_type": "location", "lat": 35, "lon": 139, "tst": 1, "motionactivities": value}
+    ).encode()
+    with pytest.raises(ValueError, match="motionactivities"):
+        location_message(payload, from_raw=from_raw)

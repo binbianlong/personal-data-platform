@@ -33,7 +33,7 @@ class RawStore:
         return self.objects[key]
 
 
-def location_store():
+def location_store(**fields):
     source = get_source("owntracks", "location")
     from personal_data_platform.sources.owntracks.raw import prepare_location
 
@@ -50,6 +50,7 @@ def location_store():
                 "alt": 30,
                 "m": 1,
                 "t": "u",
+                **fields,
             }
         ).encode(),
         device_key="a" * 64,
@@ -106,8 +107,51 @@ def test_failed_batch_rolls_back_location_and_can_be_retried(monkeypatch):
         warehouse.close()
 
 
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        ({}, None),
+        ({"motionactivities": None}, None),
+        ({"motionactivities": []}, []),
+        ({"motionactivities": ["walking", "future-state"]}, ["walking", "future-state"]),
+    ],
+)
+def test_loader_preserves_motionactivities_and_missing_values(fields, expected):
+    source, store, _, _ = location_store(**fields)
+    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    try:
+        warehouse.migrate()
+        assert run_loader(store, warehouse, source=source).records == 1
+        assert run_loader(store, warehouse, source=source).skipped == 1
+        assert warehouse.query_rows("SELECT motionactivities FROM base.owntracks_location") == [
+            (expected,)
+        ]
+    finally:
+        warehouse.close()
+
+
+def test_reconciliation_reprocesses_locations_loaded_with_previous_parser():
+    source, store, _, _ = location_store(motionactivities=["walking"])
+    source.parser_version = "owntracks-location-v1"
+    source.required_relations = ("base.owntracks_location",)
+    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    try:
+        warehouse.migrate()
+        assert run_loader(store, warehouse, source=source).records == 1
+        warehouse.connection.execute("UPDATE base.owntracks_location SET motionactivities=NULL")
+        source.parser_version = get_source("owntracks").parser_version
+
+        assert run_reconciliation(store, warehouse, source=source).ok
+        assert warehouse.query_rows("SELECT motionactivities FROM base.owntracks_location") == [
+            (["walking"],)
+        ]
+        assert run_loader(store, warehouse, source=source).skipped == 1
+    finally:
+        warehouse.close()
+
+
 def test_dbt_location_view_uses_tokyo_time(tmp_path, monkeypatch, dbt_project):
-    source, store, _, _ = location_store()
+    source, store, _, _ = location_store(motionactivities=["walking", "cycling"])
     database = tmp_path / "owntracks.duckdb"
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     warehouse.migrate()
@@ -118,8 +162,9 @@ def test_dbt_location_view_uses_tokyo_time(tmp_path, monkeypatch, dbt_project):
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
         assert warehouse.query_rows(
-            "SELECT event_at_jst,activity_date FROM marts.owntracks_location_time_series"
-        ) == [(datetime(2026, 10, 9, 9), datetime(2026, 10, 9).date())]
+            "SELECT event_at_jst,activity_date,motionactivities "
+            "FROM marts.owntracks_location_time_series"
+        ) == [(datetime(2026, 10, 9, 9), datetime(2026, 10, 9).date(), ["walking", "cycling"])]
     finally:
         warehouse.close()
 

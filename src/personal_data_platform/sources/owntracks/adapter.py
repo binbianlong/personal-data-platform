@@ -17,7 +17,7 @@ class OwnTracksSource:
     stream = "location"
     raw_storage: Literal["gcs", "sqlite"] = "gcs"
     schema_versions: tuple[int, ...] = (1,)
-    parser_version = "owntracks-location-v1"
+    parser_version = "owntracks-location-v2"
     raw_prefixes: tuple[str, ...] = (RAW_PREFIX,)
     raw_suffixes: tuple[str, ...] = (".json.gz",)
     required_relations: tuple[str, ...] = (

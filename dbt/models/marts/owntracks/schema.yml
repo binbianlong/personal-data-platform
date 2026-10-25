@@ -14,3 +14,5 @@ models:
         data_tests: [not_null]
       - name: longitude
         data_tests: [not_null]
+      - name: motionactivities
+        description: Observed activity labels; missing values remain null and empty arrays remain empty.
