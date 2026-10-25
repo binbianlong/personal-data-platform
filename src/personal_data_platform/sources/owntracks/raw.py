@@ -82,6 +82,12 @@ def location_message(payload: bytes, *, from_raw: bool = False) -> dict[str, obj
     trigger = message.get("t")
     if trigger is not None and not isinstance(trigger, str):
         raise ValueError("invalid OwnTracks trigger")
+    activities = message.get("motionactivities")
+    if activities is not None and (
+        not isinstance(activities, list)
+        or any(not isinstance(activity, str) for activity in activities)
+    ):
+        raise ValueError("invalid OwnTracks motionactivities")
     return message
 
 

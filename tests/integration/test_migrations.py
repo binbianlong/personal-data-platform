@@ -271,7 +271,33 @@ def test_owntracks_battery_column_removal_preserves_location_and_provenance(ware
     assert "battery_percent" not in {
         row[0] for row in warehouse.query_rows("DESCRIBE base.owntracks_location")
     }
-    assert warehouse.query_rows("SELECT * FROM base.owntracks_location") == before
+    assert (
+        warehouse.query_rows("SELECT * EXCLUDE (motionactivities) FROM base.owntracks_location")
+        == before
+    )
+
+
+def test_owntracks_motionactivities_migration_preserves_existing_locations(warehouse, tmp_path):
+    for path in DEFAULT_MIGRATIONS.glob("*.sql"):
+        if path.name < "009_":
+            shutil.copyfile(path, tmp_path / path.name)
+    warehouse.migrate(tmp_path)
+    at = _raw().observed_at
+    warehouse.connection.execute(
+        "INSERT INTO base.owntracks_location VALUES "
+        "('event','device',?,35,139,7,12,'raw',1,?,?,'owntracks-location-v1')",
+        [at, at, at],
+    )
+    before = warehouse.query_rows("SELECT * FROM base.owntracks_location")
+
+    warehouse.migrate()
+    warehouse.migrate()
+
+    assert (
+        warehouse.query_rows("SELECT * EXCLUDE (motionactivities) FROM base.owntracks_location")
+        == before
+    )
+    assert warehouse.query_rows("SELECT motionactivities FROM base.owntracks_location") == [(None,)]
 
 
 def test_audit_cleanup_preserves_operational_and_collector_state(warehouse, tmp_path):
