@@ -45,24 +45,24 @@ def test_local_audit_accepts_compacted_history_but_requires_current_raw(tmp_path
 
 
 def test_cloud_audit_uses_mac_heartbeat_and_rejects_stale_capture():
-    from personal_data_platform.reconciliation.job import _audit_screen_time_heartbeat
+    from personal_data_platform.sources.screen_time.audit import audit_collector_heartbeat
 
     wh = Warehouse(connect(WarehouseConfig(":memory:")))
     wh.migrate()
     source = get_source()
     now = datetime.now(UTC)
-    assert not _audit_screen_time_heartbeat(wh, source, now).ok
+    assert not audit_collector_heartbeat(wh, source, now).ok
     wh.publish_heartbeat(source.monitor_name, "mac", {"scan_completed_at": now.isoformat()})
-    assert _audit_screen_time_heartbeat(wh, source, now).ok
+    assert audit_collector_heartbeat(wh, source, now).ok
     wh.publish_heartbeat(
         source.monitor_name, "mac", {"scan_completed_at": (now - timedelta(hours=49)).isoformat()}
     )
-    assert not _audit_screen_time_heartbeat(wh, source, now).ok
+    assert not audit_collector_heartbeat(wh, source, now).ok
     wh.publish_heartbeat(
         source.monitor_name,
         "mac",
         {"collector_inactive": True, "scan_completed_at": now.isoformat()},
     )
-    assert _audit_screen_time_heartbeat(wh, source, now).ok
-    assert not _audit_screen_time_heartbeat(wh, source, now + timedelta(hours=49)).ok
+    assert audit_collector_heartbeat(wh, source, now).ok
+    assert not audit_collector_heartbeat(wh, source, now + timedelta(hours=49)).ok
     wh.close()

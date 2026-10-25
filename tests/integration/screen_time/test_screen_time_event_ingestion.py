@@ -8,6 +8,7 @@ import pytest
 
 from personal_data_platform.loader.job import run_loader
 from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+from personal_data_platform.sources.screen_time.warehouse import prune_receipts
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
     Warehouse,
@@ -255,9 +256,7 @@ def test_receipt_pruning_stops_after_uncertain_commit(tmp_path, stage):
     warehouse.connection = wrapper
     try:
         with pytest.raises(WarehouseConnectionError):
-            warehouse.prune_screen_time_receipts(
-                [current], parser_version=ScreenTimeSource().parser_version
-            )
+            prune_receipts(warehouse, [current], parser_version=ScreenTimeSource().parser_version)
         assert warehouse.connection_usable is False
         warehouse.release_job_lock("loader", "owner")
         assert wrapper.calls_after_failure == []

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from personal_data_platform.sources.screen_time.parser import PARSER_VERSION
+from personal_data_platform.sources.screen_time.warehouse import prune_receipts
 from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
     Warehouse,
@@ -54,7 +55,7 @@ def test_screen_time_receipts_prune_only_confirmed_compacted_scope(tmp_path):
             byte_size=1,
             batch=source.decode(raw, gzip.decompress(repository.objects[raw.key][1])),
         )
-    warehouse.prune_screen_time_receipts([current], parser_version=source.parser_version)
+    prune_receipts(warehouse, [current], parser_version=source.parser_version)
     assert warehouse.query_rows(
         "SELECT object_key FROM ops.ingestion_metadata ORDER BY object_key"
     ) == [(key,) for key in sorted((current.key, unrelated.key))]
@@ -90,11 +91,11 @@ def test_screen_time_receipts_need_one_confirmed_live_raw(tmp_path):
             return getattr(connection, name)
 
     warehouse.connection = NoTransaction()
-    warehouse.prune_screen_time_receipts([], parser_version=source.parser_version)
-    warehouse.prune_screen_time_receipts([old, current], parser_version=source.parser_version)
+    prune_receipts(warehouse, [], parser_version=source.parser_version)
+    prune_receipts(warehouse, [old, current], parser_version=source.parser_version)
     assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 2
     unconfirmed = replace(current, storage_generation=2)
-    warehouse.prune_screen_time_receipts([unconfirmed], parser_version=source.parser_version)
+    prune_receipts(warehouse, [unconfirmed], parser_version=source.parser_version)
     assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 2
     warehouse.close()
 

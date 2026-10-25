@@ -29,6 +29,7 @@ from personal_data_platform.sources.screen_time.config import CollectorConfig, _
 from personal_data_platform.sources.screen_time.raw import APP_IN_FOCUS_STREAM, APP_USAGE_STREAM
 from personal_data_platform.sources.screen_time.state import CollectorScan, CollectorState
 from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
+from personal_data_platform.sources.screen_time.warehouse import finish_collection, prune_receipts
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 
@@ -159,10 +160,11 @@ def load_pending(
             health = source.audit(repository, live_raw, completed_at)
             if not health.ok or state.pending(stream=source.stream):
                 raise CollectorSourceError(f"{source.stream}: collector audit failed")
-            warehouse.prune_screen_time_receipts(live_raw, parser_version=source.parser_version)
+            prune_receipts(warehouse, live_raw, parser_version=source.parser_version)
             health_details.append((source, health.details))
         if publish_success:
-            warehouse.finish_screen_time_collection(
+            finish_collection(
+                warehouse,
                 owner,
                 heartbeats=[
                     (

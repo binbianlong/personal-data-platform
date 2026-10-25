@@ -361,7 +361,7 @@ def test_daily_records_one_outcome_and_preserves_collector_heartbeats(
         result = phase(source.stream, {"_lease_owner": owner})
         return SourceHealth(result.ok, {})
 
-    monkeypatch.setattr(job, "_audit_screen_time_heartbeat", audit)
+    monkeypatch.setattr(job, "audit_collector_heartbeat", audit)
     if failure == "busy":
         warehouse.acquire_job_lock("loader", "competitor", lease_seconds=7500)
     for source in sources:

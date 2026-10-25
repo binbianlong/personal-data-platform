@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 import uuid
@@ -18,12 +17,15 @@ from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import (
     RawRepository,
     SourceAdapter,
-    SourceHealth,
     list_source_raw,
     selected_prefixes,
     validate_runtime_policy,
 )
 from personal_data_platform.sources.registry import get_source, get_sources
+from personal_data_platform.sources.screen_time.audit import (
+    audit_collector_heartbeat,
+    filter_ingestion_states,
+)
 from personal_data_platform.storage.motherduck import (
     IngestionState,
     Warehouse,
@@ -141,18 +143,7 @@ def run_reconciliation(
         states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
 
     if source.source_id == "screen_time":
-        current_keys = {
-            row[0]
-            for row in warehouse.query_rows(
-                "SELECT object_key FROM ops.screen_time_segment WHERE source_stream = ?",
-                [source.stream],
-            )
-        }
-        states = {
-            key: value
-            for key, value in states.items()
-            if key in raw_keys or key in current_keys or value.status != "succeeded"
-        }
+        states = filter_ingestion_states(warehouse, states, raw_keys=raw_keys, stream=source.stream)
     checked_at = started_at if now is not None else datetime.now(UTC)
     succeeded_keys = warehouse.succeeded_keys_for(raw_refs, parser_version=parser_version)
     failed_keys = _active_status_keys(states, "failed")
@@ -211,38 +202,6 @@ def run_reconciliation(
         details=details,
     )
     return result
-
-
-def _audit_screen_time_heartbeat(
-    warehouse: Warehouse, source: SourceAdapter, now: datetime
-) -> SourceHealth:
-    """Cloud jobs check only collector-owned success; they never renew it."""
-    from personal_data_platform.sources.screen_time.audit import COLLECTOR_FRESHNESS, MAX_CLOCK_SKEW
-
-    rows = warehouse.query_rows(
-        "SELECT succeeded_at, details FROM ops.heartbeat WHERE monitor_name = ?",
-        [source.monitor_name],
-    )
-    if not rows:
-        return SourceHealth(False, {"collector_heartbeat_missing": True})
-    succeeded_at, serialized = rows[0]
-    try:
-        details = json.loads(str(serialized))
-        scan_at = _aware_utc(datetime.fromisoformat(details["scan_completed_at"]))
-        loaded_at = _aware_utc(succeeded_at)
-        ok = all(
-            value is not None and now - COLLECTOR_FRESHNESS <= value <= now + MAX_CLOCK_SKEW
-            for value in (scan_at, loaded_at)
-        )
-        return SourceHealth(
-            ok,
-            {
-                "collector_inactive": details.get("collector_inactive") is True,
-                "collector_heartbeat_stale": not ok,
-            },
-        )
-    except (KeyError, ValueError, TypeError, AttributeError):
-        return SourceHealth(False, {"collector_heartbeat_invalid": True})
 
 
 def run_reconciliation_from_env() -> int:
@@ -344,7 +303,7 @@ def _run_daily_reconciliation() -> int:
             stage = "audit:" + source.stream
             remaining()
             with network_phase("daily_screen_time"):
-                health = _audit_screen_time_heartbeat(warehouse, source, datetime.now(UTC))
+                health = audit_collector_heartbeat(warehouse, source, datetime.now(UTC))
                 relations = _relation_names(warehouse)
                 if (
                     not health.ok
