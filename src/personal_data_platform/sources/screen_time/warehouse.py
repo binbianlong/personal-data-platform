@@ -1,10 +1,8 @@
-"""Screen Time receipt retention and collection completion in the warehouse."""
+"""Screen Time receipt retention in the warehouse."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable
-from datetime import UTC, datetime, timedelta
 
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConnectionError
@@ -51,41 +49,3 @@ def prune_receipts(
     except Exception as error:
         warehouse.connection_usable = False
         raise WarehouseConnectionError("receipt pruning commit outcome unknown") from error
-
-
-def finish_collection(
-    warehouse: Warehouse, owner_id: str, *, heartbeats: list[tuple[str, dict[str, object]]]
-) -> None:
-    """Publish stream successes and release their lease in one transaction."""
-    rows = [{"name": name, "details": json.dumps(details)} for name, details in heartbeats]
-    try:
-        row = warehouse.connection.execute(
-            "BEGIN TRANSACTION; "
-            "SELECT owner_id,expires_at FROM ops.job_lock WHERE job_name='loader'"
-        ).fetchone()
-    except Exception as error:
-        warehouse.connection_usable = False
-        raise WarehouseConnectionError("cannot begin collection finalization") from error
-    try:
-        if row is None or row[0] != owner_id or row[1] <= datetime.now(UTC) + timedelta(seconds=1):
-            raise RuntimeError("loader lease ownership lost or insufficient time remains")
-        warehouse.connection.execute(
-            "INSERT INTO ops.heartbeat "
-            "SELECT r.name::VARCHAR,?::TIMESTAMPTZ,?::VARCHAR,r.details::JSON "
-            "FROM unnest(?) stream(r) ON CONFLICT (monitor_name) DO UPDATE SET "
-            "succeeded_at=excluded.succeeded_at,run_id=excluded.run_id,details=excluded.details",
-            [datetime.now(UTC), owner_id, rows],
-        )
-        warehouse.release_job_lock("loader", owner_id)
-    except Exception as error:
-        try:
-            warehouse.connection.execute("ROLLBACK")
-        except Exception:
-            warehouse.connection_usable = False
-            raise WarehouseConnectionError("collection finalization rollback failed") from error
-        raise
-    try:
-        warehouse.connection.execute("COMMIT")
-    except Exception as error:
-        warehouse.connection_usable = False
-        raise WarehouseConnectionError("collection finalization commit outcome unknown") from error

@@ -29,7 +29,7 @@ from personal_data_platform.sources.screen_time.collector_state import Collector
 from personal_data_platform.sources.screen_time.config import CollectorConfig, _env_or_keychain
 from personal_data_platform.sources.screen_time.raw import APP_IN_FOCUS_STREAM, APP_USAGE_STREAM
 from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
-from personal_data_platform.sources.screen_time.warehouse import finish_collection, prune_receipts
+from personal_data_platform.sources.screen_time.warehouse import prune_receipts
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 
@@ -163,8 +163,7 @@ def load_pending(
             prune_receipts(warehouse, live_raw, parser_version=source.parser_version)
             health_details.append((source, health.details))
         if publish_success:
-            finish_collection(
-                warehouse,
+            warehouse.finish_collection(
                 owner,
                 heartbeats=[
                     (
