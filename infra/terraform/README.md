@@ -10,7 +10,6 @@ terraform apply runtime.tfplan
 ```
 
 backend bucketはGitHubの`TF_STATE_BUCKET`へ設定する。既存のresource名とbackendのbucket/prefixは維持する。
-GitHub設定は地域名を含まない変数を優先し、未設定なら`GCP_WEST_*`・`PDP_WEST_*`も参照する。
 registryは`GCP_RUNTIME_ARTIFACT_REPOSITORY`、image fallbackは`GCP_RUNTIME_IMAGE_URI`を使う。
 Logging変更時は既存_Defaultの除外を`logging_exclusions`と`PDP_LOGGING_EXCLUSIONS`へ引き継ぐ。
 
