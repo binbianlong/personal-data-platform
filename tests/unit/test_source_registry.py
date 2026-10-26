@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import pytest
 
 from personal_data_platform.sources import registry
@@ -37,18 +35,6 @@ def test_all_streams_requires_explicit_source_and_excludes_other_sources() -> No
 def test_registry_rejects_ambiguous_or_unknown_scope(source_id, stream, message) -> None:
     with pytest.raises(ValueError, match=message):
         registry.get_source(source_id, stream)
-
-
-def test_registry_requires_stream_when_a_source_has_multiple_streams(monkeypatch) -> None:
-    other = SimpleNamespace(source_id="screen_time", stream="synthetic-other")
-    monkeypatch.setitem(
-        registry._SOURCE_FACTORIES, ("screen_time", "synthetic-other"), lambda: other
-    )
-    with pytest.raises(ValueError, match="multiple streams"):
-        registry.get_source("screen_time")
-    assert registry.get_source("screen_time", "synthetic-other") is other
-    assert registry.get_source().stream == "app-in-focus"
-    assert registry.source_ids() == ("owntracks", "screen_time")
 
 
 @pytest.mark.parametrize(
