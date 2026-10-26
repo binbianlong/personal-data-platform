@@ -287,7 +287,7 @@ def test_ingestion_queries_isolate_both_source_and_stream() -> None:
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("source_id", "fixture_health"), ("stream", "other-stream"), ("schema_version", 2)],
+    [("source_id", "fixture_health"), ("stream", "other-stream"), ("schema_version", 3)],
 )
 def test_object_identity_cannot_cross_sources_streams_or_versions(field, value) -> None:
     warehouse = _metric_warehouse()

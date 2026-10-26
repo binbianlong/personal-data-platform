@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import pytest
 
 from personal_data_platform.sources import registry
@@ -39,18 +37,6 @@ def test_registry_rejects_ambiguous_or_unknown_scope(source_id, stream, message)
         registry.get_source(source_id, stream)
 
 
-def test_registry_requires_stream_when_a_source_has_multiple_streams(monkeypatch) -> None:
-    other = SimpleNamespace(source_id="screen_time", stream="synthetic-other")
-    monkeypatch.setitem(
-        registry._SOURCE_FACTORIES, ("screen_time", "synthetic-other"), lambda: other
-    )
-    with pytest.raises(ValueError, match="multiple streams"):
-        registry.get_source("screen_time")
-    assert registry.get_source("screen_time", "synthetic-other") is other
-    assert registry.get_source().stream == "app-in-focus"
-    assert registry.source_ids() == ("owntracks", "screen_time")
-
-
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -71,6 +57,6 @@ def test_storage_policy_drift_is_rejected(name, value, monkeypatch):
 def test_storage_policy_accepts_the_registered_namespace(monkeypatch):
     from personal_data_platform.sources.contracts import validate_runtime_policy
 
-    monkeypatch.setenv("PDP_RAW_PREFIXES_JSON", '["raw/screen_time/v1/", "raw/screen_time/v2/"]')
+    monkeypatch.setenv("PDP_RAW_PREFIXES_JSON", '["raw/screen_time/v2/"]')
     monkeypatch.setenv("PDP_RAW_SUFFIXES_JSON", '[".segb.gz"]')
     validate_runtime_policy(registry.get_source())

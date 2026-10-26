@@ -2,7 +2,7 @@
 
 ## 接続境界
 
-接続先はMotherDuck公式Remote MCPの次のendpointとする。
+MotherDuck公式Remote MCPへ接続する。
 
 ```text
 https://api.motherduck.com/mcp
@@ -24,23 +24,15 @@ ATTACH '<pdp_analyticsのshare URL>' AS personal_data_platform;
 ```
 
 この別名の制約は[MotherDuckの共有仕様](https://motherduck.com/docs/key-tasks/sharing-data/sharing-overview/#views-and-fully-qualified-table-references)に従う。
-同じ分析userの所有するmy_dbなどへの権限と、本番shareのread-only権限を区別する。
 
 ## ChatGPT設定
 
-新規接続が必要な場合、ChatGPT workspaceの管理者または許可済みdeveloperが次を行う。
+接続の追加は[OpenAI公式手順](https://developers.openai.com/api/docs/guides/custom-mcp-server)に従う。
+上記endpointへOAuthで分析アカウントとして接続し、`query`とcatalog参照用read toolだけを有効にする。
+`query_rw`などのwrite toolは無効にする。
 
-1. SettingsのSecurity and loginでDeveloper modeを有効にする。
-2. ChatGPT Pluginsの＋から上記endpointを登録する。
-3. OAuthでshareを付与した分析アカウントとして認証し、tool scanを完了する。
-4. app設定の詳細画面で`query`とcatalog参照に必要なread toolだけを有効にする。
-5. `query_rw`などのwrite toolが無効であることを確認し、会話のDeveloper modeから対象appを選ぶ。
-
-ChatGPTの対象plan、設定画面、承認手順は変更される可能性があるため、作業時点の
-[OpenAI公式手順](https://developers.openai.com/api/docs/guides/developer-mode)を確認する。
-MotherDuck endpointとOAuth、tool制限の現行仕様は
-[Remote MCP接続仕様](https://motherduck.com/docs/sql-reference/mcp/)と
-[read-only設定](https://motherduck.com/docs/key-tasks/ai-and-motherduck/securing-read-only-access/)を確認する。
+MotherDuck側の認証と権限は[Remote MCP接続仕様](https://motherduck.com/docs/sql-reference/mcp/)・
+[read-only設定](https://motherduck.com/docs/key-tasks/ai-and-motherduck/securing-read-only-access/)を参照する。
 
 ## 受入確認
 

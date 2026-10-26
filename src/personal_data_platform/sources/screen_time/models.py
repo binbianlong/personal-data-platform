@@ -19,7 +19,6 @@ class ParsedScreenTimeRecord:
     segment_key: str
     segment_sha256: str
     observed_at: datetime
-    segment_filename: str
     record_offset: int
     record_metadata_offset: int
     record_state: str
@@ -40,11 +39,6 @@ class ParsedScreenTimeRecord:
     record_kind: str = "event"
     payload_length: int = 0
     record_timestamp_cocoa: float | None = None
-    target_segment_name: str | None = None
-    target_offset: int | None = None
-    target_length: int | None = None
-    target_event_timestamp: float | None = None
-    deletion_reason: int | None = None
 
 
 class SegmentDecodeError(RawDecodeError):

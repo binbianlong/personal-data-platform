@@ -77,17 +77,16 @@ def test_large_screen_time_batch_uses_one_columnar_insert(tmp_path):
         warehouse.close()
 
 
-@pytest.mark.parametrize("version", [1, 2])
-def test_unknown_segb_state_fails_without_replacing_last_good_observation(tmp_path, version):
+def test_unknown_segb_state_fails_without_replacing_last_good_observation(tmp_path):
     warehouse = warehouse_at(tmp_path / "events.duckdb")
     repository = Repository()
     payload = event("app.retained")
-    initial = repository.add("100", segb(payload)[0], version=version)
+    initial = repository.add("100", segb(payload)[0])
     assert run_loader(repository, warehouse).succeeded == 1
     assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(True,)]
     tables = [f"ops.screen_time_{t}" for t in STATE_TABLES] + ["base.screen_time_event"]
     before = {t: warehouse.query_rows(f"SELECT * FROM {t} ORDER BY ALL") for t in tables}
-    invalid = repository.add("100", segb(payload, state=99)[0], version=version)
+    invalid = repository.add("100", segb(payload, state=99)[0])
 
     # Repeated attempts must remain failures and leave the last good snapshot intact.
     for _ in range(2):
@@ -204,14 +203,14 @@ def test_reparse_empty_latest_and_older_snapshot(tmp_path):
     raws = [repository.add("100", segb(event(f"app.{i}"))[0]) for i in range(3)]
     for raw in raws:
         load(warehouse, repository, raw)
-    warehouse.load_object(raws[1], byte_size=0, batch=ScreenTimeBatch([], "100", "events"))
+    warehouse.load_object(raws[1], byte_size=0, batch=ScreenTimeBatch([]))
     assert warehouse.query_rows("SELECT bundle_id FROM base.screen_time_event WHERE is_active") == [
         ("app.2",)
     ]
-    warehouse.load_object(raws[2], byte_size=0, batch=ScreenTimeBatch([], "100", "events"))
+    warehouse.load_object(raws[2], byte_size=0, batch=ScreenTimeBatch([]))
     # Empty batches use the source parser version, so force a reparse using the receipt.
     warehouse.connection.execute("UPDATE ops.ingestion_metadata SET parser_version = 'old'")
-    warehouse.load_object(raws[2], byte_size=0, batch=ScreenTimeBatch([], "100", "events"))
+    warehouse.load_object(raws[2], byte_size=0, batch=ScreenTimeBatch([]))
     assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event WHERE is_active") == 0
     warehouse.close()
 
@@ -343,11 +342,11 @@ def test_loader_stops_after_unknown_commit_without_failed_receipt(tmp_path):
     warehouse.close()
 
 
-def test_same_content_v1_to_v2_and_representative_fallback(tmp_path):
+def test_same_content_preserves_event_and_representative_fallback(tmp_path):
     warehouse = warehouse_at(tmp_path / "events.duckdb")
     repository = Repository()
     segment = segb(event("app.copy"))[0]
-    first = repository.add("100", segment, version=1)
+    first = repository.add("100", segment)
     load(warehouse, repository, first)
     original = warehouse.query_rows("SELECT * FROM base.screen_time_event")
     load(warehouse, repository, repository.add("100", segment))
@@ -359,7 +358,7 @@ def test_same_content_v1_to_v2_and_representative_fallback(tmp_path):
         warehouse.query_value("SELECT duplicate_occurrence_count FROM base.screen_time_event") == 1
     )
     empty = repository.add("200", b"")
-    warehouse.load_object(empty, byte_size=0, batch=ScreenTimeBatch([], "200", "events"))
+    warehouse.load_object(empty, byte_size=0, batch=ScreenTimeBatch([]))
     assert warehouse.query_rows(
         "SELECT segment_key, duplicate_occurrence_count, is_active FROM base.screen_time_event"
     ) == [(first.logical_key, 0, True)]
@@ -433,7 +432,7 @@ def test_segment_history_does_not_expand_resolve(tmp_path, history):
     assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_event") == 0
     assert_full_resolution(warehouse)
     empty = repository.add("100", b"")
-    warehouse.load_object(empty, byte_size=0, batch=ScreenTimeBatch([], "100", "events"))
+    warehouse.load_object(empty, byte_size=0, batch=ScreenTimeBatch([]))
     assert warehouse.query_value("SELECT count(*) FROM screen_time_affected_event") == 1
     assert_full_resolution(warehouse)
     warehouse.close()

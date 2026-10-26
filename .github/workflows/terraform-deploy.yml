@@ -48,14 +48,14 @@ jobs:
       TF_VAR_fitbit_subject_key: ${{ vars.PDP_FITBIT_SUBJECT_KEY }}
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
       GCP_REGION: us-west1
-      ARTIFACT_REPOSITORY: ${{ vars.GCP_RUNTIME_ARTIFACT_REPOSITORY || vars.GCP_WEST_ARTIFACT_REPOSITORY || vars.GCP_ARTIFACT_REPOSITORY }}
+      ARTIFACT_REPOSITORY: ${{ vars.GCP_RUNTIME_ARTIFACT_REPOSITORY }}
       TF_VAR_region: us-west1
-      TF_VAR_schedulers_enabled: ${{ vars.PDP_SCHEDULERS_ENABLED || vars.PDP_WEST_SCHEDULERS_ENABLED || 'true' }}
-      TF_VAR_logging_exclusions: ${{ vars.PDP_LOGGING_EXCLUSIONS || vars.PDP_WEST_LOGGING_EXCLUSIONS || '{}' }}
-      TF_VAR_runtime_image_uri: ${{ vars.GCP_RUNTIME_IMAGE_URI || vars.GCP_WEST_RUNTIME_IMAGE_URI }}
-      TF_VAR_secret_versions: ${{ vars.PDP_SECRET_VERSIONS || vars.PDP_WEST_SECRET_VERSIONS || '{}' }}
-      TF_VAR_motherduck_database: ${{ vars.PDP_MOTHERDUCK_DATABASE || vars.PDP_WEST_MOTHERDUCK_DATABASE || 'personal_data_platform' }}
-      TF_VAR_preflight_motherduck_database: ${{ vars.PDP_PREFLIGHT_MOTHERDUCK_DATABASE || vars.PDP_WEST_PREFLIGHT_MOTHERDUCK_DATABASE || 'personal_data_platform_west_preflight' }}
+      TF_VAR_schedulers_enabled: ${{ vars.PDP_SCHEDULERS_ENABLED || 'true' }}
+      TF_VAR_logging_exclusions: ${{ vars.PDP_LOGGING_EXCLUSIONS || '{}' }}
+      TF_VAR_runtime_image_uri: ${{ vars.GCP_RUNTIME_IMAGE_URI }}
+      TF_VAR_secret_versions: ${{ vars.PDP_SECRET_VERSIONS || '{}' }}
+      TF_VAR_motherduck_database: ${{ vars.PDP_MOTHERDUCK_DATABASE || 'personal_data_platform' }}
+      TF_VAR_preflight_motherduck_database: ${{ vars.PDP_PREFLIGHT_MOTHERDUCK_DATABASE || 'personal_data_platform_west_preflight' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,7 +75,7 @@ jobs:
             (keys - ["fitbit_oauth_config", "fitbit_webhook_config", "heartbeat_config", "motherduck_preflight_token", "motherduck_token", "owntracks_config"] | length == 0) and
             all(.[]; type == "string" and test("^[1-9][0-9]*\\z"))
           ' <<< "${TF_VAR_secret_versions}" > /dev/null || {
-            echo "Deployment requires five runtime numeric secret version pins in PDP_SECRET_VERSIONS (or PDP_WEST_SECRET_VERSIONS)." >&2
+            echo "Deployment requires five runtime numeric secret version pins in PDP_SECRET_VERSIONS." >&2
             exit 1
           }
 

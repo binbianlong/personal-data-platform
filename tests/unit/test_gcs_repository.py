@@ -216,7 +216,6 @@ def test_list_raw_follows_pages_ignores_other_objects_and_sorts_replay_order() -
     assert [item.storage_created_at for item in observations] == [earlier_created, later_created]
     assert [item.storage_generation for item in observations] == [1, 1]
     assert client.list_calls == [
-        {"prefix": "raw/screen_time/v1/"},
         {"prefix": "raw/screen_time/v2/"},
     ]
 
@@ -236,7 +235,7 @@ def test_list_raw_rejects_noncanonical_segment_objects() -> None:
     client.list_pages = [
         [
             _ListedBlob(
-                "raw/screen_time/v1/unpseudonymized.segb.gz",
+                "raw/screen_time/v2/unpseudonymized.segb.gz",
                 datetime(2026, 8, 27, tzinfo=UTC),
             )
         ]
@@ -310,7 +309,7 @@ def test_raw_codec_rejects_unknown_schema() -> None:
 
     identity = _identity(datetime(2026, 8, 27, tzinfo=UTC))
     with pytest.raises(ValueError, match="invalid Screen Time"):
-        ScreenTimeSource().validate_raw_key(identity.object_key.replace("/v1/", "/v3/"))
+        ScreenTimeSource().validate_raw_key(identity.object_key.replace("/v2/", "/v3/"))
 
 
 def test_gcs_rejects_foreign_listing_prefix_before_cloud_access() -> None:

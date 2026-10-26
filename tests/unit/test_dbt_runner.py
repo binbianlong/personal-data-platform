@@ -3,7 +3,7 @@ import os
 import pytest
 
 from personal_data_platform import dbt_runner
-from personal_data_platform.storage.motherduck import DEFAULT_MIGRATIONS
+from personal_data_platform.storage.migrations import DEFAULT_MIGRATIONS
 
 
 @pytest.mark.parametrize("stream", [None, "health"])

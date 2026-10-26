@@ -14,7 +14,6 @@ from personal_data_platform.network_diagnostics import instrument_connection, ne
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.models import DAILY_JOB_HISTORY_NAMES
 from personal_data_platform.sources.contracts import DecodedBatch
-from personal_data_platform.storage.migrations import DEFAULT_MIGRATIONS as DEFAULT_MIGRATIONS
 from personal_data_platform.storage.migrations import apply_migrations
 
 if TYPE_CHECKING:

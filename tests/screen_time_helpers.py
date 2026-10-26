@@ -89,18 +89,16 @@ class Repository:
         *,
         kind="events",
         device="a" * 64,
-        version=2,
         logical=None,
         stream="app-in-focus",
     ):
-        value = encode_segment_envelope(segment, name=name, kind=kind) if version == 2 else segment
+        value = encode_segment_envelope(segment, kind=kind)
         identity = ScreenTimeRawIdentity(
             device_key=device,
             stream=stream,
             segment_key=logical or sha256_hex((kind + name).encode()),
             observed_at=NOW + timedelta(seconds=len(self.objects)),
             sha256=sha256_hex(value),
-            schema_version=version,
         )
         raw = parse_raw_object_key(
             identity.object_key, storage_created_at=NOW, storage_generation=1
@@ -122,9 +120,9 @@ def _raw(
     storage_generation: int = 1,
 ) -> RawObject:
     return RawObject(
-        key="raw/screen_time/v1/device/App.InFocus/segment/2026-08-27T00:00:00Z/hash.segb.gz",
+        key="raw/screen_time/v2/device/App.InFocus/segment/2026-08-27T00:00:00Z/hash.segb.gz",
         source_id="screen_time",
-        schema_version=1,
+        schema_version=2,
         subject_key="device",
         stream="App.InFocus",
         logical_key="segment",
@@ -144,7 +142,6 @@ def _record(raw: RawObject) -> ParsedScreenTimeRecord:
         segment_key=raw.logical_key,
         segment_sha256=raw.sha256,
         observed_at=raw.observed_at,
-        segment_filename="segment.segb",
         record_offset=12,
         record_metadata_offset=120,
         record_state="WRITTEN",

@@ -93,10 +93,6 @@ def run_serve_from_env() -> int:
     from .notifications import PubSubNotifications
 
     configure_logging("personal_data_platform.sources.fitbit")
-    if os.environ.get("PDP_FITBIT_WEBHOOK_AUTHORIZATION") or os.environ.get(
-        "PDP_FITBIT_HEALTH_USER_ID"
-    ):
-        raise ValueError("split webhook settings conflict with bundled configuration")
     config = secret_config("PDP_FITBIT_WEBHOOK_CONFIG", ("authorization", "health_user_id"))
     app = create_pubsub_app(
         authenticator=GoogleHealthAuthenticator(

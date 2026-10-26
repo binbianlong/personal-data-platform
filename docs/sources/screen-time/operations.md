@@ -6,10 +6,7 @@
 ~/Library/Application Support/personal-data-platform/collector.db
 ```
 
-SQLiteに疑似化scope・SHA-256・Raw key・状態・gzip bytesを保存する。DBはmode `0600`、専用directoryは`0700`。
-各元ファイルの最新成功版を無期限に残し、未取込分だけ追加保持する。MotherDuckの台帳で成功を確認した後に、
-同じscopeの古い成功版を整理する。Biomeから元ファイルが消えても保存済みRawは残す。
-device identifierや絶対segment path、tokenは保存しない。
+DBはmode `0600`、専用directoryは`0700`。Rawと取込状態の保持範囲は[データモデル](data-model.md#observation-semantics)を参照する。
 
 ## 初回scanとwatch
 
@@ -18,24 +15,18 @@ pdp screen-time collect --once   全対象をローカル保存してから直�
 pdp screen-time collect --watch  同じ処理を1800秒間隔で反復
 ```
 
-最新segmentも[取得仕様](acquisition.md#segb-container)に従って検査する。同内容の連続取得はskipし、
-`A→B→A`や後着・修正は観測時刻の異なるRawとして処理する。event時刻のwatermarkで捨てない。
-read前後のinode・size・mtimeが変われば短く再読込し、構造不整合・CRC不一致のsnapshotは次回へ見送る。
-
-全対象の保存を終えてから、既存Loaderを同じprocess・共通leaseで実行する。成功版の整理はDB確認後だけ行う。
-スキーマ初期化は最初に成功した後の周期では省略する。初期化に失敗した場合は次周期に再試行する。
-接続は周期ごとに開き直す。追加DDLやCollectorのコード変更は、停止・更新後の再起動で反映する。
-JSONには`devices`、`segments`、`archived`、`skipped`、`deferred`と、取込結果の`loaded`、`pending`を出す。
-保存だけ成功しても取込成功とはみなさない。不完全snapshotの回も保存済みpendingは取り込めるが、成功heartbeatは更新しない。
+全対象を[取得仕様](acquisition.md#segb-container)に従って保存してからLoaderを実行する。
+保存だけ成功しても取込成功とはみなさず、JSONの`loaded`と`pending`を確認する。
+不完全snapshotの回も保存済みpendingは取り込めるが、成功heartbeatは更新しない。
+追加DDLやCollectorのコード変更は、停止・更新後の再起動で反映する。
 
 `--watch`は通信障害・lease競合・走査失敗をstderrへ記録し、1800秒後に再試行する。
 `PDP_COLLECTOR_POLL_SECONDS`の既定値は1800、最小10秒。通常運用は1800秒を維持する。
 
 ## Crash recoveryと監視
 
-pendingには元のkeyとgzip bytesを保持する。再起動後も同じbytesで再試行し、commit結果が不明な場合は
-再接続後にMotherDuck台帳を確認する。削除処理・イベントkey・補助状態のtransactionは既存の契約を使う。
-片方のstreamが走査失敗しても他方を走査する。失敗した回は全体を成功として記録しない。
+再起動後もpendingの同じkey・bytesで再試行し、commit結果が不明な場合は再接続後にMotherDuck台帳を確認する。
+片方のstreamが走査失敗しても他方を走査するが、その回を全体の成功として記録しない。
 
 stream・端末別の最終scan時刻を[SQLiteへ保存する](data-model.md#collector-scan)。未設定streamは有効なdevice集合を空にして明示的に休止する。
 端末をallowlistから外しても保存済みRawは残す。設定変更はLaunchAgentを再生成・再起動して反映する。

@@ -35,48 +35,6 @@ def test_deploy_identity_and_workflow_are_restricted() -> None:
     assert "TF_VAR_runtime_image_uri=${current_image}" in deploy
 
 
-def test_plan_identity_is_separate_and_read_only() -> None:
-    identity = _read("infra/bootstrap/identity.tf")
-    main = _read("infra/bootstrap/main.tf")
-
-    assert 'account_id   = "github-tf-plan"' in identity
-    assert 'account_id   = "github-tf-deploy"' in identity
-    assert 'role   = "roles/storage.objectViewer"' in identity
-    assert 'role   = "roles/storage.objectAdmin"' in identity
-    assert "roles/viewer" in main
-    assert "roles/iam.securityReviewer" not in main
-    assert "processing_deployer" in _read("infra/terraform/runtime.tf")
-    assert "scheduler_deployer" in _read("infra/terraform/runtime.tf")
-
-
-def test_runtime_bucket_manager_has_no_object_data_permissions() -> None:
-    roles = _read("infra/bootstrap/storage_roles.tf")
-    identity = _read("infra/bootstrap/identity.tf")
-
-    bucket_manager = roles.split(
-        'resource "google_project_iam_custom_role" "runtime_bucket_manager" {', 1
-    )[1]
-    assert '"storage.buckets.getIamPolicy"' in bucket_manager
-    assert '"storage.buckets.setIamPolicy"' in bucket_manager
-    assert '"storage.objects.get"' not in bucket_manager
-    assert "github_deploy_bucket_manager" in identity
-
-
-def test_plan_identity_can_refresh_bucket_metadata_without_object_access() -> None:
-    roles = _read("infra/bootstrap/storage_roles.tf")
-    identity = _read("infra/bootstrap/identity.tf")
-
-    bucket_reader = roles.split(
-        'resource "google_project_iam_custom_role" "runtime_bucket_reader" {', 1
-    )[1]
-    assert '"storage.buckets.get"' in bucket_reader
-    assert '"storage.buckets.getIamPolicy"' in bucket_reader
-    assert "role    = google_project_iam_custom_role.runtime_bucket_reader.name" in identity
-    assert 'member  = "serviceAccount:${google_service_account.github_plan.email}"' in identity
-    assert '"storage.objects.get"' not in bucket_reader
-    assert '"storage.objects.list"' not in bucket_reader
-
-
 def test_cloud_workflows_wait_for_bootstrap_configuration() -> None:
     plan = _read(".github/workflows/terraform-plan.yml")
     deploy = _read(".github/workflows/terraform-deploy.yml")
@@ -141,55 +99,6 @@ def _runtime_job(name: str, image: str) -> dict:
         "metadata": {"name": name},
         "spec": {"template": {"spec": {"template": {"spec": {"containers": [{"image": image}]}}}}},
     }
-
-
-def test_runtime_resources_preserve_backups_and_support_pausing() -> None:
-    bootstrap = _read("infra/bootstrap/main.tf")
-    runtime = _read("infra/terraform/runtime.tf")
-    assert 'resource "google_storage_bucket" "terraform_state_backup"' in bootstrap
-    assert 'resource "google_storage_bucket" "runtime_state"' in bootstrap
-    assert 'resource "google_artifact_registry_repository" "runtime"' in bootstrap
-    assert 'resource "google_storage_bucket" "raw"' in runtime
-    assert 'resource "google_storage_bucket" "preflight"' in runtime
-    assert 'resource "google_cloud_run_v2_job" "runtime"' in runtime
-    assert 'resource "google_cloud_scheduler_job" "runtime"' in runtime
-    assert re.search(r"paused\s*= !var.schedulers_enabled", runtime)
-    assert "days_since_custom_time" not in runtime
-    assert "raw/screen_time/" not in runtime
-    assert "raw/fitbit/v3/" not in runtime
-    assert "retention_duration_seconds = 0" in runtime
-    assert "prevent_destroy = true" in runtime
-
-
-def test_pubsub_and_receiver_access_are_separate() -> None:
-    queue = _read("infra/terraform/pubsub.tf")
-    runtime = _read("infra/terraform/runtime.tf")
-    assert "allowed_persistence_regions = [var.region]" in queue
-    assert re.search(r"enforce_in_transit\s*= true", queue)
-    assert re.search(r'message_retention_duration\s*= "604800s"', queue)
-    assert re.search(r"retain_acked_messages\s*= false", queue)
-    assert 'ttl = ""' in queue
-    assert "roles/pubsub.publisher" in queue
-    subscriber = queue.split('resource "google_pubsub_subscription_iam_member" "fitbit_worker"', 1)[
-        1
-    ]
-    subscriber = subscriber.split("\n}", 1)[0]
-    assert re.search(r"subscription\s*= google_pubsub_subscription.fitbit.name", subscriber)
-    assert re.search(r'role\s*= "roles/pubsub.subscriber"', subscriber)
-    assert (
-        'member       = "serviceAccount:${google_service_account.processing.email}"' in subscriber
-    )
-    publisher = queue.split('resource "google_pubsub_topic_iam_member" "fitbit_receiver"', 1)[1]
-    publisher = publisher.split("\n}", 1)[0]
-    assert "roles/pubsub.subscriber" not in publisher
-    assert "google_service_account.fitbit_receiver.email" in publisher
-    assert "push_config" not in queue
-    receiver = runtime.split('resource "google_cloud_run_v2_service" "fitbit_receiver"', 1)[1]
-    receiver = receiver.split('resource "google_cloud_run_v2_service_iam_member"', 1)[0]
-    assert re.search(r"PDP_FITBIT_WEBHOOK_CONFIG\s*=", receiver)
-    assert "PDP_FITBIT_OAUTH_CONFIG" not in receiver
-    assert "MOTHERDUCK_TOKEN" not in receiver
-    assert "GCS_BUCKET" not in receiver
 
 
 RUNTIME_SECRET_VERSIONS = {

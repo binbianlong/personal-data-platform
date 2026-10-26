@@ -21,50 +21,30 @@ workspaceの他DBを自動attachせず、ローカルDuckDBへの接続方法は
 ## Deploy
 
 [bootstrap](../../infra/bootstrap/README.md)でstate・registry・WIFを作り、[runtime Terraform](../../infra/terraform/README.md)で通常資産を管理する。
-secret payloadはTerraform外で登録し、数値versionに固定する。常設preflight/dbt Jobは作らない。
-通常はFitbitの毎時バッチ・OwnTracksのpush配信・日次Scheduler・監視が有効で、
-`PDP_SCHEDULERS_ENABLED=false`で一時停止する。Fitbitの通知はpull queueへ保持し、
-OwnTracksはpush設定を外して通知を保持する。workerも処理を保留する。
+secret payloadはTerraform外で登録し、数値versionに固定する。
+一時停止はGitHub変数`PDP_SCHEDULERS_ENABLED=false`を設定してDeployを反映するか、手動Terraformで`schedulers_enabled=false`を反映する。
+Fitbitの毎時バッチ・OwnTracksのpush配信・日次Scheduler・native警報が停止し、workerも処理を保留する。receiverからの通知はqueueに保持する。
 
-CIはimageをbuild・登録し、そのdigestを指定してruntimeを更新する。
-source・dbt・依存・Dockerfileに変更がないpushでは現行日次Jobのdigestを再利用する。
-無効な比較元やJob一覧取得失敗はdeployを止める。アプリdeploy失敗後の再反映には手動deployを使う。
-手動`run_daily`で日次全体を実行できる。rollbackにはFitbitのpull処理と現行DBスキーマに対応したimageを使い、削除済みなら再build・登録する。
-Deploy workflowが停止中の場合は、ローカルで`linux/amd64` imageを登録し、digestを指定してTerraformを手動反映する。
+[Deploy workflow](../../.github/workflows/terraform-deploy.yml)はimage digestを固定してruntimeを更新する。
+アプリdeploy失敗後の再反映には手動deploy、日次全体の実行には手動入力`run_daily`を使う。
+rollbackには[Fitbitの通知・coverage互換性](../sources/fitbit/operations.md#停止と復旧)と現行DBスキーマに対応したimageを使い、削除済みなら再build・登録する。
+workflowが停止中の場合はローカルで`linux/amd64` imageを登録し、digestを指定してTerraformを反映する。
 
 ## 依存関係の更新
 
-[Renovate設定](../../renovate.json)でPython依存と`uv.lock`、GitHub Actions、Docker image、Terraform providerを管理する。
-通常更新は1・4・7・10月の1日（Asia/Tokyo）に確認し、マイナー・パッチ更新を1本のPRへまとめる。
-公開日時を取得できる更新には14日の待機期間を設ける。
-未マージの通常PRは次の四半期に同じPRを更新する。定期実行の時間外は既存branchも自動更新せず、CIの再実行を抑える。
-image digestやpinの更新も同じgroupに含める。待機期間は間接依存すべての公開時刻を保証するものではない。
+更新対象・schedule・group・承認条件は[Renovate設定](../../renovate.json)を正本とする。
+通常更新は四半期ごと、既知の脆弱性修正は随時対応し、すべて差分とCIを確認して手動マージする。
+`uv.lock`全体更新は間接依存も対象となり、個別依存のDashboard承認や14日待機で対象を絞らない。
+commitに固定した`ccl-segb`の参照先も個別確認する。
 
-`uv.lock`全体は同じ四半期scheduleの専用PRで更新し、間接依存も`pyproject.toml`の制約内で更新する。
-このPRも同時に開く通常PRの上限1本に含めるため、他の通常PRが開いていれば作成を待つ。
-lockfile全体更新は個別依存のDashboard承認や14日待機で対象を絞らない。制約内のdbt等の更新も含め、差分とCIを確認して手動マージする。
+GitHubのDependency graphとDependabot alertsを有効にし、PR作成はRenovateへ一本化する。
+`pep621` managerはlockfileにしかない間接依存のalertから修正PRを作れないため、
+修正versionを確認して`uv lock --upgrade-package <package>`で更新する。
+上位依存の制約で更新できない場合はその依存も確認する。alert対象外のOS package等はこの経路では検知できない。
 
-メジャー更新とPython本体・DuckDB・dbt・Terraform providerはDependency Dashboardで承認してから個別PRを作成する。
-commitに固定した`ccl-segb`は参照先を個別確認する。Pythonの範囲内更新はlockfileを更新し、固定値や範囲外の変更はPRで確認する。
-すべて手動マージとし、既存の`CI`必須・PR必須のbranch保護を使う。
-
-既知の脆弱性はDependabot alertsから検知し、Renovateが対応できる依存には修正PRを作成する。
-修正PRには四半期schedule・14日の待機・Dashboard承認・通常PRの同時数上限を適用せず、マージは手動とする。
-GitHubでDependency graphとDependabot alertsを有効にし、Dependabot security updatesによるPR作成は無効にして重複を避ける。
-`uv.lock`の間接依存がDependency graphへ登録されていることも確認する。
-Renovateの`pep621` managerは、lockfileにしかない間接依存のalertからは修正PRを作成できない。
-その場合はalertの修正versionを確認し、`uv lock --upgrade-package <package>`で対象を更新してPRを作成する。
-上位依存の制約で更新できなければ、その依存の更新も個別に確認する。これらの修正も四半期を待たず対応する。
-未登録の依存やDocker内のOS packageなど、GitHubのalert対象外のcomponentはこの経路では検知できない。
-
-導入時は[Renovate GitHub App](https://github.com/apps/renovate)をこのrepositoryに限定してinstallし、
-設定をdefault branchへ反映する。onboarding PRが作成された場合は設定を確認してマージする。
-初回はDependency Dashboardの検出対象・エラーと、通常PRの集約、脆弱性alertの読み取り権限を確認する。
-
-更新時はPRの差分とCIを確認し、deploy結果を確認できる日にマージする。
-開発用依存だけでも`uv.lock`の変更は本番imageの再build・deployを起動する。
-MacではCollectorを停止してからcheckoutを更新し、`just sync`で依存を同期して再起動する。Cloud Runのdeploy成功に加え、
-次の日次Jobの成功とScreen Timeの取込成功heartbeatを確認する。復旧には上記Deployのrollback手順を使う。
+`uv.lock`の変更は開発用依存だけでも本番imageの再build・deployを起動するため、deploy結果を確認できる日にマージする。
+MacではCollectorを停止してからcheckoutを更新し、`just sync`で依存を同期して再起動する。
+Cloud Runのdeploy、次の日次Job、Screen Timeの取込成功heartbeatを確認する。復旧には[Deploy](#deploy)のrollback手順を使う。
 
 ## DBの初期化と更新
 
@@ -75,26 +55,15 @@ pdp migrate --database /private/path/scratch.duckdb
 ```
 
 `--database`を省略すると`MOTHERDUCK_DATABASE`・`MOTHERDUCK_TOKEN`の接続先へ適用する。
-各SQLとchecksum記録は同じtransactionで確定する。再実行は適用済みの一致を確認し、変更は新しいforward migrationへ追加する。
-全SQLが適用済みの場合は、台帳の構造・ID・checksumの確認だけで終了し、DDLは実行しない。
-未適用SQLは共通の`loader` leaseを保持して適用する。取込が実行中なら移行を中断し、終了後に再試行する。
-適用済みSQLや台帳は変更しない。checksumの不一致や未対応のスキーマ履歴があるDBへの適用は拒否する。
+各SQLとchecksum記録は同じtransactionで確定する。適用済みSQLや台帳は変更せず、新しいforward migrationを追加する。
+再実行時にchecksumを照合し、不一致や未対応のスキーマ履歴があるDBへの適用は拒否する。
+未適用SQLは共通の`loader` leaseを使うため、取込が実行中なら終了後に再試行する。
 再構築には空のscratch DBを使い、[Rebuild](#rebuild)の保持範囲を確認する。
 
 追加DDLはCollector・Fitbitバッチ・OwnTracksのpush配信・日次Schedulerを止め、実行中Jobと`loader` leaseの終了を確認してから適用する。
 MacのCollectorはeditable installのcheckoutを参照するため、そのcheckoutへmigrationを追加する前に停止する。
 Collectorは起動後にスキーマを初期化し、成功後の周期では省略する。DDL・コード・接続設定の変更後は再起動し、
 取込成功と日次全段階の成功を確認して通常運用を再開する。
-
-`007_operational_state.sql`は重複した照合履歴と日次DB heartbeatを削除する。
-適用後のrollbackにも、このスキーマに対応したimageを使う。
-
-`008_terminal_ingestion_receipts.sql`はRaw台帳を成功・失敗の確定結果に絞る。
-まだ試行していないRawは台帳なしで表し、データと成功台帳は同じtransactionで確定する。
-旧`loading`行は再試行できる失敗行へ移行する。実行中の排他は`ops.job_lock`で管理する。
-旧期限切れ台帳を移行対象から外し、保持期限の起点・期限切れ列を削除する。
-分析データと有効な取込台帳は保持する。MacのCollectorも起動時にSQLiteの旧起点列を削除し、
-保存済みRaw・未取込状態・収集成功記録を維持する。適用後は両方の現行スキーマに対応したコードを使う。
 
 ## 収集・日次処理
 
@@ -118,9 +87,6 @@ workerは最小0・最大1instance、同時処理1。処理予算480秒、サー
 Fitbit workerのleaseは600秒、共通Loaderを使うOwnTracks workerのleaseは125分である。
 日次Jobは1task/parallelism1、100分の予算、125分のleaseを使う。全処理を単一`loader` leaseで直列化する。
 競合はINFOで延期し、成功pingを送らない。dbt・手動取得・Loaderも同じleaseを使う。
-FitbitはAPIの各HTTP要求前、書き込み開始前、COMMIT前にDB上のleaseを確認する。
-実行予算だけの確認はローカルで行い、同じAPI要求でleaseを二重照会しない。
-取得完了後の予算判定、所有権・期限不足による延期、書き込み途中のROLLBACKは維持する。
 
 ## 監視とLogging
 
@@ -154,24 +120,9 @@ OwnTracksは無期限のGCS Rawを専用read-only ADCで読む。`pdp rebuild --
 
 ## 処理別ネットワーク計測
 
-Fitbit workerと日次Jobは`PDP_NETWORK_DIAGNOSTICS=true`で、一実行につき一つの
-`network_profile` JSONログを出す。通常は無効とし、調査時に対象のruntimeだけで有効にする。
-停止するには環境変数を削除するか`false`へ戻す。権限・DBスキーマ・取得範囲は変更しない。
-
-`summary.sent_bytes`と`received_bytes`は`/proc/net/dev`の非loopbackインターフェースの増分。
-`phases`はDB接続、スキーマ確認、ロック確認・更新、coverage読取・更新、削除履歴、
-既存データ比較、データ書込、BEGIN/COMMIT/ROLLBACK、API、Pub/Subを区別する。
-日次は`daily_fitbit`、`daily_dbt/dbt_run`、`daily_dbt/dbt_test`、
-`daily_owntracks`、`daily_screen_time`の段階も記録する。`/`で区切られた入れ子は
-排他的な計測区間で、親子の通信量を重複計上しない。`calls`は計測区間数でSQL件数ではない。
-Fitbitの`correlation_id`は既存の`batch_id`へ対応する。
-
-これはInternet課金量そのものではない。Google向け通信やバックグラウンド通信を含み、
-非同期送信は後続の区間・`unattributed`へ入る場合がある。実行前のstartupとHTTP応答後の
-通信も含まれないため、Cloud Monitoringの`run.googleapis.com/container/network/sent_bytes_count`
-（`kind=internet`と`google`）と集計範囲を合わせて比較する。受信量をegressへ加算しない。
-SQL・引数・健康値・認証情報は保存しない。カウンタが読めない・巻き戻る・interfaceが変わる場合は
-`valid=false`、送受信量は`null`とし、取り込み処理の成功・失敗は変えない。
+Fitbit workerと日次Jobは`PDP_NETWORK_DIAGNOSTICS=true`で、一実行につき一つの`network_profile` JSONログを出す。
+通常は無効とし、調査対象のruntimeだけで有効にする。終了時は環境変数を削除するか`false`へ戻す。
+SQL・引数・健康値・認証情報は保存しない。
 
 ```text
 jsonPayload.event="network_profile"
@@ -179,8 +130,15 @@ jsonPayload.summary.workload="fitbit_batch"
 jsonPayload.summary.valid=true
 ```
 
-日次は`workload="daily"`で検索する。計測の合計と各phaseを比較し、正常な0 byteと
-計測不能の`null`を区別する。SQL回数の減少率をegress削減率として扱わない。
+日次は`workload="daily"`で検索する。Fitbitの`correlation_id`は`batch_id`に対応する。
+`summary.sent_bytes`と`received_bytes`は`/proc/net/dev`の非loopbackインターフェースの増分で、Internet課金量そのものではない。
+Google向け・バックグラウンド通信を含み、startupとHTTP応答後の通信は含まれない。
+Cloud Monitoringの`run.googleapis.com/container/network/sent_bytes_count`（`kind=internet`と`google`）と集計範囲を合わせて比較し、受信量をegressへ加算しない。
+
+`phases`は排他的な計測区間で、`/`区切りの親子を重複計上しない。非同期通信は後続区間や`unattributed`へ入る場合がある。
+`calls`は区間数でSQL件数ではなく、SQL回数の減少率をegress削減率として扱わない。
+カウンタが読めない・巻き戻る・interfaceが変わる場合は`valid=false`、送受信量は`null`となる。正常な0 byteと区別する。
+計測不能でも取込処理の成功・失敗は変えない。
 
 ## 停止と復旧
 

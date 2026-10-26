@@ -8,68 +8,54 @@ OwnTracks -> receiver -> GCS Raw -> Pub/Sub push -> 非公開worker -> Loader ->
 Google Health Webhook -> receiver -> Pub/Sub queue -> 毎時workerがpull
   -> API完全取得 -> MotherDuckへ直接書込 -> DB commit後ACK
 
-Loader -> MotherDuck base -> dbt View -> read-only share / Remote MCP
-日次Job -> Fitbit補修 -> dbt -> OwnTracks Raw補修 -> Macの取込heartbeat・DB監査 -> 日次結果 -> Healthchecks
+MotherDuck base -> dbt View -> read-only share / Remote MCP
+日次Job -> Fitbit補修 -> dbt -> OwnTracks Raw補修 -> Macの取込heartbeat・DB監査 -> Healthchecks
 ```
 
-| source / stream | 取得元 | Raw形式 | 保存先 |
-|---|---|---|---|
-| `screen_time / app-in-focus` | Macへ同期されたiPhoneのApp.InFocus | v1/v2 SEGB | MacのSQLite |
-| `screen_time / app-usage` | Mac自身のScreenTime.AppUsage | v1/v2 SEGB | MacのSQLite |
-| `fitbit / health` | Google Health API | 保存なし | 正規化結果をMotherDuckへ直接取込 |
-| `owntracks / location` | iPhone OwnTracks HTTP | 正規化JSON gzip | GCS `us-west1` |
+| source / stream | 取得元 | Raw・復旧元 |
+|---|---|---|
+| `screen_time / app-in-focus` | Macへ同期されたiPhoneのApp.InFocus | SEGBをMacのSQLiteへ保存 |
+| `screen_time / app-usage` | Mac自身のScreenTime.AppUsage | SEGBをMacのSQLiteへ保存 |
+| `fitbit / health` | Google Health API | Rawなし。API再取得 |
+| `owntracks / location` | iPhone OwnTracks HTTP | 正規化JSON gzipをGCSへ保存 |
 
-Fitbit receiverは認証とPub/Sub発行、OwnTracks receiverは認証とRaw保存を担当し、API取得やDB書込を行わない。
-worker・日次Jobは同じimageとruntime Service Accountを共有する。時刻・lease・監視・復旧は
-[Platform運用](operations.md)、アクセス境界は[セキュリティ](security.md)に従う。
+receiverは認証と通知・Raw保存までを担当し、API取得やDB書込はworkerが行う。
+時刻・lease・監視・復旧は[Platform運用](operations.md)、アクセス境界は[セキュリティ](security.md)を参照する。
 
 ## 共通処理とsourceの責任
 
-実装は`src/personal_data_platform/`内に置く。
-
-| 境界 | 責任 |
-|---|---|
-| `sources/contracts.py`・`sources/registry.py` | 登録済みsource/stream、Raw codec、decode、型付きbatch、監査、dbt selector |
-| `storage/gcs.py` | OwnTracks Rawの保存・読取と保持済みGCS transport |
-| `loader/`・`storage/motherduck.py` | hash検証、再試行、object単位transaction、共通取込台帳 |
-| `reconciliation/`・`recovery/` | Rawと台帳の照合、scratchへの再生 |
-| `sources/<source>/` | 認証・取得、control/pending状態、wire format、正規化、baseへの書込 |
-| `dbt/` | interval、日境界、日次集計、source横断JOINをViewとして提供 |
+共通処理はRawの検証・取込台帳・transaction・再試行を、各`src/personal_data_platform/sources/<source>/`は
+取得・wire format・正規化・baseへの書込・control状態を所有する。日境界・集計・source横断JOINはdbt Viewへ置く。
 
 Raw adapterは一つのsource/streamを担当し、保持中の全Raw schema版を再生できるようにする。
 FitbitはRaw adapterへ登録せず、API取得と直接Writerで処理する。dbt selectorはRaw adapterから独立して解決する。
 Raw schema版とparser versionは別で、parser versionを更新すると保持中の旧parser成功分も再解析する。
-取得状態・controlの意味はsourceが所有し、共通処理は他sourceへCollectorのscan記録を要求しない。
-未知のsource/streamを既存decoderへ流すfallbackは設けない。
+共通処理は他sourceへCollectorのscan記録を要求せず、未知のsource/streamを既存decoderへ流すfallbackを設けない。
 
 ## Rawと保持期限
 
 - Rawはcreate-onlyの決定的gzip。展開後bytesのSHA-256と観測時刻をkeyへ含め、同じkeyのretryには同じbytesを使う。
-- 連続する同一内容は省くが、`A -> B -> A`を過去のhashだけで除外しない。source固有の比較条件は各データモデルに従う。
-- Screen Timeは各元ファイルの最新成功版と未取込分だけを既存SQLiteに保持する。保存期限はなく、Biomeから消えたファイルも残す。
-- FitbitのAPIレスポンスはメモリだけで扱い、Rawを永続保存しない。API再取得で補修・復旧する。
-- OwnTracksの位置Rawは正規化JSONとしてGCSに無期限保存する。保存フィールドと重複排除keyは[OwnTracksデータモデル](../sources/owntracks/data-model.md)に従う。
+- 連続する同一内容は省くが、`A -> B -> A`を過去のhashだけで除外しない。
+- Screen Timeは各元ファイルの最新成功版と未取込分をSQLiteへ保持する。保存期限はなく、Biomeから消えたファイルも残す。
+- FitbitのAPIレスポンスはメモリだけで扱い、Rawを永続保存しない。
+- OwnTracksの位置RawはGCSに無期限保存する。
 
-Rawは保存中の版の再生用正本で、MotherDuckはRaw整理後も分析履歴を保持する。
-OwnTracks以外の全期間のDB復元をRawだけで保証しない。keyとpayloadは
-[Screen Timeデータモデル](../sources/screen-time/data-model.md)、[Fitbitデータモデル](../sources/fitbit/data-model.md)、[OwnTracksデータモデル](../sources/owntracks/data-model.md)を参照する。
+MotherDuckはRaw整理後も分析履歴を保持し、OwnTracks以外の全期間のDB復元をRawだけで保証しない。
+key・payload・重複排除条件は[Screen Time](../sources/screen-time/data-model.md)、
+[Fitbit](../sources/fitbit/data-model.md)、[OwnTracks](../sources/owntracks/data-model.md)のデータモデルを参照する。
 
 ## Loaderと永続化
 
-Loaderは選択scopeの全prefix・全pageを走査し、重複key、namespace外、未対応schema、keyとmetadataの不一致を拒否する。
-`(observed_at, object_key)`順にgenerationを固定して取得し、gzip展開・SHA-256検証後にdecodeする。
-`ops.ingestion_metadata`のRaw identity・generation・parser versionが一致する成功だけをskipする。
-
+Loaderは選択scopeのRawをgeneration固定で読み、gzip展開・SHA-256検証後にdecodeする。
+Raw identity・generation・parser versionが一致する成功だけをskipする。
 型付き行、sourceの補助状態、取込成功はWarehouseが所有する1 transactionでcommitする。
 書込失敗はrollbackして別transactionに失敗記録を残す。commit結果不明・rollback失敗では接続を閉じ、
 後続Rawや失敗記録を書き込まず、再接続後の台帳から再試行を判断する。
-Fitbitは完全取得範囲をWriterで直接commitする。結果不明では接続を破棄し、再配信時にAPIを再取得する。
+Fitbitは完全取得範囲を直接commitし、結果不明では接続を破棄して再配信時にAPIを再取得する。
 
-Macは全対象のローカル保存後に既存Loaderを同じprocessで実行し、DB成功確認後に旧成功Rawを整理する。
-Screen Timeは現行の物理recordだけを運用状態に残し、ローカルRawの整理と成功確認が済んだscopeの旧成功台帳も整理する。
-pending・失敗・不完全snapshotがある回はstream heartbeatを更新しない。日次JobはMacの成功記録とDBを監査する。
-日次結果は`ops.job_run`へ集約し、照合結果はその`details`へ含める。
-Raw単位の再試行には取込台帳、Macの鮮度確認にはstream heartbeatを使う。
+Macはローカル保存後に同じprocessでLoaderを実行し、DB成功確認後に旧成功Raw・対応する旧成功台帳を整理する。
+pending・失敗・不完全snapshotがある回はstream heartbeatを更新しない。
+Raw単位の再試行には取込台帳、Macの鮮度確認にはstream heartbeat、日次結果には`ops.job_run`を使う。
 DBと外部HTTPはatomicではないため、外部送信失敗はJob失敗として扱う。
 
 ## Source・stream追加手順
@@ -79,5 +65,3 @@ DBと外部HTTPはatomicではないため、外部送信失敗はJob失敗と�
 3. baseの変更は新しいforward migrationへ追加する。適用済みSQLを書き換えず、batch内でcommitしない。
 4. dbtのmodel/testへselector用tagを付け、scope混入拒否、再実行、rollback、generation固定を検証する。
 5. Terraformで取得identity・実行経路・監視と、必要な場合だけRaw権限・Lifecycleを設定し、[DB更新手順](operations.md#dbの初期化と更新)で有効にする。
-
-独自UI/MCP server、ZIP取り込み、RawのObject Lock、永続Parquet中間層は設けない。

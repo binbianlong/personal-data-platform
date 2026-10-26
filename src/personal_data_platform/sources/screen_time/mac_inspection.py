@@ -15,7 +15,7 @@ from .collector import (
     select_completed_segments,
 )
 from .parser import parse_segb_bytes
-from .raw import APP_IN_FOCUS_STREAM, sha256_hex
+from .raw import APP_IN_FOCUS_STREAM, RAW_SCHEMA_VERSION, sha256_hex
 
 DEFAULT_MAC_DIRECTORY = Path.home() / "Library/Biome/streams/restricted/App.InFocus/local"
 _INSPECTION_TIME = datetime(1970, 1, 1, tzinfo=UTC)
@@ -39,7 +39,7 @@ def inspect_mac_directory(directory: Path) -> dict[str, object]:
             raw = RawObject(
                 key=f"local/{relative_path}",
                 source_id="screen_time",
-                schema_version=1,
+                schema_version=RAW_SCHEMA_VERSION,
                 subject_key="local-mac-inspection",
                 stream=APP_IN_FOCUS_STREAM,
                 logical_key=relative_path,

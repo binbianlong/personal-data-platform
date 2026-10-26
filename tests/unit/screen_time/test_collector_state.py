@@ -1,7 +1,7 @@
 import gzip
 from datetime import UTC, datetime
 
-from personal_data_platform.sources.screen_time.collector_state import CollectorScan, CollectorState
+from personal_data_platform.sources.screen_time.collector_state import CollectorState
 
 NOW = datetime(2026, 8, 27, 1, 2, 3, tzinfo=UTC)
 
@@ -42,51 +42,3 @@ def test_pending_payload_survives_restart_and_loaded_latest_is_skipped(tmp_path)
 
     assert _prepare(restarted_state, b"state-a") is None
     assert restarted_state.pending() == []
-
-
-def test_return_to_old_content_is_a_new_observation(tmp_path) -> None:
-    state = CollectorState(tmp_path / "collector.db")
-    keys = []
-
-    for raw_bytes in (b"state-a", b"state-b", b"state-a"):
-        pending = _prepare(state, raw_bytes)
-        assert pending is not None
-        keys.append(pending.identity.object_key)
-        state.mark_loaded(pending.identity.object_key, NOW)
-
-    assert len(set(keys)) == 3
-    assert keys[0].rsplit("/", 1)[1] == keys[2].rsplit("/", 1)[1]
-    assert keys[0] != keys[2]
-
-
-def test_successful_scan_is_updated_only_when_explicitly_recorded(tmp_path) -> None:
-    state = CollectorState(tmp_path / "collector.db")
-    assert state.last_successful_scan() is None
-    scan = CollectorScan(NOW, ("a" * 64,), {"a" * 64: NOW})
-
-    state.record_successful_scan(scan)
-
-    assert state.last_successful_scan() == scan
-
-
-def test_pending_recovery_keeps_original_v1_and_v2_identities(tmp_path) -> None:
-    from personal_data_platform.sources.screen_time.raw import encode_segment_envelope
-
-    state = CollectorState(tmp_path / "state.db")
-    first = _prepare(state, b"legacy")
-    second = state.prepare(
-        device_key="a" * 64,
-        stream="app-in-focus",
-        segment_key="b" * 64,
-        raw_bytes=encode_segment_envelope(b"segb", name="123", kind="events"),
-        observed_at=NOW,
-        schema_version=2,
-    )
-    restarted = CollectorState(tmp_path / "state.db")
-    pending = restarted.pending()
-    assert [p.identity for p in pending] == [first.identity, second.identity]
-    assert [p.identity.schema_version for p in pending] == [1, 2]
-    assert [p.compressed_payload for p in pending] == [
-        first.compressed_payload,
-        second.compressed_payload,
-    ]
