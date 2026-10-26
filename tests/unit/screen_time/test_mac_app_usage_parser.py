@@ -35,7 +35,6 @@ def _raw(payload: bytes):
         segment_key="c" * 64,
         observed_at=NOW,
         sha256=sha256_hex(payload),
-        schema_version=2,
     )
     return parse_raw_object_key(identity.object_key, storage_created_at=NOW, storage_generation=1)
 

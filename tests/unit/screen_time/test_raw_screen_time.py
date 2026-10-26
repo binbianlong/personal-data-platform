@@ -35,7 +35,7 @@ def test_raw_identity_uses_hmac_keys_and_hashes_uncompressed_bytes() -> None:
     )
 
     assert identity.object_key == (
-        f"raw/screen_time/v1/{device_key}/app-in-focus/{segment_key}/"
+        f"raw/screen_time/v2/{device_key}/app-in-focus/{segment_key}/"
         f"20260827T010203456789Z/{sha256_hex(raw_bytes)}.segb.gz"
     )
     assert "synthetic-device" not in identity.object_key
@@ -95,9 +95,9 @@ def test_parse_raw_object_key_round_trips_identity() -> None:
     "key",
     [
         "raw/screen_time/v2/" + "a" * 64,
-        "raw/screen_time/v1/not-a-hmac/app-in-focus/segment/time/hash.segb.gz",
+        "raw/screen_time/v2/not-a-hmac/app-in-focus/segment/time/hash.segb.gz",
         (
-            "raw/screen_time/v1/"
+            "raw/screen_time/v2/"
             + "a" * 64
             + "/App.InFocus/"
             + "b" * 64
@@ -123,7 +123,7 @@ def test_raw_identity_rejects_naive_observation_time() -> None:
         )
 
 
-def test_v2_envelope_preserves_source_bytes_and_round_trips_key() -> None:
+def test_envelope_preserves_source_bytes_and_round_trips_key() -> None:
     from personal_data_platform.sources.screen_time.raw import (
         decode_segment_envelope,
         encode_segment_envelope,
@@ -137,7 +137,6 @@ def test_v2_envelope_preserves_source_bytes_and_round_trips_key() -> None:
         segment_key="b" * 64,
         observed_at=datetime(2026, 9, 13, tzinfo=UTC),
         sha256=sha256_hex(payload),
-        schema_version=2,
     )
     parsed = parse_raw_object_key(
         identity.object_key, storage_created_at=identity.observed_at, storage_generation=1
@@ -147,7 +146,7 @@ def test_v2_envelope_preserves_source_bytes_and_round_trips_key() -> None:
 
 
 @pytest.mark.parametrize("payload", [b"", b"SEGB", b"PDPST\x02\0\0\0\xff{}"])
-def test_v2_rejects_truncated_envelopes(payload) -> None:
+def test_envelope_rejects_truncated_envelopes(payload) -> None:
     from personal_data_platform.sources.screen_time.raw import decode_segment_envelope
 
     with pytest.raises(ValueError):

@@ -15,15 +15,15 @@ from personal_data_platform.raw.models import RawObject
 
 APP_IN_FOCUS_STREAM = "app-in-focus"
 APP_USAGE_STREAM = "app-usage"
-RAW_PREFIX = "raw/screen_time/v1"
-RAW_V2_PREFIX = "raw/screen_time/v2"
+RAW_SCHEMA_VERSION = 2
+RAW_PREFIX = "raw/screen_time/v2"
 _ENVELOPE_MAGIC = b"PDPST\x02"
 _DEVICE_DOMAIN = b"screen-time/device/v1\0"
 _SEGMENT_DOMAIN = b"screen-time/segment/v1\0"
 _SAFE_KEY_PART = re.compile(r"^[a-z0-9-]+$")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RAW_KEY_PATTERN = re.compile(
-    r"^raw/screen_time/v(?P<schema_version>[12])/"
+    rf"^{re.escape(RAW_PREFIX)}/"
     r"(?P<device_key>[0-9a-f]{64})/"
     r"(?P<stream>[a-z0-9-]+)/"
     r"(?P<segment_key>[0-9a-f]{64})/"
@@ -96,11 +96,8 @@ class ScreenTimeRawIdentity:
     segment_key: str
     observed_at: datetime
     sha256: str
-    schema_version: int = 1
 
     def __post_init__(self) -> None:
-        if self.schema_version not in (1, 2):
-            raise ValueError("unsupported Screen Time Raw schema version")
         if not _HEX_SHA256.fullmatch(self.device_key):
             raise ValueError("device_key must be a lowercase SHA-256 hex digest")
         if not _SAFE_KEY_PART.fullmatch(self.stream):
@@ -114,7 +111,7 @@ class ScreenTimeRawIdentity:
     @property
     def scope_prefix(self) -> str:
         """Return the prefix shared by every observation of this segment."""
-        return f"raw/screen_time/v{self.schema_version}/{self.device_key}/{self.stream}/{self.segment_key}/"
+        return f"{RAW_PREFIX}/{self.device_key}/{self.stream}/{self.segment_key}/"
 
     @property
     def object_key(self) -> str:
@@ -125,12 +122,12 @@ class ScreenTimeRawIdentity:
 def parse_raw_object_key(
     key: str, *, storage_created_at: datetime, storage_generation: int
 ) -> RawObject:
-    """Parse a canonical Screen Time v1/v2 Raw key and its storage creation time."""
+    """Parse a canonical Screen Time Raw key and its storage creation time."""
     values = _match_raw_object_key(key).groupdict()
     return RawObject(
         key=key,
         source_id="screen_time",
-        schema_version=int(values["schema_version"]),
+        schema_version=RAW_SCHEMA_VERSION,
         subject_key=values["device_key"],
         stream=values["stream"],
         logical_key=values["segment_key"],
@@ -183,11 +180,11 @@ def encode_segment_envelope(segment: bytes, *, name: str, kind: str) -> bytes:
 
 def decode_segment_envelope(payload: bytes) -> tuple[bytes, str, str]:
     if not payload.startswith(_ENVELOPE_MAGIC) or len(payload) < 10:
-        raise ValueError("invalid Screen Time v2 envelope")
+        raise ValueError("invalid Screen Time envelope")
     size = struct.unpack_from(">I", payload, len(_ENVELOPE_MAGIC))[0]
     start = len(_ENVELOPE_MAGIC) + 4
     if not 0 < size <= 1024 or start + size >= len(payload):
-        raise ValueError("invalid Screen Time v2 envelope metadata size")
+        raise ValueError("invalid Screen Time envelope metadata size")
     try:
         metadata = json.loads(payload[start : start + size])
         if set(metadata) != {"source_segment_name", "segment_kind"}:
@@ -195,7 +192,7 @@ def decode_segment_envelope(payload: bytes) -> tuple[bytes, str, str]:
         name, kind = metadata["source_segment_name"], metadata["segment_kind"]
         _validate_envelope_identity(name, kind)
     except (TypeError, KeyError, ValueError) as error:
-        raise ValueError("invalid Screen Time v2 envelope metadata") from error
+        raise ValueError("invalid Screen Time envelope metadata") from error
     return payload[start + size :], name, kind
 
 

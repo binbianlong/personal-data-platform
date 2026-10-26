@@ -21,7 +21,7 @@ secretを変更すると過去のdevice / segment keyとの同一性を失うた
 
 ## SEGB container
 
-SEGB segmentの元bytesとsegment名・種別をv2 envelopeへ格納する。
+SEGB segmentの元bytesとsegment名・種別をenvelopeへ格納する。
 Collectorは最新segmentも読み、read前後のinode・size・mtimeが一致したbytesを検査する。
 構造不整合や書込途中のCRC不一致があるsnapshotは保存・取り込みを見送り、次周期に再試行する。
 

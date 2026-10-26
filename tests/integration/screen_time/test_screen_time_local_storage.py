@@ -48,9 +48,9 @@ def test_loaded_raw_survives_restart_and_only_superseded_success_is_removed(tmp_
     third = state.prepare(**args, raw_bytes=b"third", observed_at=NOW + timedelta(seconds=2))
     repo = ScreenTimeLocalRepository(state=state, source=get_source())
     assert gzip.decompress(repo.get_raw(first.identity.object_key, generation=1)) == b"first"
-    assert len(list(repo.list_raw("raw/screen_time/v1/"))) == 3
+    assert len(list(repo.list_raw("raw/screen_time/v2/"))) == 3
     state.mark_loaded(second.identity.object_key, NOW)
-    assert {r.key for r in repo.list_raw("raw/screen_time/v1/")} == {
+    assert {r.key for r in repo.list_raw("raw/screen_time/v2/")} == {
         second.identity.object_key,
         third.identity.object_key,
     }
@@ -66,7 +66,7 @@ def test_loaded_raw_survives_restart_and_only_superseded_success_is_removed(tmp_
             ),
         )
     restarted = ScreenTimeLocalRepository(state=CollectorState(state.path), source=get_source())
-    retained = list(restarted.list_raw("raw/screen_time/v1/"))
+    retained = list(restarted.list_raw("raw/screen_time/v2/"))
     assert len(retained) == 1
     assert retained[0].key == third.identity.object_key
     assert retained[0].storage_created_at == storage_created_at
@@ -120,7 +120,6 @@ def test_warehouse_commit_then_restart_acknowledges_without_duplicate_events(
         segment_key="b" * 64,
         raw_bytes=body,
         observed_at=NOW,
-        schema_version=2,
     )
     source = get_source()
     repo = ScreenTimeLocalRepository(state=state, source=source)
@@ -146,7 +145,6 @@ def test_warehouse_commit_then_restart_acknowledges_without_duplicate_events(
             segb(event("synthetic.other"))[0], name="100", kind="events"
         ),
         observed_at=NOW + timedelta(seconds=1),
-        schema_version=2,
     )
     load_pending(state, wh, now=NOW + timedelta(seconds=1), publish_success=publish_success)
     assert wh.query_rows("SELECT object_key FROM ops.ingestion_metadata") == [
@@ -200,7 +198,6 @@ def test_mac_raw_without_scan_is_not_treated_as_never_activated(tmp_path) -> Non
         segment_key="c" * 64,
         observed_at=now,
         sha256="d" * 64,
-        schema_version=2,
     ).object_key
     raw = source.parse_raw_key(raw_key, storage_created_at=now, storage_generation=1)
     assert not source.audit(repository, [raw], now).ok

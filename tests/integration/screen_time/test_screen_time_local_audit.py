@@ -31,7 +31,6 @@ def test_local_audit_accepts_compacted_history_but_requires_current_raw(tmp_path
                 segb(event(f"synthetic.{index}"))[0], name="100", kind="events"
             ),
             observed_at=NOW + timedelta(seconds=index),
-            schema_version=2,
         )
         assert run_loader_objects(
             repo, wh, tuple(repo.list_raw("raw/screen_time/v2/")), source=source

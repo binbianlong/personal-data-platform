@@ -2,22 +2,22 @@
 
 ## Local Raw observation
 
-RawはSQLite `collector.db`のgzip BLOBとして保存する。Collectorはv2を保存し、Loaderはv1/v2を読む。
+RawはSQLite `collector.db`のgzip BLOBとして保存する。CollectorとLoaderは同じ保存形式を使う。
 keyと保存metadataのgenerationを取込台帳との照合に使う。
 
 ```text
-raw/screen_time/v<1または2>/<device_key>/<app-in-focusまたはapp-usage>/<segment_key>/
+raw/screen_time/v2/<device_key>/<app-in-focusまたはapp-usage>/<segment_key>/
   <observed_at>/<sha256>.segb.gz
 ```
 
-`observed_at`は取得完了UTC時刻。hashはgzip前の本文に対するSHA-256で、v1は元SEGB、v2はenvelope全体を対象とする。
-v2はsegment名・種別と元SEGBを保持し、元bytesを復元できる。端末identifierや絶対pathは保存しない。
+`observed_at`は取得完了UTC時刻。hashはgzip前のenvelope全体に対するSHA-256である。
+Rawはsegment名・種別と元SEGBを保持し、元bytesを復元できる。端末identifierや絶対pathは保存しない。
 binary形式は[raw.py](../../../src/personal_data_platform/sources/screen_time/raw.py)に定義する。
 
 ## 疑似化key
 
 `device_key`はdevice identifier、`segment_key`はdevice・stream・segment相対pathをHMAC-SHA-256で疑似化する。
-v1/v2で同じkeyを使う。secretの扱いは[取得仕様](acquisition.md#認証と疑似化secret)を参照する。
+secretの扱いは[取得仕様](acquisition.md#認証と疑似化secret)を参照する。
 
 ## Observation semantics
 

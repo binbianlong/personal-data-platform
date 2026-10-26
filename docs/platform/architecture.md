@@ -14,8 +14,8 @@ MotherDuck base -> dbt View -> read-only share / Remote MCP
 
 | source / stream | 取得元 | Raw・復旧元 |
 |---|---|---|
-| `screen_time / app-in-focus` | Macへ同期されたiPhoneのApp.InFocus | v1/v2 SEGBをMacのSQLiteへ保存 |
-| `screen_time / app-usage` | Mac自身のScreenTime.AppUsage | v1/v2 SEGBをMacのSQLiteへ保存 |
+| `screen_time / app-in-focus` | Macへ同期されたiPhoneのApp.InFocus | SEGBをMacのSQLiteへ保存 |
+| `screen_time / app-usage` | Mac自身のScreenTime.AppUsage | SEGBをMacのSQLiteへ保存 |
 | `fitbit / health` | Google Health API | Rawなし。API再取得 |
 | `owntracks / location` | iPhone OwnTracks HTTP | 正規化JSON gzipをGCSへ保存 |
 

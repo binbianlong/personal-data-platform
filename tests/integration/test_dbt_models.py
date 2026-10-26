@@ -19,9 +19,9 @@ from personal_data_platform.storage.motherduck import (
 @pytest.fixture
 def raw() -> RawObject:
     return RawObject(
-        key="raw/screen_time/v1/device/App.InFocus/segment/2026-08-27T00:00:00Z/hash.segb.gz",
+        key="raw/screen_time/v2/device/App.InFocus/segment/2026-08-27T00:00:00Z/hash.segb.gz",
         source_id="screen_time",
-        schema_version=1,
+        schema_version=2,
         subject_key="device",
         stream="App.InFocus",
         logical_key="segment",

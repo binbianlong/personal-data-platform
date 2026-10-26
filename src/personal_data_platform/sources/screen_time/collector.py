@@ -251,7 +251,6 @@ class ScreenTimeCollector:
                     stream=self._source.raw_stream,
                     segment_key=segment_key,
                     raw_bytes=envelope,
-                    schema_version=2,
                     observed_at=observed_at,
                 )
                 if observation is None:

@@ -15,7 +15,7 @@ from .raw import (
     APP_IN_FOCUS_STREAM,
     APP_USAGE_STREAM,
     RAW_PREFIX,
-    RAW_V2_PREFIX,
+    RAW_SCHEMA_VERSION,
     decode_segment_envelope,
     parse_raw_object_key,
     validate_raw_object_key,
@@ -23,14 +23,14 @@ from .raw import (
 
 
 class ScreenTimeSource:
-    """Read legacy SEGB and v2 observations into Screen Time events."""
+    """Read stored Screen Time observations into events."""
 
     source_id = "screen_time"
     stream = APP_IN_FOCUS_STREAM
     raw_storage: Literal["gcs", "sqlite"] = "sqlite"
-    schema_versions: tuple[int, ...] = (1, 2)
+    schema_versions: tuple[int, ...] = (RAW_SCHEMA_VERSION,)
     parser_version = PARSER_VERSION
-    raw_prefixes: tuple[str, ...] = (f"{RAW_PREFIX}/", f"{RAW_V2_PREFIX}/")
+    raw_prefixes: tuple[str, ...] = (f"{RAW_PREFIX}/",)
     raw_suffixes: tuple[str, ...] = (".segb.gz",)
     required_relations: tuple[str, ...] = (
         "base.screen_time_event",
@@ -75,9 +75,7 @@ class ScreenTimeSource:
         ):
             raise ValueError("Raw source, stream or schema version does not match Screen Time")
         self.validate_raw_key(raw.key)
-        name = kind = None
-        if raw.schema_version == 2:
-            payload, name, kind = decode_segment_envelope(payload)
+        payload, name, kind = decode_segment_envelope(payload)
         records = [] if kind == "tombstones" else parse_segb_bytes(raw, payload, segment_kind=kind)
         if name is not None:
             records = [replace(record, segment_filename=name) for record in records]

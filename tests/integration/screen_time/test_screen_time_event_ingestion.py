@@ -77,17 +77,16 @@ def test_large_screen_time_batch_uses_one_columnar_insert(tmp_path):
         warehouse.close()
 
 
-@pytest.mark.parametrize("version", [1, 2])
-def test_unknown_segb_state_fails_without_replacing_last_good_observation(tmp_path, version):
+def test_unknown_segb_state_fails_without_replacing_last_good_observation(tmp_path):
     warehouse = warehouse_at(tmp_path / "events.duckdb")
     repository = Repository()
     payload = event("app.retained")
-    initial = repository.add("100", segb(payload)[0], version=version)
+    initial = repository.add("100", segb(payload)[0])
     assert run_loader(repository, warehouse).succeeded == 1
     assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(True,)]
     tables = [f"ops.screen_time_{t}" for t in STATE_TABLES] + ["base.screen_time_event"]
     before = {t: warehouse.query_rows(f"SELECT * FROM {t} ORDER BY ALL") for t in tables}
-    invalid = repository.add("100", segb(payload, state=99)[0], version=version)
+    invalid = repository.add("100", segb(payload, state=99)[0])
 
     # Repeated attempts must remain failures and leave the last good snapshot intact.
     for _ in range(2):
@@ -343,11 +342,11 @@ def test_loader_stops_after_unknown_commit_without_failed_receipt(tmp_path):
     warehouse.close()
 
 
-def test_same_content_v1_to_v2_and_representative_fallback(tmp_path):
+def test_same_content_preserves_event_and_representative_fallback(tmp_path):
     warehouse = warehouse_at(tmp_path / "events.duckdb")
     repository = Repository()
     segment = segb(event("app.copy"))[0]
-    first = repository.add("100", segment, version=1)
+    first = repository.add("100", segment)
     load(warehouse, repository, first)
     original = warehouse.query_rows("SELECT * FROM base.screen_time_event")
     load(warehouse, repository, repository.add("100", segment))
