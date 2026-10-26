@@ -11,7 +11,7 @@ raw/screen_time/v2/<device_key>/<app-in-focusまたはapp-usage>/<segment_key>/
 ```
 
 `observed_at`は取得完了UTC時刻。hashはgzip前のenvelope全体に対するSHA-256である。
-Rawはsegment名・種別と元SEGBを保持し、元bytesを復元できる。端末identifierや絶対pathは保存しない。
+Rawはsegment種別と元SEGBを保持し、元bytesを復元できる。端末identifierや絶対pathは保存しない。
 binary形式は[raw.py](../../../src/personal_data_platform/sources/screen_time/raw.py)に定義する。
 
 ## 疑似化key
@@ -43,7 +43,7 @@ SQLiteの`collector_stream_scan`にstream・device別の最終scan時刻と有�
 
 ## Recordの取り込み
 
-`ops.ingestion_metadata`のrecord数は削除済み・CRC不一致・tombstoneを含む。
+`ops.ingestion_metadata`のrecord数は削除済み・CRC不一致を含む。削除記録のRawは取込対象から外す。
 削除済み・CRC不一致のrecordは現行候補から外し、不要になった物理recordはイベント更新と同じtransactionで削除する。
 保存中の最新版Rawは再解析できるが、整理済みの旧版Rawと成功台帳は残さない。
 

@@ -224,7 +224,11 @@ class ScreenTimeCollector:
         deferred = 0
         for device in devices:
             device_key = build_device_key(self._pseudonym_key, device.identifier)
-            segments = self._source.list_segments(device)
+            segments = [
+                (path, relative_path)
+                for path, relative_path in self._source.list_segments(device)
+                if path.parent.name != "tombstone"
+            ]
             select_completed_segments(segments)  # Validate the numeric names in every directory.
             segment_count += len(segments)
             for path, relative_path in segments:
@@ -236,11 +240,7 @@ class ScreenTimeCollector:
                     relative_path=relative_path,
                 )
                 observed_at = self._clock()
-                envelope = encode_segment_envelope(
-                    raw_bytes,
-                    name=path.name,
-                    kind="tombstones" if path.parent.name == "tombstone" else "events",
-                )
+                envelope = encode_segment_envelope(raw_bytes)
                 try:
                     validate_segb_snapshot(raw_bytes)
                 except RawDecodeError:

@@ -92,7 +92,7 @@ class Repository:
         logical=None,
         stream="app-in-focus",
     ):
-        value = encode_segment_envelope(segment, name=name, kind=kind)
+        value = encode_segment_envelope(segment, kind=kind)
         identity = ScreenTimeRawIdentity(
             device_key=device,
             stream=stream,
@@ -142,7 +142,6 @@ def _record(raw: RawObject) -> ParsedScreenTimeRecord:
         segment_key=raw.logical_key,
         segment_sha256=raw.sha256,
         observed_at=raw.observed_at,
-        segment_filename="segment.segb",
         record_offset=12,
         record_metadata_offset=120,
         record_state="WRITTEN",

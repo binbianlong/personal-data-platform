@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import replace
 from datetime import datetime
 from typing import Literal
 
@@ -75,13 +74,10 @@ class ScreenTimeSource:
         ):
             raise ValueError("Raw source, stream or schema version does not match Screen Time")
         self.validate_raw_key(raw.key)
-        payload, name, kind = decode_segment_envelope(payload)
+        payload, kind = decode_segment_envelope(payload)
         records = [] if kind == "tombstones" else parse_segb_bytes(raw, payload, segment_kind=kind)
-        if name is not None:
-            records = [replace(record, segment_filename=name) for record in records]
         return ScreenTimeBatch(
             records,
-            source_segment_name=name,
             segment_kind=kind,
             parser_version_override=self.parser_version,
         )

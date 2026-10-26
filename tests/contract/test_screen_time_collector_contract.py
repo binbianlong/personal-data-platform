@@ -85,6 +85,19 @@ def test_repeated_scans_keep_every_changed_pending_snapshot_until_load(tmp_path)
     assert repo.get_raw(original.identity.object_key, generation=1) == original.compressed_payload
 
 
+def test_collector_ignores_tombstone_files(tmp_path):
+    collector, state, _, remote = _collector(tmp_path)
+    (remote / "100").write_bytes(segb(event("app.current"))[0])
+    tombstones = remote / "tombstone"
+    tombstones.mkdir()
+    (tombstones / "unneeded").write_bytes(b"not-an-event")
+
+    result = collector.collect_once()
+
+    assert (result.segments, result.archived, result.deferred) == (1, 1, 0)
+    assert len(state.pending()) == 1
+
+
 def test_crc_valid_unsupported_payload_remains_pending_for_parser_recovery(tmp_path):
     collector, state, repo, remote = _collector(tmp_path)
     body = segb(event("unknown-schema") + b"\xf3\x01")[0]

@@ -8,7 +8,6 @@ import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Protocol
 
 from personal_data_platform.raw.models import RawObject
@@ -16,10 +15,9 @@ from personal_data_platform.raw.models import RawObject
 from .models import ParsedScreenTimeRecord, PayloadDecodeError, SegmentDecodeError
 from .payloads import (
     CF_ABSOLUTE_TIME_EPOCH,
-    DecodedTombstone,
     decode_app_in_focus_payload,
     decode_mac_app_usage_payload,
-    decode_tombstone_payload,
+    is_tombstone_payload,
 )
 
 PARSER_VERSION = "app-in-focus-v2"
@@ -113,7 +111,7 @@ def parse_segb_records(
     segment: bytes,
     records: Iterable[SegbRecord],
     *,
-    segment_kind: str | None = None,
+    segment_kind: str = "events",
 ) -> list[ParsedScreenTimeRecord]:
     """Keep deletion/CRC metadata without requiring a surviving event payload."""
     if raw.stream == "app-usage":
@@ -140,7 +138,6 @@ def parse_segb_records(
             timestamp_cocoa = struct.unpack_from("<d", segment, metadata_offset + 8)[0]
         crc = getattr(record, "crc_passed", None)
         decoded: DecodedScreenTimeEvent | None = None
-        tombstone: DecodedTombstone | None = None
         identity = None
         if state_name == "DELETED":
             kind = "deleted"
@@ -153,25 +150,21 @@ def parse_segb_records(
             raise SegmentDecodeError("unsupported SEGB record state")
         elif crc is False:
             kind = "crc_failure"
+        elif segment_kind == "tombstones":
+            if not is_tombstone_payload(payload):
+                raise PayloadDecodeError("unrecognized tombstone payload")
+            kind = "tombstone"
         else:
-            tombstone = decode_tombstone_payload(payload)
-            if tombstone:
-                if segment_kind == "events":
-                    raise PayloadDecodeError("tombstone payload in an events segment")
-                kind = "tombstone"
-            else:
-                if segment_kind == "tombstones":
-                    raise PayloadDecodeError("unrecognized tombstone payload")
-                kind = "event"
-                decoded = decode_event(payload)
-                identity = event_key(
-                    device_key=raw.subject_key,
-                    stream=raw.stream,
-                    bundle_id=decoded.bundle_id,
-                    cf_absolute_time=decoded.cf_absolute_time,
-                    in_foreground=decoded.in_foreground,
-                    kind=decoded.kind,
-                )
+            kind = "event"
+            decoded = decode_event(payload)
+            identity = event_key(
+                device_key=raw.subject_key,
+                stream=raw.stream,
+                bundle_id=decoded.bundle_id,
+                cf_absolute_time=decoded.cf_absolute_time,
+                in_foreground=decoded.in_foreground,
+                kind=decoded.kind,
+            )
         parsed.append(
             ParsedScreenTimeRecord(
                 event_key=identity,
@@ -181,7 +174,6 @@ def parse_segb_records(
                 segment_key=raw.logical_key,
                 segment_sha256=raw.sha256,
                 observed_at=raw.observed_at,
-                segment_filename=Path(raw.key).name.removesuffix(".gz"),
                 record_offset=record_offset,
                 record_metadata_offset=metadata_offset,
                 record_state=state_name,
@@ -202,11 +194,6 @@ def parse_segb_records(
                 record_kind=kind,
                 payload_length=len(payload),
                 record_timestamp_cocoa=timestamp_cocoa,
-                target_segment_name=tombstone["target_segment_name"] if tombstone else None,
-                target_offset=tombstone["target_offset"] if tombstone else None,
-                target_length=tombstone["target_length"] if tombstone else None,
-                target_event_timestamp=tombstone["target_event_timestamp"] if tombstone else None,
-                deletion_reason=tombstone["deletion_reason"] if tombstone else None,
             )
         )
     return parsed
@@ -274,7 +261,7 @@ def validate_segb_snapshot(segment: bytes) -> None:
 
 
 def parse_segb_bytes(
-    raw: RawObject, segment: bytes, *, segment_kind: str | None = None
+    raw: RawObject, segment: bytes, *, segment_kind: str = "events"
 ) -> list[ParsedScreenTimeRecord]:
     """Decode one complete uncompressed SEGB object and its application payloads."""
     try:

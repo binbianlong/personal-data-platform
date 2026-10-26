@@ -47,7 +47,7 @@ def test_empty_latest_snapshot_and_late_reparse_cannot_restore_records(tmp_path)
     first = repository.add("100", segb(event("app.a"))[0])
     empty = repository.add("100", b"")
     first_batch = _load(warehouse, repository, first)
-    warehouse.load_object(empty, byte_size=0, batch=ScreenTimeBatch([], "100", "events"))
+    warehouse.load_object(empty, byte_size=0, batch=ScreenTimeBatch([]))
     assert warehouse.query_rows("SELECT is_active FROM base.screen_time_event") == [(False,)]
     assert warehouse.query_value("SELECT count(*) FROM ops.screen_time_record") == 0
     warehouse.load_object(

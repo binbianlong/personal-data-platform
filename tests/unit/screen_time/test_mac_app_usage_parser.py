@@ -41,7 +41,7 @@ def _raw(payload: bytes):
 
 def _decode(payload: bytes, *, kind: str = "events", state: int = 1, crc: int | None = None):
     segment, _ = segb(payload, state=state, crc=crc)
-    envelope = encode_segment_envelope(segment, name="123456", kind=kind)
+    envelope = encode_segment_envelope(segment, kind=kind)
     return get_source("screen_time", "app-usage").decode(_raw(envelope), envelope)
 
 
@@ -102,7 +102,7 @@ def test_app_usage_preserves_deleted_and_crc_records_but_skips_tombstones() -> N
 def test_empty_mac_segment_records_its_own_parser_version() -> None:
     # A header with zero entries is a complete SEGB v2 file.
     empty_segment = struct.pack("<4sid16s", b"SEGB", 0, 0.0, b"\0" * 16)
-    envelope = encode_segment_envelope(empty_segment, name="123456", kind="events")
+    envelope = encode_segment_envelope(empty_segment)
     batch = get_source("screen_time", "app-usage").decode(_raw(envelope), envelope)
 
     assert batch.record_count == 0

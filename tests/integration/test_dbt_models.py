@@ -49,7 +49,6 @@ def _record(
         segment_key=raw.logical_key,
         segment_sha256=raw.sha256,
         observed_at=raw.observed_at,
-        segment_filename="segment.segb",
         record_offset=offset,
         record_metadata_offset=offset,
         record_state="WRITTEN",

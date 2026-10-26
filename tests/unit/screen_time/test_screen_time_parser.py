@@ -188,14 +188,13 @@ def test_crc_failure_preserves_corrupt_bytes_without_creating_an_event() -> None
         parse_segb_records(_raw(), b"ignored", [record])
 
 
-@pytest.mark.parametrize("reason", [1, 2, 99])
-def test_tombstones_are_typed_records_not_foreground_events(reason) -> None:
+def test_tombstones_are_identified_only_for_local_diagnostics() -> None:
     payload = b"".join(
         (
             _field_bytes(1, b"12345"),
             _field_varint(2, 512),
             _field_varint(3, 100),
-            _field_varint(4, reason),
+            _field_varint(4, 2),
             _field_bytes(5, b"synthetic"),
             _field_double(6, 10.5),
         )
@@ -205,14 +204,7 @@ def test_tombstones_are_typed_records_not_foreground_events(reason) -> None:
     )
     parsed = parse_segb_records(_raw(), b"ignored", [record], segment_kind="tombstones")[0]
     assert parsed.record_kind == "tombstone" and parsed.event_key is None
-    assert (
-        parsed.target_segment_name,
-        parsed.target_offset,
-        parsed.target_length,
-        parsed.target_event_timestamp,
-        parsed.deletion_reason,
-    ) == ("12345", 512, 100, 10.5, reason)
-    with pytest.raises(PayloadDecodeError, match="events segment"):
+    with pytest.raises(PayloadDecodeError):
         parse_segb_records(_raw(), b"ignored", [record], segment_kind="events")
 
 

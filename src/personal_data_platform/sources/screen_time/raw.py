@@ -167,18 +167,17 @@ def _require_relative_path(value: str) -> None:
         raise ValueError("relative path must be a normalized relative POSIX path")
 
 
-def encode_segment_envelope(segment: bytes, *, name: str, kind: str) -> bytes:
-    """Carry the source filename needed for exact tombstone references, without device paths."""
-    _validate_envelope_identity(name, kind)
+def encode_segment_envelope(segment: bytes, *, kind: str = "events") -> bytes:
+    """Store the source bytes with the segment type needed for ingestion."""
+    _validate_segment_kind(kind)
     metadata = json.dumps(
-        {"source_segment_name": name, "segment_kind": kind},
-        sort_keys=True,
+        {"segment_kind": kind},
         separators=(",", ":"),
     ).encode()
     return _ENVELOPE_MAGIC + struct.pack(">I", len(metadata)) + metadata + segment
 
 
-def decode_segment_envelope(payload: bytes) -> tuple[bytes, str, str]:
+def decode_segment_envelope(payload: bytes) -> tuple[bytes, str]:
     if not payload.startswith(_ENVELOPE_MAGIC) or len(payload) < 10:
         raise ValueError("invalid Screen Time envelope")
     size = struct.unpack_from(">I", payload, len(_ENVELOPE_MAGIC))[0]
@@ -187,17 +186,13 @@ def decode_segment_envelope(payload: bytes) -> tuple[bytes, str, str]:
         raise ValueError("invalid Screen Time envelope metadata size")
     try:
         metadata = json.loads(payload[start : start + size])
-        if set(metadata) != {"source_segment_name", "segment_kind"}:
-            raise ValueError("unexpected envelope metadata")
-        name, kind = metadata["source_segment_name"], metadata["segment_kind"]
-        _validate_envelope_identity(name, kind)
+        kind = metadata["segment_kind"]
+        _validate_segment_kind(kind)
     except (TypeError, KeyError, ValueError) as error:
         raise ValueError("invalid Screen Time envelope metadata") from error
-    return payload[start + size :], name, kind
+    return payload[start + size :], kind
 
 
-def _validate_envelope_identity(name: str, kind: str) -> None:
-    if not isinstance(name, str) or not name.isascii() or not name.isdecimal():
-        raise ValueError("source segment name must be numeric")
+def _validate_segment_kind(kind: str) -> None:
     if kind not in ("events", "tombstones"):
         raise ValueError("unsupported source segment kind")

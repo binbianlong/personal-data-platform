@@ -34,14 +34,6 @@ class DecodedMacAppUsage(TypedDict):
     unknown_field_count: int
 
 
-class DecodedTombstone(TypedDict):
-    target_segment_name: str
-    target_offset: int | None
-    target_length: int | None
-    deletion_reason: int | None
-    target_event_timestamp: float
-
-
 @dataclass(frozen=True, slots=True)
 class _WireValue:
     field_number: int
@@ -205,17 +197,12 @@ def decode_mac_app_usage_payload(payload: bytes) -> DecodedMacAppUsage:
     }
 
 
-def decode_tombstone_payload(payload: bytes) -> DecodedTombstone | None:
-    """Recognize BMTombstoneEvent, not an incompatible App.InFocus event.
-
-    Tags verified with macOS BMTombstoneEvent.initWithProtoData/jsonDictionary:
-    1 segmentName, 2 offset, 3 length, 4 reason, 5 processName,
-    6 eventTimestamp, 7 policyID. Reasons: 1 TTL, 2 UserInitiated.
-    """
+def is_tombstone_payload(payload: bytes) -> bool:
+    """Recognize BMTombstoneEvent for local format diagnostics."""
     values = _decode_wire(payload)
     signature = {(v.field_number, v.wire_type) for v in values}
     if not {(1, 2), (2, 0), (3, 0), (4, 0), (5, 2), (6, 1)} <= signature:
-        return None
+        return False
     name = _utf8(_one(values, 1, 2), 1)
     if not name or not name.isascii() or not name.isdecimal():
         raise PayloadDecodeError("invalid tombstone segment name")
@@ -227,10 +214,4 @@ def decode_tombstone_payload(payload: bytes) -> DecodedTombstone | None:
         raise PayloadDecodeError("invalid tombstone event timestamp")
     _utf8(_one(values, 5, 2), 5)
     _utf8(_one(values, 7, 2), 7)
-    return {
-        "target_segment_name": name,
-        "target_offset": _uint(_one(values, 2, 0), 2),
-        "target_length": _uint(_one(values, 3, 0), 3),
-        "deletion_reason": _uint(_one(values, 4, 0), 4),
-        "target_event_timestamp": timestamp,
-    }
+    return True

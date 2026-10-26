@@ -35,7 +35,6 @@ RECORD_COLUMNS = (
     "platform_flag",
     "parser_version",
     "unknown_field_count",
-    "segment_filename",
 )
 EVENT_COLUMNS = (
     "event_key",
@@ -72,6 +71,8 @@ def write_state(
     *,
     loaded_at: datetime,
 ) -> None:
+    if batch.segment_kind == "tombstones":
+        return
     scope = [raw.subject_key, raw.stream, raw.logical_key]
     connection.execute("""
         CREATE OR REPLACE TEMP TABLE screen_time_affected_event (event_key VARCHAR PRIMARY KEY);
@@ -79,10 +80,6 @@ def write_state(
         SELECT *, NULL::DOUBLE AS record_timestamp_cocoa, NULL::VARCHAR AS digest
         FROM ops.screen_time_record WHERE false;
     """)
-    # Apple deletion markers have no role in the current-record model.
-    if batch.segment_kind == "tombstones":
-        return
-
     previous = connection.execute(
         "SELECT observed_at, object_key FROM ops.screen_time_segment "
         "WHERE device_key = ? AND source_stream = ? AND segment_key = ?",
@@ -129,7 +126,6 @@ def write_state(
                 record.platform_flag,
                 record.parser_version,
                 record.unknown_field_count,
-                batch.source_segment_name or record.segment_filename,
                 record.record_timestamp_cocoa,
                 digest,
             ]

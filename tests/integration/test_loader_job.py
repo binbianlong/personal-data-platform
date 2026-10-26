@@ -50,7 +50,7 @@ def test_all_streams_loader_holds_one_lease_and_processes_both(tmp_path, monkeyp
         + "/app-usage/"
         + "c" * 64
         + "/20260827T000000000000Z/"
-        + hashlib.sha256(encode_segment_envelope(b"mac", name="100", kind="events")).hexdigest()
+        + hashlib.sha256(encode_segment_envelope(b"mac")).hexdigest()
         + ".segb.gz",
         stream="app-usage",
         subject_key="b" * 64,
@@ -70,15 +70,11 @@ def test_all_streams_loader_holds_one_lease_and_processes_both(tmp_path, monkeyp
     repositories = {
         "app-in-focus": CheckedRepository(
             [phone],
-            {
-                phone.key: gzip.compress(
-                    encode_segment_envelope(b"phone", name="100", kind="events")
-                )
-            },
+            {phone.key: gzip.compress(encode_segment_envelope(b"phone"))},
         ),
         "app-usage": CheckedRepository(
             [mac],
-            {mac.key: gzip.compress(encode_segment_envelope(b"mac", name="100", kind="events"))},
+            {mac.key: gzip.compress(encode_segment_envelope(b"mac"))},
         ),
     }
     monkeypatch.setattr(
@@ -118,9 +114,7 @@ def test_all_streams_loader_attempts_mac_after_iphone_inventory_failure(
         + "/app-usage/"
         + "c" * 64
         + "/20260827T000000000000Z/"
-        + hashlib.sha256(
-            encode_segment_envelope(mac_content, name="100", kind="events")
-        ).hexdigest()
+        + hashlib.sha256(encode_segment_envelope(mac_content)).hexdigest()
         + ".segb.gz",
         stream="app-usage",
         subject_key="b" * 64,
@@ -142,11 +136,7 @@ def test_all_streams_loader_attempts_mac_after_iphone_inventory_failure(
         "app-in-focus": FailedRepository(),
         "app-usage": _Repository(
             [mac],
-            {
-                mac.key: gzip.compress(
-                    encode_segment_envelope(mac_content, name="100", kind="events")
-                )
-            },
+            {mac.key: gzip.compress(encode_segment_envelope(mac_content))},
         ),
     }
     try:
@@ -198,9 +188,7 @@ def _raw(
         stream="app-in-focus",
         segment_key=hashlib.sha256(key.encode()).hexdigest(),
         observed_at=observed_at,
-        sha256=hashlib.sha256(
-            encode_segment_envelope(content, name="100", kind="events")
-        ).hexdigest(),
+        sha256=hashlib.sha256(encode_segment_envelope(content)).hexdigest(),
     )
     return parse_raw_object_key(
         identity.object_key,
@@ -218,10 +206,8 @@ def test_loader_continues_after_poison_object_and_retries_it(tmp_path, monkeypat
     repository = _Repository(
         [good, poison],
         {
-            good.key: gzip.compress(
-                encode_segment_envelope(good_content, name="100", kind="events")
-            ),
-            poison.key: gzip.compress(encode_segment_envelope(b"wrong", name="100", kind="events")),
+            good.key: gzip.compress(encode_segment_envelope(good_content)),
+            poison.key: gzip.compress(encode_segment_envelope(b"wrong")),
         },
     )
     monkeypatch.setattr(
@@ -241,9 +227,7 @@ def test_loader_continues_after_poison_object_and_retries_it(tmp_path, monkeypat
             "succeeded": 1,
         }
 
-        repository.objects[poison.key] = gzip.compress(
-            encode_segment_envelope(repaired_content, name="100", kind="events")
-        )
+        repository.objects[poison.key] = gzip.compress(encode_segment_envelope(repaired_content))
         second = run_loader(repository, warehouse)
 
         assert second.skipped == 1
@@ -263,7 +247,7 @@ def test_loader_revalidates_a_recreated_object_generation(tmp_path, monkeypatch)
     original = _raw("raw/recreated.segb.gz", content, now, storage_generation=1)
     repository = _Repository(
         [original],
-        {original.key: gzip.compress(encode_segment_envelope(content, name="100", kind="events"))},
+        {original.key: gzip.compress(encode_segment_envelope(content))},
     )
     monkeypatch.setattr(
         "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",
@@ -311,7 +295,7 @@ def test_loader_rejects_mixed_or_inconsistent_metadata_before_reading(tmp_path, 
     raw = _raw("identity", content, datetime(2026, 8, 27, tzinfo=UTC))
     repository = _Repository(
         [replace(raw, **changes)],
-        {raw.key: gzip.compress(encode_segment_envelope(content, name="100", kind="events"))},
+        {raw.key: gzip.compress(encode_segment_envelope(content))},
     )
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "rejected.duckdb"))))
     warehouse.migrate()
@@ -487,11 +471,7 @@ def test_loader_uses_source_decoder_across_schema_versions_and_preserves_other_s
         phone = _raw("phone", phone_content, now)
         phone_repository = _Repository(
             [phone],
-            {
-                phone.key: gzip.compress(
-                    encode_segment_envelope(phone_content, name="100", kind="events")
-                )
-            },
+            {phone.key: gzip.compress(encode_segment_envelope(phone_content))},
         )
         monkeypatch.setattr(
             "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",

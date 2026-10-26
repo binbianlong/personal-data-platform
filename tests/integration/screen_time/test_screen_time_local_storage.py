@@ -98,9 +98,7 @@ def test_latest_segment_is_saved_pending_without_successor(tmp_path):
     assert collector.collect_once().deferred == 0
     pending = state.pending()
     assert len(pending) == 1
-    assert gzip.decompress(pending[0].compressed_payload) == encode_segment_envelope(
-        body, name="100", kind="events"
-    )
+    assert gzip.decompress(pending[0].compressed_payload) == encode_segment_envelope(body)
     (remote / "100").write_bytes(segb(event("synthetic.other"), crc=0)[0])
     assert collector.collect_once().deferred == 1
     assert [p.identity.object_key for p in state.pending()] == [pending[0].identity.object_key]
@@ -113,7 +111,7 @@ def test_warehouse_commit_then_restart_acknowledges_without_duplicate_events(
     from personal_data_platform.sources.screen_time.runtime import load_pending
 
     state = CollectorState(tmp_path / "collector.db")
-    body = encode_segment_envelope(segb(event("synthetic.app"))[0], name="100", kind="events")
+    body = encode_segment_envelope(segb(event("synthetic.app"))[0])
     pending = state.prepare(
         device_key="a" * 64,
         stream="app-in-focus",
@@ -141,9 +139,7 @@ def test_warehouse_commit_then_restart_acknowledges_without_duplicate_events(
         device_key="a" * 64,
         stream="app-in-focus",
         segment_key="b" * 64,
-        raw_bytes=encode_segment_envelope(
-            segb(event("synthetic.other"))[0], name="100", kind="events"
-        ),
+        raw_bytes=encode_segment_envelope(segb(event("synthetic.other"))[0]),
         observed_at=NOW + timedelta(seconds=1),
     )
     load_pending(state, wh, now=NOW + timedelta(seconds=1), publish_success=publish_success)

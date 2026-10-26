@@ -1,4 +1,6 @@
 import gzip
+import json
+import struct
 from datetime import UTC, datetime
 
 import pytest
@@ -129,8 +131,8 @@ def test_envelope_preserves_source_bytes_and_round_trips_key() -> None:
         encode_segment_envelope,
     )
 
-    payload = encode_segment_envelope(b"SEGB-source-bytes", name="123", kind="events")
-    assert decode_segment_envelope(payload) == (b"SEGB-source-bytes", "123", "events")
+    payload = encode_segment_envelope(b"SEGB-source-bytes")
+    assert decode_segment_envelope(payload) == (b"SEGB-source-bytes", "events")
     identity = ScreenTimeRawIdentity(
         device_key="a" * 64,
         stream="app-in-focus",
@@ -151,3 +153,13 @@ def test_envelope_rejects_truncated_envelopes(payload) -> None:
 
     with pytest.raises(ValueError):
         decode_segment_envelope(payload)
+
+
+def test_envelope_reads_stored_payloads_without_using_extra_metadata() -> None:
+    from personal_data_platform.sources.screen_time.raw import decode_segment_envelope
+
+    metadata = json.dumps({"source_segment_name": "123", "segment_kind": "events"}).encode()
+    body = b"SEGB-source-bytes"
+    payload = b"PDPST\x02" + struct.pack(">I", len(metadata)) + metadata + body
+
+    assert decode_segment_envelope(payload) == (body, "events")

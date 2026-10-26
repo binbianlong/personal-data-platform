@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, slots=True)
 class ScreenTimeBatch:
     records: Sequence[ParsedScreenTimeRecord]
-    source_segment_name: str | None = None
     segment_kind: str | None = None
     parser_version_override: str | None = None
 
