@@ -86,15 +86,10 @@ MacのCollectorはeditable installのcheckoutを参照するため、そのcheck
 Collectorは起動後にスキーマを初期化し、成功後の周期では省略する。DDL・コード・接続設定の変更後は再起動し、
 取込成功と日次全段階の成功を確認して通常運用を再開する。
 
-`007_operational_state.sql`は重複した照合履歴と日次DB heartbeatを削除する。
-適用後のrollbackにも、このスキーマに対応したimageを使う。
-
-`008_terminal_ingestion_receipts.sql`はRaw台帳を成功・失敗の確定結果に絞る。
-まだ試行していないRawは台帳なしで表し、データと成功台帳は同じtransactionで確定する。
-旧`loading`行は再試行できる失敗行へ移行する。実行中の排他は`ops.job_lock`で管理する。
-旧期限切れ台帳を移行対象から外し、保持期限の起点・期限切れ列を削除する。
-分析データと有効な取込台帳は保持する。MacのCollectorも起動時にSQLiteの旧起点列を削除し、
-保存済みRaw・未取込状態・収集成功記録を維持する。適用後は両方の現行スキーマに対応したコードを使う。
+Raw台帳は成功・失敗の確定結果を記録し、まだ試行していないRawは台帳なしで表す。
+データと成功台帳は同じtransactionで確定し、実行中の排他は`ops.job_lock`で管理する。
+日次処理の結果は`ops.job_run`、Collectorの成功状態はstreamごとのheartbeatへ記録する。
+MacのSQLiteは保存済みRaw・未取込状態・収集成功記録を保持する。
 
 ## 収集・日次処理
 

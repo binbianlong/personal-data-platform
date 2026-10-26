@@ -1,4 +1,3 @@
-import shutil
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
@@ -14,7 +13,7 @@ from personal_data_platform.sources.fitbit.models import (
     Window,
 )
 from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
-from personal_data_platform.storage.motherduck import DEFAULT_MIGRATIONS, Warehouse
+from personal_data_platform.storage.motherduck import Warehouse
 from tests.integration.fitbit.test_fitbit_writer import apply, sleep_snapshot, snapshot
 
 
@@ -24,77 +23,6 @@ def warehouse():
     value.migrate()
     yield value
     value.close()
-
-
-def test_fitbit_schema_has_five_typed_tables_and_one_coverage(warehouse):
-    assert {
-        row[0]
-        for row in warehouse.query_rows(
-            "SELECT table_name FROM information_schema.tables WHERE table_schema='base' "
-            "AND table_name LIKE 'fitbit_%'"
-        )
-    } == {
-        "fitbit_activity_interval",
-        "fitbit_resting_heart_rate_daily",
-        "fitbit_sleep_session",
-        "fitbit_sleep_detail",
-        "fitbit_heart_rate_minute",
-    }
-    assert (
-        warehouse.query_value(
-            "SELECT count(*) FROM information_schema.tables WHERE table_schema='ops' "
-            "AND table_name LIKE 'fitbit_%coverage'"
-        )
-        == 1
-    )
-    assert (
-        warehouse.query_value(
-            "SELECT count(*) FROM information_schema.columns WHERE table_schema='base' "
-            "AND table_name LIKE 'fitbit_%' AND column_name IN ('origin','cursor_at','parent_id')"
-        )
-        == 0
-    )
-
-
-def test_minute_column_removal_preserves_values_and_ordering_metadata(tmp_path):
-    for path in DEFAULT_MIGRATIONS.glob("00[1234]_*.sql"):
-        shutil.copyfile(path, tmp_path / path.name)
-    warehouse = Warehouse(duckdb.connect())
-    try:
-        warehouse.migrate(tmp_path)
-        at = datetime(2026, 9, 1, tzinfo=UTC)
-        warehouse.connection.execute(
-            "INSERT INTO base.fitbit_heart_rate_minute VALUES "
-            "('self',?,?,'heart-rate-minute-v1',?,60,50,70,3,?,'api-id',?)",
-            [GOOGLE_WEARABLES, at, at + timedelta(minutes=1), at, at],
-        )
-        before = warehouse.query_rows(
-            "SELECT * EXCLUDE (end_at, sample_count) FROM base.fitbit_heart_rate_minute"
-        )
-        warehouse.connection.execute(
-            "CREATE VIEW marts.fitbit_heart_rate_minute_time_series AS "
-            "SELECT subject_key,data_source_family,start_at,end_at,average AS mean_minute_heart_rate,"
-            "minimum AS min_heart_rate,maximum AS max_heart_rate,sample_count,aggregation_version,"
-            "fetched_at,source_key FROM base.fitbit_heart_rate_minute"
-        )
-
-        warehouse.migrate()
-
-        assert not {"end_at", "sample_count"} & {
-            row[0] for row in warehouse.query_rows("DESCRIBE base.fitbit_heart_rate_minute")
-        }
-        assert warehouse.query_rows("SELECT * FROM base.fitbit_heart_rate_minute") == before
-        assert warehouse.query_rows(
-            "SELECT start_at,end_at FROM marts.fitbit_heart_rate_minute_time_series"
-        ) == [(at, at + timedelta(minutes=1))]
-        assert "sample_count" not in {
-            row[0]
-            for row in warehouse.query_rows("DESCRIBE marts.fitbit_heart_rate_minute_time_series")
-        }
-        warehouse.migrate()
-        assert warehouse.query_rows("SELECT * FROM base.fitbit_heart_rate_minute") == before
-    finally:
-        warehouse.close()
 
 
 def test_shared_activity_ids_are_isolated_by_metric(warehouse):

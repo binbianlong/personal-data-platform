@@ -70,14 +70,6 @@ class CollectorState:
         self.path.chmod(0o600)
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
-            connection.execute("BEGIN IMMEDIATE")
-            columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(segment_observation)")
-            }
-            if "retention_started_at" in columns:
-                connection.execute(
-                    "ALTER TABLE segment_observation DROP COLUMN retention_started_at"
-                )
 
     def prepare(
         self,
