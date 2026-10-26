@@ -10,8 +10,7 @@
 - productionと別のRawを使うtestはGCS bucketとMotherDuck databaseを分離し、権限も共有しない。
   preflightは専用bucketの`test/preflight/`と検証用databaseに権限を限定する。
 
-疑似化方法とsource固有のkeyはsource packageで定義する。Screen Timeは
-[`data-model.md`](../sources/screen-time/data-model.md)に従う。
+疑似化方法とsource固有のkeyは各sourceのデータモデルで定義する。
 
 ## GCS IAM
 
@@ -19,6 +18,7 @@
 |---|---|
 | Local Collector | GCS権限なし。SQLite RawとMotherDuck writer tokenを使う |
 | 共通runtime Service Account | worker・日次JobのOAuth/DB secret accessと西部Rawへのlist / read |
+| Fitbit receiver | Webhook検証secretとPub/Sub publisher |
 | OwnTracks receiver | OwnTracks認証secretと`raw/owntracks/v1/`へのcreateだけ |
 | GCS service agent | OwnTracks topicへのPub/Sub publisher |
 | Trigger Service Account | 日次Jobと非公開workerのinvoke。Pub/Sub pushはOIDCで認証 |
@@ -26,17 +26,14 @@
 | Rebuild operator | 専用read-only Service Accountでproduction bucketへのlist / read |
 
 bucket IAM policyはTerraformでauthoritativeに管理し、projectのViewer / Editor / Owner convenience valueによるobject accessを残さない。
-Screen Time RebuildはCollectorを止めてローカルSQLiteを読む。FitbitはAPI再取得で復旧する。
 
 ## Secret
 
 Macでは疑似化secretと専用MotherDuck writer tokenをmacOS Keychainへ保存する。CollectorにADCは不要である。
 secretをSQLite state、plist、shell履歴、Git管理ファイルへ平文で保存しない。plistには接続先DB名と収集設定だけを含める。
 
-Cloud Runのworker・日次Jobは共通runtime Service Accountを使い、OwnTracks worker・日次JobがGCS Rawを読む。
-Fitbit receiverは別Service Accountで、Webhook検証secretとPub/Sub publisherを持つ。OwnTracks receiverは専用Service Accountで認証secretとOwnTracks Rawの作成権限を持つ。
-MotherDuck、OAuth、Webhook、日次heartbeat、OwnTracks認証の5 payloadはSecret Managerへ保存し、正の数値versionへ固定する。
-各Jobへ渡す環境変数とsecret pinは[Runtime Terraform](../../infra/terraform/README.md#secretと資格情報)を正本とする。
+Cloud Runの資格情報はSecret Managerへ保存し、正の数値versionへ固定する。
+payload・環境変数・secret pinは[Runtime Terraform](../../infra/terraform/README.md#secretと資格情報)を正本とする。
 secret値をTerraform variable、Terraform state、container image、GitHub Actions outputへ含めない。
 
 ChatGPT接続にはMotherDuckのread-only user/shareを使い、Loader / dbt writer tokenを再利用しない。toolの
@@ -48,9 +45,9 @@ ChatGPT接続にはMotherDuckのread-only user/shareを使い、Loader / dbt wri
 - GitHub ActionsからGCPへはWorkload Identity Federationを使用し、長期Service Account keyを作らない。
 - deploy用federationは対象repository、`main` ref、対象workflowへattribute conditionで限定する。
 - Terraform plan用とdeploy用のService Accountを分離する。
-- worker・日次Jobは共通Service Accountを使う。receiver、Rebuild operatorは別identityとし、
-  Secret Manager accessと実行権限を必要なresourceへ限定する。共有runtime SAの権限はworker・日次Jobの合計であり、両者のIAM分離を保証しない。
-- Trigger SAには日次Job・workerのinvoke権限を与え、Pub/Sub service agentのToken CreatorはそのSAへ限定する。
+- receiver・Rebuild operatorは別identityとし、Secret Manager accessと実行権限を必要なresourceへ限定する。
+  共有runtime SAの権限はworker・日次Jobの合計であり、両者のIAM分離を保証しない。
+- Pub/Sub service agentのToken CreatorはTrigger SAへ限定する。
 - 非公開workerに`allUsers`を付与しない。OIDCのaudienceはworkerのCloud Run URIへ固定する。
 
 ## インシデント時
