@@ -164,13 +164,17 @@ def test_worker_rejects_mismatched_storage_metadata_without_writing(tmp_path, fi
         assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 0
 
 
-def test_worker_lease_conflict_retries_and_preserves_competing_owner(tmp_path):
+def test_worker_lease_conflict_retries_and_preserves_competing_owner(tmp_path, caplog):
     store, _, client, factory = setup_worker(tmp_path)
     with closing(factory()) as warehouse:
         assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
-    assert client.post("/notifications/owntracks", json=notification(store)).status_code == 503
+    with caplog.at_level(logging.INFO):
+        response = client.post("/notifications/owntracks", json=notification(store))
+    assert response.status_code == 429
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
+        assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 0
         warehouse.release_job_lock("loader", "daily")
     assert client.post("/notifications/owntracks", json=notification(store)).status_code == 204
 

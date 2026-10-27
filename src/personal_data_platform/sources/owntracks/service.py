@@ -150,7 +150,7 @@ def create_worker_app(
             return Response(status_code=204 if ok else 503)
         except JobAlreadyRunning:
             LOGGER.info("OwnTracks ingestion deferred: shared writer busy")
-            return Response(status_code=503)
+            return Response(status_code=429)
         except Exception as error:
             LOGGER.error("OwnTracks ingestion failed (%s)", type(error).__name__)
             return Response(status_code=503)
