@@ -86,7 +86,7 @@ schema 1の心拍・legacy通知は引き続き受理する。
 ## 60分バッチの確認
 
 Cloud Scheduler `pdp-fitbit-batch-west`がworkerの`POST /notifications/fitbit/drain`を毎時00分にOIDC認証で起動する。
-Fitbitの滞留警報は75分超が5分継続した場合に発報する。設定は[Runtime Terraform](../../../infra/terraform/README.md)を参照する。
+Fitbitの滞留警報は90分超が5分継続した場合に発報する。設定は[Runtime Terraform](../../../infra/terraform/README.md)を参照する。
 
 ```text
 resource.type="cloud_run_revision"
