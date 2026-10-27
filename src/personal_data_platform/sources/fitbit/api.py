@@ -107,8 +107,25 @@ class UrllibTransport:
                 return HttpResponse(error.code, error.read(), dict(error.headers.items()))
             finally:
                 error.close()
-        except (URLError, OSError):
-            raise TransientError("Google Health transport failed") from None
+
+
+def _log_request_failure(
+    *, oauth: bool, http_status: int | None = None, error: OSError | None = None
+) -> None:
+    LOGGER.warning(
+        "fitbit request failed",
+        extra={
+            "event": "fitbit_request_failed",
+            "summary": {
+                "request_kind": "oauth" if oauth else "api",
+                "http_status": http_status,
+                "transport_error_type": type(error).__name__ if error is not None else None,
+                "transport_reason_type": type(error.reason).__name__
+                if isinstance(error, URLError)
+                else None,
+            },
+        },
+    )
 
 
 def request_json(
@@ -124,8 +141,11 @@ def request_json(
     """Validate and classify an API or refresh response without exposing its body."""
     try:
         response = transport.request(method, url, headers=headers, body=body, timeout=timeout)
-    except (URLError, OSError):
+    except (URLError, OSError) as error:
+        _log_request_failure(oauth=oauth, error=error)
         raise TransientError("Google Health transport failed") from None
+    if not 200 <= response.status < 300:
+        _log_request_failure(oauth=oauth, http_status=response.status)
     if response.status in (401, 403) or (oauth and response.status == 400):
         raise AuthenticationError("Google Health authorization failed")
     if response.status == 429:
