@@ -284,6 +284,8 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
         "owntracks",
         "app-in-focus",
         "app-usage",
+        "missing-relation",
+        "relation-query",
         "none",
         "gap",
         "gap-covered",
@@ -359,9 +361,16 @@ def test_daily_records_one_outcome_and_preserves_collector_heartbeats(
     def audit(_warehouse, source, now):
         owner = warehouse.query_value("SELECT owner_id FROM ops.job_lock WHERE job_name='loader'")
         result = phase(source.stream, {"_lease_owner": owner})
-        return SourceHealth(result.ok, {})
+        return SourceHealth(result.ok, {"collector_heartbeat_stale": not result.ok})
 
     monkeypatch.setattr(job, "audit_collector_heartbeat", audit)
+    if failure == "missing-relation":
+        warehouse.connection.execute("DROP VIEW marts.daily_screen_time_total")
+    elif failure == "relation-query":
+        warehouse.connection.execute(
+            "CREATE OR REPLACE VIEW marts.daily_screen_time_total AS "
+            "SELECT 1 AS value WHERE CAST('invalid' AS INTEGER) > 0"
+        )
     if failure == "busy":
         warehouse.acquire_job_lock("loader", "competitor", lease_seconds=7500)
     for source in sources:
@@ -432,12 +441,28 @@ def test_daily_records_one_outcome_and_preserves_collector_heartbeats(
                 assert "last_completed_target_date" in details
             else:
                 expected_stage = "audit:" + failure if failure.startswith("app-") else failure
+                if failure in ("missing-relation", "relation-query"):
+                    expected_stage = "audit:app-in-focus"
                 if failure == "old-marker-heartbeat":
                     expected_stage = "heartbeat"
                 assert details["failed_stage"] == expected_stage
             if failure not in ("fitbit", "dbt"):
                 assert details["owntracks"] == {"raw_object_count": 3}
         assert "ops.reconciliation_run" not in _relation_names(warehouse)
+        if failure in ("app-in-focus", "app-usage", "missing-relation", "relation-query"):
+            entries = [json.loads(line) for line in capfd.readouterr().err.splitlines()]
+            audits = [entry for entry in entries if entry.get("event") == "screen_time_audit"]
+            assert len(audits) == 1
+            assert audits[0]["severity"] == "ERROR" and audits[0]["status"] == "failed"
+            summary = audits[0]["summary"]
+            assert summary["stream"] == ("app-usage" if failure == "app-usage" else "app-in-focus")
+            assert summary["collector_heartbeat_stale"] is failure.startswith("app-")
+            assert summary["missing_relations"] == (
+                ["marts.daily_screen_time_total"] if failure == "missing-relation" else []
+            )
+            assert summary["failed_relation_queries"] == (
+                ["marts.daily_screen_time_total"] if failure == "relation-query" else None
+            )
         if failure in ("none", "gap", "gap-covered", "gap-edge"):
             assert phases == ["fitbit", "dbt", "owntracks", "app-in-focus", "app-usage"]
             entries = [json.loads(line) for line in capfd.readouterr().err.splitlines()]

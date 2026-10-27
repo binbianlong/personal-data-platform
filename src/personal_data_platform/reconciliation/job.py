@@ -305,12 +305,29 @@ def _run_daily_reconciliation() -> int:
             with network_phase("daily_screen_time"):
                 health = audit_collector_heartbeat(warehouse, source, datetime.now(UTC))
                 relations = _relation_names(warehouse)
-                if (
-                    not health.ok
-                    or set(source.required_relations) - relations
-                    or _failed_relation_queries(warehouse, relations, source.required_relations)
-                ):
-                    LOGGER.error("Screen Time audit failed: %s", source.stream)
+                missing_relations = sorted(set(source.required_relations) - relations)
+                failed_queries = (
+                    _failed_relation_queries(warehouse, relations, source.required_relations)
+                    if health.ok and not missing_relations
+                    else None
+                )
+                if not health.ok or missing_relations or failed_queries:
+                    LOGGER.error(
+                        "Screen Time audit failed: %s",
+                        source.stream,
+                        extra={
+                            "event": "screen_time_audit",
+                            "status": "failed",
+                            "summary": {
+                                "stream": source.stream,
+                                **health.details,
+                                "missing_relations": missing_relations,
+                                "failed_relation_queries": list(failed_queries)
+                                if failed_queries is not None
+                                else None,
+                            },
+                        },
+                    )
                     return 1
         remaining()
         payload: dict[str, object] = {

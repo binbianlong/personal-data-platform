@@ -69,8 +69,8 @@ run "pull_batches_existing_subscription" {
     error_message = "Operators need the batch schedule and drain endpoint in runtime outputs."
   }
   assert {
-    condition     = google_monitoring_alert_policy.pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 4500
-    error_message = "Hourly Fitbit batches need a 75-minute backlog threshold."
+    condition     = google_monitoring_alert_policy.pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 5400
+    error_message = "Hourly Fitbit batches need a 90-minute backlog threshold."
   }
 }
 

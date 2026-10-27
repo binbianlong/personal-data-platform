@@ -1,7 +1,10 @@
 """Offline Google Health v4 contract tests using synthetic points."""
 
 import json
+import logging
+import ssl
 from datetime import UTC, date, datetime, timedelta
+from urllib.error import URLError
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -279,6 +282,68 @@ def test_network_failure_is_transient_and_has_a_sanitized_message():
             Window("steps", START, START + timedelta(days=1)), subject_key="owner"
         )
     assert "synthetic-token" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "response,http_status,transport_error_type,transport_reason_type,oauth",
+    [
+        ((503, {"error": "synthetic-health"}, {}), 503, None, None, False),
+        ((401, {"error": "synthetic-health"}, {}), 401, None, None, False),
+        ((429, {"error": "synthetic-health"}, {}), 429, None, None, False),
+        ((400, {"error": "synthetic-token"}, {}), 400, None, None, True),
+        (TimeoutError("synthetic-token"), None, "TimeoutError", None, False),
+        (
+            URLError(ssl.SSLCertVerificationError("synthetic-token")),
+            None,
+            "URLError",
+            "SSLCertVerificationError",
+            False,
+        ),
+    ],
+)
+def test_failed_request_logs_status_or_transport_type_without_private_data(
+    caplog, response, http_status, transport_error_type, transport_reason_type, oauth
+):
+    from personal_data_platform.sources.fitbit.api import HealthError, request_json
+
+    with caplog.at_level(logging.WARNING), pytest.raises(HealthError):
+        request_json(
+            FakeTransport([response]),
+            "POST",
+            "https://example.test/synthetic-token",
+            headers={"Authorization": "Bearer synthetic-token"},
+            body=b"synthetic-health",
+            timeout=1,
+            oauth=oauth,
+        )
+    records = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_request_failed"]
+    assert len(records) == 1
+    assert records[0].summary == {
+        "request_kind": "oauth" if oauth else "api",
+        "http_status": http_status,
+        "transport_error_type": transport_error_type,
+        "transport_reason_type": transport_reason_type,
+    }
+    logged = json.dumps(records[0].__dict__, default=str)
+    assert "synthetic-token" not in logged
+    assert "synthetic-health" not in logged
+
+
+def test_urllib_failure_retains_tls_diagnosis_without_logging_exception_text(monkeypatch, caplog):
+    from personal_data_platform.sources.fitbit import api
+
+    def fail(*args, **kwargs):
+        raise URLError(ssl.SSLCertVerificationError("synthetic-token"))
+
+    monkeypatch.setattr(api, "urlopen", fail)
+    with caplog.at_level(logging.WARNING), pytest.raises(api.TransientError):
+        api.request_json(
+            api.UrllibTransport(), "GET", "https://example.test", headers={}, timeout=1
+        )
+    records = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_request_failed"]
+    assert len(records) == 1
+    assert records[0].summary["transport_reason_type"] == "SSLCertVerificationError"
+    assert "synthetic-token" not in json.dumps(records[0].__dict__, default=str)
 
 
 def test_each_response_is_checked_against_its_chunk_not_only_total_window():

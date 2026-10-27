@@ -75,17 +75,20 @@ def audit_collector_heartbeat(
     warehouse: Warehouse, source: SourceAdapter, now: datetime
 ) -> SourceHealth:
     """Cloud jobs check only collector-owned success; they never renew it."""
+    diagnostics: dict[str, object] = {"checked_at": now.isoformat()}
     rows = warehouse.query_rows(
         "SELECT succeeded_at, details FROM ops.heartbeat WHERE monitor_name = ?",
         [source.monitor_name],
     )
     if not rows:
-        return SourceHealth(False, {"collector_heartbeat_missing": True})
+        return SourceHealth(False, {**diagnostics, "collector_heartbeat_missing": True})
     succeeded_at, serialized = rows[0]
+    loaded_at = _aware_utc(succeeded_at)
+    diagnostics["collector_succeeded_at"] = loaded_at.isoformat() if loaded_at else None
     try:
         details = json.loads(str(serialized))
         scan_at = _aware_utc(datetime.fromisoformat(details["scan_completed_at"]))
-        loaded_at = _aware_utc(succeeded_at)
+        diagnostics["scan_completed_at"] = scan_at.isoformat() if scan_at else None
         ok = all(
             value is not None and now - COLLECTOR_FRESHNESS <= value <= now + MAX_CLOCK_SKEW
             for value in (scan_at, loaded_at)
@@ -93,12 +96,13 @@ def audit_collector_heartbeat(
         return SourceHealth(
             ok,
             {
+                **diagnostics,
                 "collector_inactive": details.get("collector_inactive") is True,
                 "collector_heartbeat_stale": not ok,
             },
         )
     except (KeyError, ValueError, TypeError, AttributeError):
-        return SourceHealth(False, {"collector_heartbeat_invalid": True})
+        return SourceHealth(False, {**diagnostics, "collector_heartbeat_invalid": True})
 
 
 def filter_ingestion_states(

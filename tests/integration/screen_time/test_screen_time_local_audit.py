@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 
 from personal_data_platform.sources.registry import get_source
@@ -48,13 +49,19 @@ def test_cloud_audit_uses_mac_heartbeat_and_rejects_stale_capture():
     wh.migrate()
     source = get_source()
     now = datetime.now(UTC)
-    assert not audit_collector_heartbeat(wh, source, now).ok
+    missing = audit_collector_heartbeat(wh, source, now)
+    assert not missing.ok and missing.details["collector_heartbeat_missing"]
+    assert missing.details["checked_at"] == now.isoformat()
     wh.publish_heartbeat(source.monitor_name, "mac", {"scan_completed_at": now.isoformat()})
     assert audit_collector_heartbeat(wh, source, now).ok
     wh.publish_heartbeat(
         source.monitor_name, "mac", {"scan_completed_at": (now - timedelta(hours=49)).isoformat()}
     )
-    assert not audit_collector_heartbeat(wh, source, now).ok
+    stale = audit_collector_heartbeat(wh, source, now)
+    assert not stale.ok
+    assert stale.details["checked_at"] == now.isoformat()
+    assert stale.details["scan_completed_at"] == (now - timedelta(hours=49)).isoformat()
+    assert stale.details["collector_succeeded_at"] is not None
     wh.publish_heartbeat(
         source.monitor_name,
         "mac",
@@ -63,3 +70,26 @@ def test_cloud_audit_uses_mac_heartbeat_and_rejects_stale_capture():
     assert audit_collector_heartbeat(wh, source, now).ok
     assert not audit_collector_heartbeat(wh, source, now + timedelta(hours=49)).ok
     wh.close()
+
+
+def test_cloud_audit_does_not_include_invalid_heartbeat_contents_in_diagnostics():
+    from personal_data_platform.sources.screen_time.audit import audit_collector_heartbeat
+
+    wh = Warehouse(connect(WarehouseConfig(":memory:")))
+    wh.migrate()
+    source = get_source()
+    now = datetime.now(UTC)
+    try:
+        wh.publish_heartbeat(
+            source.monitor_name,
+            "mac",
+            {"scan_completed_at": "synthetic-token", "private": "synthetic-health"},
+        )
+        health = audit_collector_heartbeat(wh, source, now)
+        assert not health.ok and health.details["collector_heartbeat_invalid"]
+        assert health.details["checked_at"] == now.isoformat()
+        logged = json.dumps(health.details)
+        assert "synthetic-token" not in logged
+        assert "synthetic-health" not in logged
+    finally:
+        wh.close()

@@ -8,6 +8,6 @@ receiver URLはTerraformの`runtime_resources.owntracks_url` output（末尾`/we
 
 ## 取込と補修
 
-workerはRawのDBへのcommitを確認してから204を返し、失敗やlease競合は503で再配信を受ける。日次JobはRawと取込台帳を照合し、未取込分と旧parser版で取り込んだRawを再処理する。
+workerはRawのDBへのcommitを確認してから204を返し、失敗は503、lease競合は429で再配信を受ける。日次JobはRawと取込台帳を照合し、未取込分と旧parser版で取り込んだRawを再処理する。
 
 取込遅延は`base.owntracks_location`の`received_at`と`loaded_at`で確認する。scratch DBへの再生は[Rebuild](../../platform/operations.md#rebuild)、復旧・監視・停止操作は[Platform運用](../../platform/operations.md#停止と復旧)を参照する。
