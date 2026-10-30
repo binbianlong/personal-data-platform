@@ -89,7 +89,7 @@ def test_notifications_require_signature_of_unchanged_body(signature: str | None
         authenticate(notification(), signature_header=signature)
 
 
-def test_whole_batch_must_match_owner_and_five_types() -> None:
+def test_whole_batch_must_match_owner_and_supported_types() -> None:
     for invalid in [notification(owner="other"), notification("weight"), {"data": {}}]:
         with pytest.raises((AuthenticationError, PayloadError)):
             authenticate([notification(), invalid])
@@ -437,3 +437,32 @@ def test_split_civil_steps_does_not_interpret_provider_date_as_future_utc():
     units = split_notifications(notice)
     assert len(units) == 1
     assert units[0].windows == notice.windows
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "daily-heart-rate-variability",
+        "heart-rate-variability",
+        "daily-respiratory-rate",
+        "respiratory-rate-sleep-summary",
+        "daily-oxygen-saturation",
+        "daily-sleep-temperature-derivations",
+        "exercise",
+        "sedentary-period",
+        "distance",
+        "time-in-heart-rate-zone",
+    ],
+)
+def test_additional_webhook_types_have_valid_reacquisition_windows(kind):
+    result = authenticate(notification(kind))
+    assert result.groups and all(w.data_type == kind for w in result.windows)
+    if kind.startswith("daily-") or kind == "exercise":
+        assert result.windows == (
+            Window(kind, time("2026-09-26T00:00:00"), time("2026-09-28T00:00:00")),
+        )
+
+
+def test_daily_vo2_max_is_not_a_supported_webhook_type():
+    with pytest.raises(PayloadError):
+        authenticate(notification("daily-vo2-max"))

@@ -62,6 +62,7 @@ pdp migrate --database /private/path/scratch.duckdb
 
 追加DDLはCollector・Fitbitバッチ・OwnTracksのpush配信・日次Schedulerを止め、実行中Jobと`loader` leaseの終了を確認してから適用する。
 MacのCollectorはeditable installのcheckoutを参照するため、そのcheckoutへmigrationを追加する前に停止する。
+適用済みmigrationを認識しない旧コードはDB接続時のschema照合で失敗するため、再開前に全Cloud Run runtimeのimageとCollectorのcheckout・依存を更新する。
 Collectorは起動後にスキーマを初期化し、成功後の周期では省略する。DDL・コード・接続設定の変更後は再起動し、
 取込成功と日次全段階の成功を確認して通常運用を再開する。
 
@@ -72,7 +73,7 @@ OwnTracksのGCS保存完了通知はPub/Subから非公開workerへpushし、DB 
 既存martsはViewであり、取込ごとにdbtを実行しなくても次のqueryへ反映される。
 `pdp reconciliation`は日次04:10 Asia/Tokyoの処理全体を実行する。
 
-1. Fitbit APIから5種別のTokyo直近2完了日（計10取得単位）を再照合する。
+1. Fitbit APIから16種別のTokyo直近2完了日（計32取得単位）を再照合する。
 2. dbt run/testを実行する。
 3. OwnTracksの無期限Rawと台帳を照合し、未取込分を補修する。
 4. Macが更新したScreen Time両streamの取込成功heartbeatを48時間の鮮度とDB relationで監査する。

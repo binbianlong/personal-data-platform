@@ -139,7 +139,7 @@ def test_manual_busy_does_not_release_competing_owner(manual_env):
     warehouse.close()
 
 
-def test_daily_repair_fetches_ten_units_using_shared_warehouse_and_owner(tmp_path, monkeypatch):
+def test_daily_repair_fetches_all_types_using_shared_warehouse_and_owner(tmp_path, monkeypatch):
     logger = logging.getLogger("personal_data_platform.sources.fitbit")
     monkeypatch.setattr(logger, "handlers", [])
     monkeypatch.setattr(logger, "level", logger.level)
@@ -165,14 +165,25 @@ def test_daily_repair_fetches_ten_units_using_shared_warehouse_and_owner(tmp_pat
         result = runtime.run_daily_repair(
             now=now, warehouse=warehouse, lease_owner="daily", timeout_seconds=6000
         )
-        assert result.ok and result.completed_scopes == 10
-        assert len(api.calls) == 10 and len(set(api.calls)) == 10
+        assert result.ok and result.completed_scopes == 32
+        assert len(api.calls) == 32 and len(set(api.calls)) == 32
         assert {window.data_type for window in api.calls} == {
             "steps",
             "heart-rate",
             "daily-resting-heart-rate",
             "active-zone-minutes",
             "sleep",
+            "daily-heart-rate-variability",
+            "heart-rate-variability",
+            "daily-respiratory-rate",
+            "respiratory-rate-sleep-summary",
+            "daily-oxygen-saturation",
+            "daily-sleep-temperature-derivations",
+            "exercise",
+            "daily-vo2-max",
+            "sedentary-period",
+            "distance",
+            "time-in-heart-rate-zone",
         }
         for kind in {window.data_type for window in api.calls}:
             bounds = [
@@ -191,7 +202,7 @@ def test_daily_repair_fetches_ten_units_using_shared_warehouse_and_owner(tmp_pat
                         datetime(2026, 10, 11, 15, tzinfo=UTC),
                     ),
                 ]
-        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 10
+        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 32
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
     finally:
         warehouse.close()

@@ -32,7 +32,7 @@ def test_group_overlaps_containment_and_adjacency_but_preserves_day_and_mode():
     assert len(merged.notification.windows) == 1
 
 
-def test_daily_and_legacy_only_exact_original_ranges_deduplicate():
+def test_daily_and_legacy_deduplicate_canonical_acquired_days():
     from personal_data_platform.sources.fitbit.batch import group_notifications
 
     start = NOW.replace(hour=0)
@@ -43,9 +43,11 @@ def test_daily_and_legacy_only_exact_original_ranges_deduplicate():
         queued("d", start + timedelta(minutes=1), start + timedelta(minutes=2), mode="legacy"),
     ]
     units, _ = group_notifications(messages, now=NOW)
-    assert len(units) == 3
-    assert len(units[0].originals) == 2
-    assert units[1].notification.windows == units[2].notification.windows
+    assert len(units) == 2
+    assert len(units[0].originals) == len(units[1].originals) == 2
+    assert units[1].notification.windows == (
+        Window("steps", start - timedelta(hours=9), start + timedelta(hours=15)),
+    )
 
 
 def test_incomplete_bounded_minute_is_excluded_before_merge_but_legacy_is_ready():

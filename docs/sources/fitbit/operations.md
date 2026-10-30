@@ -83,6 +83,37 @@ schema 2の歩数通知と暦日coverageを使う間は、worker・日次Jobと�
 rollbackではreceiverを先に戻す。キュー内のschema 2通知を読めないworkerや、暦日coverageを認識しないJobへ戻さない。
 schema 1の心拍・legacy通知は引き続き受理する。
 
+## 指標追加の導入
+
+1. [共通のDB更新手順](../../platform/operations.md#dbの初期化と更新)に従い、Collector・各取込・日次処理を停止し、実行中Jobとloader leaseの終了を確認する。既存checkoutへ追加migrationを配置する前にCollectorを停止する。
+2. migration `011_fitbit_health_metrics.sql`を適用し、Fitbit worker・OwnTracks worker・日次Jobを同じ新しいimageへ更新する。Collectorのcheckoutも更新し、`just sync`を実行する。全取込runtimeが適用済み011を認識し、Fitbit writerが16種類を読める状態を確認した後でreceiverを更新する。
+3. OAuthの`googlehealth.activity_and_fitness.readonly`・`googlehealth.health_metrics_and_measurements.readonly`・`googlehealth.sleep.readonly`を確認する。運動だけ`google-sources`を使う。
+4. Google Healthの既存subscriptionの`dataTypes`へ、既存5種類を残して次の10種類を追加する。`daily-vo2-max`は通知対象に追加しない。
+5. dbtのFitbitモデルとテストを反映し、Collector・各取込・日次処理を再開する。過去分の一括同期は行わず、通知と直近2完了日の再照合を確認する。
+
+追加する通知型:
+
+```text
+daily-heart-rate-variability
+heart-rate-variability
+daily-respiratory-rate
+respiratory-rate-sleep-summary
+daily-oxygen-saturation
+daily-sleep-temperature-derivations
+exercise
+sedentary-period
+distance
+time-in-heart-rate-zone
+```
+
+取得ログの種別・範囲・成功、追加テーブルの件数、`daily_fitbit_health`と睡眠・運動ビューを確認する。
+端末や元データによって返却されない項目もあるため、正常な空取得とAPIエラーを区別する。
+日次VO2 maxは次の日次再照合で確認し、必要な場合だけ直近範囲を型指定で同期する。
+
+rollbackではGoogle Healthの追加10型の購読を外してからreceiverを戻す。
+キューに追加型が残る間は、新しいworker・日次Jobを維持して処理を完了する。
+migrationは削除・巻き戻しせず、適用済み011を認識するコードを使う。
+
 ## 60分バッチの確認
 
 Cloud Scheduler `pdp-fitbit-batch-west`がworkerの`POST /notifications/fitbit/drain`を毎時00分にOIDC認証で起動する。

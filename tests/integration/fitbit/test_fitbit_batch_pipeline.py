@@ -339,3 +339,17 @@ def test_one_hundred_independent_units_share_lifecycle_and_preserve_each_commit(
         "release_job_lock": 1,
         "close": 1,
     }
+
+
+def test_legacy_subday_notifications_fetch_the_same_day_once(tmp_path):
+    runner, api, _ = direct_setup(tmp_path, states=(None,))
+    start = NOW - timedelta(hours=1)
+    first = retime(raw_message("a"), start, start + timedelta(minutes=1), mode="legacy")
+    second = retime(
+        raw_message("b"), start + timedelta(minutes=2), start + timedelta(minutes=3), mode="legacy"
+    )
+    subscriber = Subscriber([[first, second]])
+    result = drainer(runner, subscriber).run()
+    assert result.ok and result.acked == 2
+    assert len(api.calls) == result.grouped == 1
+    assert set(subscriber.acks) == {first.ack_id, second.ack_id}
