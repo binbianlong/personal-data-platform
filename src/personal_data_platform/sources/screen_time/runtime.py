@@ -30,7 +30,8 @@ from personal_data_platform.sources.screen_time.config import CollectorConfig, _
 from personal_data_platform.sources.screen_time.raw import APP_IN_FOCUS_STREAM, APP_USAGE_STREAM
 from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
 from personal_data_platform.sources.screen_time.warehouse import prune_receipts
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.factory import WarehouseConfig, open_warehouse
+from personal_data_platform.storage.warehouse import Warehouse
 
 
 def collect(*, watch: bool) -> int:
@@ -72,7 +73,7 @@ def collect(*, watch: bool) -> int:
             inactive_streams=inactive_streams,
             inactive_state=state,
         )
-        warehouse = Warehouse(connect(warehouse_config()))
+        warehouse = open_warehouse(warehouse_config())
         try:
             if not schema_initialized:
                 warehouse.migrate()

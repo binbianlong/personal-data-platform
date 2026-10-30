@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Iterable
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -14,7 +15,7 @@ from .models import ParsedScreenTimeRecord
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
 
-    from .writer import ScreenTimeBatch
+    from .batch import ScreenTimeBatch
 
 LOGGER = logging.getLogger(__name__)
 RECORD_COLUMNS = (
@@ -231,3 +232,31 @@ def write_state(
     count_row = connection.execute("SELECT count(*) FROM screen_time_affected_event").fetchone()
     assert count_row is not None
     LOGGER.info("Screen Time affected events=%d", count_row[0])
+
+
+def receipt_candidates(live_raw: Iterable[RawObject]) -> list[RawObject]:
+    by_scope: dict[tuple[str, str, str], list[RawObject]] = {}
+    for raw in live_raw:
+        if raw.source_id == "screen_time":
+            by_scope.setdefault((raw.subject_key, raw.stream, raw.logical_key), []).append(raw)
+    return [values[0] for values in by_scope.values() if len(values) == 1]
+
+
+def prune_receipts(connection: DuckDBPyConnection, confirmed: Iterable[RawObject]) -> None:
+    for raw in confirmed:
+        connection.execute(
+            "DELETE FROM ops.ingestion_metadata "
+            "WHERE source_id = 'screen_time' AND status = 'succeeded' "
+            "AND subject_key = ? AND source_stream = ? AND logical_key = ? "
+            "AND (observed_at, object_key) < (?, ?)",
+            [raw.subject_key, raw.stream, raw.logical_key, raw.observed_at, raw.key],
+        )
+
+
+def current_object_keys(connection: DuckDBPyConnection, *, stream: str) -> set[str]:
+    return {
+        row[0]
+        for row in connection.execute(
+            "SELECT object_key FROM ops.screen_time_segment WHERE source_stream = ?", [stream]
+        ).fetchall()
+    }

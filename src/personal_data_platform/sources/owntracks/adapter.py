@@ -38,7 +38,7 @@ class OwnTracksSource:
         )
 
     def decode(self, raw: RawObject, payload: bytes) -> DecodedBatch:
-        from .writer import OwnTracksBatch
+        from .batch import OwnTracksBatch
 
         if (raw.source_id, raw.stream, raw.schema_version) != (self.source_id, self.stream, 1):
             raise ValueError("Raw does not belong to OwnTracks location")

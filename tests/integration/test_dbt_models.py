@@ -7,8 +7,8 @@ import pytest
 
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.raw.models import RawObject
+from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
 from personal_data_platform.sources.screen_time.models import ParsedScreenTimeRecord
-from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
     Warehouse,
     WarehouseConfig,

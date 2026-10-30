@@ -65,7 +65,7 @@ class ScreenTimeSource:
         )
 
     def decode(self, raw: RawObject, payload: bytes) -> DecodedBatch:
-        from .writer import ScreenTimeBatch
+        from .batch import ScreenTimeBatch
 
         if (
             raw.source_id != self.source_id

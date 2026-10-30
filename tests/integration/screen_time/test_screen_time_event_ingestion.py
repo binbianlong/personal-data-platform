@@ -8,8 +8,8 @@ import pytest
 
 from personal_data_platform.loader.job import run_loader
 from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
 from personal_data_platform.sources.screen_time.warehouse import prune_receipts
-from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
     Warehouse,
     WarehouseConfig,
@@ -391,7 +391,7 @@ def test_broken_connection_stops_every_followup_write(tmp_path, failure):
 
 
 def assert_full_resolution(warehouse):
-    from personal_data_platform.sources.screen_time.event_state import ANALYTICAL_COLUMNS
+    from personal_data_platform.sources.screen_time.motherduck import ANALYTICAL_COLUMNS
 
     columns = ", ".join((*ANALYTICAL_COLUMNS, "is_active"))
     expected = warehouse.query_rows(

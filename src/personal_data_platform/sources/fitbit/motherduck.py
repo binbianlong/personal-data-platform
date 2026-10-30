@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from .models import (
     CIVIL_RECORD_AGGREGATION_VERSION,
@@ -17,6 +17,7 @@ from .models import (
     Record,
     Snapshot,
     Window,
+    WriteResult,
     aware,
     date_cursor,
 )
@@ -27,14 +28,6 @@ if TYPE_CHECKING:
 _SCOPE = "subject_key=? AND data_type=? AND data_source_family=? AND aggregation_version=?"
 # For small inputs, MERGE's cold-connection overhead exceeds its smaller row payload.
 _MINUTE_MERGE_MIN_ROWS = 64
-
-
-@dataclass(frozen=True, slots=True)
-class WriteResult:
-    outcome: Literal["range_replaced", "unchanged", "stale"]
-    submitted_rows: int
-    accepted_ranges: tuple[tuple[datetime, datetime], ...]
-    protected_records: int = 0
 
 
 def coverage_scope(

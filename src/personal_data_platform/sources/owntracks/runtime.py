@@ -14,8 +14,9 @@ from personal_data_platform.loader.job import run_loader_objects
 from personal_data_platform.logging_config import configure_logging
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import RawRepository
+from personal_data_platform.storage.factory import open_warehouse
 from personal_data_platform.storage.gcs import GCSRawRepository
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.warehouse import Warehouse
 
 from .adapter import OwnTracksSource
 from .service import OwnTracksConfig, create_receiver_app, create_worker_app
@@ -62,7 +63,7 @@ def run_server(*, worker: bool) -> int:
         app = create_worker_app(
             processor=OwnTracksProcessor(
                 repository=repository,
-                warehouse_factory=lambda: Warehouse(connect(WarehouseConfig.from_env())),
+                warehouse_factory=lambda: open_warehouse(),
                 paused=paused == "true",
             ),
             subscription=_required("PDP_OWNTRACKS_PUBSUB_SUBSCRIPTION"),

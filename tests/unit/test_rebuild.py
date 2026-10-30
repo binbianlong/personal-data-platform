@@ -53,12 +53,12 @@ def test_all_streams_rebuilds_one_scratch_database_and_shared_daily_views(
     database = tmp_path / "combined.duckdb"
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
     monkeypatch.setattr(
-        "personal_data_platform.recovery.rebuild.connect",
-        lambda _config: connect(WarehouseConfig(str(database))),
+        "personal_data_platform.recovery.rebuild.open_warehouse",
+        lambda _config: Warehouse(connect(WarehouseConfig(str(database)))),
     )
     calls = []
 
-    def build_views(*, target, selector):
+    def build_views(*, target, selector, config):
         calls.append((target, selector))
         real_run_dbt(target="local", selector=selector)
 
@@ -233,16 +233,18 @@ def test_rebuild_uses_scratch_credentials_and_restores_environment(monkeypatch, 
 
     def connect_scratch(config):
         connections.append(config)
-        return connect(WarehouseConfig(":memory:"))
+        return Warehouse(connect(WarehouseConfig(":memory:")))
 
-    def transform(*, target, selector):
+    def transform(*, target, selector, config):
         dbt_calls.append((target, selector))
-        assert os.environ["MOTHERDUCK_DATABASE"] == "scratch_database"
-        assert os.environ["MOTHERDUCK_TOKEN"] == "scratch_token"
+        assert config is connections[0]
+        assert config == WarehouseConfig("scratch_database", "scratch_token")
+        assert os.environ["MOTHERDUCK_DATABASE"] == "ambient_database"
+        assert os.environ["MOTHERDUCK_TOKEN"] == "ambient_token"
         if dbt_fails:
             raise RuntimeError("dbt failed")
 
-    monkeypatch.setattr("personal_data_platform.recovery.rebuild.connect", connect_scratch)
+    monkeypatch.setattr("personal_data_platform.recovery.rebuild.open_warehouse", connect_scratch)
     monkeypatch.setattr("personal_data_platform.recovery.rebuild.run_dbt", transform)
 
     def rebuild():
@@ -296,8 +298,8 @@ def test_rebuild_uses_one_inventory_and_fails_if_a_listed_generation_disappears(
 
     repository = Repository()
     monkeypatch.setattr(
-        "personal_data_platform.recovery.rebuild.connect",
-        lambda config: connect(WarehouseConfig(":memory:")),
+        "personal_data_platform.recovery.rebuild.open_warehouse",
+        lambda config: Warehouse(connect(WarehouseConfig(":memory:"))),
     )
 
     assert (
@@ -344,8 +346,11 @@ def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(mon
         parser_version = "synthetic-1"
         record_count = 1
 
-        def write(self, connection, raw, *, byte_size, loaded_at):
-            written.append(raw)
+    monkeypatch.setattr(
+        Warehouse,
+        "_write_batch",
+        lambda self, raw, batch, **kwargs: written.append(raw),
+    )
 
     class Source:
         parser_version = Batch.parser_version
@@ -389,8 +394,8 @@ def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(mon
 
     source = Source()
     monkeypatch.setattr(
-        "personal_data_platform.recovery.rebuild.connect",
-        lambda config: connect(WarehouseConfig(":memory:")),
+        "personal_data_platform.recovery.rebuild.open_warehouse",
+        lambda config: Warehouse(connect(WarehouseConfig(":memory:"))),
     )
     monkeypatch.setattr(
         "personal_data_platform.recovery.rebuild.run_dbt",
@@ -412,7 +417,13 @@ def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(mon
     assert listed == list(source.raw_prefixes)
     assert read == [(raw.key, raw.storage_generation) for raw in observations]
     assert written == observations
-    assert dbt_calls == [{"target": "prod", "selector": source.dbt_selector}]
+    assert dbt_calls == [
+        {
+            "target": "prod",
+            "selector": source.dbt_selector,
+            "config": WarehouseConfig("scratch_database", "scratch_token"),
+        }
+    ]
     inventory = rebuild_inventory(observations, source=source)
     assert inventory["source_id"] == "synthetic"
     assert inventory["stream"] == "metrics"

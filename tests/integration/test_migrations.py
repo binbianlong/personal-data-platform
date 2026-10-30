@@ -7,7 +7,7 @@ import duckdb
 import pytest
 
 from personal_data_platform.cli import main
-from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
+from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
 from personal_data_platform.storage.migrations import DEFAULT_MIGRATIONS
 from personal_data_platform.storage.motherduck import (
     Warehouse,

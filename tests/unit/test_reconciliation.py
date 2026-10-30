@@ -15,7 +15,7 @@ from personal_data_platform.reconciliation.models import ReconciliationResult
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.sources.screen_time.collector_state import CollectorScan
 from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
-from personal_data_platform.storage.motherduck import IngestionState
+from personal_data_platform.storage.warehouse import IngestionState
 
 DEVICE_KEY = "a" * 64
 NOW = datetime(2026, 8, 27, tzinfo=UTC)
@@ -125,13 +125,14 @@ class _Warehouse:
     def set_succeeded(self, keys: list[str]) -> None:
         self.states.update({key: IngestionState(key, "succeeded") for key in keys})
 
-    def query_rows(self, sql: str, parameters=None) -> list[tuple[str]]:
-        if parameters is not None:
-            return [(key,) for key, value in self.states.items() if value.status == "succeeded"]
-        return [(relation,) for relation in self.relations]
+    def current_screen_time_object_keys(self, *, stream):
+        return {key for key, state in self.states.items() if state.status == "succeeded"}
 
-    def query_value(self, sql: str) -> int:
-        return 0
+    def relation_names(self):
+        return self.relations.copy()
+
+    def check_relation(self, relation):
+        assert relation in self.relations
 
 
 def test_success_returns_audit_without_writing_another_outcome() -> None:

@@ -16,7 +16,7 @@ def test_fitbit_dbt_selector_does_not_require_a_raw_adapter(monkeypatch, stream)
     warehouse = Warehouse(duckdb.connect())
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "connect", lambda _: warehouse.connection)
+    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
     monkeypatch.setattr(warehouse, "close", lambda: None)
     monkeypatch.setattr(
         registry,
@@ -41,8 +41,7 @@ def test_cloud_dbt_migrates_before_models(monkeypatch) -> None:
     calls = []
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "connect", lambda _config: warehouse.connection)
-    monkeypatch.setattr(dbt_runner, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
     monkeypatch.setattr(warehouse, "close", lambda: None)
 
     def run_models(**kwargs):
@@ -81,6 +80,7 @@ def test_dbt_masks_production_token_and_restores_environment(monkeypatch, previo
     from dbt_common.events.functions import env_scrubber
 
     secret_name = "DBT_ENV_SECRET_MOTHERDUCK_TOKEN"
+    monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-production-token")
     if previous is None:
         monkeypatch.delenv(secret_name, raising=False)
@@ -109,6 +109,7 @@ def test_dbt_masks_production_token_and_restores_environment(monkeypatch, previo
 
 
 def test_dbt_rejects_missing_production_token_before_invocation(monkeypatch) -> None:
+    monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.delenv("MOTHERDUCK_TOKEN", raising=False)
     monkeypatch.setattr(dbt_runner, "_invoke", lambda _arguments: pytest.fail("dbt was invoked"))
 
@@ -136,8 +137,7 @@ def test_all_writers_share_loader_lease(monkeypatch):
     assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "connect", lambda _: warehouse.connection)
-    monkeypatch.setattr(dbt_runner, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
     monkeypatch.setattr(warehouse, "close", lambda: None)
     monkeypatch.setattr(dbt_runner, "run_dbt", lambda **kwargs: pytest.fail("dbt was invoked"))
     try:
@@ -158,8 +158,7 @@ def test_inherited_dbt_lease_is_checked_and_not_released(monkeypatch):
     assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "connect", lambda _: warehouse.connection)
-    monkeypatch.setattr(dbt_runner, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
     monkeypatch.setattr(warehouse, "close", lambda: None)
     calls = []
     monkeypatch.setattr(dbt_runner, "run_dbt", lambda **kwargs: calls.append(kwargs))
@@ -182,3 +181,35 @@ def test_bounded_dbt_subprocess_uses_remaining_deadline(monkeypatch):
     with pytest.raises(TimeoutError):
         dbt_runner._invoke(["test"], timeout_seconds=0)
     assert len(commands) == 1
+
+
+@pytest.mark.parametrize("timeout", [None, 15])
+@pytest.mark.parametrize("fails", [False, True])
+def test_explicit_dbt_config_uses_scratch_target_and_restores_environment(
+    monkeypatch, timeout, fails
+):
+    from personal_data_platform.storage.factory import WarehouseConfig
+
+    monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
+    monkeypatch.setenv("MOTHERDUCK_TOKEN", "production-token")
+    monkeypatch.setenv("DBT_ENV_SECRET_MOTHERDUCK_TOKEN", "previous-secret")
+    config = WarehouseConfig("scratch", "scratch-token")
+    operations = []
+
+    def invoke(arguments, **kwargs):
+        operations.append(arguments[0])
+        assert os.environ["MOTHERDUCK_DATABASE"] == "scratch"
+        assert os.environ["DBT_ENV_SECRET_MOTHERDUCK_TOKEN"] == "scratch-token"
+        if fails:
+            raise RuntimeError("dbt failed")
+
+    monkeypatch.setattr(dbt_runner, "_invoke", invoke)
+    if fails:
+        with pytest.raises(RuntimeError, match="dbt failed"):
+            dbt_runner.run_dbt(target="prod", config=config, timeout_seconds=timeout)
+    else:
+        dbt_runner.run_dbt(target="prod", config=config, timeout_seconds=timeout)
+    assert operations == (["run"] if fails else ["run", "test"])
+    assert os.environ["MOTHERDUCK_DATABASE"] == "production"
+    assert os.environ["MOTHERDUCK_TOKEN"] == "production-token"
+    assert os.environ["DBT_ENV_SECRET_MOTHERDUCK_TOKEN"] == "previous-secret"

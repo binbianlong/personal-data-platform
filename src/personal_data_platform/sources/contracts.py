@@ -7,12 +7,9 @@ import os
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import Literal, Protocol
 
 from personal_data_platform.raw.models import RawObject
-
-if TYPE_CHECKING:
-    from duckdb import DuckDBPyConnection
 
 
 class RawRepository(Protocol):
@@ -36,17 +33,13 @@ class RawCodec(Protocol):
 
 
 class DecodedBatch(Protocol):
-    """Source rows written inside the warehouse-owned object transaction."""
+    """Normalized source data; persistence belongs to the warehouse implementation."""
 
     @property
     def parser_version(self) -> str: ...
 
     @property
     def record_count(self) -> int: ...
-
-    def write(
-        self, connection: DuckDBPyConnection, raw: RawObject, *, byte_size: int, loaded_at: datetime
-    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)

@@ -38,7 +38,7 @@ def snapshot(value=10, *, hour=0, end_hour=24, version=1, origin="api"):
 
 
 def apply(warehouse, data):
-    from personal_data_platform.sources.fitbit.writer import FitbitBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitBatch
 
     warehouse.connection.execute("BEGIN")
     try:
@@ -72,7 +72,7 @@ def test_old_overlapping_acquisition_cannot_erase_newer_empty_range(warehouse):
 
 
 def test_writer_does_not_commit_its_callers_transaction(warehouse):
-    from personal_data_platform.sources.fitbit.writer import FitbitBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitBatch
 
     data = snapshot()
     warehouse.connection.execute("BEGIN")
@@ -109,7 +109,7 @@ def test_newer_middle_range_preserves_both_sides_of_an_older_snapshot(warehouse)
 
 
 def test_rollback_restores_records_deletions_and_coverage_after_replacement(warehouse):
-    from personal_data_platform.sources.fitbit.writer import FitbitBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitBatch
 
     original = snapshot(10)
     apply(warehouse, original)
@@ -210,7 +210,7 @@ def test_repeated_old_ranges_keep_the_newer_deletion_order(warehouse):
 
 def test_changed_dense_day_uses_bounded_sql_statements(warehouse):
     from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window
-    from personal_data_platform.sources.fitbit.writer import FitbitBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitBatch
 
     at = datetime(2026, 9, 1, tzinfo=UTC)
     records = tuple(
@@ -269,7 +269,7 @@ def test_minute_writer_reports_counts_and_stale_ranges(warehouse):
         HeartRateMinuteSnapshot,
         Window,
     )
-    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitMinuteBatch
 
     at = datetime(2026, 9, 1, tzinfo=UTC)
     scope = Window("heart-rate", at, at + timedelta(minutes=2))
@@ -306,7 +306,7 @@ def test_minute_writer_changes_only_different_or_missing_rows(warehouse):
         HeartRateMinuteSnapshot,
         Window,
     )
-    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitMinuteBatch
 
     at = datetime(2026, 9, 1, tzinfo=UTC)
     rows = tuple(
@@ -392,7 +392,7 @@ class CoverageConnection:
 
 
 def test_fragmented_coverage_uses_two_mutations_and_preserves_scopes_and_hashes(warehouse):
-    from personal_data_platform.sources.fitbit.writer import _Coverage, _replace_coverage
+    from personal_data_platform.sources.fitbit.motherduck import _Coverage, _replace_coverage
 
     warehouse.connection.execute("SET TimeZone='Asia/Tokyo'")
     at = datetime.fromisoformat("2026-09-01T09:00:00.123456+09:00")
@@ -473,7 +473,7 @@ def test_fragmented_coverage_uses_two_mutations_and_preserves_scopes_and_hashes(
 
 
 def test_new_and_stale_snapshots_use_one_and_zero_coverage_mutations(warehouse):
-    from personal_data_platform.sources.fitbit.writer import FitbitBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitBatch
 
     connection = CoverageConnection(warehouse.connection)
     data = snapshot(None, version=2)
@@ -512,7 +512,7 @@ def test_failed_exact_coverage_update_rolls_back_changes(warehouse):
         HeartRateMinuteSnapshot,
         Window,
     )
-    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitMinuteBatch
 
     at = datetime(2026, 9, 1, tzinfo=UTC)
     original = HeartRateMinuteSnapshot(
@@ -561,7 +561,7 @@ def test_failed_exact_coverage_update_rolls_back_changes(warehouse):
 
 
 def test_failed_coverage_insert_rolls_back_bulk_delete_and_record_changes(warehouse):
-    from personal_data_platform.sources.fitbit.writer import FitbitBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitBatch
 
     for hour in (0, 8, 16):
         apply(warehouse, snapshot(hour + 1, hour=hour, end_hour=hour + 8))

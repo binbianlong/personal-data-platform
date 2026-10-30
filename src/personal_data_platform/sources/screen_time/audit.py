@@ -12,7 +12,7 @@ from personal_data_platform.sources.contracts import RawRepository, SourceAdapte
 from personal_data_platform.sources.screen_time.collector_state import CollectorScan
 
 if TYPE_CHECKING:
-    from personal_data_platform.storage.motherduck import IngestionState, Warehouse
+    from personal_data_platform.storage.warehouse import IngestionState, Warehouse
 
 COLLECTOR_FRESHNESS = timedelta(hours=48)
 MAX_CLOCK_SKEW = timedelta(minutes=10)
@@ -76,13 +76,10 @@ def audit_collector_heartbeat(
 ) -> SourceHealth:
     """Cloud jobs check only collector-owned success; they never renew it."""
     diagnostics: dict[str, object] = {"checked_at": now.isoformat()}
-    rows = warehouse.query_rows(
-        "SELECT succeeded_at, details FROM ops.heartbeat WHERE monitor_name = ?",
-        [source.monitor_name],
-    )
-    if not rows:
+    heartbeat = warehouse.get_heartbeat(source.monitor_name)
+    if heartbeat is None:
         return SourceHealth(False, {**diagnostics, "collector_heartbeat_missing": True})
-    succeeded_at, serialized = rows[0]
+    succeeded_at, serialized = heartbeat
     loaded_at = _aware_utc(succeeded_at)
     diagnostics["collector_succeeded_at"] = loaded_at.isoformat() if loaded_at else None
     try:
@@ -113,13 +110,7 @@ def filter_ingestion_states(
     stream: str,
 ) -> dict[str, IngestionState]:
     """Ignore compacted successes outside the live Raw and current segments."""
-    current_keys = {
-        row[0]
-        for row in warehouse.query_rows(
-            "SELECT object_key FROM ops.screen_time_segment WHERE source_stream = ?",
-            [stream],
-        )
-    }
+    current_keys = warehouse.current_screen_time_object_keys(stream=stream)
     return {
         key: value
         for key, value in states.items()

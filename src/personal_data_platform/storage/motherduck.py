@@ -4,17 +4,40 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable
+import re
+import time
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 from personal_data_platform.network_diagnostics import instrument_connection, network_phase
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.models import DAILY_JOB_HISTORY_NAMES
 from personal_data_platform.sources.contracts import DecodedBatch
+from personal_data_platform.sources.fitbit.models import (
+    HeartRateMinuteSnapshot,
+    Snapshot,
+    WriteResult,
+)
+from personal_data_platform.sources.fitbit.motherduck import FitbitBatch, FitbitMinuteBatch
+from personal_data_platform.sources.owntracks import motherduck as owntracks
+from personal_data_platform.sources.owntracks.batch import OwnTracksBatch
+from personal_data_platform.sources.screen_time import motherduck as screen_time
+from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
 from personal_data_platform.storage.migrations import apply_migrations
+from personal_data_platform.storage.warehouse import (
+    IngestionState as IngestionState,
+)
+from personal_data_platform.storage.warehouse import (
+    WarehouseConnectionError as WarehouseConnectionError,
+)
+from personal_data_platform.storage.warehouse import (
+    WarehouseLeaseError,
+)
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
@@ -34,13 +57,17 @@ class WarehouseConfig:
             raise ValueError("MOTHERDUCK_DATABASE is required")
         return cls(database=database, token=os.environ.get("MOTHERDUCK_TOKEN"))
 
-
-@dataclass(frozen=True, slots=True)
-class IngestionState:
-    """Current load status for one object known to the warehouse."""
-
-    object_key: str
-    status: str
+    def dbt_environment(self, *, target: str) -> dict[str, str]:
+        if target == "prod":
+            if not self.token:
+                raise ValueError("MOTHERDUCK_TOKEN is required for the production dbt target")
+            return {
+                "MOTHERDUCK_DATABASE": self.database,
+                "DBT_ENV_SECRET_MOTHERDUCK_TOKEN": self.token,
+            }
+        if target == "local":
+            return {"DBT_DUCKDB_PATH": self.database}
+        return {}
 
 
 def connect(config: WarehouseConfig) -> DuckDBPyConnection:
@@ -75,10 +102,6 @@ def _raw_identity(raw: RawObject) -> tuple[str, int, str, str, str, datetime, st
         raw.observed_at,
         raw.sha256,
     )
-
-
-class WarehouseConnectionError(RuntimeError):
-    """The connection must be reopened before deciding whether a write committed."""
 
 
 class Warehouse:
@@ -177,6 +200,65 @@ class Warehouse:
             raise RuntimeError(f"immutable object identity changed: {raw.key}")
         return current
 
+    def _write_batch(self, raw: RawObject, batch: DecodedBatch, *, loaded_at: datetime) -> None:
+        if isinstance(batch, ScreenTimeBatch) and raw.source_id == "screen_time":
+            screen_time.write_state(self.connection, raw, batch, loaded_at=loaded_at)
+        elif isinstance(batch, OwnTracksBatch) and raw.source_id == "owntracks":
+            owntracks.write_batch(self.connection, raw, batch, loaded_at=loaded_at)
+        else:
+            raise ValueError(f"unsupported decoded batch for source: {raw.source_id}")
+
+    def commit_fitbit_snapshot(
+        self,
+        snapshot: Snapshot | HeartRateMinuteSnapshot,
+        *,
+        source_key: str,
+        loaded_at: datetime,
+        owner_id: str,
+        deadline: float,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> WriteResult:
+        """Replace a complete acquisition and coverage while holding the writer lease."""
+        if not self.connection_usable:
+            raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
+
+        def guard() -> None:
+            seconds = deadline - monotonic()
+            if seconds <= 0:
+                raise TimeoutError("acquisition execution budget exhausted")
+            self.require_job_lock(owner_id, remaining_seconds=max(1, int(seconds)))
+
+        batch: FitbitBatch | FitbitMinuteBatch
+        batch = (
+            FitbitMinuteBatch(snapshot)
+            if isinstance(snapshot, HeartRateMinuteSnapshot)
+            else FitbitBatch(snapshot)
+        )
+        guard()
+        try:
+            self.connection.execute("BEGIN")
+        except Exception as error:
+            self.connection_usable = False
+            raise WarehouseConnectionError("cannot begin acquisition transaction") from error
+        try:
+            result = batch.write_snapshot(
+                self.connection, source_key=source_key, loaded_at=loaded_at
+            )
+            guard()
+        except Exception:
+            try:
+                self.connection.execute("ROLLBACK")
+            except Exception as error:
+                self.connection_usable = False
+                raise WarehouseConnectionError("acquisition rollback outcome unknown") from error
+            raise
+        try:
+            self.connection.execute("COMMIT")
+        except Exception as error:
+            self.connection_usable = False
+            raise WarehouseConnectionError("acquisition commit outcome unknown") from error
+        return result
+
     def load_object(
         self,
         raw: RawObject,
@@ -208,7 +290,7 @@ class Warehouse:
                     self.connection.execute("ROLLBACK")
                 return 0
 
-            batch.write(self.connection, raw, byte_size=byte_size, loaded_at=now)
+            self._write_batch(raw, batch, loaded_at=now)
             self.connection.execute(
                 """
                 INSERT INTO ops.ingestion_metadata (
@@ -394,7 +476,7 @@ class Warehouse:
             or row[0] != owner_id
             or row[1] <= datetime.now(UTC) + timedelta(seconds=remaining_seconds)
         ):
-            raise RuntimeError("loader lease ownership lost or insufficient time remains")
+            raise WarehouseLeaseError("loader lease ownership lost or insufficient time remains")
 
     def finish_job(self, run_id: str, *, succeeded: bool, details: dict[str, object]) -> None:
         self.connection.execute(
@@ -449,7 +531,9 @@ class Warehouse:
                 or row[0] != owner_id
                 or row[1] <= datetime.now(UTC) + timedelta(seconds=1)
             ):
-                raise RuntimeError("loader lease ownership lost or insufficient time remains")
+                raise WarehouseLeaseError(
+                    "loader lease ownership lost or insufficient time remains"
+                )
             self.connection.execute(
                 "INSERT INTO ops.heartbeat "
                 "SELECT r.name::VARCHAR,?::TIMESTAMPTZ,?::VARCHAR,r.details::JSON "
@@ -484,3 +568,109 @@ class Warehouse:
             """,
             [monitor_name, datetime.now(UTC), run_id, json.dumps(details, sort_keys=True)],
         )
+
+    @contextmanager
+    def _transaction(self, operation: str) -> Iterator[None]:
+        if not self.connection_usable:
+            raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
+        try:
+            self.connection.execute("BEGIN TRANSACTION")
+        except Exception as error:
+            self.connection_usable = False
+            raise WarehouseConnectionError(f"cannot begin {operation}; reopen warehouse") from error
+        try:
+            yield
+        except Exception:
+            try:
+                self.connection.execute("ROLLBACK")
+            except Exception as error:
+                self.connection_usable = False
+                raise WarehouseConnectionError(f"{operation} rollback failed") from error
+            raise
+        try:
+            self.connection.execute("COMMIT")
+        except Exception as error:
+            self.connection_usable = False
+            raise WarehouseConnectionError(f"{operation} commit outcome unknown") from error
+
+    def interrupt(self) -> None:
+        if self.connection_usable:
+            self.connection.interrupt()
+
+    def prune_screen_time_receipts(
+        self, live_raw: Iterable[RawObject], *, parser_version: str
+    ) -> None:
+        candidates = screen_time.receipt_candidates(live_raw)
+        confirmed = self.succeeded_keys_for(candidates, parser_version=parser_version)
+        if not confirmed:
+            return
+        with self._transaction("receipt pruning"):
+            screen_time.prune_receipts(
+                self.connection, [raw for raw in candidates if raw.key in confirmed]
+            )
+
+    def current_screen_time_object_keys(self, *, stream: str) -> set[str]:
+        return screen_time.current_object_keys(self.connection, stream=stream)
+
+    def get_heartbeat(self, monitor_name: str) -> tuple[datetime, str] | None:
+        row = self.connection.execute(
+            "SELECT succeeded_at, details FROM ops.heartbeat WHERE monitor_name = ?",
+            [monitor_name],
+        ).fetchone()
+        return None if row is None else (row[0], str(row[1]))
+
+    def relation_names(self) -> set[str]:
+        rows = self.connection.execute(
+            "SELECT table_schema || '.' || table_name FROM information_schema.tables "
+            "WHERE table_catalog = current_database() AND table_schema IN ('base', 'marts', 'ops')"
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    def check_relation(self, relation: str) -> None:
+        if re.fullmatch(r"(?:base|marts|ops)\.[a-z_][a-z0-9_]*", relation) is None:
+            raise ValueError(f"invalid warehouse relation: {relation}")
+        self.connection.execute(f"SELECT count(*) FROM {relation}").fetchone()
+
+    def latest_completed_target_date(self) -> date | None:
+        row = self.connection.execute(
+            "SELECT json_extract_string(details,'$.last_completed_target_date') "
+            "FROM ops.job_run WHERE job_name IN (?, ?) AND status='succeeded' "
+            "AND json_extract_string(details,'$.last_completed_target_date') IS NOT NULL "
+            "ORDER BY completed_at DESC LIMIT 1",
+            list(DAILY_JOB_HISTORY_NAMES),
+        ).fetchone()
+        return date.fromisoformat(str(row[0])) if row is not None else None
+
+    def complete_daily_job(
+        self, run_id: str, *, details: dict[str, object], now: datetime, deadline: float
+    ) -> None:
+        with self._transaction("daily completion"):
+            self.prune_run_history(now=now)
+            self.finish_job(run_id, succeeded=True, details=details)
+            seconds = int(deadline - time.monotonic())
+            if seconds <= 0:
+                raise TimeoutError("daily reconciliation deadline exceeded")
+            self.require_job_lock(run_id, remaining_seconds=seconds)
+
+    def require_empty_target(self) -> None:
+        count = self.connection.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_catalog = current_database() "
+            "AND table_schema NOT IN ('information_schema', 'pg_catalog')"
+        ).fetchone()
+        if count is not None and count[0]:
+            raise ValueError("rebuild target must not contain existing tables or views")
+
+    def probe(self) -> dict[str, object]:
+        """Exercise DDL and DML in the caller's isolated test database."""
+        table = f"probe_{uuid4().hex}"
+        self.connection.execute("CREATE SCHEMA IF NOT EXISTS preflight")
+        try:
+            self.connection.execute(f"CREATE TABLE preflight.{table} (value INTEGER NOT NULL)")
+            self.connection.execute(f"INSERT INTO preflight.{table} VALUES (42)")
+            row = self.connection.execute(f"SELECT value FROM preflight.{table}").fetchone()
+            if row is None or row[0] != 42:
+                raise RuntimeError("MotherDuck preflight round trip returned the wrong value")
+            return {"ok": True, "tested_at": datetime.now(UTC).isoformat()}
+        finally:
+            self.connection.execute(f"DROP TABLE IF EXISTS preflight.{table}")

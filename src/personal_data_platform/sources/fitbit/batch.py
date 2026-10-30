@@ -15,7 +15,7 @@ from google.api_core.exceptions import DeadlineExceeded
 
 from personal_data_platform.loader.deadline import interrupt_after
 from personal_data_platform.network_diagnostics import network_phase, network_run
-from personal_data_platform.storage.motherduck import Warehouse
+from personal_data_platform.storage.warehouse import Warehouse
 
 from .acquisition import AcquisitionRunner, acquisition_windows
 from .models import DATE_TYPES, Notification
