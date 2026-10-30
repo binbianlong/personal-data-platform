@@ -39,7 +39,7 @@ def _raw(storage_created_at: datetime) -> RawObject:
 
 
 def _warehouse() -> Warehouse:
-    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    warehouse = _SyntheticWarehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate()
     for relation in (
         "base.screen_time_transition",
@@ -101,8 +101,11 @@ class _EmptyBatch:
     parser_version = "synthetic-1"
     record_count = 0
 
-    def write(self, connection, raw, *, byte_size, loaded_at):
-        pass
+
+class _SyntheticWarehouse(Warehouse):
+    def _write_batch(self, raw, batch, *, loaded_at):
+        if not isinstance(batch, _EmptyBatch):
+            return super()._write_batch(raw, batch, loaded_at=loaded_at)
 
 
 class _SyntheticSource:

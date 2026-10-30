@@ -5,9 +5,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
 from personal_data_platform.sources.screen_time.parser import PARSER_VERSION
 from personal_data_platform.sources.screen_time.warehouse import prune_receipts
-from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
     Warehouse,
     WarehouseConfig,
@@ -242,18 +242,22 @@ class _MetricBatch:
     parser_version: str = "fixture-metric-v1"
     record_count: int = 1
 
-    def write(self, connection, raw, *, byte_size, loaded_at) -> None:
-        connection.execute("DELETE FROM base.fixture_metric WHERE object_key = ?", [raw.key])
-        connection.execute(
+
+class _MetricWarehouse(Warehouse):
+    def _write_batch(self, raw, batch, *, loaded_at):
+        if not isinstance(batch, _MetricBatch):
+            return super()._write_batch(raw, batch, loaded_at=loaded_at)
+        self.connection.execute("DELETE FROM base.fixture_metric WHERE object_key = ?", [raw.key])
+        self.connection.execute(
             "INSERT INTO base.fixture_metric VALUES (?, ?, ?)",
-            [raw.key, self.amount, loaded_at],
+            [raw.key, batch.amount, loaded_at],
         )
-        if self.fail:
+        if batch.fail:
             raise ValueError("source writer failed after inserting a row")
 
 
 def _metric_warehouse() -> Warehouse:
-    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
+    warehouse = _MetricWarehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate()
     warehouse.connection.execute(
         """

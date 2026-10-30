@@ -7,7 +7,7 @@ from dataclasses import replace
 
 from personal_data_platform.loader.job import run_loader
 from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
-from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
+from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 from tests.screen_time_helpers import Repository, event, segb
 

@@ -3,8 +3,8 @@ from datetime import UTC, date, datetime, timedelta
 
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window, date_cursor
-from personal_data_platform.sources.fitbit.writer import FitbitBatch
-from personal_data_platform.sources.screen_time.writer import ScreenTimeBatch
+from personal_data_platform.sources.fitbit.motherduck import FitbitBatch
+from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 from tests.screen_time_helpers import _raw, _record
 
@@ -123,7 +123,7 @@ def test_minute_daily_average_has_observed_minute_semantics(
         HeartRateMinute,
         HeartRateMinuteSnapshot,
     )
-    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitMinuteBatch
 
     database = tmp_path / "minutes.duckdb"
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
@@ -184,7 +184,7 @@ def test_minute_writer_empty_deletes_and_stale_snapshot_protects_newer_subrange(
         HeartRateMinute,
         HeartRateMinuteSnapshot,
     )
-    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitMinuteBatch
 
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "minute-writer.duckdb"))))
     warehouse.migrate()
@@ -234,7 +234,7 @@ def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path)
         HeartRateMinute,
         HeartRateMinuteSnapshot,
     )
-    from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+    from personal_data_platform.sources.fitbit.motherduck import FitbitMinuteBatch
     from tests.unit.fitbit.test_fitbit_api import FakeTransport, client, rollup
 
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "partial.duckdb"))))

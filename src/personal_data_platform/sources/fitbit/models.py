@@ -324,3 +324,11 @@ class HeartRateMinuteSnapshot:
             if minute.start in seen:
                 raise ValueError("duplicate heart rate minute")
             seen.add(minute.start)
+
+
+@dataclass(frozen=True, slots=True)
+class WriteResult:
+    outcome: Literal["range_replaced", "unchanged", "stale"]
+    submitted_rows: int
+    accepted_ranges: tuple[tuple[datetime, datetime], ...]
+    protected_records: int = 0

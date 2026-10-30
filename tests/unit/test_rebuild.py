@@ -344,8 +344,11 @@ def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(mon
         parser_version = "synthetic-1"
         record_count = 1
 
-        def write(self, connection, raw, *, byte_size, loaded_at):
-            written.append(raw)
+    monkeypatch.setattr(
+        Warehouse,
+        "_write_batch",
+        lambda self, raw, batch, **kwargs: written.append(raw),
+    )
 
     class Source:
         parser_version = Batch.parser_version

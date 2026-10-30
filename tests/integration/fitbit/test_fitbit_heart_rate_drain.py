@@ -10,7 +10,7 @@ from personal_data_platform.sources.fitbit.models import (
     Notification,
     Window,
 )
-from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+from personal_data_platform.sources.fitbit.motherduck import FitbitMinuteBatch
 from tests.integration.fitbit.helpers import drain_notification
 from tests.integration.fitbit.test_fitbit_acquisition import NOW, direct_setup
 from tests.unit.fitbit.test_fitbit_api import FakeTransport, client, rollup

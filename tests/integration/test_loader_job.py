@@ -315,10 +315,14 @@ class _JsonBatch:
     def __init__(self, value: int) -> None:
         self.value = value
 
-    def write(self, connection, raw, *, byte_size, loaded_at) -> None:
-        connection.execute(
+
+class _JsonWarehouse(Warehouse):
+    def _write_batch(self, raw, batch, *, loaded_at):
+        if not isinstance(batch, _JsonBatch):
+            return super()._write_batch(raw, batch, loaded_at=loaded_at)
+        self.connection.execute(
             "INSERT INTO base.synthetic_value VALUES (?, ?, ?, ?)",
-            [raw.key, raw.stream, raw.schema_version, self.value],
+            [raw.key, raw.stream, raw.schema_version, batch.value],
         )
 
 
@@ -434,7 +438,7 @@ def test_loader_uses_source_decoder_across_schema_versions_and_preserves_other_s
         },
     )
     repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=source)
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "synthetic.duckdb"))))
+    warehouse = _JsonWarehouse(connect(WarehouseConfig(str(tmp_path / "synthetic.duckdb"))))
     warehouse.migrate()
     warehouse.connection.execute(
         "CREATE TABLE base.synthetic_value (object_key VARCHAR, stream VARCHAR, "

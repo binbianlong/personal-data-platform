@@ -88,17 +88,17 @@ def test_failed_batch_rolls_back_location_and_can_be_retried(monkeypatch):
     source, store, _, _ = location_store()
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate()
-    from personal_data_platform.sources.owntracks.writer import OwnTracksBatch
+    from personal_data_platform.sources.owntracks import motherduck
 
-    write = OwnTracksBatch.write
+    write = motherduck.write_batch
 
-    def interrupted(self, connection, raw, **kwargs):
-        write(self, connection, raw, **kwargs)
+    def interrupted(*args, **kwargs):
+        write(*args, **kwargs)
         raise RuntimeError("interrupted")
 
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(OwnTracksBatch, "write", interrupted)
+            patch.setattr(motherduck, "write_batch", interrupted)
             assert run_loader(store, warehouse, source=source).failed == 1
         assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 0
         assert warehouse.query_value("SELECT status FROM ops.ingestion_metadata") == "failed"

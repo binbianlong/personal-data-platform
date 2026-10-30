@@ -14,7 +14,7 @@ from .models import ParsedScreenTimeRecord
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
 
-    from .writer import ScreenTimeBatch
+    from .batch import ScreenTimeBatch
 
 LOGGER = logging.getLogger(__name__)
 RECORD_COLUMNS = (

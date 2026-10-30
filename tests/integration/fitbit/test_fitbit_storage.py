@@ -12,7 +12,7 @@ from personal_data_platform.sources.fitbit.models import (
     Snapshot,
     Window,
 )
-from personal_data_platform.sources.fitbit.writer import FitbitMinuteBatch
+from personal_data_platform.sources.fitbit.motherduck import FitbitMinuteBatch
 from personal_data_platform.storage.motherduck import Warehouse
 from tests.integration.fitbit.test_fitbit_writer import apply, sleep_snapshot, snapshot
 

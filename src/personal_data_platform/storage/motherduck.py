@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,7 +15,26 @@ from personal_data_platform.network_diagnostics import instrument_connection, ne
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.models import DAILY_JOB_HISTORY_NAMES
 from personal_data_platform.sources.contracts import DecodedBatch
+from personal_data_platform.sources.fitbit.models import (
+    HeartRateMinuteSnapshot,
+    Snapshot,
+    WriteResult,
+)
+from personal_data_platform.sources.fitbit.motherduck import FitbitBatch, FitbitMinuteBatch
+from personal_data_platform.sources.owntracks import motherduck as owntracks
+from personal_data_platform.sources.owntracks.batch import OwnTracksBatch
+from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
+from personal_data_platform.sources.screen_time.motherduck import write_state
 from personal_data_platform.storage.migrations import apply_migrations
+from personal_data_platform.storage.warehouse import (
+    IngestionState as IngestionState,
+)
+from personal_data_platform.storage.warehouse import (
+    WarehouseConnectionError as WarehouseConnectionError,
+)
+from personal_data_platform.storage.warehouse import (
+    WarehouseLeaseError,
+)
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
@@ -33,14 +53,6 @@ class WarehouseConfig:
         if not database:
             raise ValueError("MOTHERDUCK_DATABASE is required")
         return cls(database=database, token=os.environ.get("MOTHERDUCK_TOKEN"))
-
-
-@dataclass(frozen=True, slots=True)
-class IngestionState:
-    """Current load status for one object known to the warehouse."""
-
-    object_key: str
-    status: str
 
 
 def connect(config: WarehouseConfig) -> DuckDBPyConnection:
@@ -75,10 +87,6 @@ def _raw_identity(raw: RawObject) -> tuple[str, int, str, str, str, datetime, st
         raw.observed_at,
         raw.sha256,
     )
-
-
-class WarehouseConnectionError(RuntimeError):
-    """The connection must be reopened before deciding whether a write committed."""
 
 
 class Warehouse:
@@ -177,6 +185,65 @@ class Warehouse:
             raise RuntimeError(f"immutable object identity changed: {raw.key}")
         return current
 
+    def _write_batch(self, raw: RawObject, batch: DecodedBatch, *, loaded_at: datetime) -> None:
+        if isinstance(batch, ScreenTimeBatch) and raw.source_id == "screen_time":
+            write_state(self.connection, raw, batch, loaded_at=loaded_at)
+        elif isinstance(batch, OwnTracksBatch) and raw.source_id == "owntracks":
+            owntracks.write_batch(self.connection, raw, batch, loaded_at=loaded_at)
+        else:
+            raise ValueError(f"unsupported decoded batch for source: {raw.source_id}")
+
+    def commit_fitbit_snapshot(
+        self,
+        snapshot: Snapshot | HeartRateMinuteSnapshot,
+        *,
+        source_key: str,
+        loaded_at: datetime,
+        owner_id: str,
+        deadline: float,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> WriteResult:
+        """Replace a complete acquisition and coverage while holding the writer lease."""
+        if not self.connection_usable:
+            raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
+
+        def guard() -> None:
+            seconds = deadline - monotonic()
+            if seconds <= 0:
+                raise TimeoutError("acquisition execution budget exhausted")
+            self.require_job_lock(owner_id, remaining_seconds=max(1, int(seconds)))
+
+        batch: FitbitBatch | FitbitMinuteBatch
+        batch = (
+            FitbitMinuteBatch(snapshot)
+            if isinstance(snapshot, HeartRateMinuteSnapshot)
+            else FitbitBatch(snapshot)
+        )
+        guard()
+        try:
+            self.connection.execute("BEGIN")
+        except Exception as error:
+            self.connection_usable = False
+            raise WarehouseConnectionError("cannot begin acquisition transaction") from error
+        try:
+            result = batch.write_snapshot(
+                self.connection, source_key=source_key, loaded_at=loaded_at
+            )
+            guard()
+        except Exception:
+            try:
+                self.connection.execute("ROLLBACK")
+            except Exception as error:
+                self.connection_usable = False
+                raise WarehouseConnectionError("acquisition rollback outcome unknown") from error
+            raise
+        try:
+            self.connection.execute("COMMIT")
+        except Exception as error:
+            self.connection_usable = False
+            raise WarehouseConnectionError("acquisition commit outcome unknown") from error
+        return result
+
     def load_object(
         self,
         raw: RawObject,
@@ -208,7 +275,7 @@ class Warehouse:
                     self.connection.execute("ROLLBACK")
                 return 0
 
-            batch.write(self.connection, raw, byte_size=byte_size, loaded_at=now)
+            self._write_batch(raw, batch, loaded_at=now)
             self.connection.execute(
                 """
                 INSERT INTO ops.ingestion_metadata (
@@ -394,7 +461,7 @@ class Warehouse:
             or row[0] != owner_id
             or row[1] <= datetime.now(UTC) + timedelta(seconds=remaining_seconds)
         ):
-            raise RuntimeError("loader lease ownership lost or insufficient time remains")
+            raise WarehouseLeaseError("loader lease ownership lost or insufficient time remains")
 
     def finish_job(self, run_id: str, *, succeeded: bool, details: dict[str, object]) -> None:
         self.connection.execute(
@@ -449,7 +516,9 @@ class Warehouse:
                 or row[0] != owner_id
                 or row[1] <= datetime.now(UTC) + timedelta(seconds=1)
             ):
-                raise RuntimeError("loader lease ownership lost or insufficient time remains")
+                raise WarehouseLeaseError(
+                    "loader lease ownership lost or insufficient time remains"
+                )
             self.connection.execute(
                 "INSERT INTO ops.heartbeat "
                 "SELECT r.name::VARCHAR,?::TIMESTAMPTZ,?::VARCHAR,r.details::JSON "

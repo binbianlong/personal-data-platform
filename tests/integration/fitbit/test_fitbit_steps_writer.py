@@ -5,7 +5,7 @@ import duckdb
 import pytest
 
 from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window
-from personal_data_platform.sources.fitbit.writer import FitbitBatch
+from personal_data_platform.sources.fitbit.motherduck import FitbitBatch
 from personal_data_platform.storage.motherduck import Warehouse
 
 AT = datetime(2026, 9, 1, tzinfo=UTC)

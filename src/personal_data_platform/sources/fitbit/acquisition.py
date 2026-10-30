@@ -13,7 +13,11 @@ from zoneinfo import ZoneInfo
 
 from personal_data_platform.loader.deadline import interrupt_after
 from personal_data_platform.network_diagnostics import network_phase
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConnectionError
+from personal_data_platform.storage.motherduck import Warehouse
+from personal_data_platform.storage.warehouse import (
+    WarehouseConnectionError,
+    WarehouseLeaseError,
+)
 
 from .api import HealthClient
 from .models import (
@@ -23,8 +27,8 @@ from .models import (
     Notification,
     Snapshot,
     Window,
+    WriteResult,
 )
-from .writer import FitbitBatch, FitbitMinuteBatch, WriteResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -281,37 +285,19 @@ class AcquisitionRunner:
         owner: str,
         deadline: float,
     ) -> WriteResult:
-        batch: FitbitBatch | FitbitMinuteBatch
-        if isinstance(acquisition, HeartRateMinuteSnapshot):
-            batch = FitbitMinuteBatch(acquisition)
-        else:
-            batch = FitbitBatch(acquisition)
-        self._check(warehouse, owner, deadline)
         try:
-            warehouse.connection.execute("BEGIN")
-        except Exception:
-            warehouse.connection_usable = False
-            raise WarehouseConnectionError("cannot begin acquisition transaction") from None
-        try:
-            result = batch.write_snapshot(
-                warehouse.connection,
+            return warehouse.commit_fitbit_snapshot(
+                acquisition,
                 source_key="fitbit-api:" + uuid.uuid4().hex,
                 loaded_at=self.clock(),
+                owner_id=owner,
+                deadline=deadline,
+                monotonic=self.monotonic,
             )
-            self._check(warehouse, owner, deadline)
-        except Exception:
-            try:
-                warehouse.connection.execute("ROLLBACK")
-            except Exception:
-                warehouse.connection_usable = False
-                raise WarehouseConnectionError("acquisition rollback outcome unknown") from None
-            raise
-        try:
-            warehouse.connection.execute("COMMIT")
-        except Exception:
-            warehouse.connection_usable = False
-            raise WarehouseConnectionError("acquisition commit outcome unknown") from None
-        return result
+        except WarehouseLeaseError:
+            raise AcquisitionDeferred("shared loader ownership lost") from None
+        except TimeoutError as error:
+            raise AcquisitionDeferred(str(error)) from None
 
     def _process(
         self,
