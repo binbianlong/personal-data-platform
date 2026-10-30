@@ -26,7 +26,7 @@ from personal_data_platform.sources.screen_time.audit import (
     audit_collector_heartbeat,
     filter_ingestion_states,
 )
-from personal_data_platform.storage.factory import open_warehouse
+from personal_data_platform.storage.factory import WarehouseConfig, open_warehouse
 from personal_data_platform.storage.warehouse import IngestionState, Warehouse
 
 from .heartbeat import daily_heartbeat_urls, publish_http_heartbeat
@@ -213,7 +213,8 @@ def _run_daily_reconciliation() -> int:
         validate_runtime_policy(source)
     owntracks = get_source("owntracks")
     validate_runtime_policy(owntracks)
-    warehouse = open_warehouse()
+    config = WarehouseConfig.from_env()
+    warehouse = open_warehouse(config)
     owner = str(uuid.uuid4())
     now = datetime.now(UTC)
     target_date = now.astimezone(ZoneInfo("Asia/Tokyo")).date() - timedelta(days=1)
@@ -265,7 +266,7 @@ def _run_daily_reconciliation() -> int:
             return 1
         stage = "dbt"
         with network_phase("daily_dbt"):
-            if run_dbt_from_env(lease_owner=owner, timeout_seconds=remaining()):
+            if run_dbt_from_env(lease_owner=owner, timeout_seconds=remaining(), config=config):
                 return 1
         stage = "owntracks"
         remaining()

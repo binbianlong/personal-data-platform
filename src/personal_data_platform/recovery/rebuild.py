@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterable, Iterator, Sequence
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from collections.abc import Iterable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 
-from personal_data_platform.config import RebuildADCConfig
+from personal_data_platform.config import RebuildADCConfig, temporary_environment
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.loader.job import run_loader, run_loader_all
 from personal_data_platform.raw.models import RawObject
@@ -104,7 +104,8 @@ def run_rebuild(
     )
     if any(not value.key.startswith(prefixes) for value in snapshot):
         raise ValueError("rebuild inventory contains an object outside the requested prefix")
-    warehouse = open_warehouse(WarehouseConfig(database=target_db, token=token))
+    config = WarehouseConfig(database=target_db, token=token)
+    warehouse = open_warehouse(config)
     try:
         require_empty_rebuild_target(warehouse)
         warehouse.migrate()
@@ -118,11 +119,7 @@ def run_rebuild(
         warehouse.close()
     if not summary.ok:
         return 1
-    with (
-        _temporary_environment("MOTHERDUCK_DATABASE", target_db),
-        _temporary_environment("MOTHERDUCK_TOKEN", token),
-    ):
-        run_dbt(target="prod", selector=source.dbt_selector)
+    run_dbt(target="prod", selector=source.dbt_selector, config=config)
     return 0
 
 
@@ -147,7 +144,8 @@ def run_rebuild_all(
     for source, repository, observations in inventories:
         validated = tuple(validate_observations(source, observations))
         snapshots[(source.source_id, source.stream)] = _SnapshotRawRepository(repository, validated)
-    warehouse = open_warehouse(WarehouseConfig(database=target_db, token=token))
+    config = WarehouseConfig(database=target_db, token=token)
+    warehouse = open_warehouse(config)
     try:
         require_empty_rebuild_target(warehouse)
         warehouse.migrate()
@@ -160,11 +158,7 @@ def run_rebuild_all(
         warehouse.close()
     if not summary.ok:
         return 1
-    with (
-        _temporary_environment("MOTHERDUCK_DATABASE", target_db),
-        _temporary_environment("MOTHERDUCK_TOKEN", token),
-    ):
-        run_dbt(target="prod", selector=next(iter(selectors)))
+    run_dbt(target="prod", selector=next(iter(selectors)), config=config)
     return 0
 
 
@@ -193,8 +187,8 @@ def run_rebuild_from_env(
     credentials: AbstractContextManager[None] = nullcontext()
     if sources[0].raw_storage == "gcs":
         adc = RebuildADCConfig.from_env()
-        credentials = _temporary_environment(
-            "GOOGLE_APPLICATION_CREDENTIALS", str(adc.credentials_path)
+        credentials = temporary_environment(
+            {"GOOGLE_APPLICATION_CREDENTIALS": str(adc.credentials_path)}
         )
     with credentials:
         inventories = tuple(
@@ -238,16 +232,3 @@ def run_rebuild_from_env(
             source=source,
             observations=observations,
         )
-
-
-@contextmanager
-def _temporary_environment(name: str, value: str) -> Iterator[None]:
-    previous = os.environ.get(name)
-    os.environ[name] = value
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = previous

@@ -6,7 +6,8 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -154,3 +155,18 @@ def secret_config(
             f"{name} requires valid JSON with fields: {', '.join(fields)}"
         ) from None
     return {key: str(data[key]) for key in fields}
+
+
+@contextmanager
+def temporary_environment(values: Mapping[str, str]) -> Iterator[None]:
+    """Apply invocation settings and restore only the keys this invocation owns."""
+    previous = {name: os.environ.get(name) for name in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value

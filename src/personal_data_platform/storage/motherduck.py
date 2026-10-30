@@ -57,6 +57,18 @@ class WarehouseConfig:
             raise ValueError("MOTHERDUCK_DATABASE is required")
         return cls(database=database, token=os.environ.get("MOTHERDUCK_TOKEN"))
 
+    def dbt_environment(self, *, target: str) -> dict[str, str]:
+        if target == "prod":
+            if not self.token:
+                raise ValueError("MOTHERDUCK_TOKEN is required for the production dbt target")
+            return {
+                "MOTHERDUCK_DATABASE": self.database,
+                "DBT_ENV_SECRET_MOTHERDUCK_TOKEN": self.token,
+            }
+        if target == "local":
+            return {"DBT_DUCKDB_PATH": self.database}
+        return {}
+
 
 def connect(config: WarehouseConfig) -> DuckDBPyConnection:
     """Connect to MotherDuck, or to a local DuckDB file for tests."""

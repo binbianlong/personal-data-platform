@@ -9,9 +9,10 @@ import time
 import uuid
 from pathlib import Path
 
+from personal_data_platform.config import temporary_environment
 from personal_data_platform.loader.job import LOADER_LEASE_SECONDS, JobAlreadyRunning
 from personal_data_platform.network_diagnostics import network_phase
-from personal_data_platform.storage.factory import open_warehouse
+from personal_data_platform.storage.factory import WarehouseConfig, dbt_environment, open_warehouse
 
 PROJECT_ROOT = Path(os.environ.get("PDP_PROJECT_ROOT", Path(__file__).resolve().parents[2]))
 DBT_PROJECT_DIR = PROJECT_ROOT / "dbt"
@@ -30,7 +31,7 @@ def _invoke(arguments: list[str], *, timeout_seconds: float | None = None) -> No
     try:
         from dbt.cli.main import dbtRunner
     except ImportError as error:  # pragma: no cover - packaging failure
-        raise RuntimeError("dbt-duckdb is required to run transformations") from error
+        raise RuntimeError("dbt is required to run transformations") from error
 
     result = dbtRunner().invoke(arguments)
     if not result.success:
@@ -44,6 +45,7 @@ def run_dbt(
     project_dir: Path = DBT_PROJECT_DIR,
     selector: str | None = None,
     timeout_seconds: int | None = None,
+    config: WarehouseConfig | None = None,
 ) -> None:
     common = [
         "--project-dir",
@@ -57,14 +59,7 @@ def run_dbt(
         if not selector.strip():
             raise ValueError("dbt selector must not be empty")
         common.extend(["--select", selector])
-    secret_name = "DBT_ENV_SECRET_MOTHERDUCK_TOKEN"
-    previous_secret = os.environ.get(secret_name)
-    if target == "prod":
-        token = os.environ.get("MOTHERDUCK_TOKEN")
-        if not token:
-            raise ValueError("MOTHERDUCK_TOKEN is required for the production dbt target")
-        os.environ[secret_name] = token
-    try:
+    with temporary_environment(dbt_environment(target=target, config=config)):
         deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
         for operation in ("run", "test"):
             with network_phase("dbt_" + operation):
@@ -72,12 +67,6 @@ def run_dbt(
                     _invoke([operation, *common])
                 else:
                     _invoke([operation, *common], timeout_seconds=deadline - time.monotonic())
-    finally:
-        if target == "prod":
-            if previous_secret is None:
-                os.environ.pop(secret_name, None)
-            else:
-                os.environ[secret_name] = previous_secret
 
 
 def run_dbt_from_env(
@@ -86,6 +75,7 @@ def run_dbt_from_env(
     stream: str | None = None,
     lease_owner: str | None = None,
     timeout_seconds: int = 50 * 60,
+    config: WarehouseConfig | None = None,
 ) -> int:
     from personal_data_platform.sources.registry import get_dbt_selector
 
@@ -96,7 +86,8 @@ def run_dbt_from_env(
     if target != "prod":
         raise ValueError("Cloud dbt entrypoint requires DBT_TARGET=prod")
 
-    warehouse = open_warehouse()
+    config = config if config is not None else WarehouseConfig.from_env()
+    warehouse = open_warehouse(config)
     owner = lease_owner or str(uuid.uuid4())
     acquired = False
     try:
@@ -112,6 +103,7 @@ def run_dbt_from_env(
             target=target,
             timeout_seconds=timeout_seconds,
             selector=selector,
+            config=config,
         )
         warehouse.require_job_lock(owner)
         return 0

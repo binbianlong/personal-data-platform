@@ -58,7 +58,7 @@ def test_all_streams_rebuilds_one_scratch_database_and_shared_daily_views(
     )
     calls = []
 
-    def build_views(*, target, selector):
+    def build_views(*, target, selector, config):
         calls.append((target, selector))
         real_run_dbt(target="local", selector=selector)
 
@@ -235,10 +235,12 @@ def test_rebuild_uses_scratch_credentials_and_restores_environment(monkeypatch, 
         connections.append(config)
         return Warehouse(connect(WarehouseConfig(":memory:")))
 
-    def transform(*, target, selector):
+    def transform(*, target, selector, config):
         dbt_calls.append((target, selector))
-        assert os.environ["MOTHERDUCK_DATABASE"] == "scratch_database"
-        assert os.environ["MOTHERDUCK_TOKEN"] == "scratch_token"
+        assert config is connections[0]
+        assert config == WarehouseConfig("scratch_database", "scratch_token")
+        assert os.environ["MOTHERDUCK_DATABASE"] == "ambient_database"
+        assert os.environ["MOTHERDUCK_TOKEN"] == "ambient_token"
         if dbt_fails:
             raise RuntimeError("dbt failed")
 
@@ -415,7 +417,13 @@ def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(mon
     assert listed == list(source.raw_prefixes)
     assert read == [(raw.key, raw.storage_generation) for raw in observations]
     assert written == observations
-    assert dbt_calls == [{"target": "prod", "selector": source.dbt_selector}]
+    assert dbt_calls == [
+        {
+            "target": "prod",
+            "selector": source.dbt_selector,
+            "config": WarehouseConfig("scratch_database", "scratch_token"),
+        }
+    ]
     inventory = rebuild_inventory(observations, source=source)
     assert inventory["source_id"] == "synthetic"
     assert inventory["stream"] == "metrics"
