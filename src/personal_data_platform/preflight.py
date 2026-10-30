@@ -7,18 +7,14 @@ import json
 import logging
 import os
 import uuid
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING
 
 import google.cloud.storage as storage
 
 from personal_data_platform.config import GCSConfig
 from personal_data_platform.recovery.rebuild import validate_rebuild_target
+from personal_data_platform.storage.factory import WarehouseConfig, open_warehouse
 from personal_data_platform.storage.gcs_types import GCSClient
-from personal_data_platform.storage.motherduck import WarehouseConfig, connect
-
-if TYPE_CHECKING:
-    from duckdb import DuckDBPyConnection
+from personal_data_platform.storage.warehouse import Warehouse
 
 PREFLIGHT_PREFIX = "test/preflight/"
 LOGGER = logging.getLogger(__name__)
@@ -74,20 +70,9 @@ def probe_gcs(
                 LOGGER.exception("GCS preflight cleanup failed after the probe failed")
 
 
-def probe_warehouse(connection: DuckDBPyConnection) -> dict[str, object]:
-    """Exercise DDL and DML in a disposable schema within the test database."""
-
-    table = f"probe_{uuid.uuid4().hex}"
-    connection.execute("CREATE SCHEMA IF NOT EXISTS preflight")
-    try:
-        connection.execute(f"CREATE TABLE preflight.{table} (value INTEGER NOT NULL)")
-        connection.execute(f"INSERT INTO preflight.{table} VALUES (42)")
-        row = connection.execute(f"SELECT value FROM preflight.{table}").fetchone()
-        if row is None or row[0] != 42:
-            raise RuntimeError("MotherDuck preflight round trip returned the wrong value")
-        return {"ok": True, "tested_at": datetime.now(UTC).isoformat()}
-    finally:
-        connection.execute(f"DROP TABLE IF EXISTS preflight.{table}")
+def probe_warehouse(warehouse: Warehouse) -> dict[str, object]:
+    """Exercise the warehouse in the caller's isolated test namespace."""
+    return warehouse.probe()
 
 
 def run_preflight_from_env() -> int:
@@ -111,10 +96,10 @@ def run_preflight_from_env() -> int:
 
     client = storage.Client(project=gcs.project_id)
     results = {"gcs": probe_gcs(client, bucket=preflight_bucket)}
-    warehouse_connection = connect(WarehouseConfig(test_database, token))
+    warehouse = open_warehouse(WarehouseConfig(test_database, token))
     try:
-        results["motherduck"] = probe_warehouse(warehouse_connection)
+        results["motherduck"] = probe_warehouse(warehouse)
     finally:
-        warehouse_connection.close()
+        warehouse.close()
     print(json.dumps(results, sort_keys=True))
     return 0

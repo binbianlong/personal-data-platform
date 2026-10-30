@@ -325,8 +325,7 @@ def test_daily_records_one_outcome_and_preserves_collector_heartbeats(
         "PDP_HEARTBEAT_CONFIG",
         '{"daily":"https://example.test/daily"}',
     )
-    monkeypatch.setattr(job, "connect", lambda _: warehouse.connection)
-    monkeypatch.setattr(job, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(job, "open_warehouse", lambda config=None: warehouse)
     monkeypatch.setattr(warehouse, "close", lambda: None)
     monkeypatch.setattr(job, "publish_http_heartbeat", lambda *args: successes.append(args))
 

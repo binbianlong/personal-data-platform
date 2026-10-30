@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from personal_data_platform.preflight import probe_gcs, probe_warehouse, run_preflight_from_env
+from personal_data_platform.storage.motherduck import Warehouse
 
 
 class _Blob:
@@ -118,7 +119,7 @@ def test_warehouse_probe_cleans_up_its_table() -> None:
     import duckdb
 
     connection = duckdb.connect(":memory:")
-    result = probe_warehouse(connection)
+    result = probe_warehouse(Warehouse(connection))
 
     assert result["ok"] is True
     assert (
@@ -142,7 +143,7 @@ def test_warehouse_probe_rejects_missing_row_and_cleans_up() -> None:
 
     try:
         with pytest.raises(RuntimeError, match="round trip"):
-            probe_warehouse(EmptyProbeResult())
+            probe_warehouse(Warehouse(EmptyProbeResult()))
         assert connection.execute(
             "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'preflight'"
         ).fetchone() == (0,)

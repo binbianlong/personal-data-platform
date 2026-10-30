@@ -22,7 +22,8 @@ from personal_data_platform.sources.contracts import (
     validate_runtime_policy,
 )
 from personal_data_platform.sources.registry import get_source, get_sources
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.factory import WarehouseConfig, open_warehouse
+from personal_data_platform.storage.warehouse import Warehouse
 
 _SAFE_DATABASE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -75,16 +76,7 @@ def validate_rebuild_target(target_db: str, production_db: str | None) -> None:
 
 
 def require_empty_rebuild_target(warehouse: Warehouse) -> None:
-    table_count = warehouse.query_value(
-        """
-        SELECT count(*)
-        FROM information_schema.tables
-        WHERE table_catalog = current_database()
-          AND table_schema NOT IN ('information_schema', 'pg_catalog')
-        """
-    )
-    if table_count:
-        raise ValueError("rebuild target must not contain existing tables or views")
+    warehouse.require_empty_target()
 
 
 def run_rebuild(
@@ -112,7 +104,7 @@ def run_rebuild(
     )
     if any(not value.key.startswith(prefixes) for value in snapshot):
         raise ValueError("rebuild inventory contains an object outside the requested prefix")
-    warehouse = Warehouse(connect(WarehouseConfig(database=target_db, token=token)))
+    warehouse = open_warehouse(WarehouseConfig(database=target_db, token=token))
     try:
         require_empty_rebuild_target(warehouse)
         warehouse.migrate()
@@ -155,7 +147,7 @@ def run_rebuild_all(
     for source, repository, observations in inventories:
         validated = tuple(validate_observations(source, observations))
         snapshots[(source.source_id, source.stream)] = _SnapshotRawRepository(repository, validated)
-    warehouse = Warehouse(connect(WarehouseConfig(database=target_db, token=token)))
+    warehouse = open_warehouse(WarehouseConfig(database=target_db, token=token))
     try:
         require_empty_rebuild_target(warehouse)
         warehouse.migrate()

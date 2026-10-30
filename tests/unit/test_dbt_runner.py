@@ -16,7 +16,7 @@ def test_fitbit_dbt_selector_does_not_require_a_raw_adapter(monkeypatch, stream)
     warehouse = Warehouse(duckdb.connect())
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "connect", lambda _: warehouse.connection)
+    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
     monkeypatch.setattr(warehouse, "close", lambda: None)
     monkeypatch.setattr(
         registry,
@@ -41,8 +41,7 @@ def test_cloud_dbt_migrates_before_models(monkeypatch) -> None:
     calls = []
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "connect", lambda _config: warehouse.connection)
-    monkeypatch.setattr(dbt_runner, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
     monkeypatch.setattr(warehouse, "close", lambda: None)
 
     def run_models(**kwargs):
@@ -136,8 +135,7 @@ def test_all_writers_share_loader_lease(monkeypatch):
     assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "connect", lambda _: warehouse.connection)
-    monkeypatch.setattr(dbt_runner, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
     monkeypatch.setattr(warehouse, "close", lambda: None)
     monkeypatch.setattr(dbt_runner, "run_dbt", lambda **kwargs: pytest.fail("dbt was invoked"))
     try:
@@ -158,8 +156,7 @@ def test_inherited_dbt_lease_is_checked_and_not_released(monkeypatch):
     assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "connect", lambda _: warehouse.connection)
-    monkeypatch.setattr(dbt_runner, "Warehouse", lambda _: warehouse)
+    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
     monkeypatch.setattr(warehouse, "close", lambda: None)
     calls = []
     monkeypatch.setattr(dbt_runner, "run_dbt", lambda **kwargs: calls.append(kwargs))

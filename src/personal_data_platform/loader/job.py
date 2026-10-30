@@ -19,12 +19,8 @@ from personal_data_platform.sources.contracts import (
     validate_runtime_policy,
 )
 from personal_data_platform.sources.registry import get_source, get_sources
-from personal_data_platform.storage.motherduck import (
-    Warehouse,
-    WarehouseConfig,
-    WarehouseConnectionError,
-    connect,
-)
+from personal_data_platform.storage.factory import open_warehouse
+from personal_data_platform.storage.warehouse import Warehouse, WarehouseConnectionError
 
 from .deadline import interrupt_after
 from .models import LoadSummary, RawDecodeError
@@ -200,7 +196,7 @@ def run_loader_from_env(
     )
     for source in sources:
         validate_runtime_policy(source)
-    warehouse = Warehouse(connect(WarehouseConfig.from_env()))
+    warehouse = open_warehouse()
     try:
         warehouse.migrate()
         try:

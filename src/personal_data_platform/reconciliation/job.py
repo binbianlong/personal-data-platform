@@ -26,29 +26,17 @@ from personal_data_platform.sources.screen_time.audit import (
     audit_collector_heartbeat,
     filter_ingestion_states,
 )
-from personal_data_platform.storage.motherduck import (
-    IngestionState,
-    Warehouse,
-    WarehouseConfig,
-    connect,
-)
+from personal_data_platform.storage.factory import open_warehouse
+from personal_data_platform.storage.warehouse import IngestionState, Warehouse
 
 from .heartbeat import daily_heartbeat_urls, publish_http_heartbeat
-from .models import DAILY_JOB_HISTORY_NAMES, DAILY_JOB_NAME, ReconciliationResult
+from .models import DAILY_JOB_NAME, ReconciliationResult
 
 LOGGER = logging.getLogger(__name__)
 
 
 def _relation_names(warehouse: Warehouse) -> set[str]:
-    rows = warehouse.query_rows(
-        """
-        SELECT table_schema || '.' || table_name
-        FROM information_schema.tables
-        WHERE table_catalog = current_database()
-          AND table_schema IN ('base', 'marts', 'ops')
-        """
-    )
-    return {row[0] for row in rows}
+    return warehouse.relation_names()
 
 
 def _failed_relation_queries(
@@ -59,7 +47,7 @@ def _failed_relation_queries(
         if relation not in relations:
             continue
         try:
-            warehouse.query_value(f"SELECT count(*) FROM {relation}")
+            warehouse.check_relation(relation)
         except Exception:
             LOGGER.exception("required relation query failed: %s", relation)
             failed.append(relation)
@@ -212,7 +200,6 @@ def run_reconciliation_from_env() -> int:
 
 
 def _run_daily_reconciliation() -> int:
-    from datetime import date
     from zoneinfo import ZoneInfo
 
     from personal_data_platform.dbt_runner import run_dbt_from_env
@@ -226,7 +213,7 @@ def _run_daily_reconciliation() -> int:
         validate_runtime_policy(source)
     owntracks = get_source("owntracks")
     validate_runtime_policy(owntracks)
-    warehouse = Warehouse(connect(WarehouseConfig.from_env()))
+    warehouse = open_warehouse()
     owner = str(uuid.uuid4())
     now = datetime.now(UTC)
     target_date = now.astimezone(ZoneInfo("Asia/Tokyo")).date() - timedelta(days=1)
@@ -255,15 +242,9 @@ def _run_daily_reconciliation() -> int:
         timer = interrupt_after(warehouse, remaining())
         warehouse.begin_job(DAILY_JOB_NAME, owner)
         job_started = True
-        previous = warehouse.query_value(
-            "SELECT json_extract_string(details,'$.last_completed_target_date') "
-            "FROM ops.job_run WHERE job_name IN (?, ?) AND status='succeeded' "
-            "AND json_extract_string(details,'$.last_completed_target_date') IS NOT NULL "
-            "ORDER BY completed_at DESC LIMIT 1",
-            list(DAILY_JOB_HISTORY_NAMES),
-        )
+        previous = warehouse.latest_completed_target_date()
         if previous:
-            first_missing = date.fromisoformat(str(previous)) + timedelta(days=1)
+            first_missing = previous + timedelta(days=1)
             repair_start = target_date - timedelta(days=DAILY_REPAIR_DAYS - 1)
             if first_missing < repair_start:
                 gap = {
@@ -338,15 +319,9 @@ def _run_daily_reconciliation() -> int:
         }
         stage = "completion"
         details["last_completed_target_date"] = target_date.isoformat()
-        warehouse.connection.execute("BEGIN TRANSACTION")
-        try:
-            warehouse.prune_run_history(now=datetime.now(UTC))
-            warehouse.finish_job(owner, succeeded=True, details=details)
-            remaining()
-            warehouse.connection.execute("COMMIT")
-        except Exception:
-            warehouse.connection.execute("ROLLBACK")
-            raise
+        warehouse.complete_daily_job(
+            owner, details=details, now=datetime.now(UTC), deadline=deadline
+        )
         completed = True
         stage = "heartbeat"
         remaining()

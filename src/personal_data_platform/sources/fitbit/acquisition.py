@@ -13,8 +13,8 @@ from zoneinfo import ZoneInfo
 
 from personal_data_platform.loader.deadline import interrupt_after
 from personal_data_platform.network_diagnostics import network_phase
-from personal_data_platform.storage.motherduck import Warehouse
 from personal_data_platform.storage.warehouse import (
+    Warehouse,
     WarehouseConnectionError,
     WarehouseLeaseError,
 )

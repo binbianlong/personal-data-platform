@@ -16,7 +16,8 @@ import uvicorn
 from personal_data_platform.config import secret_config
 from personal_data_platform.loader.job import JobAlreadyRunning
 from personal_data_platform.logging_config import configure_logging
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.factory import open_warehouse
+from personal_data_platform.storage.warehouse import Warehouse
 
 from .api import HealthClient
 from .models import DATA_TYPES, DATE_TYPES, Window, date_cursor
@@ -46,7 +47,7 @@ def enabled(name: str) -> bool:
 
 
 def _warehouse() -> Warehouse:
-    return Warehouse(connect(WarehouseConfig.from_env()))
+    return open_warehouse()
 
 
 def _acquisition_runner() -> AcquisitionRunner:

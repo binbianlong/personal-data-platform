@@ -11,7 +11,7 @@ from pathlib import Path
 
 from personal_data_platform.loader.job import LOADER_LEASE_SECONDS, JobAlreadyRunning
 from personal_data_platform.network_diagnostics import network_phase
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.factory import open_warehouse
 
 PROJECT_ROOT = Path(os.environ.get("PDP_PROJECT_ROOT", Path(__file__).resolve().parents[2]))
 DBT_PROJECT_DIR = PROJECT_ROOT / "dbt"
@@ -96,7 +96,7 @@ def run_dbt_from_env(
     if target != "prod":
         raise ValueError("Cloud dbt entrypoint requires DBT_TARGET=prod")
 
-    warehouse = Warehouse(connect(WarehouseConfig.from_env()))
+    warehouse = open_warehouse()
     owner = lease_owner or str(uuid.uuid4())
     acquired = False
     try:

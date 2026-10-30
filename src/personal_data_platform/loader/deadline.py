@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from threading import Timer
 
-from personal_data_platform.storage.motherduck import Warehouse
+from personal_data_platform.storage.warehouse import Warehouse
 
 
 def interrupt_after(warehouse: Warehouse, seconds: float) -> Timer:
@@ -13,7 +13,7 @@ def interrupt_after(warehouse: Warehouse, seconds: float) -> Timer:
 
     def interrupt() -> None:
         if warehouse.connection_usable:
-            warehouse.connection.interrupt()
+            warehouse.interrupt()
 
     timer = Timer(seconds, interrupt)
     timer.daemon = True

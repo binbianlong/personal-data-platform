@@ -71,12 +71,12 @@ def _print_error(error: Exception) -> None:
 
 def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "migrate":
-        from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+        from personal_data_platform.storage.factory import WarehouseConfig, open_warehouse
 
         if args.database is not None and not args.database.endswith((".duckdb", ".db")):
             raise ValueError("--database must name a local .duckdb or .db file")
         config = WarehouseConfig(args.database) if args.database else WarehouseConfig.from_env()
-        warehouse = Warehouse(connect(config))
+        warehouse = open_warehouse(config)
         try:
             warehouse.migrate()
         finally:

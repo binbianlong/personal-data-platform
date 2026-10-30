@@ -165,7 +165,7 @@ def test_scheduled_loader_skips_when_another_run_holds_the_lease(tmp_path, monke
     )
     monkeypatch.setattr("personal_data_platform.loader.job.validate_runtime_policy", lambda _: None)
     monkeypatch.setattr(
-        "personal_data_platform.loader.job.WarehouseConfig.from_env",
+        "personal_data_platform.storage.factory.WarehouseConfig.from_env",
         lambda: WarehouseConfig(database),
     )
     monkeypatch.setattr(

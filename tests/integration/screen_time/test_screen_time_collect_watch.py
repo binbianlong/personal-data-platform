@@ -77,7 +77,9 @@ def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatc
         if len(scans) == 3:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(runtime, "connect", open_connection)
+    monkeypatch.setattr(
+        runtime, "open_warehouse", lambda config: Warehouse(open_connection(config))
+    )
     monkeypatch.setattr(Warehouse, "migrate", migrate)
     monkeypatch.setattr(Warehouse, "acquire_job_lock", acquire)
     monkeypatch.setattr(runtime.time, "sleep", next_scan)

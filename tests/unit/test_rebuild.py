@@ -53,8 +53,8 @@ def test_all_streams_rebuilds_one_scratch_database_and_shared_daily_views(
     database = tmp_path / "combined.duckdb"
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
     monkeypatch.setattr(
-        "personal_data_platform.recovery.rebuild.connect",
-        lambda _config: connect(WarehouseConfig(str(database))),
+        "personal_data_platform.recovery.rebuild.open_warehouse",
+        lambda _config: Warehouse(connect(WarehouseConfig(str(database)))),
     )
     calls = []
 
@@ -233,7 +233,7 @@ def test_rebuild_uses_scratch_credentials_and_restores_environment(monkeypatch, 
 
     def connect_scratch(config):
         connections.append(config)
-        return connect(WarehouseConfig(":memory:"))
+        return Warehouse(connect(WarehouseConfig(":memory:")))
 
     def transform(*, target, selector):
         dbt_calls.append((target, selector))
@@ -242,7 +242,7 @@ def test_rebuild_uses_scratch_credentials_and_restores_environment(monkeypatch, 
         if dbt_fails:
             raise RuntimeError("dbt failed")
 
-    monkeypatch.setattr("personal_data_platform.recovery.rebuild.connect", connect_scratch)
+    monkeypatch.setattr("personal_data_platform.recovery.rebuild.open_warehouse", connect_scratch)
     monkeypatch.setattr("personal_data_platform.recovery.rebuild.run_dbt", transform)
 
     def rebuild():
@@ -296,8 +296,8 @@ def test_rebuild_uses_one_inventory_and_fails_if_a_listed_generation_disappears(
 
     repository = Repository()
     monkeypatch.setattr(
-        "personal_data_platform.recovery.rebuild.connect",
-        lambda config: connect(WarehouseConfig(":memory:")),
+        "personal_data_platform.recovery.rebuild.open_warehouse",
+        lambda config: Warehouse(connect(WarehouseConfig(":memory:"))),
     )
 
     assert (
@@ -392,8 +392,8 @@ def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(mon
 
     source = Source()
     monkeypatch.setattr(
-        "personal_data_platform.recovery.rebuild.connect",
-        lambda config: connect(WarehouseConfig(":memory:")),
+        "personal_data_platform.recovery.rebuild.open_warehouse",
+        lambda config: Warehouse(connect(WarehouseConfig(":memory:"))),
     )
     monkeypatch.setattr(
         "personal_data_platform.recovery.rebuild.run_dbt",

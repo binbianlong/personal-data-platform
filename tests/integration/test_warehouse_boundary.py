@@ -1,5 +1,6 @@
 """The persistence boundary accepts data without executing decoder callbacks."""
 
+import time
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
@@ -54,3 +55,44 @@ def test_fitbit_commit_rolls_back_if_deadline_expires_after_writing(monkeypatch)
             )
         assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
         assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 0
+
+
+@pytest.mark.parametrize("stage", ["COMMIT", "ROLLBACK"])
+def test_uncertain_daily_completion_prevents_connection_reuse(stage, monkeypatch):
+    from personal_data_platform.storage.warehouse import WarehouseConnectionError
+
+    now = datetime.now(UTC)
+    with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
+        warehouse.migrate()
+        warehouse.acquire_job_lock("loader", "daily", lease_seconds=60)
+        warehouse.begin_job("daily-reconciliation", "daily")
+        connection = warehouse.connection
+
+        class Uncertain:
+            def execute(self, sql, *args):
+                if sql == stage:
+                    raise RuntimeError("connection lost")
+                return connection.execute(sql, *args)
+
+        if stage == "ROLLBACK":
+            monkeypatch.setattr(
+                warehouse,
+                "finish_job",
+                lambda *a, **kw: (_ for _ in ()).throw(ValueError("write failed")),
+            )
+        warehouse.connection = Uncertain()
+        try:
+            with pytest.raises(WarehouseConnectionError):
+                warehouse.complete_daily_job(
+                    "daily", details={}, now=now, deadline=time.monotonic() + 10
+                )
+            assert not warehouse.connection_usable
+            warehouse.release_job_lock("loader", "daily")
+        finally:
+            warehouse.connection = connection
+            try:
+                connection.execute("ROLLBACK")
+            except Exception:
+                pass
+        assert warehouse.query_value("SELECT status FROM ops.job_run") == "running"
+        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
