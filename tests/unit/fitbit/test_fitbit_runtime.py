@@ -86,7 +86,7 @@ def test_daily_repair_uses_two_completed_tokyo_days_without_device_cursor(
 
         def run_windows(self, windows, **kwargs):
             calls.append((windows, kwargs))
-            return AcquisitionSummary(completed_scopes=10)
+            return AcquisitionSummary(completed_scopes=32)
 
     monkeypatch.setattr(runtime, "_acquisition_runner", lambda: Runner())
     monkeypatch.delenv("PDP_FITBIT_PROCESSING_PAUSED", raising=False)
@@ -99,7 +99,7 @@ def test_daily_repair_uses_two_completed_tokyo_days_without_device_cursor(
         )
         assert result.ok and len(calls) == 1
         windows, kwargs = calls[0]
-        assert len(windows) == 5
+        assert len(windows) == 16
         for window in windows:
             start, end = (
                 (civil_start, civil_end)

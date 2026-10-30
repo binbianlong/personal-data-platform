@@ -17,17 +17,33 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from personal_data_platform.sources.fitbit.models import (
+    DAILY_TYPES,
     DATE_TYPES,
+    SAMPLE_TYPES,
     HeartRateMinute,
     HeartRateMinuteSnapshot,
     Record,
     Snapshot,
     Window,
     aware,
+    data_source_family_for,
     date_cursor,
     object_dict,
     parse_time,
     string,
+)
+
+from .details import (
+    ExerciseDetails,
+    HrvDaily,
+    HrvSample,
+    OxygenSaturationDaily,
+    RecordDetails,
+    RespiratorySleepSummary,
+    RespiratoryStats,
+    SleepSummary,
+    SleepTemperatureDaily,
+    Vo2MaxDaily,
 )
 
 DATA_SOURCE_FAMILY = "users/me/dataSourceFamilies/google-wearables"
@@ -37,6 +53,32 @@ _FIELDS = {
     "daily-resting-heart-rate": ("dailyRestingHeartRate", "daily_resting_heart_rate.date"),
     "active-zone-minutes": ("activeZoneMinutes", "active_zone_minutes.interval.start_time"),
     "sleep": ("sleep", "sleep.interval.civil_end_time"),
+    "daily-heart-rate-variability": (
+        "dailyHeartRateVariability",
+        "daily_heart_rate_variability.date",
+    ),
+    "heart-rate-variability": (
+        "heartRateVariability",
+        "heart_rate_variability.sample_time.physical_time",
+    ),
+    "daily-respiratory-rate": ("dailyRespiratoryRate", "daily_respiratory_rate.date"),
+    "respiratory-rate-sleep-summary": (
+        "respiratoryRateSleepSummary",
+        "respiratory_rate_sleep_summary.sample_time.physical_time",
+    ),
+    "daily-oxygen-saturation": ("dailyOxygenSaturation", "daily_oxygen_saturation.date"),
+    "daily-sleep-temperature-derivations": (
+        "dailySleepTemperatureDerivations",
+        "daily_sleep_temperature_derivations.date",
+    ),
+    "daily-vo2-max": ("dailyVo2Max", "daily_vo2_max.date"),
+    "exercise": ("exercise", "exercise.interval.civil_start_time"),
+    "sedentary-period": ("sedentaryPeriod", "sedentary_period.interval.start_time"),
+    "distance": ("distance", "distance.interval.start_time"),
+    "time-in-heart-rate-zone": (
+        "timeInHeartRateZone",
+        "time_in_heart_rate_zone.interval.start_time",
+    ),
 }
 _POINT_FIELDS = {field for field, _ in _FIELDS.values()} | {"heartRate"}
 
@@ -379,8 +421,8 @@ class HealthClient:
             start, end = _utc_text(window.start), _utc_text(window.end)
         query: dict[str, str | int] = {
             "filter": f'{field} >= "{start}" AND {field} < "{end}"',
-            "pageSize": 25 if window.data_type == "sleep" else 10_000,
-            "dataSourceFamily": DATA_SOURCE_FAMILY,
+            "pageSize": 25 if window.data_type in ("sleep", "exercise") else 10_000,
+            "dataSourceFamily": data_source_family_for(window.data_type),
         }
         if page_token:
             query["pageToken"] = page_token
@@ -534,6 +576,8 @@ def _normalize(data_type: str, point: dict[str, object], subject_key: str) -> tu
                 value=float(_integer(payload["beatsPerMinute"], minimum=1, maximum=300)),
             ),
         )
+    if data_type not in ("steps", "active-zone-minutes"):
+        return (_health_metric(data_type, payload, point_id, subject_key),)
     timing = object_dict(payload["interval"])
     start, end, start_offset, end_offset = _interval(timing)
     # Steps records omit count for an on-wrist true zero; no record means missing data.
@@ -585,6 +629,12 @@ def _sleep(payload: dict[str, object], point_id: str) -> tuple[Record, ...]:
             value=float(_integer(minutes)) if minutes is not None else None,
             is_main_sleep=main_sleep,
             category=category,
+            details=SleepSummary(
+                _optional_integer(summary, "minutesAwake"),
+                _optional_integer(summary, "minutesInSleepPeriod"),
+                _optional_integer(summary, "minutesToFallAsleep"),
+                _optional_integer(summary, "minutesAfterWakeUp"),
+            ),
         )
     ]
     stage_intervals: list[tuple[datetime, datetime]] = []
@@ -650,3 +700,152 @@ def _sleep(payload: dict[str, object], point_id: str) -> tuple[Record, ...]:
         if previous[1] > following[0]:
             raise ValueError("sleep stages must not overlap")
     return tuple(records)
+
+
+def _number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError("metric must be a finite number")
+    return float(value)
+
+
+def _optional_number(payload: dict[str, object], field: str) -> float | None:
+    value = payload.get(field)
+    return None if value is None else _number(value)
+
+
+def _optional_integer(payload: dict[str, object], field: str) -> int | None:
+    value = payload.get(field)
+    return None if value is None else _integer(value)
+
+
+def _duration(value: object) -> float:
+    text = string(value)
+    if re.fullmatch(r"\d+(?:\.\d{1,9})?s", text) is None:
+        raise ValueError("duration must be nonnegative seconds")
+    seconds = float(text[:-1])
+    if not math.isfinite(seconds):
+        raise ValueError("duration must be finite")
+    return seconds
+
+
+def _respiratory_stats(value: object) -> RespiratoryStats:
+    fields = object_dict(value)
+    return RespiratoryStats(
+        _number(fields["breathsPerMinute"]),
+        _optional_number(fields, "standardDeviation"),
+        _optional_number(fields, "signalToNoise"),
+    )
+
+
+def _health_metric(
+    kind: str, payload: dict[str, object], point_id: str | None, subject_key: str
+) -> Record:
+    details: RecordDetails | None = None
+    value = None
+    if kind in DAILY_TYPES:
+        source_date = _date(payload["date"])
+        cursor = date_cursor(source_date)
+        if kind == "daily-heart-rate-variability":
+            details = HrvDaily(
+                _optional_number(payload, "averageHeartRateVariabilityMilliseconds"),
+                _optional_number(
+                    payload, "deepSleepRootMeanSquareOfSuccessiveDifferencesMilliseconds"
+                ),
+                _optional_integer(payload, "nonRemHeartRateBeatsPerMinute"),
+                _optional_number(payload, "entropy"),
+            )
+        elif kind == "daily-respiratory-rate":
+            value = _number(payload["breathsPerMinute"])
+        elif kind == "daily-oxygen-saturation":
+            details = OxygenSaturationDaily(
+                _number(payload["averagePercentage"]),
+                _number(payload["lowerBoundPercentage"]),
+                _number(payload["upperBoundPercentage"]),
+                _optional_number(payload, "standardDeviationPercentage"),
+            )
+        elif kind == "daily-sleep-temperature-derivations":
+            details = SleepTemperatureDaily(
+                _number(payload["nightlyTemperatureCelsius"]),
+                _optional_number(payload, "baselineTemperatureCelsius"),
+                _optional_number(payload, "relativeNightlyStddev30dCelsius"),
+            )
+        elif kind == "daily-vo2-max":
+            estimated = payload.get("estimated")
+            if estimated is not None and type(estimated) is not bool:
+                raise ValueError("estimated must be boolean")
+            level = payload.get("cardioFitnessLevel")
+            details = Vo2MaxDaily(
+                _number(payload["vo2Max"]),
+                estimated,
+                string(level) if level is not None else None,
+                _optional_number(payload, "vo2MaxCovariance"),
+            )
+        return Record(
+            kind,
+            point_id or _identity(subject_key, kind, source_date.isoformat()),
+            cursor,
+            cursor,
+            source_date=source_date,
+            value=value,
+            details=details,
+        )
+    if kind in SAMPLE_TYPES:
+        timing = object_dict(payload["sampleTime"])
+        at = _timestamp(timing["physicalTime"])
+        offset = _offset(timing["utcOffset"])
+        source_date = _source_date(timing.get("civilTime"), at, offset)
+        if kind == "heart-rate-variability":
+            details = HrvSample(
+                _optional_number(payload, "rootMeanSquareOfSuccessiveDifferencesMilliseconds"),
+                _optional_number(payload, "standardDeviationMilliseconds"),
+            )
+        else:
+            details = RespiratorySleepSummary(
+                _respiratory_stats(payload["fullSleepStats"]),
+                *(
+                    _respiratory_stats(payload[field]) if field in payload else RespiratoryStats()
+                    for field in ("deepSleepStats", "lightSleepStats", "remSleepStats")
+                ),
+            )
+        return Record(
+            kind,
+            point_id or _identity(subject_key, kind, _utc_text(at)),
+            at,
+            at,
+            offset_seconds=offset,
+            source_date=source_date,
+            details=details,
+        )
+    timing = object_dict(payload["interval"])
+    start, end, start_offset, end_offset = _interval(timing)
+    source_date = _source_date(timing.get("civilStartTime"), start, start_offset)
+    cursor = start
+    category = None
+    if kind == "exercise":
+        if point_id is None:
+            raise ValueError("exercise needs a provider identity")
+        cursor = date_cursor(source_date)
+        duration = payload.get("activeDuration")
+        details = ExerciseDetails(
+            string(payload["exerciseType"]),
+            string(payload["displayName"]),
+            _duration(duration) if duration is not None else None,
+        )
+    elif kind == "distance":
+        # Like steps, the provider can omit the value for an observed true zero.
+        value = _integer(payload.get("millimeters", 0), maximum=1_000_000_000) / 1000
+    elif kind == "time-in-heart-rate-zone":
+        category = string(payload["heartRateZoneType"])
+    return Record(
+        kind,
+        point_id or _identity(subject_key, kind, _utc_text(start), _utc_text(end), category or ""),
+        cursor,
+        start,
+        end,
+        value,
+        start_offset,
+        end_offset,
+        source_date,
+        category=category,
+        details=details,
+    )

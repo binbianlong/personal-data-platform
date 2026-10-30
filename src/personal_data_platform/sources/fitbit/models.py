@@ -10,8 +10,37 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 
-DATA_TYPES = ("steps", "heart-rate", "daily-resting-heart-rate", "active-zone-minutes", "sleep")
-DATE_TYPES = ("daily-resting-heart-rate", "sleep")
+from .details import DETAIL_TYPES, RecordDetails
+
+DAILY_TYPES = (
+    "daily-resting-heart-rate",
+    "daily-heart-rate-variability",
+    "daily-respiratory-rate",
+    "daily-oxygen-saturation",
+    "daily-sleep-temperature-derivations",
+    "daily-vo2-max",
+)
+SAMPLE_TYPES = ("heart-rate-variability", "respiratory-rate-sleep-summary")
+INTERVAL_TYPES = (
+    "steps",
+    "active-zone-minutes",
+    "sedentary-period",
+    "distance",
+    "time-in-heart-rate-zone",
+)
+DATA_TYPES = (
+    "steps",
+    "heart-rate",
+    "daily-resting-heart-rate",
+    "active-zone-minutes",
+    "sleep",
+    *DAILY_TYPES[1:],
+    *SAMPLE_TYPES,
+    "exercise",
+    *INTERVAL_TYPES[2:],
+)
+WEBHOOK_TYPES = tuple(kind for kind in DATA_TYPES if kind != "daily-vo2-max")
+DATE_TYPES = (*DAILY_TYPES, "sleep", "exercise")
 RECORD_AGGREGATION_VERSION = "records-v1"
 CIVIL_RECORD_AGGREGATION_VERSION = "records-civil-v1"
 AcquisitionMode = Literal["legacy", "bounded_minutes", "bounded_steps"]
@@ -23,6 +52,17 @@ TABLES = {
     "sleep": "fitbit_sleep_session",
     "sleep-stage": "fitbit_sleep_detail",
     "sleep-wake": "fitbit_sleep_detail",
+    "daily-heart-rate-variability": "fitbit_hrv_daily",
+    "heart-rate-variability": "fitbit_hrv_sample",
+    "daily-respiratory-rate": "fitbit_respiratory_rate_daily",
+    "respiratory-rate-sleep-summary": "fitbit_respiratory_rate_sleep_summary",
+    "daily-oxygen-saturation": "fitbit_oxygen_saturation_daily",
+    "daily-sleep-temperature-derivations": "fitbit_sleep_temperature_daily",
+    "exercise": "fitbit_exercise",
+    "daily-vo2-max": "fitbit_vo2_max_daily",
+    "sedentary-period": "fitbit_sedentary_period",
+    "distance": "fitbit_distance_interval",
+    "time-in-heart-rate-zone": "fitbit_heart_rate_zone_interval",
 }
 
 
@@ -92,6 +132,7 @@ class Record:
     parent_id: str | None = None
     category: str | None = None
     is_main_sleep: bool | None = None
+    details: RecordDetails | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in TABLES or not self.record_id:
@@ -102,7 +143,7 @@ class Record:
             object.__setattr__(self, "end", aware(self.end))
             if self.end <= self.start:
                 raise ValueError("record interval must be positive")
-        if self.kind in ("steps", "active-zone-minutes", "sleep", "sleep-stage", "sleep-wake"):
+        if self.kind in (*INTERVAL_TYPES, "sleep", "exercise", "sleep-stage", "sleep-wake"):
             if self.end is None:
                 raise ValueError("interval record needs an end")
         if self.value is not None and (
@@ -111,7 +152,17 @@ class Record:
             raise ValueError("record value must be finite and nonnegative")
         if self.value is not None:
             object.__setattr__(self, "value", float(self.value))
-        if self.kind in DATA_TYPES[:4] and self.value is None:
+        if (
+            self.kind
+            in (
+                "steps",
+                "active-zone-minutes",
+                "daily-resting-heart-rate",
+                "daily-respiratory-rate",
+                "distance",
+            )
+            and self.value is None
+        ):
             raise ValueError("metric record needs a value")
         for offset in (self.offset_seconds, self.end_offset_seconds):
             if offset is not None and (
@@ -120,12 +171,22 @@ class Record:
                 raise ValueError("invalid UTC offset")
         if self.kind in ("sleep-stage", "sleep-wake") and not self.parent_id:
             raise ValueError("sleep detail needs a parent")
-        if self.kind in ("steps", "active-zone-minutes"):
+        if self.kind in (*INTERVAL_TYPES, *SAMPLE_TYPES):
             if self.cursor != self.start:
                 raise ValueError("record cursor must match its physical start")
         if self.kind in DATE_TYPES:
             if self.source_date is None or self.cursor != date_cursor(self.source_date):
                 raise ValueError("record cursor must match its provider date")
+
+        if self.kind in SAMPLE_TYPES and self.end is not None:
+            raise ValueError("sample must not have a fabricated interval")
+        expected = DETAIL_TYPES.get(self.kind)
+        if self.details is not None and (
+            expected is None or not isinstance(self.details, expected)
+        ):
+            raise ValueError("record details do not match data type")
+        if expected is not None and self.kind != "sleep" and self.details is None:
+            raise ValueError("record needs typed details")
 
 
 def object_dict(value: object) -> dict[str, object]:
@@ -160,6 +221,7 @@ class Snapshot:
             raise ValueError("only complete acquisitions can replace a range")
         object.__setattr__(self, "fetched_at", aware(self.fetched_at))
         identities: set[tuple[str, str]] = set()
+        daily_dates: set[date | None] = set()
         sessions = {record.record_id: record for record in self.records if record.kind == "sleep"}
         for record in self.records:
             kind = "sleep" if record.kind in ("sleep-stage", "sleep-wake") else record.kind
@@ -171,6 +233,10 @@ class Snapshot:
             if identity in identities:
                 raise ValueError("duplicate record identity")
             identities.add(identity)
+            if kind in DAILY_TYPES:
+                if record.source_date in daily_dates:
+                    raise ValueError("duplicate provider date")
+                daily_dates.add(record.source_date)
             if record.kind in ("sleep-stage", "sleep-wake"):
                 parent = sessions.get(record.parent_id or "")
                 if parent is None or parent.cursor != record.cursor:
@@ -185,6 +251,10 @@ class Snapshot:
     @property
     def aggregation_version(self) -> str:
         return RECORD_AGGREGATION_VERSION
+
+    @property
+    def data_source_family(self) -> str:
+        return data_source_family_for(self.window.data_type)
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +320,11 @@ class Notification:
 
 HEART_RATE_AGGREGATION_VERSION = "heart-rate-minute-v1"
 GOOGLE_WEARABLES = "users/me/dataSourceFamilies/google-wearables"
+GOOGLE_SOURCES = "users/me/dataSourceFamilies/google-sources"
+
+
+def data_source_family_for(data_type: str) -> str:
+    return GOOGLE_SOURCES if data_type == "exercise" else GOOGLE_WEARABLES
 
 
 @dataclass(frozen=True, slots=True)

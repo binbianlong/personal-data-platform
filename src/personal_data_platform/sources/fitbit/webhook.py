@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from .models import (
     DATA_TYPES,
     DATE_TYPES,
+    WEBHOOK_TYPES,
     AcquisitionMode,
     Notification,
     Window,
@@ -347,7 +348,7 @@ class GoogleHealthAuthenticator:
                 if not hmac.compare_digest(string(data["healthUserId"]).encode(), self._owner):
                     raise AuthenticationError("unexpected webhook owner")
                 kind = string(data["dataType"])
-                if kind not in DATA_TYPES or data.get("version") != "1":
+                if kind not in WEBHOOK_TYPES or data.get("version") != "1":
                     raise ValueError("unsupported webhook type or version")
                 if data.get("operation") not in ("UPSERT", "DELETE"):
                     raise ValueError("unsupported webhook operation")

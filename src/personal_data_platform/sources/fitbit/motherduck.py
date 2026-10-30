@@ -8,10 +8,13 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
+from .details import SleepSummary
 from .models import (
     CIVIL_RECORD_AGGREGATION_VERSION,
+    DATE_TYPES,
     GOOGLE_WEARABLES,
     RECORD_AGGREGATION_VERSION,
+    SAMPLE_TYPES,
     TABLES,
     HeartRateMinuteSnapshot,
     Record,
@@ -19,6 +22,7 @@ from .models import (
     Window,
     WriteResult,
     aware,
+    data_source_family_for,
     date_cursor,
 )
 
@@ -33,7 +37,7 @@ _MINUTE_MERGE_MIN_ROWS = 64
 def coverage_scope(
     subject_key: str, data_type: str, aggregation_version: str = RECORD_AGGREGATION_VERSION
 ) -> tuple[str, str, str, str]:
-    return subject_key, data_type, GOOGLE_WEARABLES, aggregation_version
+    return subject_key, data_type, data_source_family_for(data_type), aggregation_version
 
 
 def _subtract(
@@ -166,10 +170,10 @@ def _digest(value: object) -> str:
 
 
 def _cursor(kind: str, prefix: str = "") -> str:
-    if kind in ("steps", "active-zone-minutes"):
-        return f"{prefix}start_at"
-    # DATE::TIMESTAMPTZ would depend on the connection's time zone.
-    return f"timezone('UTC', {prefix}source_date::TIMESTAMP)"
+    if kind in (*DATE_TYPES, "sleep-stage", "sleep-wake"):
+        # DATE::TIMESTAMPTZ would depend on the connection's time zone.
+        return f"timezone('UTC', {prefix}source_date::TIMESTAMP)"
+    return f"{prefix}sample_at" if kind in SAMPLE_TYPES else f"{prefix}start_at"
 
 
 def _kind_filter(kind: str, prefix: str = "") -> str:
@@ -180,7 +184,101 @@ def _kind_filter(kind: str, prefix: str = "") -> str:
     return "true"
 
 
+_HEALTH_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "daily-heart-rate-variability": (
+        ("source_date", "DATE"),
+        ("rmssd_ms", "DOUBLE"),
+        ("deep_sleep_rmssd_ms", "DOUBLE"),
+        ("non_rem_heart_rate_bpm", "BIGINT"),
+        ("entropy", "DOUBLE"),
+    ),
+    "heart-rate-variability": (
+        ("sample_at", "TIMESTAMPTZ"),
+        ("offset_seconds", "INTEGER"),
+        ("source_date", "DATE"),
+        ("rmssd_ms", "DOUBLE"),
+        ("sdnn_ms", "DOUBLE"),
+    ),
+    "daily-respiratory-rate": (("source_date", "DATE"), ("breaths_per_minute", "DOUBLE")),
+    "respiratory-rate-sleep-summary": (
+        ("sample_at", "TIMESTAMPTZ"),
+        ("offset_seconds", "INTEGER"),
+        ("source_date", "DATE"),
+        ("full_breaths_per_minute", "DOUBLE"),
+        ("full_standard_deviation", "DOUBLE"),
+        ("full_signal_to_noise", "DOUBLE"),
+        ("deep_breaths_per_minute", "DOUBLE"),
+        ("deep_standard_deviation", "DOUBLE"),
+        ("deep_signal_to_noise", "DOUBLE"),
+        ("light_breaths_per_minute", "DOUBLE"),
+        ("light_standard_deviation", "DOUBLE"),
+        ("light_signal_to_noise", "DOUBLE"),
+        ("rem_breaths_per_minute", "DOUBLE"),
+        ("rem_standard_deviation", "DOUBLE"),
+        ("rem_signal_to_noise", "DOUBLE"),
+    ),
+    "daily-oxygen-saturation": (
+        ("source_date", "DATE"),
+        ("average_percent", "DOUBLE"),
+        ("lower_bound_percent", "DOUBLE"),
+        ("upper_bound_percent", "DOUBLE"),
+        ("standard_deviation_percent", "DOUBLE"),
+    ),
+    "daily-sleep-temperature-derivations": (
+        ("source_date", "DATE"),
+        ("nightly_temperature_celsius", "DOUBLE"),
+        ("baseline_temperature_celsius", "DOUBLE"),
+        ("relative_nightly_stddev_30d_celsius", "DOUBLE"),
+    ),
+    "exercise": (
+        ("start_at", "TIMESTAMPTZ"),
+        ("end_at", "TIMESTAMPTZ"),
+        ("offset_seconds", "INTEGER"),
+        ("end_offset_seconds", "INTEGER"),
+        ("source_date", "DATE"),
+        ("exercise_type", "VARCHAR"),
+        ("display_name", "VARCHAR"),
+        ("active_duration_seconds", "DOUBLE"),
+    ),
+    "daily-vo2-max": (
+        ("source_date", "DATE"),
+        ("vo2_max_ml_kg_min", "DOUBLE"),
+        ("estimated", "BOOLEAN"),
+        ("cardio_fitness_level", "VARCHAR"),
+        ("covariance", "DOUBLE"),
+    ),
+    "sedentary-period": (
+        ("start_at", "TIMESTAMPTZ"),
+        ("end_at", "TIMESTAMPTZ"),
+        ("offset_seconds", "INTEGER"),
+        ("end_offset_seconds", "INTEGER"),
+        ("source_date", "DATE"),
+    ),
+    "distance": (
+        ("start_at", "TIMESTAMPTZ"),
+        ("end_at", "TIMESTAMPTZ"),
+        ("offset_seconds", "INTEGER"),
+        ("end_offset_seconds", "INTEGER"),
+        ("source_date", "DATE"),
+        ("distance_meters", "DOUBLE"),
+    ),
+    "time-in-heart-rate-zone": (
+        ("start_at", "TIMESTAMPTZ"),
+        ("end_at", "TIMESTAMPTZ"),
+        ("offset_seconds", "INTEGER"),
+        ("end_offset_seconds", "INTEGER"),
+        ("source_date", "DATE"),
+        ("zone", "VARCHAR"),
+    ),
+}
+
+
 def _record_fields(kind: str) -> tuple[tuple[str, ...], str]:
+    if kind in _HEALTH_FIELDS:
+        fields = _HEALTH_FIELDS[kind]
+        return tuple(name for name, _ in fields), ", ".join(
+            f"r.{name}::{sql_type}" for name, sql_type in fields
+        )
     if kind in ("steps", "active-zone-minutes"):
         return (
             (
@@ -209,9 +307,15 @@ def _record_fields(kind: str) -> tuple[tuple[str, ...], str]:
                 "end_offset_seconds",
                 "sleep_type",
                 "is_main_sleep",
+                "minutes_awake",
+                "minutes_in_sleep_period",
+                "minutes_to_fall_asleep",
+                "minutes_after_wake_up",
             ),
             "r.source_date::DATE, r.start::TIMESTAMPTZ, r.end::TIMESTAMPTZ, r.value::DOUBLE, "
-            "r.offset_seconds::INTEGER, r.end_offset_seconds::INTEGER, r.category::VARCHAR, r.is_main_sleep::BOOLEAN",
+            "r.offset_seconds::INTEGER, r.end_offset_seconds::INTEGER, r.category::VARCHAR, r.is_main_sleep::BOOLEAN, "
+            "r.minutes_awake::BIGINT, r.minutes_in_sleep_period::BIGINT, "
+            "r.minutes_to_fall_asleep::BIGINT, r.minutes_after_wake_up::BIGINT",
         )
     return (
         (
@@ -228,6 +332,33 @@ def _record_fields(kind: str) -> tuple[tuple[str, ...], str]:
         "r.start::TIMESTAMPTZ, r.end::TIMESTAMPTZ, r.offset_seconds::INTEGER, "
         "r.end_offset_seconds::INTEGER, r.category::VARCHAR",
     )
+
+
+def _record_row(record: Record) -> dict[str, object]:
+    row = asdict(record)
+    row.pop("details")
+    if record.details is not None:
+        details = asdict(record.details)
+        if record.kind == "respiratory-rate-sleep-summary":
+            row.update(
+                {
+                    f"{stage}_{field}": value
+                    for stage, stats in details.items()
+                    for field, value in stats.items()
+                }
+            )
+        else:
+            row.update(details)
+    elif record.kind == "sleep":
+        row.update(asdict(SleepSummary()))
+    row.update(start_at=record.start, end_at=record.end, sample_at=record.start)
+    if record.kind == "daily-respiratory-rate":
+        row["breaths_per_minute"] = record.value
+    elif record.kind == "distance":
+        row["distance_meters"] = record.value
+    elif record.kind == "time-in-heart-rate-zone":
+        row["zone"] = record.category
+    return row
 
 
 @dataclass(frozen=True, slots=True)
@@ -610,7 +741,7 @@ class FitbitBatch:
                     [snapshot.subject_key, start, end, sorted(protected)],
                 )
             rows = [
-                asdict(record)
+                _record_row(record)
                 for record in snapshot.records
                 if record.kind == kind
                 and any(start <= record.cursor < end for start, end in accepted)
@@ -631,11 +762,16 @@ class FitbitBatch:
                     for column in columns
                     if column not in ("subject_key", "record_id", "metric", "kind")
                 )
+                conflict = "subject_key, record_id"
+                if kind in ("steps", "active-zone-minutes"):
+                    conflict = "subject_key, metric, record_id"
+                elif kind in ("sleep-stage", "sleep-wake"):
+                    conflict = "subject_key, kind, record_id"
                 # Parameter ingestion batches a day's rows into one statement.
                 connection.execute(
                     f"""INSERT INTO base.{table} ({", ".join(columns)})
                     SELECT ?, r.record_id::VARCHAR, {projection}, ?, ?, ? FROM unnest(?) incoming(r)
-                    ON CONFLICT DO UPDATE SET {updates}
+                    ON CONFLICT ({conflict}) DO UPDATE SET {updates}
                     WHERE (excluded.fetched_at, excluded.source_key) >= ({table}.fetched_at, {table}.source_key)""",
                     [snapshot.subject_key, snapshot.fetched_at, source_key, loaded_at, rows],
                 )

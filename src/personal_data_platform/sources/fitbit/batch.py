@@ -18,7 +18,7 @@ from personal_data_platform.network_diagnostics import network_phase, network_ru
 from personal_data_platform.storage.warehouse import Warehouse
 
 from .acquisition import AcquisitionRunner, acquisition_windows
-from .models import DATE_TYPES, Notification
+from .models import DATE_TYPES, Notification, Window
 from .notifications import decode_notification
 
 LOGGER = logging.getLogger(__name__)
@@ -40,8 +40,8 @@ class AcquisitionUnit:
 def group_notifications(
     messages: list[QueuedNotification], *, now: datetime
 ) -> tuple[list[AcquisitionUnit], list[QueuedNotification]]:
-    """Merge complete bounded scopes only inside one acquisition day."""
-    buckets: dict[tuple[object, ...], list[QueuedNotification]] = {}
+    """Group acquired days and merge complete bounded scopes within one day."""
+    buckets: dict[tuple[object, ...], tuple[Window, list[QueuedNotification]]] = {}
     deferred = []
     for message in messages:
         notice = message.notification
@@ -59,19 +59,23 @@ def group_notifications(
             notice.acquisition_mode,
             window.time_basis,
         )
-        if notice.acquisition_mode == "legacy" or window.data_type in DATE_TYPES:
+        if notice.acquisition_mode == "legacy":
+            for acquired in acquisition_windows(notice.windows):
+                buckets.setdefault((*key, acquired), (acquired, []))[1].append(message)
+            continue
+        if window.data_type in DATE_TYPES:
             key += (window,)
         elif window.end > day + timedelta(days=1):
             # A noncanonical scope retains its original acquisition and ACK dependency.
             key += (message.ack_id,)
         else:
             key += (day,)
-        buckets.setdefault(key, []).append(message)
+        buckets.setdefault(key, (window, []))[1].append(message)
     units = []
-    for bucket in buckets.values():
+    for acquired, bucket in buckets.values():
         first = bucket[0].notification
         if first.acquisition_mode == "legacy":
-            ranges = [(window, tuple(bucket)) for window in acquisition_windows(first.windows)]
+            ranges = [(acquired, tuple(bucket))]
         else:
             ranges = []
             for message in sorted(bucket, key=lambda m: m.notification.windows[0].start):
