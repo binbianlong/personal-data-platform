@@ -11,8 +11,39 @@ sources:
       - name: fitbit_activity_interval
       - name: fitbit_resting_heart_rate_daily
       - name: fitbit_sleep_session
+        columns:
+          - name: minutes_awake
+            description: Provider sleep summary minutes awake; short awakenings can overlap stages.
+          - name: minutes_in_sleep_period
+            description: Provider sleep period in minutes.
+          - name: minutes_to_fall_asleep
+            description: Provider latency in minutes; automatic detection can default to zero.
+          - name: minutes_after_wake_up
+            description: Provider minutes after waking; NULL when absent.
       - name: fitbit_sleep_detail
       - name: fitbit_heart_rate_minute
+      - name: fitbit_hrv_daily
+        description: Provider daily HRV; RMSSD values are milliseconds. Non-REM heart rate and entropy may also be present.
+      - name: fitbit_hrv_sample
+        description: Native HRV sample timestamps and RMSSD/SDNN milliseconds; no inferred sleep-session relationship.
+      - name: fitbit_respiratory_rate_daily
+        description: Provider daily main-sleep respiratory rate in breaths per minute.
+      - name: fitbit_respiratory_rate_sleep_summary
+        description: Native sample time and full/deep/light/REM respiratory statistics; multiple records per date are retained.
+      - name: fitbit_oxygen_saturation_daily
+        description: Provider daily percentages with confidence bounds and standard deviation; bounds are not extrema.
+      - name: fitbit_sleep_temperature_daily
+        description: Nightly and baseline skin temperatures in Celsius, plus the provider relative 30-day standard deviation.
+      - name: fitbit_exercise
+        description: Google-sources exercise sessions with physical bounds, provider start date, original type/name and optional active seconds.
+      - name: fitbit_vo2_max_daily
+        description: Provider daily VO2 max in ml/kg/min with optional estimation flag, fitness level and covariance.
+      - name: fitbit_sedentary_period
+        description: Observed physical intervals while sedentary and wearing the device; no inference for missing or off-wrist periods.
+      - name: fitbit_distance_interval
+        description: Physical intervals with distance in meters; true zero differs from missing data.
+      - name: fitbit_heart_rate_zone_interval
+        description: Physical intervals with original provider zone strings; duration is elapsed time, independent of weighted AZM.
   - name: screen_time_base
     schema: base
     tables:

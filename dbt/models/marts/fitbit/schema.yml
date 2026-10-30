@@ -19,3 +19,63 @@ models:
       - name: observed_heart_rate_minutes
         description: Count of minutes with heart rate values; missing and nonwear windows are excluded.
         data_tests: [not_null]
+
+  - name: daily_fitbit_health
+    description: Daily wearable metrics. Provider daily summaries keep their source date; physical intervals use Asia/Tokyo dates. Missing values remain NULL.
+    columns:
+      - name: activity_date
+        description: Provider date for daily summaries; Asia/Tokyo date for intervals and sleep end times.
+      - name: hrv_rmssd_ms
+        description: Provider daily average RMSSD in milliseconds; not recalculated from stored samples.
+      - name: deep_sleep_hrv_rmssd_ms
+        description: Provider daily deep-sleep RMSSD in milliseconds.
+      - name: respiratory_rate_breaths_per_minute
+        description: Provider daily respiratory rate from the main sleep, in breaths per minute.
+      - name: spo2_lower_bound_percent
+        description: Lower confidence bound of sleep oxygen saturation; not the minimum sample.
+      - name: spo2_upper_bound_percent
+        description: Upper confidence bound of sleep oxygen saturation; not the maximum sample.
+      - name: spo2_standard_deviation_percent
+        description: Provider standard deviation of daily oxygen saturation averages over the past 7-30 days.
+      - name: sleep_temperature_delta_celsius
+        description: Nightly skin temperature minus the provider baseline. May be negative; NULL without a baseline.
+      - name: vo2_max_ml_kg_min
+        description: Provider daily VO2 max in milliliters of oxygen per kilogram per minute. Missing days are not forward-filled.
+      - name: vo2_max_estimated
+        description: Provider estimation flag; NULL when absent.
+      - name: distance_meters
+        description: Observed distance in meters, prorated by elapsed time across Asia/Tokyo midnight.
+      - name: sedentary_seconds
+        description: Seconds in provider sedentary intervals while wearing the device; excludes unknown or off-wrist time.
+      - name: heart_rate_zone_light_seconds
+        description: Observed LIGHT zone seconds in this Asia/Tokyo day. NULL when no matching interval exists.
+      - name: heart_rate_zone_moderate_seconds
+        description: Observed MODERATE zone seconds, without active-zone-minute weighting.
+      - name: heart_rate_zone_vigorous_seconds
+        description: Observed VIGOROUS zone seconds, without active-zone-minute weighting.
+      - name: heart_rate_zone_peak_seconds
+        description: Observed PEAK zone seconds, without active-zone-minute weighting.
+
+  - name: fitbit_sleep_sessions
+    description: Native sleep sessions with provider summary values and Asia/Tokyo end dates.
+    columns:
+      - name: minutes_awake
+        description: Provider minutes awake during the sleep period. Do not add overlapping short awakenings.
+      - name: minutes_in_sleep_period
+        description: Provider sleep-period minutes; not reconstructed from stage intervals.
+      - name: minutes_to_fall_asleep
+        description: Provider sleep latency. Automatically detected sleep can default to zero; this does not establish measured zero latency.
+      - name: minutes_after_wake_up
+        description: Provider minutes after waking; NULL when absent.
+
+  - name: fitbit_exercise_sessions
+    description: Reconciled google-sources exercise sessions, including Google/Fitbit manual logs and Health Connect records.
+    columns:
+      - name: activity_date
+        description: Asia/Tokyo date of the physical session start. The original provider start date is source_date.
+      - name: exercise_type
+        description: Original provider exercise type, including previously unknown enum strings.
+      - name: active_duration_seconds
+        description: Provider activity duration excluding pauses; NULL when absent.
+      - name: elapsed_seconds
+        description: Physical end minus start in seconds, including pauses.
