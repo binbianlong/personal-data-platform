@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -24,10 +25,12 @@ from personal_data_platform.sources.fitbit.models import (
     WriteResult,
 )
 from personal_data_platform.sources.fitbit.motherduck import FitbitBatch, FitbitMinuteBatch
+from personal_data_platform.sources.iphone_screen_time import motherduck as iphone_screen_time
+from personal_data_platform.sources.iphone_screen_time.batch import IPhoneScreenTimeBatch
+from personal_data_platform.sources.mac_screen_time import motherduck as mac_screen_time
+from personal_data_platform.sources.mac_screen_time.batch import MacScreenTimeBatch
 from personal_data_platform.sources.owntracks import motherduck as owntracks
 from personal_data_platform.sources.owntracks.batch import OwnTracksBatch
-from personal_data_platform.sources.screen_time import motherduck as screen_time
-from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
 from personal_data_platform.storage.migrations import apply_migrations
 from personal_data_platform.storage.warehouse import (
     IngestionState as IngestionState,
@@ -201,8 +204,10 @@ class Warehouse:
         return current
 
     def _write_batch(self, raw: RawObject, batch: DecodedBatch, *, loaded_at: datetime) -> None:
-        if isinstance(batch, ScreenTimeBatch) and raw.source_id == "screen_time":
-            screen_time.write_state(self.connection, raw, batch, loaded_at=loaded_at)
+        if isinstance(batch, IPhoneScreenTimeBatch) and raw.source_id == "iphone_screen_time":
+            iphone_screen_time.write_state(self.connection, raw, batch, loaded_at=loaded_at)
+        elif isinstance(batch, MacScreenTimeBatch) and raw.source_id == "mac_screen_time":
+            mac_screen_time.write_state(self.connection, raw, batch, loaded_at=loaded_at)
         elif isinstance(batch, OwnTracksBatch) and raw.source_id == "owntracks":
             owntracks.write_batch(self.connection, raw, batch, loaded_at=loaded_at)
         else:
@@ -597,20 +602,21 @@ class Warehouse:
         if self.connection_usable:
             self.connection.interrupt()
 
-    def prune_screen_time_receipts(
-        self, live_raw: Iterable[RawObject], *, parser_version: str
+    def prune_biome_receipts(
+        self, live_raw: Iterable[RawObject], *, source_id: str, parser_version: str
     ) -> None:
-        candidates = screen_time.receipt_candidates(live_raw)
+        writer = _biome_writer(source_id)
+        candidates = writer.receipt_candidates(live_raw)
         confirmed = self.succeeded_keys_for(candidates, parser_version=parser_version)
         if not confirmed:
             return
         with self._transaction("receipt pruning"):
-            screen_time.prune_receipts(
+            writer.prune_receipts(
                 self.connection, [raw for raw in candidates if raw.key in confirmed]
             )
 
-    def current_screen_time_object_keys(self, *, stream: str) -> set[str]:
-        return screen_time.current_object_keys(self.connection, stream=stream)
+    def current_biome_object_keys(self, *, source_id: str, stream: str) -> set[str]:
+        return set(_biome_writer(source_id).current_object_keys(self.connection, stream=stream))
 
     def get_heartbeat(self, monitor_name: str) -> tuple[datetime, str] | None:
         row = self.connection.execute(
@@ -674,3 +680,11 @@ class Warehouse:
             return {"ok": True, "tested_at": datetime.now(UTC).isoformat()}
         finally:
             self.connection.execute(f"DROP TABLE IF EXISTS preflight.{table}")
+
+
+def _biome_writer(source_id: str) -> ModuleType:
+    if source_id == "iphone_screen_time":
+        return iphone_screen_time
+    if source_id == "mac_screen_time":
+        return mac_screen_time
+    raise ValueError(f"unsupported Biome source: {source_id}")

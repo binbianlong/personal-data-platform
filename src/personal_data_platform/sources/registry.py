@@ -5,30 +5,16 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .contracts import SourceAdapter
+from .iphone_screen_time.adapter import IPhoneScreenTimeSource
+from .mac_screen_time.adapter import MacScreenTimeSource
 from .owntracks.adapter import OwnTracksSource
-from .screen_time.adapter import MacAppUsageSource, ScreenTimeSource
-
-
-def _screen_time_source() -> SourceAdapter:
-    known_streams = tuple(
-        stream for source_id, stream in _SOURCE_FACTORIES if source_id == "screen_time"
-    )
-    return ScreenTimeSource(known_streams=known_streams)
-
-
-def _mac_app_usage_source() -> SourceAdapter:
-    known_streams = tuple(
-        stream for source_id, stream in _SOURCE_FACTORIES if source_id == "screen_time"
-    )
-    return MacAppUsageSource(known_streams=known_streams)
-
 
 _SOURCE_FACTORIES: dict[tuple[str, str], Callable[[], SourceAdapter]] = {
     ("owntracks", "location"): OwnTracksSource,
-    ("screen_time", "app-in-focus"): _screen_time_source,
-    ("screen_time", "app-usage"): _mac_app_usage_source,
+    ("iphone_screen_time", "app-in-focus"): IPhoneScreenTimeSource,
+    ("mac_screen_time", "app-usage"): MacScreenTimeSource,
 }
-_DEFAULT_SOURCE = ("screen_time", "app-in-focus")
+_DEFAULT_SOURCE = ("iphone_screen_time", "app-in-focus")
 
 
 def source_ids() -> tuple[str, ...]:
@@ -80,5 +66,5 @@ def get_dbt_selector(source_id: str | None, stream: str | None) -> str:
     if source_id == "fitbit":
         if stream not in (None, "health"):
             raise ValueError(f"unsupported stream for source 'fitbit': {stream}")
-        return "tag:fitbit tag:screen_time"
+        return "tag:fitbit"
     return get_source(source_id, stream).dbt_selector

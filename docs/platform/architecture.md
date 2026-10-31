@@ -3,7 +3,8 @@
 Screen TimeはMac、OwnTracksはGCP `us-west1`でRawを保存し、FitbitはAPIから直接取り込む。分析履歴はMotherDuck `us-west-2`へ保存する。
 
 ```text
-Screen Time Collector -> SQLite Raw -> Loader -> MotherDuck -> stream heartbeat
+iPhone Screen Time Collector -> 専用SQLite Raw -> Loader -> MotherDuck -> source heartbeat
+Mac Screen Time Collector -> 専用SQLite Raw -> Loader -> MotherDuck -> source heartbeat
 OwnTracks -> receiver -> GCS Raw -> Pub/Sub push -> 非公開worker -> Loader -> MotherDuck
 Google Health Webhook -> receiver -> Pub/Sub queue -> 毎時workerがpull
   -> API完全取得 -> MotherDuckへ直接書込 -> DB commit後ACK
@@ -14,8 +15,8 @@ MotherDuck base -> dbt View -> read-only share / Remote MCP
 
 | source / stream | 取得元 | Raw・復旧元 |
 |---|---|---|
-| `screen_time / app-in-focus` | Macへ同期されたiPhoneのApp.InFocus | SEGBをMacのSQLiteへ保存 |
-| `screen_time / app-usage` | Mac自身のScreenTime.AppUsage | SEGBをMacのSQLiteへ保存 |
+| `iphone_screen_time / app-in-focus` | Macへ同期されたiPhoneのApp.InFocus | SEGBをMacのSQLiteへ保存 |
+| `mac_screen_time / app-usage` | Mac自身のScreenTime.AppUsage | SEGBをMacのSQLiteへ保存 |
 | `fitbit / health` | Google Health API | アプリ側データをAPIで再取得。PDP内のRaw保存なし |
 | `owntracks / location` | iPhone OwnTracks HTTP | 正規化JSON gzipをGCSへ保存 |
 
@@ -37,6 +38,11 @@ FitbitはRaw adapterへ登録せず、API取得したsnapshotをWarehouseの操�
 Raw schema版とparser versionは別で、parser versionを更新すると保持中の旧parser成功分も再解析する。
 共通処理は他sourceへCollectorのscan記録を要求せず、未知のsource/streamを既存decoderへ流すfallbackを設けない。
 
+iPhone・Macのsourceはそれぞれ設定、取得、decoder、Adapter、writer、CLIとLaunchAgentを所有する。
+`biome/`はSEGB、Raw v2 envelope、疑似化、SQLite archive、収集engineなどsource名を判断しない共通処理を持つ。
+相互sourceへの依存はなく、一方のscan・取込・監査・heartbeat失敗は他方の状態を変更しない。
+書込は他sourceと同じ`loader` leaseで直列化する。横断分析はトップレベルの`dbt/models/cross_source/`へ置く。
+
 ## Rawと保持期限
 
 - Rawはcreate-onlyの決定的gzip。展開後bytesのSHA-256と観測時刻をkeyへ含め、同じkeyのretryには同じbytesを使う。
@@ -46,7 +52,8 @@ Raw schema版とparser versionは別で、parser versionを更新すると保持
 - OwnTracksの位置RawはGCSに無期限保存する。
 
 MotherDuckはRaw整理後も分析履歴を保持し、OwnTracks以外の全期間のDB復元をRawだけで保証しない。
-key・payload・重複排除条件は[Screen Time](../sources/screen-time/data-model.md)、
+key・payload・重複排除条件は[iPhone Screen Time](../sources/iphone-screen-time/data-model.md)、
+[Mac Screen Time](../sources/mac-screen-time/data-model.md)、
 [Fitbit](../sources/fitbit/data-model.md)、[OwnTracks](../sources/owntracks/data-model.md)のデータモデルを参照する。
 
 ## Loaderと永続化

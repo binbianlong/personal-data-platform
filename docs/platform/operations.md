@@ -76,11 +76,11 @@ OwnTracksのGCS保存完了通知はPub/Subから非公開workerへpushし、DB 
 1. Fitbit APIから16種別のTokyo直近2完了日（計32取得単位）を再照合する。
 2. dbt run/testを実行する。
 3. OwnTracksの無期限Rawと台帳を照合し、未取込分を補修する。
-4. Macが更新したScreen Time両streamの取込成功heartbeatを48時間の鮮度とDB relationで監査する。
+4. Macが更新したiPhone・Mac Screen Time両sourceの取込成功heartbeatを48時間の鮮度とDB relationで監査する。
 5. 完了対象日と照合結果を`ops.job_run`へcommitする。
 6. Healthchecksへ外部成功pingを1回送る。
 
-Screen Timeの収集・保存・取り込みはMacのCollectorが30分周期で実行する。日次Jobはstream heartbeatを更新しない。
+Screen Timeの収集・保存・取り込みはMacの独立した2つのCollectorがそれぞれ30分周期で実行する。日次Jobはsource heartbeatを更新しない。
 日次成功時に`ops.job_run`の7日を超えた履歴を整理する。
 欠測判定に使う最新の日次成功記録は7日を超えても保持する。
 
@@ -107,13 +107,13 @@ gcloud logging read 'resource.type="cloud_run_job"' --project=<project-id> \
 ## Rebuild
 
 本番DBを空にせず、保存中のRawを別の空scratch DBへ再生する。Screen TimeはMacのSQLiteを読むため、
-Collectorを停止してからinventoryを取得し、再生完了後に再開する。Screen TimeにGCS設定・ADCは不要である。
+対象sourceのCollectorを停止してからinventoryを取得し、再生完了後に再開する。Screen TimeにGCS設定・ADCは不要である。
 
 FitbitはRawを持たない。別のscratch DBへ`pdp fitbit sync --from ... --to ...`で再取得し、
 `pdp dbt --source fitbit`と本番との比較で復旧を検証する。Screen TimeのRaw再生は次の手順で行う。
 
-1. `pdp rebuild --source screen_time --all-streams --dry-run`で保持範囲とinventoryを確認する。
-2. writer tokenを安全なsecret sourceから`MOTHERDUCK_TOKEN`へ渡し、`pdp rebuild --source screen_time --all-streams --target-db <scratch-db> --allow-partial-history`を実行する。
+1. `pdp rebuild --source iphone_screen_time --stream app-in-focus --dry-run`（Macは`--source mac_screen_time --stream app-usage`）で保持範囲とinventoryを確認する。
+2. writer tokenを安全なsecret sourceから`MOTHERDUCK_TOKEN`へ渡し、`pdp rebuild --source iphone_screen_time --stream app-in-focus --target-db <scratch-db> --allow-partial-history`（Macは別の空scratch DBへ`--source mac_screen_time --stream app-usage`）を実行する。
 3. 固定inventoryから再生し、dbt検証後に本番と件数・key・代表martを比較する。途中で対象Rawが消えた場合は失敗させる。
 4. 差分確認後に参照先を切り替える。本番と同じDB、既存tableのあるDB、partial history未承認の再構築は拒否する。
 
@@ -150,7 +150,7 @@ Cloud Monitoringの`run.googleapis.com/container/network/sent_bytes_count`（`ki
 | 日次処理 | `ops.job_run`の最新日次行の`status`・`details.failed_stage` | 失敗段階のログを確認し、原因解消後に日次Jobを再実行する |
 | Fitbitの通常取込 | `fitbit_batch`ログの`failed`・`deferred`・`acked`とPub/Sub滞留 | 未ACKは次回バッチで再試行する。7日の保持期限を越えた欠測は期間指定同期する |
 | OwnTracks・Screen TimeのRaw取込 | `ops.ingestion_metadata`の失敗行 | Rawを残して原因を修正し、Loaderを再実行する |
-| Macの収集停止 | `ops.heartbeat`のScreen Time両streamの成功時刻 | MacのCollectorを確認する。日次Jobの成功でMacの成功時刻は更新されない |
+| Macの収集停止 | `ops.heartbeat`のiPhone・Mac Screen Time両sourceの成功時刻 | MacのCollectorを確認する。日次Jobの成功でMacの成功時刻は更新されない |
 
 日次の照合結果は同じ行の`details.owntracks`、古いFitbit欠測は`details.manual_repair_required`に含む。
 LoaderはRaw単位の台帳とログを使い、別のジョブ履歴は作らない。
@@ -173,3 +173,59 @@ Fitbitバッチ・OwnTracksのpush配信・日次Schedulerを止め、実行中w
 
 Screen TimeのDB復元はイベント・補助状態・台帳を同じ時点へ戻す。Rawは各元ファイルの最新版だけを保存するため、
 更新前の再解析やRawだけからの全履歴復元を保証しない。復元元のDB・backupは検証が終わるまで保持する。
+
+
+## Screen Timeの分割切替
+
+旧`screen_time`を`iphone_screen_time`と`mac_screen_time`へ分けると、SQLite、Raw prefix、
+ops/base relation、日次mart、heartbeatとLaunchAgentがsource別になる。旧入口の互換aliasはない。
+分割前の全分析履歴はMotherDuckのforward migrationで引き継ぎ、Rawだけから再構築しない。
+
+### 停止と退避
+
+1. editable installが参照するlive checkoutを変更する前に、旧LaunchAgent `com.personal-data-platform.screen-time-collector`を`launchctl bootout`で停止する。手動Collector・Loaderも停止する。
+2. [Deploy](#deploy)の既存Terraform設定で`schedulers_enabled=false`を反映し、Fitbitバッチ、OwnTracks push、日次Schedulerを停止する。実行中worker/Jobの終了と`ops.job_lock`の`loader` leaseがidleであることを確認する。
+3. 旧SQLiteをSQLite backup APIまたは`sqlite3 <旧DB> '.backup <退避DB>'`で別pathへ退避し、`PRAGMA integrity_check`を確認する。`collector.db`だけを稼働中に単純copyしない。旧control tableも含むDB全体を保持する。
+4. MotherDuckの本番DBをprivate cloneとして退避し、復元可能な接続先を控える。共有済み分析接続へcloneを公開しない。cloneから別のscratch DBを作り、forward migrationとdbtをリハーサルする。
+5. 退避SQLiteのcopyを入力に下記ツールをscratch pathへ適用し、両sourceのRaw inventory、payload、採番上限、scan、pending、取込台帳を照合する。MotherDuckでは有効・無効の全イベント履歴と代表martの値を分割前後で比較する。
+
+### SQLiteの一度限りの移行
+
+```bash
+python3 scripts/migrate_screen_time_sources.py
+python3 scripts/migrate_screen_time_sources.py --apply
+```
+
+既定入力は`~/Library/Application Support/personal-data-platform/collector.db`。
+既定出力はその配下ではなく、同じ親directoryの`iphone_screen_time/collector.db`と`mac_screen_time/collector.db`。
+別pathを使う場合は`--source-db`、`--iphone-db`、`--mac-db`を明示する。
+`--apply`なしは検証とJSON件数表示だけで、出力directory・DBを作らない。
+
+元DBは読み取り専用で開き、`app-in-focus`と`app-usage`を別DBへコピーする。
+`object_key`の`raw/screen_time/v2/`だけを各source prefixへ変更し、id、gzip bytes、hash、status、
+全timestamp、storage generation、scan row、元の`sqlite_sequence`上限を維持する。
+現行runtimeの2 table以外の既知の旧control tableはJSONの`excluded_legacy_tables`へ表示し、元DBに残す。
+未知schema・stream・prefix・key不整合・出力衝突は拒否する。
+
+両方の一時DBがintegrity checkと全値比較を通った後、各fileをatomic renameで公開する。
+2 file同時のatomic切替ではないため、両方の成功を確認するまでCollectorを起動しない。
+中断時は同じ入力・出力で再実行する。期待値と完全一致する既存出力は再利用し、異なる出力は上書きしない。
+元DBは変更・削除しない。移行後に新しい書込が始まったDBへこのツールを再適用しない。
+
+### 適用と再開
+
+1. 停止状態で本番MotherDuckへ`pdp migrate`を適用する。SQLは旧sourceのイベント・補助状態・台帳・heartbeatを移し、旧relationを除去する。SQLite移行も完了させ、元DBとprivate cloneは保持する。
+2. 全Cloud Run runtimeを新スキーマ対応imageへ更新し、Macのcheckoutと依存も更新する。新DDLを認識しない旧imageは起動しない。cloudは停止設定を維持する。
+3. 旧Keychainの疑似化secretを変更せず、両sourceの専用accountへ複製する。MotherDuck tokenも各専用accountへ設定する。旧環境変数を各sourceの設定へ置き換え、2つのLaunchAgentを生成する。[iPhone運用](../sources/iphone-screen-time/operations.md)・[Mac運用](../sources/mac-screen-time/operations.md)の`doctor`を各々実行する。
+4. `pdp iphone-screen-time collect --once`と`pdp mac-screen-time collect --once`を別々に実行する。各sourceのpending、台帳、直接監査結果、専用heartbeatを確認する。続いて各`collect --watch`をLaunchAgentで起動し、旧Agentは再起動しない。
+5. cloud停止中に`pdp dbt --source iphone_screen_time`、`pdp dbt --source mac_screen_time`と全体の`pdp dbt`を実行し、source単独・横断モデルを検証する。直接のsource監査とread-only queryで件数・key・mart・他sourceへの状態混入がないことを確認する。
+6. Terraformで`schedulers_enabled=true`へ戻す。再開後に日次Jobを一度実行し、Fitbit補修、dbt、OwnTracks照合、両source監査、成功pingの全段階を確認する。停止設定中はFitbit補修がdeferするため、日次全体の成功確認には使わない。
+
+### 復旧
+
+新しい書込が一度もない場合だけ、全処理を停止したままMotherDuck private cloneと旧SQLiteを同じ退避時点へ戻し、
+そのスキーマに対応した旧image・checkout・旧Agent設定をそろえてから再開する。分析接続も復元先との対応を確認する。
+
+切替後に新しいRaw・イベント・Fitbit・OwnTracksの書込が一度でもあれば、DBの単純巻戻しは行わない。
+先に両SQLiteとMotherDuckを追加退避し、退避以後のdeltaを保持して原因を修正し、forward migration・再取込で補修する。
+修復・比較が完了するまで旧DBとcloneを削除しない。

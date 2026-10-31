@@ -27,7 +27,7 @@ def test_fitbit_dbt_selector_does_not_require_a_raw_adapter(monkeypatch, stream)
     monkeypatch.setattr(dbt_runner, "run_dbt", lambda **kwargs: calls.append(kwargs))
     try:
         assert dbt_runner.run_dbt_from_env(source_id="fitbit", stream=stream) == 0
-        assert calls[0]["selector"] == "tag:fitbit tag:screen_time"
+        assert calls[0]["selector"] == "tag:fitbit"
     finally:
         warehouse.connection.close()
 
@@ -120,10 +120,10 @@ def test_dbt_rejects_missing_production_token_before_invocation(monkeypatch) -> 
 def test_selected_dbt_models_and_tests_use_the_same_scope(monkeypatch):
     calls = []
     monkeypatch.setattr(dbt_runner, "_invoke", calls.append)
-    dbt_runner.run_dbt(target="local", selector="tag:screen_time_app_in_focus")
+    dbt_runner.run_dbt(target="local", selector="tag:iphone_screen_time_app_in_focus")
     assert [arguments[0] for arguments in calls] == ["run", "test"]
     assert all(
-        arguments[-2:] == ["--select", "tag:screen_time_app_in_focus"] for arguments in calls
+        arguments[-2:] == ["--select", "tag:iphone_screen_time_app_in_focus"] for arguments in calls
     )
 
 

@@ -72,7 +72,8 @@ jobs:
           # Help paths validate the shared container entrypoint without requiring
           # local Biome data or production credentials.
           docker run --rm personal-data-platform:ci --help
-          docker run --rm personal-data-platform:ci screen-time --help
+          docker run --rm personal-data-platform:ci iphone-screen-time --help
+          docker run --rm personal-data-platform:ci mac-screen-time --help
           docker run --rm personal-data-platform:ci loader --help
           docker run --rm personal-data-platform:ci dbt --help
           docker run --rm personal-data-platform:ci reconciliation --help

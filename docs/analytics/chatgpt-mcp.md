@@ -40,7 +40,7 @@ MotherDuck側の認証と権限は[Remote MCP接続仕様](https://motherduck.co
 
 ```text
 成功すること:
-- catalogからpersonal_data_platformとmarts.daily_screen_timeを発見できる
+- catalogからpersonal_data_platformとmarts.daily_iphone_screen_time / marts.daily_mac_screen_timeを発見できる
 - SELECTで日次利用秒数を取得できる
 
 拒否されること:

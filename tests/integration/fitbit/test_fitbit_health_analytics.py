@@ -87,7 +87,7 @@ def test_daily_and_session_views_keep_native_values_and_day_boundaries(
     apply(warehouse, snapshot("exercise", points=[travel], day=DAY - timedelta(days=1)))
     warehouse.close()
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
-    run_dbt(target="local", project_dir=dbt_project, selector="tag:fitbit tag:screen_time")
+    run_dbt(target="local", project_dir=dbt_project, selector="tag:fitbit")
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
         assert warehouse.query_rows(

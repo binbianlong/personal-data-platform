@@ -15,15 +15,17 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--database", help="local .duckdb or .db file; defaults to MotherDuck")
 
     from personal_data_platform.sources.fitbit.cli import configure as configure_fitbit
+    from personal_data_platform.sources.iphone_screen_time.cli import configure as configure_iphone
+    from personal_data_platform.sources.mac_screen_time.cli import configure as configure_mac
     from personal_data_platform.sources.owntracks.cli import configure as configure_owntracks
-    from personal_data_platform.sources.screen_time.cli import configure as configure_screen_time
 
     configure_fitbit(
         commands.add_parser("fitbit", help="receive and synchronize Fitbit health data")
     )
     configure_owntracks(commands.add_parser("owntracks", help="receive OwnTracks locations"))
 
-    configure_screen_time(commands.add_parser("screen-time", help="inspect or collect Screen Time"))
+    configure_iphone(commands.add_parser("iphone-screen-time", help="collect iPhone Screen Time"))
+    configure_mac(commands.add_parser("mac-screen-time", help="collect Mac Screen Time"))
 
     loader = commands.add_parser("loader", help="load saved Raw into MotherDuck")
     dbt = commands.add_parser("dbt", help="apply analytics models")
@@ -86,8 +88,12 @@ def _dispatch(args: argparse.Namespace) -> int:
         from personal_data_platform.sources.fitbit.cli import run
 
         return run(args)
-    if args.command == "screen-time":
-        from personal_data_platform.sources.screen_time.cli import run
+    if args.command == "iphone-screen-time":
+        from personal_data_platform.sources.iphone_screen_time.cli import run
+
+        return run(args)
+    if args.command == "mac-screen-time":
+        from personal_data_platform.sources.mac_screen_time.cli import run
 
         return run(args)
     if args.command == "owntracks":

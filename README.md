@@ -1,6 +1,6 @@
 # Personal Data Platform
 
-Screen Time・OwnTracks・Fitbitの行動・健康データを収集し、MotherDuckで分析する個人データ基盤。
+iPhone Screen Time・Mac Screen Time・OwnTracks・Fitbitの行動・健康データを収集し、MotherDuckで分析する個人データ基盤。
 構成・各ソースの仕様・運用手順は[ドキュメント](docs/README.md)を参照する。
 
 ## 開発環境

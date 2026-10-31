@@ -11,7 +11,7 @@ stateはruntimeと別の`personal-data-platform/motherduck` prefixへ保存す�
 
 ```bash
 export MOTHERDUCK_TOKEN="$(security find-generic-password \
-  -s personal-data-platform -a screen-time-motherduck-token -w)"
+  -s personal-data-platform -a iphone-screen-time-motherduck-token -w)"
 terraform -chdir=infra/motherduck init -input=false -lockfile=readonly \
   -backend-config="bucket=health-data-pipeline-503813-personal-data-platform-tfstate-west"
 ```

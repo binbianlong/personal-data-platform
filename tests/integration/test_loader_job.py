@@ -15,7 +15,7 @@ from personal_data_platform.loader.job import (
     run_loader_from_env,
 )
 from personal_data_platform.raw.models import RawObject
-from personal_data_platform.sources.screen_time.raw import (
+from personal_data_platform.sources.iphone_screen_time.raw import (
     ScreenTimeRawIdentity,
     encode_segment_envelope,
     parse_raw_object_key,
@@ -45,13 +45,14 @@ def test_all_streams_loader_holds_one_lease_and_processes_both(tmp_path, monkeyp
     phone = _raw("phone", b"phone", now)
     mac = replace(
         _raw("mac", b"mac", now),
-        key="raw/screen_time/v2/"
+        key="raw/mac_screen_time/v2/"
         + "b" * 64
         + "/app-usage/"
         + "c" * 64
         + "/20260827T000000000000Z/"
         + hashlib.sha256(encode_segment_envelope(b"mac")).hexdigest()
         + ".segb.gz",
+        source_id="mac_screen_time",
         stream="app-usage",
         subject_key="b" * 64,
         logical_key="c" * 64,
@@ -78,12 +79,16 @@ def test_all_streams_loader_holds_one_lease_and_processes_both(tmp_path, monkeyp
         ),
     }
     monkeypatch.setattr(
-        "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",
+        "personal_data_platform.sources.iphone_screen_time.adapter.parse_segb_bytes",
+        lambda raw, segment, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "personal_data_platform.sources.mac_screen_time.adapter.parse_segb_bytes",
         lambda raw, segment, **kwargs: [],
     )
     try:
         sources = tuple(
-            get_source("screen_time", stream) for stream in ("app-in-focus", "app-usage")
+            get_source(source_id) for source_id in ("iphone_screen_time", "mac_screen_time")
         )
         summary = run_loader_all(
             sources,
@@ -109,13 +114,14 @@ def test_all_streams_loader_attempts_mac_after_iphone_inventory_failure(
     mac_content = b"mac"
     mac = replace(
         _raw("mac", mac_content, now),
-        key="raw/screen_time/v2/"
+        key="raw/mac_screen_time/v2/"
         + "b" * 64
         + "/app-usage/"
         + "c" * 64
         + "/20260827T000000000000Z/"
         + hashlib.sha256(encode_segment_envelope(mac_content)).hexdigest()
         + ".segb.gz",
+        source_id="mac_screen_time",
         stream="app-usage",
         subject_key="b" * 64,
         logical_key="c" * 64,
@@ -128,10 +134,16 @@ def test_all_streams_loader_attempts_mac_after_iphone_inventory_failure(
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "failure.duckdb"))))
     warehouse.migrate()
     monkeypatch.setattr(
-        "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",
+        "personal_data_platform.sources.iphone_screen_time.adapter.parse_segb_bytes",
         lambda raw, segment, **kwargs: [],
     )
-    sources = tuple(get_source("screen_time", stream) for stream in ("app-in-focus", "app-usage"))
+    monkeypatch.setattr(
+        "personal_data_platform.sources.mac_screen_time.adapter.parse_segb_bytes",
+        lambda raw, segment, **kwargs: [],
+    )
+    sources = tuple(
+        get_source(source_id) for source_id in ("iphone_screen_time", "mac_screen_time")
+    )
     repositories = {
         "app-in-focus": FailedRepository(),
         "app-usage": _Repository(
@@ -146,7 +158,7 @@ def test_all_streams_loader_attempts_mac_after_iphone_inventory_failure(
             repository_factory=lambda source: repositories[source.stream],
         )
         assert summary.failed == 1 and summary.succeeded == 1
-        assert warehouse.ingestion_counts(source_id="screen_time", stream="app-usage") == {
+        assert warehouse.ingestion_counts(source_id="mac_screen_time", stream="app-usage") == {
             "succeeded": 1
         }
     finally:
@@ -158,7 +170,7 @@ def test_scheduled_loader_skips_when_another_run_holds_the_lease(tmp_path, monke
     monkeypatch.setattr(
         "personal_data_platform.loader.job.get_source",
         lambda source_id, stream: SimpleNamespace(
-            source_id="screen_time",
+            source_id="iphone_screen_time",
             stream="app-in-focus",
             repository_from_env=lambda: _Repository([], {}),
         ),
@@ -173,7 +185,7 @@ def test_scheduled_loader_skips_when_another_run_holds_the_lease(tmp_path, monke
         lambda *args, **kwargs: (_ for _ in ()).throw(JobAlreadyRunning("busy")),
     )
 
-    assert run_loader_from_env(source_id="screen_time", stream="app-in-focus") == 0
+    assert run_loader_from_env(source_id="iphone_screen_time", stream="app-in-focus") == 0
 
 
 def _raw(
@@ -211,7 +223,7 @@ def test_loader_continues_after_poison_object_and_retries_it(tmp_path, monkeypat
         },
     )
     monkeypatch.setattr(
-        "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",
+        "personal_data_platform.sources.iphone_screen_time.adapter.parse_segb_bytes",
         lambda raw, segment, **kwargs: [],
     )
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "loader.duckdb"))))
@@ -222,7 +234,9 @@ def test_loader_continues_after_poison_object_and_retries_it(tmp_path, monkeypat
         assert first.succeeded == 1
         assert first.failed == 1
         assert not first.ok
-        assert warehouse.ingestion_counts(source_id="screen_time", stream="app-in-focus") == {
+        assert warehouse.ingestion_counts(
+            source_id="iphone_screen_time", stream="app-in-focus"
+        ) == {
             "failed": 1,
             "succeeded": 1,
         }
@@ -234,9 +248,9 @@ def test_loader_continues_after_poison_object_and_retries_it(tmp_path, monkeypat
         assert second.succeeded == 1
         assert second.failed == 0
         assert second.ok
-        assert warehouse.ingestion_counts(source_id="screen_time", stream="app-in-focus") == {
-            "succeeded": 2
-        }
+        assert warehouse.ingestion_counts(
+            source_id="iphone_screen_time", stream="app-in-focus"
+        ) == {"succeeded": 2}
     finally:
         warehouse.close()
 
@@ -250,7 +264,7 @@ def test_loader_revalidates_a_recreated_object_generation(tmp_path, monkeypatch)
         {original.key: gzip.compress(encode_segment_envelope(content))},
     )
     monkeypatch.setattr(
-        "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",
+        "personal_data_platform.sources.iphone_screen_time.adapter.parse_segb_bytes",
         lambda raw, segment, **kwargs: [],
     )
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "loader.duckdb"))))
@@ -478,13 +492,13 @@ def test_loader_uses_source_decoder_across_schema_versions_and_preserves_other_s
             {phone.key: gzip.compress(encode_segment_envelope(phone_content))},
         )
         monkeypatch.setattr(
-            "personal_data_platform.sources.screen_time.adapter.parse_segb_bytes",
+            "personal_data_platform.sources.iphone_screen_time.adapter.parse_segb_bytes",
             lambda raw, payload, **kwargs: [],
         )
         assert run_loader(phone_repository, warehouse).succeeded == 1
-        assert warehouse.ingestion_counts(source_id="screen_time", stream="app-in-focus") == {
-            "succeeded": 1
-        }
+        assert warehouse.ingestion_counts(
+            source_id="iphone_screen_time", stream="app-in-focus"
+        ) == {"succeeded": 1}
         assert warehouse.ingestion_counts(source_id="synthetic", stream="activity") == {
             "succeeded": 2
         }

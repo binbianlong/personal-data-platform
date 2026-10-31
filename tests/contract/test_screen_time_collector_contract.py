@@ -4,16 +4,18 @@ from datetime import UTC, datetime
 
 import pytest
 
-from personal_data_platform.sources.registry import get_source
-from personal_data_platform.sources.screen_time.collector import (
+from personal_data_platform.biome.collector import CollectorSourceError, ScreenTimeCollector
+from personal_data_platform.biome.collector_state import CollectorState
+from personal_data_platform.sources.iphone_screen_time.collector import (
     BiomeScreenTimeSource,
-    CollectorSourceError,
-    ScreenTimeCollector,
 )
-from personal_data_platform.sources.screen_time.collector_state import CollectorState
-from personal_data_platform.sources.screen_time.raw import build_device_key, decode_segment_envelope
-from personal_data_platform.sources.screen_time.runtime import load_pending
-from personal_data_platform.sources.screen_time.storage import ScreenTimeLocalRepository
+from personal_data_platform.sources.iphone_screen_time.raw import (
+    build_device_key,
+    decode_segment_envelope,
+)
+from personal_data_platform.sources.iphone_screen_time.runtime import load_pending
+from personal_data_platform.sources.iphone_screen_time.storage import LocalRepository
+from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.motherduck import (
     Warehouse,
     WarehouseConfig,
@@ -38,8 +40,8 @@ def _collector(tmp_path):
         )
     remote = tmp_path / "remote" / "phone"
     remote.mkdir(parents=True)
-    state = CollectorState(tmp_path / "collector.db")
-    repo = ScreenTimeLocalRepository(state=state, source=get_source())
+    state = CollectorState(tmp_path / "collector.db", source_id="iphone_screen_time")
+    repo = LocalRepository(state=state, source=get_source())
     collector = ScreenTimeCollector(
         source=BiomeScreenTimeSource(sync_db_path=sync, remote_dir=remote.parent),
         state=state,
@@ -62,11 +64,11 @@ def test_a_b_a_and_unchanged_snapshot_are_durable_and_idempotent(tmp_path):
             keys.append(state.pending()[0].identity.object_key)
             load_pending(state, wh, now=NOW)
             assert state.pending() == []
-            assert len(list(repo.list_raw("raw/screen_time/v2/"))) == 1
+            assert len(list(repo.list_raw("raw/iphone_screen_time/v2/"))) == 1
         assert len(set(keys)) == 3
         assert collector.collect_once().skipped == 1
         assert state.pending() == []
-        assert wh.query_value("SELECT count(*) FROM base.screen_time_event") == 2
+        assert wh.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 2
     finally:
         wh.close()
 
@@ -187,7 +189,7 @@ def test_liveness_and_lease_release_are_atomic(tmp_path, failure):
     wh = Warehouse(connect(config))
     try:
         assert wh.query_value("SELECT count(*) FROM ops.heartbeat") == (
-            2 if failure == "commit_after" else 0
+            1 if failure == "commit_after" else 0
         )
         assert wh.query_value("SELECT count(*) FROM ops.job_lock") == (
             1 if failure == "commit_before" else 0
@@ -220,11 +222,11 @@ def test_invalid_snapshot_does_not_replace_valid_raw_or_advance_scan(tmp_path, b
     collector, state, repo, remote = _collector(tmp_path)
     (remote / "100").write_bytes(segb(event("valid"))[0])
     collector.collect_once()
-    previous = state.last_successful_scan()
+    previous = state.last_successful_scan(stream="app-in-focus")
     original = state.pending()[0]
     (remote / "100").write_bytes(body)
     assert collector.collect_once().deferred == 1
-    assert state.last_successful_scan() == previous
+    assert state.last_successful_scan(stream="app-in-focus") == previous
     assert len(state.pending()) == 1
     assert repo.get_raw(original.identity.object_key, generation=1) == original.compressed_payload
 
@@ -252,4 +254,4 @@ def test_non_numeric_segment_is_a_scan_failure(tmp_path):
     (remote / "unknown").write_bytes(segb(event("a"))[0])
     with pytest.raises(CollectorSourceError, match="non-numeric"):
         collector.collect_once()
-    assert state.last_successful_scan() is None
+    assert state.last_successful_scan(stream="app-in-focus") is None

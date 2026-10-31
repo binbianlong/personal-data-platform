@@ -5,14 +5,14 @@ import struct
 import zlib
 from datetime import UTC, datetime, timedelta
 
+from personal_data_platform.biome.models import ParsedScreenTimeRecord
 from personal_data_platform.raw.models import RawObject
-from personal_data_platform.sources.screen_time.models import ParsedScreenTimeRecord
-from personal_data_platform.sources.screen_time.raw import (
-    ScreenTimeRawIdentity,
+from personal_data_platform.sources.iphone_screen_time import raw as phone_raw
+from personal_data_platform.sources.iphone_screen_time.raw import (
     encode_segment_envelope,
-    parse_raw_object_key,
     sha256_hex,
 )
+from personal_data_platform.sources.mac_screen_time import raw as mac_raw
 
 NOW = datetime(2026, 9, 13, tzinfo=UTC)
 
@@ -93,14 +93,15 @@ class Repository:
         stream="app-in-focus",
     ):
         value = encode_segment_envelope(segment, kind=kind)
-        identity = ScreenTimeRawIdentity(
+        codec = mac_raw if stream == "app-usage" else phone_raw
+        identity = codec.ScreenTimeRawIdentity(
             device_key=device,
             stream=stream,
             segment_key=logical or sha256_hex((kind + name).encode()),
             observed_at=NOW + timedelta(seconds=len(self.objects)),
             sha256=sha256_hex(value),
         )
-        raw = parse_raw_object_key(
+        raw = codec.parse_raw_object_key(
             identity.object_key, storage_created_at=NOW, storage_generation=1
         )
         self.objects[raw.key] = raw, gzip.compress(value, mtime=0)
@@ -120,11 +121,11 @@ def _raw(
     storage_generation: int = 1,
 ) -> RawObject:
     return RawObject(
-        key="raw/screen_time/v2/device/App.InFocus/segment/2026-08-27T00:00:00Z/hash.segb.gz",
-        source_id="screen_time",
+        key="raw/iphone_screen_time/v2/device/app-in-focus/segment/2026-08-27T00:00:00Z/hash.segb.gz",
+        source_id="iphone_screen_time",
         schema_version=2,
         subject_key="device",
-        stream="App.InFocus",
+        stream="app-in-focus",
         logical_key="segment",
         observed_at=datetime(2026, 8, 27, tzinfo=UTC),
         sha256="a" * 64,

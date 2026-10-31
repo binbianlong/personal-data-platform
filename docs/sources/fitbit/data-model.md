@@ -73,6 +73,6 @@ zoneは`LIGHT`・`MODERATE`・`VIGOROUS`・`PEAK`の列へ集計し、該当区�
 提供元日付とTokyo日付は旅行時などに異なり得る。睡眠・運動の元日付は別列に残す。
 欠測を0へ変換しない。睡眠時間に段階と短い覚醒を加算せず、AZMへの追加重み付けもしない。
 
-`fitbit_sleep_screen_time`は睡眠開始前2時間のScreen Timeを端末別に返す。
+`fitbit_sleep_iphone_screen_time`と`fitbit_sleep_mac_screen_time`は睡眠開始前2時間のScreen Timeを端末別に返す。
 completeと次の開始から終了を推定した区間を窓内で切り詰め、端末内の重複を統合する。
 対象区間がない端末は行を作らず、端末横断で合算しない。同一個人の端末を前提とし、複数人のデータを混在させない。

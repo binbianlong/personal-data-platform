@@ -7,6 +7,10 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from personal_data_platform.biome.audit import (
+    audit_collector_heartbeat,
+    filter_ingestion_states,
+)
 from personal_data_platform.loader.deadline import interrupt_after
 from personal_data_platform.loader.job import (
     LOADER_LEASE_SECONDS,
@@ -21,11 +25,7 @@ from personal_data_platform.sources.contracts import (
     selected_prefixes,
     validate_runtime_policy,
 )
-from personal_data_platform.sources.registry import get_source, get_sources
-from personal_data_platform.sources.screen_time.audit import (
-    audit_collector_heartbeat,
-    filter_ingestion_states,
-)
+from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.factory import WarehouseConfig, open_warehouse
 from personal_data_platform.storage.warehouse import IngestionState, Warehouse
 
@@ -130,8 +130,10 @@ def run_reconciliation(
         raw_keys = set(raw_by_key)
         states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
 
-    if source.source_id == "screen_time":
-        states = filter_ingestion_states(warehouse, states, raw_keys=raw_keys, stream=source.stream)
+    if source.source_id in ("iphone_screen_time", "mac_screen_time"):
+        states = filter_ingestion_states(
+            warehouse, states, raw_keys=raw_keys, source_id=source.source_id, stream=source.stream
+        )
     checked_at = started_at if now is not None else datetime.now(UTC)
     succeeded_keys = warehouse.succeeded_keys_for(raw_refs, parser_version=parser_version)
     failed_keys = _active_status_keys(states, "failed")
@@ -208,7 +210,7 @@ def _run_daily_reconciliation() -> int:
 
     configure_logging("personal_data_platform.reconciliation")
     urls = daily_heartbeat_urls()
-    sources = get_sources("screen_time", all_streams=True)
+    sources = (get_source("iphone_screen_time"), get_source("mac_screen_time"))
     for source in sources:
         validate_runtime_policy(source)
     owntracks = get_source("owntracks")
@@ -282,9 +284,9 @@ def _run_daily_reconciliation() -> int:
             LOGGER.error("OwnTracks Raw reconciliation failed")
             return 1
         for source in sources:
-            stage = "audit:" + source.stream
+            stage = "audit:" + source.source_id
             remaining()
-            with network_phase("daily_screen_time"):
+            with network_phase("daily_" + source.source_id):
                 health = audit_collector_heartbeat(warehouse, source, datetime.now(UTC))
                 relations = _relation_names(warehouse)
                 missing_relations = sorted(set(source.required_relations) - relations)
@@ -295,12 +297,13 @@ def _run_daily_reconciliation() -> int:
                 )
                 if not health.ok or missing_relations or failed_queries:
                     LOGGER.error(
-                        "Screen Time audit failed: %s",
-                        source.stream,
+                        "Collector audit failed: %s",
+                        source.source_id,
                         extra={
-                            "event": "screen_time_audit",
+                            "event": "collector_audit",
                             "status": "failed",
                             "summary": {
+                                "source_id": source.source_id,
                                 "stream": source.stream,
                                 **health.details,
                                 "missing_relations": missing_relations,
