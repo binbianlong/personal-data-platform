@@ -116,3 +116,65 @@ def test_sleep_summary_keeps_zero_and_null_without_reconstructing_from_stages():
     assert sleep.details.minutes_in_sleep_period == 420
     assert sleep.details.minutes_to_fall_asleep == 0
     assert sleep.details.minutes_after_wake_up is None
+
+
+@pytest.mark.parametrize("identity_field", ["dataPointName", "name"])
+def test_respiratory_collection_identity_uses_stable_missing_id_fallback(identity_field):
+    kind = "respiratory-rate-sleep-summary"
+    collection = point(kind)
+    del collection["dataPointName"]
+    missing = deepcopy(collection)
+    collection[identity_field] = f"users/synthetic-user/dataTypes/{kind}/dataPoints/"
+    expected = snapshot(kind, points=[missing]).records[0]
+    assert snapshot(kind, points=[collection]).records[0] == expected
+    for empty in [None, ""]:
+        unnamed = deepcopy(missing)
+        unnamed[identity_field] = empty
+        assert snapshot(kind, points=[unnamed]).records[0] == expected
+    corrected = deepcopy(collection)
+    corrected["respiratoryRateSleepSummary"]["fullSleepStats"]["breathsPerMinute"] = 15.5
+    assert snapshot(kind, points=[corrected]).records[0].record_id == expected.record_id
+    assert (
+        snapshot(kind, points=[point(kind, identity="provider-id")]).records[0].record_id
+        == "provider-id"
+    )
+    with pytest.raises(InvalidResponseError, match="duplicate identity"):
+        snapshot(kind, points=[collection, missing])
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "users//dataTypes/respiratory-rate-sleep-summary/dataPoints/",
+        "users/synthetic-user/dataTypes/heart-rate-variability/dataPoints/",
+        "users/synthetic-user/dataTypes/respiratory-rate-sleep-summary/dataPoints//",
+        "users/synthetic-user/dataTypes/respiratory-rate-sleep-summary/dataPoints/id/extra",
+        "users/synthetic-user/dataTypes/respiratory-rate-sleep-summary/dataPoints",
+        "unexpected/users/synthetic-user/dataTypes/respiratory-rate-sleep-summary/dataPoints/",
+    ],
+)
+def test_respiratory_collection_identity_rejects_malformed_resource_paths(name):
+    value = point("respiratory-rate-sleep-summary")
+    value["dataPointName"] = name
+    with pytest.raises(InvalidResponseError):
+        snapshot("respiratory-rate-sleep-summary", points=[value])
+
+
+def test_respiratory_collection_identity_preserves_conflicting_alias_rejection():
+    kind = "respiratory-rate-sleep-summary"
+    value = point(kind)
+    value["name"] = f"users/synthetic-user/dataTypes/{kind}/dataPoints/"
+    with pytest.raises(InvalidResponseError):
+        snapshot(kind, points=[value])
+
+
+@pytest.mark.parametrize(
+    "kind", ["heart-rate-variability", "daily-respiratory-rate", "exercise", "sleep"]
+)
+def test_respiratory_collection_identity_exception_does_not_apply_to_other_types(kind):
+    from tests.unit.fitbit.test_fitbit_api import sleep_point
+
+    value = sleep_point() if kind == "sleep" else point(kind)
+    value["dataPointName"] = f"users/synthetic-user/dataTypes/{kind}/dataPoints/"
+    with pytest.raises(InvalidResponseError):
+        snapshot(kind, points=[value])

@@ -538,6 +538,11 @@ def _point_id(point: dict[str, object], data_type: str) -> str | None:
     name = _alias(point, "dataPointName", "name")
     if name in (None, ""):
         return None
+    # Respiratory summaries can return the collection stem without a point ID.
+    if data_type == "respiratory-rate-sleep-summary" and re.fullmatch(
+        r"users/[^/]+/dataTypes/respiratory-rate-sleep-summary/dataPoints/", string(name)
+    ):
+        return None
     matched = re.fullmatch(
         rf"users/[^/]+/dataTypes/{re.escape(data_type)}/dataPoints/([^/]+)", string(name)
     )
