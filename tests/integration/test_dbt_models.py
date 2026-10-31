@@ -5,10 +5,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from personal_data_platform.biome.models import ParsedScreenTimeRecord
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.raw.models import RawObject
-from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
-from personal_data_platform.sources.screen_time.models import ParsedScreenTimeRecord
+from personal_data_platform.sources.iphone_screen_time.batch import IPhoneScreenTimeBatch
+from personal_data_platform.sources.mac_screen_time.batch import MacScreenTimeBatch
 from personal_data_platform.storage.motherduck import (
     Warehouse,
     WarehouseConfig,
@@ -19,11 +20,11 @@ from personal_data_platform.storage.motherduck import (
 @pytest.fixture
 def raw() -> RawObject:
     return RawObject(
-        key="raw/screen_time/v2/device/App.InFocus/segment/2026-08-27T00:00:00Z/hash.segb.gz",
-        source_id="screen_time",
+        key="raw/iphone_screen_time/v2/device/app-in-focus/segment/2026-08-27T00:00:00Z/hash.segb.gz",
+        source_id="iphone_screen_time",
         schema_version=2,
         subject_key="device",
-        stream="App.InFocus",
+        stream="app-in-focus",
         logical_key="segment",
         observed_at=datetime(2026, 8, 27, tzinfo=UTC),
         sha256="a" * 64,
@@ -74,7 +75,12 @@ def test_mac_daily_totals_preserve_observed_end_at_next_start(
 ) -> None:
     database = tmp_path / "mac-daily.duckdb"
     mac_raw = replace(
-        raw, key="raw/mac", subject_key="mac-device", stream="app-usage", logical_key="mac-segment"
+        raw,
+        key="raw/mac",
+        source_id="mac_screen_time",
+        subject_key="mac-device",
+        stream="app-usage",
+        logical_key="mac-segment",
     )
     before_midnight = datetime(2026, 8, 26, 14, 59, tzinfo=UTC)
     midnight_plus_one = datetime(2026, 8, 26, 15, 1, tzinfo=UTC)
@@ -132,30 +138,35 @@ def test_mac_daily_totals_preserve_observed_end_at_next_start(
     ]
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     warehouse.migrate()
-    warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch(phone_records))
+    warehouse.load_object(raw, byte_size=100, batch=IPhoneScreenTimeBatch(phone_records))
     warehouse.load_object(
         mac_raw,
         byte_size=100,
-        batch=ScreenTimeBatch(
+        batch=MacScreenTimeBatch(
             [replace(record, parser_version="app-usage-v1") for record in mac_records]
         ),
     )
     warehouse.close()
 
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
-    run_dbt(target="local", project_dir=dbt_project, selector="tag:screen_time")
+    run_dbt(
+        target="local",
+        project_dir=dbt_project,
+        selector="tag:iphone_screen_time tag:mac_screen_time",
+    )
 
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
         assert warehouse.query_rows(
-            "SELECT start_event_key, end_event_key, quality FROM base.screen_time_interval "
+            "SELECT start_event_key, end_event_key, quality FROM base.mac_screen_time_interval "
             "WHERE platform = 'macos' ORDER BY started_at"
         ) == [
             ("first-start", "z-end", "complete"),
             ("a-next-start", "last-end", "complete"),
         ]
         assert warehouse.query_rows(
-            "SELECT activity_date, platform, total_seconds FROM marts.daily_screen_time_total "
+            "SELECT activity_date, platform, total_seconds FROM marts.daily_iphone_screen_time_total "
+            "UNION ALL SELECT activity_date, platform, total_seconds FROM marts.daily_mac_screen_time_total "
             "ORDER BY platform, activity_date"
         ) == [
             (datetime(2026, 8, 26).date(), "ios", 60.0),
@@ -229,7 +240,7 @@ def test_dbt_pairs_events_and_splits_tokyo_midnight(
 
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     warehouse.migrate()
-    warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch(records))
+    warehouse.load_object(raw, byte_size=100, batch=IPhoneScreenTimeBatch(records))
     warehouse.close()
 
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
@@ -237,23 +248,23 @@ def test_dbt_pairs_events_and_splits_tokyo_midnight(
 
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_transition") == 5
+        assert warehouse.query_value("SELECT count(*) FROM base.iphone_screen_time_transition") == 5
         assert (
             warehouse.query_value(
-                "SELECT count(*) FROM base.screen_time_transition WHERE event_key = 'deleted-start'"
+                "SELECT count(*) FROM base.iphone_screen_time_transition WHERE event_key = 'deleted-start'"
             )
             == 0
         )
         assert (
             warehouse.query_value(
-                "SELECT duplicate_occurrence_count FROM base.screen_time_transition "
+                "SELECT duplicate_occurrence_count FROM base.iphone_screen_time_transition "
                 "WHERE event_key = 'a-start'"
             )
             == 1
         )
         assert dict(
             warehouse.query_rows(
-                "SELECT quality, count(*) FROM base.screen_time_interval GROUP BY quality"
+                "SELECT quality, count(*) FROM base.iphone_screen_time_interval GROUP BY quality"
             )
         ) == {
             "complete": 1,
@@ -263,22 +274,22 @@ def test_dbt_pairs_events_and_splits_tokyo_midnight(
         }
         assert warehouse.query_rows(
             "SELECT start_event_key, end_event_key, has_duplicate_source "
-            "FROM base.screen_time_interval WHERE quality = 'complete'"
+            "FROM base.iphone_screen_time_interval WHERE quality = 'complete'"
         ) == [("a-start", "a-end", True)]
         assert warehouse.query_rows(
-            "SELECT activity_date, total_seconds FROM marts.daily_screen_time "
+            "SELECT activity_date, total_seconds FROM marts.daily_iphone_screen_time "
             "WHERE bundle_id = 'app.a' ORDER BY activity_date"
         ) == [(datetime(2026, 8, 26).date(), 60.0), (datetime(2026, 8, 27).date(), 60.0)]
         assert (
             warehouse.query_value(
-                "SELECT total_seconds FROM marts.daily_screen_time WHERE bundle_id = 'app.b'"
+                "SELECT total_seconds FROM marts.daily_iphone_screen_time WHERE bundle_id = 'app.b'"
             )
             == 120.0
         )
         daily_totals = warehouse.query_rows(
             "SELECT activity_date, complete_seconds, inferred_seconds, total_seconds, "
             "complete_interval_parts, inferred_interval_parts "
-            "FROM marts.daily_screen_time_total ORDER BY activity_date"
+            "FROM marts.daily_iphone_screen_time_total ORDER BY activity_date"
         )
         assert daily_totals == [
             (datetime(2026, 8, 26).date(), 60.0, 0.0, 60.0, 1, 0),
@@ -286,12 +297,12 @@ def test_dbt_pairs_events_and_splits_tokyo_midnight(
         ]
         warehouse.connection.execute("SET TimeZone = 'UTC'")
         utc_keys = warehouse.query_rows(
-            "SELECT interval_key FROM base.screen_time_interval ORDER BY interval_key"
+            "SELECT interval_key FROM base.iphone_screen_time_interval ORDER BY interval_key"
         )
         warehouse.connection.execute("SET TimeZone = 'Asia/Tokyo'")
         assert (
             warehouse.query_rows(
-                "SELECT interval_key FROM base.screen_time_interval ORDER BY interval_key"
+                "SELECT interval_key FROM base.iphone_screen_time_interval ORDER BY interval_key"
             )
             == utc_keys
         )
@@ -299,7 +310,7 @@ def test_dbt_pairs_events_and_splits_tokyo_midnight(
             warehouse.query_rows(
                 "SELECT activity_date, complete_seconds, inferred_seconds, total_seconds, "
                 "complete_interval_parts, inferred_interval_parts "
-                "FROM marts.daily_screen_time_total ORDER BY activity_date"
+                "FROM marts.daily_iphone_screen_time_total ORDER BY activity_date"
             )
             == daily_totals
         )
@@ -367,15 +378,20 @@ def test_dbt_pairs_events_and_splits_tokyo_midnight(
         ),
     ],
 )
+@pytest.mark.parametrize("source", ["iphone_screen_time", "mac_screen_time"])
 def test_dbt_preserves_boundary_order_and_evidence(
     tmp_path,
     monkeypatch,
     dbt_project,
     raw,
+    source,
     events,
     expected_intervals,
     expected_daily_seconds,
 ) -> None:
+    stream = "app-in-focus" if source == "iphone_screen_time" else "app-usage"
+    raw = replace(raw, source_id=source, stream=stream)
+    batch_class = IPhoneScreenTimeBatch if source == "iphone_screen_time" else MacScreenTimeBatch
     database = tmp_path / "dbt-test.duckdb"
     records = []
     for event_key, seconds, foreground, duplicate in events:
@@ -397,7 +413,7 @@ def test_dbt_preserves_boundary_order_and_evidence(
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
         warehouse.migrate()
-        warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch(records))
+        warehouse.load_object(raw, byte_size=100, batch=batch_class(records))
     finally:
         warehouse.close()
 
@@ -409,21 +425,21 @@ def test_dbt_preserves_boundary_order_and_evidence(
         assert (
             warehouse.query_rows(
                 "SELECT start_event_key, end_event_key, quality, duration_seconds, "
-                "has_duplicate_source FROM base.screen_time_interval "
+                f"has_duplicate_source FROM base.{source}_interval "
                 "ORDER BY started_at NULLS LAST, start_event_key, end_event_key"
             )
             == expected_intervals
         )
         assert warehouse.query_rows(
             "SELECT coalesce(sum(complete_seconds), 0), coalesce(sum(inferred_seconds), 0) "
-            "FROM marts.daily_screen_time"
+            f"FROM marts.daily_{source}"
         ) == [expected_daily_seconds]
         assert warehouse.query_rows(
             "SELECT coalesce(sum(complete_seconds), 0), coalesce(sum(inferred_seconds), 0) "
-            "FROM marts.daily_screen_time_total"
+            f"FROM marts.daily_{source}_total"
         ) == [expected_daily_seconds]
         if expected_daily_seconds == (0.0, 0.0):
-            assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time_total") == 0
+            assert warehouse.query_value(f"SELECT count(*) FROM marts.daily_{source}_total") == 0
     finally:
         warehouse.close()
 
@@ -451,7 +467,7 @@ def test_dbt_views_follow_late_segment_corrections(tmp_path, monkeypatch, dbt_pr
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
         warehouse.migrate()
-        warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch(records))
+        warehouse.load_object(raw, byte_size=100, batch=IPhoneScreenTimeBatch(records))
     finally:
         warehouse.close()
 
@@ -460,9 +476,12 @@ def test_dbt_views_follow_late_segment_corrections(tmp_path, monkeypatch, dbt_pr
 
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
-        assert warehouse.query_value("SELECT total_seconds FROM marts.daily_screen_time") == 120
         assert (
-            warehouse.query_value("SELECT total_seconds FROM marts.daily_screen_time_total") == 120
+            warehouse.query_value("SELECT total_seconds FROM marts.daily_iphone_screen_time") == 120
+        )
+        assert (
+            warehouse.query_value("SELECT total_seconds FROM marts.daily_iphone_screen_time_total")
+            == 120
         )
         correction = replace(
             raw,
@@ -484,14 +503,19 @@ def test_dbt_views_follow_late_segment_corrections(tmp_path, monkeypatch, dbt_pr
             event_key="corrected-end",
             event_at=raw.observed_at + timedelta(seconds=60),
         )
-        warehouse.load_object(correction, byte_size=100, batch=ScreenTimeBatch(corrected_records))
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_transition") == 2
+        warehouse.load_object(
+            correction, byte_size=100, batch=IPhoneScreenTimeBatch(corrected_records)
+        )
+        assert warehouse.query_value("SELECT count(*) FROM base.iphone_screen_time_transition") == 2
         assert warehouse.query_rows(
-            "SELECT end_event_key, duration_seconds FROM base.screen_time_interval"
+            "SELECT end_event_key, duration_seconds FROM base.iphone_screen_time_interval"
         ) == [("corrected-end", 60.0)]
-        assert warehouse.query_value("SELECT total_seconds FROM marts.daily_screen_time") == 60
         assert (
-            warehouse.query_value("SELECT total_seconds FROM marts.daily_screen_time_total") == 60
+            warehouse.query_value("SELECT total_seconds FROM marts.daily_iphone_screen_time") == 60
+        )
+        assert (
+            warehouse.query_value("SELECT total_seconds FROM marts.daily_iphone_screen_time_total")
+            == 60
         )
 
         deletion = replace(
@@ -500,9 +524,11 @@ def test_dbt_views_follow_late_segment_corrections(tmp_path, monkeypatch, dbt_pr
             observed_at=correction.observed_at + timedelta(days=1),
             sha256="c" * 64,
         )
-        warehouse.load_object(deletion, byte_size=0, batch=ScreenTimeBatch([]))
-        assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time") == 0
-        assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time_total") == 0
+        warehouse.load_object(deletion, byte_size=0, batch=IPhoneScreenTimeBatch([]))
+        assert warehouse.query_value("SELECT count(*) FROM marts.daily_iphone_screen_time") == 0
+        assert (
+            warehouse.query_value("SELECT count(*) FROM marts.daily_iphone_screen_time_total") == 0
+        )
     finally:
         warehouse.close()
 
@@ -531,19 +557,19 @@ def test_daily_totals_sum_apps_without_combining_devices(tmp_path, monkeypatch, 
                             foreground=foreground,
                         )
                     )
-            warehouse.load_object(device_raw, byte_size=100, batch=ScreenTimeBatch(records))
+            warehouse.load_object(device_raw, byte_size=100, batch=IPhoneScreenTimeBatch(records))
     finally:
         warehouse.close()
 
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
-    run_dbt(target="local", project_dir=dbt_project, selector="tag:screen_time")
+    run_dbt(target="local", project_dir=dbt_project, selector="tag:iphone_screen_time")
 
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
         assert warehouse.query_rows(
             "SELECT activity_date, device_key, platform, complete_seconds, inferred_seconds, "
             "total_seconds, complete_interval_parts, inferred_interval_parts "
-            "FROM marts.daily_screen_time_total ORDER BY device_key"
+            "FROM marts.daily_iphone_screen_time_total ORDER BY device_key"
         ) == [
             (raw.observed_at.date(), "first", "ios", 150.0, 0.0, 150.0, 2, 0),
             (raw.observed_at.date(), "second", "ios", 45.0, 0.0, 45.0, 1, 0),
@@ -572,7 +598,7 @@ def test_daily_totals_do_not_fill_missing_usage(
                 )
                 for index, foreground in enumerate([True, False])
             ]
-            warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch(records))
+            warehouse.load_object(raw, byte_size=100, batch=IPhoneScreenTimeBatch(records))
     finally:
         warehouse.close()
 
@@ -581,6 +607,42 @@ def test_daily_totals_do_not_fill_missing_usage(
 
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
-        assert warehouse.query_value("SELECT count(*) FROM marts.daily_screen_time_total") == 0
+        assert (
+            warehouse.query_value("SELECT count(*) FROM marts.daily_iphone_screen_time_total") == 0
+        )
+    finally:
+        warehouse.close()
+
+
+@pytest.mark.parametrize(
+    "source,other",
+    [("iphone_screen_time", "mac_screen_time"), ("mac_screen_time", "iphone_screen_time")],
+)
+def test_source_selector_builds_without_other_sources(
+    tmp_path, monkeypatch, dbt_project, source, other
+):
+    database = tmp_path / "source-only.duckdb"
+    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
+    warehouse.migrate()
+    warehouse.connection.execute(f"DROP MACRO ops.{other}_resolve")
+    for table in ["record", "segment"]:
+        warehouse.connection.execute(f"DROP TABLE ops.{other}_{table}")
+    warehouse.connection.execute(f"DROP TABLE base.{other}_event")
+    for (table,) in warehouse.query_rows(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema='base' AND table_name LIKE 'fitbit_%'"
+    ):
+        warehouse.connection.execute(f"DROP TABLE base.{table}")
+    warehouse.close()
+    monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
+    run_dbt(target="local", project_dir=dbt_project, selector=f"tag:{source}")
+    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
+    try:
+        assert warehouse.query_value(f"SELECT count(*) FROM marts.daily_{source}_total") == 0
+        assert (
+            warehouse.query_rows(
+                "SELECT table_name FROM information_schema.views WHERE table_schema='marts' AND table_name LIKE 'fitbit_sleep_%'"
+            )
+            == []
+        )
     finally:
         warehouse.close()

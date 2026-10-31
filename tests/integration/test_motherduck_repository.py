@@ -5,9 +5,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
-from personal_data_platform.sources.screen_time.parser import PARSER_VERSION
-from personal_data_platform.sources.screen_time.warehouse import prune_receipts
+from personal_data_platform.sources.iphone_screen_time.batch import (
+    IPhoneScreenTimeBatch as ScreenTimeBatch,
+)
+from personal_data_platform.sources.iphone_screen_time.parser import PARSER_VERSION
 from personal_data_platform.storage.motherduck import (
     Warehouse,
     WarehouseConfig,
@@ -39,7 +40,9 @@ def test_cloud_connection_is_scoped_to_the_requested_database(monkeypatch):
 def test_screen_time_receipts_prune_only_confirmed_compacted_scope(tmp_path):
     import gzip
 
-    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+    from personal_data_platform.sources.iphone_screen_time.adapter import (
+        IPhoneScreenTimeSource as ScreenTimeSource,
+    )
     from tests.screen_time_helpers import Repository, event, segb
 
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "receipts.duckdb"))))
@@ -55,7 +58,9 @@ def test_screen_time_receipts_prune_only_confirmed_compacted_scope(tmp_path):
             byte_size=1,
             batch=source.decode(raw, gzip.decompress(repository.objects[raw.key][1])),
         )
-    prune_receipts(warehouse, [current], parser_version=source.parser_version)
+    warehouse.prune_biome_receipts(
+        [current], source_id=source.source_id, parser_version=source.parser_version
+    )
     assert warehouse.query_rows(
         "SELECT object_key FROM ops.ingestion_metadata ORDER BY object_key"
     ) == [(key,) for key in sorted((current.key, unrelated.key))]
@@ -65,7 +70,9 @@ def test_screen_time_receipts_prune_only_confirmed_compacted_scope(tmp_path):
 def test_screen_time_receipts_need_one_confirmed_live_raw(tmp_path):
     import gzip
 
-    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+    from personal_data_platform.sources.iphone_screen_time.adapter import (
+        IPhoneScreenTimeSource as ScreenTimeSource,
+    )
     from tests.screen_time_helpers import Repository, event, segb
 
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "receipts.duckdb"))))
@@ -91,11 +98,17 @@ def test_screen_time_receipts_need_one_confirmed_live_raw(tmp_path):
             return getattr(connection, name)
 
     warehouse.connection = NoTransaction()
-    prune_receipts(warehouse, [], parser_version=source.parser_version)
-    prune_receipts(warehouse, [old, current], parser_version=source.parser_version)
+    warehouse.prune_biome_receipts(
+        [], source_id=source.source_id, parser_version=source.parser_version
+    )
+    warehouse.prune_biome_receipts(
+        [old, current], source_id=source.source_id, parser_version=source.parser_version
+    )
     assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 2
     unconfirmed = replace(current, storage_generation=2)
-    prune_receipts(warehouse, [unconfirmed], parser_version=source.parser_version)
+    warehouse.prune_biome_receipts(
+        [unconfirmed], source_id=source.source_id, parser_version=source.parser_version
+    )
     assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 2
     warehouse.close()
 
@@ -153,8 +166,10 @@ def test_migration_and_object_load_are_idempotent(tmp_path) -> None:
 
         assert warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch([_record(raw)])) == 1
         assert warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch([_record(raw)])) == 0
-        assert warehouse.succeeded_keys(source_id="screen_time", stream="App.InFocus") == {raw.key}
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
+        assert warehouse.succeeded_keys(source_id="iphone_screen_time", stream="app-in-focus") == {
+            raw.key
+        }
+        assert warehouse.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 1
         assert (
             warehouse.query_value("SELECT storage_created_at FROM ops.ingestion_metadata")
             == raw.storage_created_at
@@ -170,17 +185,17 @@ def test_failed_load_can_be_retried(tmp_path) -> None:
         raw = _raw()
         warehouse.mark_failed(raw, byte_size=0, error=ValueError("broken"))
 
-        assert warehouse.ingestion_counts(source_id="screen_time", stream="App.InFocus") == {
-            "failed": 1
-        }
+        assert warehouse.ingestion_counts(
+            source_id="iphone_screen_time", stream="app-in-focus"
+        ) == {"failed": 1}
         assert (
             warehouse.query_value("SELECT storage_created_at FROM ops.ingestion_metadata")
             == raw.storage_created_at
         )
         assert warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch([_record(raw)])) == 1
-        assert warehouse.ingestion_counts(source_id="screen_time", stream="App.InFocus") == {
-            "succeeded": 1
-        }
+        assert warehouse.ingestion_counts(
+            source_id="iphone_screen_time", stream="app-in-focus"
+        ) == {"succeeded": 1}
     finally:
         warehouse.close()
 
@@ -214,7 +229,7 @@ def test_new_generation_is_not_trusted_until_it_is_reloaded(tmp_path) -> None:
             FROM ops.ingestion_metadata
             """
         ) == [(recreated_at, 2)]
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 1
     finally:
         warehouse.close()
 
@@ -324,7 +339,7 @@ def test_a_non_screen_time_batch_writes_typed_rows_with_source_identity() -> Non
             FROM ops.ingestion_metadata
             """
         ) == [("fixture_health", "account", raw.logical_key, "fixture-metric-v1")]
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 0
+        assert warehouse.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 0
     finally:
         warehouse.close()
 
@@ -377,7 +392,7 @@ def test_empty_screen_time_batch_keeps_its_decoder_version_and_source_identity()
             """
         ) == [(PARSER_VERSION, 0, raw.subject_key, raw.logical_key)]
         assert warehouse.query_rows(
-            "SELECT device_key, segment_key FROM ops.screen_time_segment"
+            "SELECT device_key, segment_key FROM ops.iphone_screen_time_segment"
         ) == [(raw.subject_key, raw.logical_key)]
         failed_raw = replace(raw, key="raw/failed")
         warehouse.mark_failed(

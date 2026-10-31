@@ -7,7 +7,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window
-from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
+from personal_data_platform.sources.iphone_screen_time.batch import (
+    IPhoneScreenTimeBatch as ScreenTimeBatch,
+)
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 from tests.screen_time_helpers import _raw, _record
 
@@ -20,7 +22,7 @@ def test_raw_batch_cannot_take_control_of_database_execution():
     with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
         warehouse.migrate()
         assert warehouse.load_object(_raw(), byte_size=1, batch=DataBatch([_record(_raw())])) == 1
-        assert warehouse.query_value("SELECT count(*) FROM base.screen_time_event") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 1
         assert warehouse.query_value("SELECT status FROM ops.ingestion_metadata") == "succeeded"
 
 

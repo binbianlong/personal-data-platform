@@ -44,8 +44,13 @@ sources:
         description: Physical intervals with distance in meters; true zero differs from missing data.
       - name: fitbit_heart_rate_zone_interval
         description: Physical intervals with original provider zone strings; duration is elapsed time, independent of weighted AZM.
-  - name: screen_time_base
+  - name: iphone_screen_time_base
     schema: base
     tables:
-      - name: screen_time_event
-        description: Sole analytical input; one resolved event per event_key, including inactive history.
+      - name: iphone_screen_time_event
+        description: One resolved event per event_key, including inactive history.
+  - name: mac_screen_time_base
+    schema: base
+    tables:
+      - name: mac_screen_time_event
+        description: One resolved event per event_key, including inactive history.

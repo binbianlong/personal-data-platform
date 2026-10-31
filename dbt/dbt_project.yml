@@ -13,15 +13,25 @@ models:
     base:
       +schema: base
       +materialized: view
-      screen_time:
-        +tags: [screen_time]
+      iphone_screen_time:
+        +tags: [iphone_screen_time]
+      mac_screen_time:
+        +tags: [mac_screen_time]
     marts:
       +schema: marts
       +materialized: view
-      screen_time:
-        +tags: [screen_time]
+      iphone_screen_time:
+        +tags: [iphone_screen_time]
+      mac_screen_time:
+        +tags: [mac_screen_time]
+      cross_source:
+        +tags: [cross_source]
 
 data_tests:
   personal_data_platform:
-    screen_time:
-      +tags: [screen_time]
+    iphone_screen_time:
+      +tags: [iphone_screen_time]
+    mac_screen_time:
+      +tags: [mac_screen_time]
+    cross_source:
+      +tags: [cross_source]

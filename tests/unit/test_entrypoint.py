@@ -27,14 +27,14 @@ def test_collection_exception_group_prints_stream_and_nested_cause(monkeypatch, 
         )
 
     monkeypatch.setattr(cli, "_dispatch", fail)
-    assert main(["screen-time", "collect", "--once"]) == 1
+    assert main(["iphone-screen-time", "collect", "--once"]) == 1
     assert "app-usage: synthetic upload failure" in capsys.readouterr().err
 
 
 def test_devices_still_lists_iphone_when_local_mac_row_is_missing(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    from personal_data_platform.sources.screen_time.config import CollectorConfig
+    from personal_data_platform.sources.iphone_screen_time.config import CollectorConfig
 
     sync_db = tmp_path / "sync.db"
     with sqlite3.connect(sync_db) as connection:
@@ -48,14 +48,13 @@ def test_devices_still_lists_iphone_when_local_mac_row_is_missing(
         state_db_path=tmp_path / "state.db",
         pseudonym_key=b"x" * 32,
         device_allowlist=frozenset(),
-        mac_app_usage_local_dir=tmp_path / "local",
     )
     monkeypatch.setattr(CollectorConfig, "from_env", lambda **_kwargs: config)
 
-    assert main(["screen-time", "devices"]) == 0
+    assert main(["iphone-screen-time", "devices"]) == 0
     output = capsys.readouterr()
     assert '"platform": "ios"' in output.out
-    assert "expected exactly one" in output.err
+    assert output.err == ""
 
 
 def test_loader_command_lazily_calls_job(monkeypatch) -> None:
@@ -99,9 +98,9 @@ def test_all_streams_flag_reaches_runtime_job(
     setattr(fake_module, function_name, run_job)
     monkeypatch.setitem(sys.modules, module_name, fake_module)
 
-    assert main([command, *extra, "--source", "screen_time", "--all-streams"]) == 0
+    assert main([command, *extra, "--source", "iphone_screen_time", "--all-streams"]) == 0
     assert calls[0]["all_streams"] is True
-    assert calls[0]["source_id"] == "screen_time"
+    assert calls[0]["source_id"] == "iphone_screen_time"
     assert calls[0]["stream"] is None
 
 
@@ -154,7 +153,7 @@ def test_operational_command_lazily_calls_job(
 
 
 @pytest.mark.parametrize(
-    "args", [["--source", "screen_time"], ["--stream", "app-usage"], ["--all-streams"]]
+    "args", [["--source", "iphone_screen_time"], ["--stream", "app-usage"], ["--all-streams"]]
 )
 def test_daily_command_rejects_scope_options(args):
     with pytest.raises(SystemExit) as error:
@@ -219,7 +218,9 @@ def test_cli_passes_explicit_source_and_stream(
 
 
 def test_unknown_source_is_rejected_before_cloud_access(monkeypatch, capsys):
-    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+    from personal_data_platform.sources.iphone_screen_time.adapter import (
+        IPhoneScreenTimeSource as ScreenTimeSource,
+    )
 
     monkeypatch.setattr(
         ScreenTimeSource, "repository_from_env", lambda self: pytest.fail("cloud accessed")

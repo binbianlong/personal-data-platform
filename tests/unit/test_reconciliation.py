@@ -6,15 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from personal_data_platform.biome.collector_state import CollectorScan
 from personal_data_platform.loader.models import LoadSummary
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.job import (
     run_reconciliation,
 )
 from personal_data_platform.reconciliation.models import ReconciliationResult
+from personal_data_platform.sources.iphone_screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.sources.registry import get_source
-from personal_data_platform.sources.screen_time.collector_state import CollectorScan
-from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.storage.warehouse import IngestionState
 
 DEVICE_KEY = "a" * 64
@@ -119,13 +119,13 @@ class _Warehouse:
         }
 
     def active_ingestion_states(self, *, source_id: str, stream: str) -> dict[str, IngestionState]:
-        assert (source_id, stream) == ("screen_time", "app-in-focus")
+        assert (source_id, stream) == ("iphone_screen_time", "app-in-focus")
         return self.states.copy()
 
     def set_succeeded(self, keys: list[str]) -> None:
         self.states.update({key: IngestionState(key, "succeeded") for key in keys})
 
-    def current_screen_time_object_keys(self, *, stream):
+    def current_biome_object_keys(self, *, source_id, stream):
         return {key for key, state in self.states.items() if state.status == "succeeded"}
 
     def relation_names(self):
@@ -284,7 +284,7 @@ def test_repair_rechecks_objects_uploaded_after_initial_inventory(monkeypatch) -
     warehouse = _Warehouse(set())
 
     def repair(repository, warehouse, *, source, prefix):
-        assert (source.source_id, source.stream) == ("screen_time", "app-in-focus")
+        assert (source.source_id, source.stream) == ("iphone_screen_time", "app-in-focus")
         repository.keys.append(_key("arrived-during-repair"))
         warehouse.set_succeeded(repository.keys)
         # This later upload has not been loaded and belongs to the next audit.

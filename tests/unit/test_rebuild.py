@@ -19,8 +19,8 @@ from personal_data_platform.recovery.rebuild import (
     run_rebuild_from_env,
     validate_rebuild_target,
 )
+from personal_data_platform.sources.iphone_screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.sources.registry import get_source
-from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 from tests.screen_time_helpers import Repository, event, mac_usage_event, segb
 
@@ -45,12 +45,11 @@ def test_unlimited_gcs_rebuild_uses_read_only_adc_and_restores_environment(tmp_p
     assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == "previous-adc"
 
 
-def test_all_streams_rebuilds_one_scratch_database_and_shared_daily_views(
-    tmp_path, monkeypatch
-) -> None:
+@pytest.mark.parametrize("source_id", ["iphone_screen_time", "mac_screen_time"])
+def test_source_rebuild_builds_only_its_own_daily_views(tmp_path, monkeypatch, source_id) -> None:
     from personal_data_platform.dbt_runner import run_dbt as real_run_dbt
 
-    database = tmp_path / "combined.duckdb"
+    database = tmp_path / "scratch.duckdb"
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
     monkeypatch.setattr(
         "personal_data_platform.recovery.rebuild.open_warehouse",
@@ -63,29 +62,22 @@ def test_all_streams_rebuilds_one_scratch_database_and_shared_daily_views(
         real_run_dbt(target="local", selector=selector)
 
     monkeypatch.setattr("personal_data_platform.recovery.rebuild.run_dbt", build_views)
-    when = datetime(2026, 9, 13, 0, 0, tzinfo=UTC)
-    phone_repository = Repository()
-    mac_repository = Repository()
-    for name, payload in (
-        ("100", event("phone.app", 100.0)),
-        ("200", event("phone.app", 160.0, foreground=False)),
-    ):
-        phone_repository.add(name, segb(payload)[0])
-    for name, payload in (
-        ("100", mac_usage_event("mac.app", when.timestamp(), start=True)),
-        ("200", mac_usage_event("mac.app", when.timestamp() + 60, start=False)),
-    ):
-        mac_repository.add(name, segb(payload)[0], device="b" * 64, stream="app-usage")
-    phone = get_source("screen_time", "app-in-focus")
-    mac = get_source("screen_time", "app-usage")
-    inventories = (
-        (phone, phone_repository, tuple(value[0] for value in phone_repository.objects.values())),
-        (mac, mac_repository, tuple(value[0] for value in mac_repository.objects.values())),
-    )
-
+    source = get_source(source_id)
+    repository = Repository()
+    if source_id == "iphone_screen_time":
+        payloads = [event("app", 100.0), event("app", 160.0, foreground=False)]
+    else:
+        when = datetime(2026, 9, 13, tzinfo=UTC).timestamp()
+        payloads = [
+            mac_usage_event("app", when, start=True),
+            mac_usage_event("app", when + 60, start=False),
+        ]
+    for index, payload in enumerate(payloads):
+        repository.add(str(index), segb(payload)[0], stream=source.stream)
+    inventory = (source, repository, tuple(value[0] for value in repository.objects.values()))
     assert (
         run_rebuild_all(
-            inventories,
+            (inventory,),
             target_db="scratch",
             token="local",
             production_db="production",
@@ -93,15 +85,15 @@ def test_all_streams_rebuilds_one_scratch_database_and_shared_daily_views(
         )
         == 0
     )
-    assert calls == [("prod", "tag:screen_time")]
+    assert calls == [("prod", "tag:" + source_id)]
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
-        assert warehouse.query_rows(
-            "SELECT platform, count(*) FROM base.screen_time_event GROUP BY platform ORDER BY platform"
-        ) == [("ios", 2), ("macos", 2)]
-        assert warehouse.query_rows(
-            "SELECT platform, total_seconds FROM marts.daily_screen_time_total ORDER BY platform"
-        ) == [("ios", 60.0), ("macos", 60.0)]
+        assert warehouse.query_value(f"SELECT count(*) FROM base.{source_id}_event") == 2
+        assert (
+            warehouse.query_value(f"SELECT total_seconds FROM marts.daily_{source_id}_total") == 60
+        )
+        other = "mac_screen_time" if source_id == "iphone_screen_time" else "iphone_screen_time"
+        assert f"marts.daily_{other}" not in warehouse.relation_names()
     finally:
         warehouse.close()
 
@@ -215,12 +207,12 @@ def test_rebuild_dry_run_uses_canonical_raw_prefix(tmp_path, monkeypatch) -> Non
         return Repository()
 
     monkeypatch.setattr(
-        "personal_data_platform.sources.screen_time.storage.ScreenTimeLocalRepository.from_env",
+        "personal_data_platform.sources.iphone_screen_time.storage.LocalRepository.from_env",
         repository_from_env,
     )
 
     assert run_rebuild_from_env(dry_run=True, target_db=None) == 0
-    assert prefixes == ["raw/screen_time/v2/"]
+    assert prefixes == ["raw/iphone_screen_time/v2/"]
     assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == "ambient-collector-adc.json"
 
 

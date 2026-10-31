@@ -9,11 +9,11 @@ import google_crc32c
 import pytest
 from google.api_core.exceptions import Forbidden, NotFound, PreconditionFailed
 
-from personal_data_platform.sources.registry import get_source
-from personal_data_platform.sources.screen_time.raw import (
+from personal_data_platform.sources.iphone_screen_time.raw import (
     ScreenTimeRawIdentity,
     sha256_hex,
 )
+from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.gcs import GCSRawRepository
 
 
@@ -216,7 +216,7 @@ def test_list_raw_follows_pages_ignores_other_objects_and_sorts_replay_order() -
     assert [item.storage_created_at for item in observations] == [earlier_created, later_created]
     assert [item.storage_generation for item in observations] == [1, 1]
     assert client.list_calls == [
-        {"prefix": "raw/screen_time/v2/"},
+        {"prefix": "raw/iphone_screen_time/v2/"},
     ]
 
 
@@ -235,7 +235,7 @@ def test_list_raw_rejects_noncanonical_segment_objects() -> None:
     client.list_pages = [
         [
             _ListedBlob(
-                "raw/screen_time/v2/unpseudonymized.segb.gz",
+                "raw/iphone_screen_time/v2/unpseudonymized.segb.gz",
                 datetime(2026, 8, 27, tzinfo=UTC),
             )
         ]
@@ -258,37 +258,15 @@ def test_list_raw_rejects_missing_gcs_generation() -> None:
         repository.list_raw()
 
 
-def test_registered_screen_time_stream_is_filtered_without_failing_selected_stream(
-    monkeypatch,
-) -> None:
+def test_gcs_lists_only_the_selected_source_prefix() -> None:
     from dataclasses import replace
-    from types import SimpleNamespace
 
-    from personal_data_platform.sources import registry
-
-    monkeypatch.setitem(
-        registry._SOURCE_FACTORIES,
-        ("screen_time", "synthetic-other"),
-        lambda: SimpleNamespace(source_id="screen_time", stream="synthetic-other"),
-    )
     client = FakeGCSClient()
     selected = _identity(datetime(2026, 8, 27, tzinfo=UTC))
-    other = replace(selected, stream="synthetic-other")
-    client.list_pages = [
-        [
-            _ListedBlob(other.object_key, other.observed_at),
-            _ListedBlob(selected.object_key, selected.observed_at),
-        ]
-    ]
+    other = replace(selected, source_id="mac_screen_time", stream="app-usage")
+    client.list_pages = [[_ListedBlob(other.object_key, other.observed_at)]]
     repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=get_source())
-
-    assert [raw.key for raw in repository.list_raw()] == [selected.object_key]
-    source = registry.get_source()
-    other_raw = source.parse_raw_key(
-        other.object_key, storage_created_at=other.observed_at, storage_generation=1
-    )
-    with pytest.raises(ValueError, match="does not match Screen Time"):
-        source.decode(other_raw, b"not-decoded")
+    assert repository.list_raw() == []
 
 
 def test_gcs_rejects_unregistered_stream_and_unknown_schema() -> None:
@@ -305,7 +283,9 @@ def test_gcs_rejects_unregistered_stream_and_unknown_schema() -> None:
 
 
 def test_raw_codec_rejects_unknown_schema() -> None:
-    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+    from personal_data_platform.sources.iphone_screen_time.adapter import (
+        IPhoneScreenTimeSource as ScreenTimeSource,
+    )
 
     identity = _identity(datetime(2026, 8, 27, tzinfo=UTC))
     with pytest.raises(ValueError, match="invalid Screen Time"):

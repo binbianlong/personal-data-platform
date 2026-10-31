@@ -4,7 +4,8 @@ from datetime import UTC, date, datetime, timedelta
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window, date_cursor
 from personal_data_platform.sources.fitbit.motherduck import FitbitBatch
-from personal_data_platform.sources.screen_time.batch import ScreenTimeBatch
+from personal_data_platform.sources.iphone_screen_time.batch import IPhoneScreenTimeBatch
+from personal_data_platform.sources.mac_screen_time.batch import MacScreenTimeBatch
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 from tests.screen_time_helpers import _raw, _record
 
@@ -70,7 +71,8 @@ def test_health_views_split_tokyo_days_preserve_missing_and_keep_devices_separat
         ("phone", "app-in-focus", "app-in-focus-v1"),
         ("mac", "app-usage", "app-usage-v1"),
     ]:
-        raw = replace(_raw(), key=device, subject_key=device, stream=stream)
+        source = "iphone_screen_time" if device == "phone" else "mac_screen_time"
+        raw = replace(_raw(), key=device, source_id=source, subject_key=device, stream=stream)
         start = replace(
             _record(raw),
             event_key=device + "start",
@@ -85,10 +87,15 @@ def test_health_views_split_tokyo_days_preserve_missing_and_keep_devices_separat
             record_offset=100,
             record_metadata_offset=200,
         )
-        warehouse.load_object(raw, byte_size=1, batch=ScreenTimeBatch([start, end]))
+        batch_class = IPhoneScreenTimeBatch if device == "phone" else MacScreenTimeBatch
+        warehouse.load_object(raw, byte_size=1, batch=batch_class([start, end]))
     warehouse.close()
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
-    run_dbt(target="local", project_dir=dbt_project, selector="tag:fitbit tag:screen_time")
+    run_dbt(
+        target="local",
+        project_dir=dbt_project,
+        selector="tag:fitbit tag:iphone_screen_time tag:mac_screen_time tag:cross_source",
+    )
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
         assert warehouse.query_rows(
@@ -108,7 +115,8 @@ def test_health_views_split_tokyo_days_preserve_missing_and_keep_devices_separat
             == 45
         )
         assert warehouse.query_rows(
-            "select device_key,platform,screen_time_seconds from marts.fitbit_sleep_screen_time order by device_key"
+            "select device_key,platform,screen_time_seconds from marts.fitbit_sleep_iphone_screen_time "
+            "union all select device_key,platform,screen_time_seconds from marts.fitbit_sleep_mac_screen_time order by device_key"
         ) == [("mac", "macos", 1800.0), ("phone", "ios", 1800.0)]
     finally:
         warehouse.close()
@@ -155,7 +163,11 @@ def test_minute_daily_average_has_observed_minute_semantics(
     )
     warehouse.close()
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
-    run_dbt(target="local", project_dir=dbt_project, selector="tag:fitbit tag:screen_time")
+    run_dbt(
+        target="local",
+        project_dir=dbt_project,
+        selector="tag:fitbit tag:iphone_screen_time tag:mac_screen_time tag:cross_source",
+    )
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
         assert not warehouse.query_rows(
@@ -270,5 +282,74 @@ def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path)
         assert warehouse.query_rows(
             "SELECT average,source_key FROM base.fitbit_heart_rate_minute"
         ) == [(60, "existing")]
+    finally:
+        warehouse.close()
+
+
+def test_cross_source_sleep_usage_clips_merges_devices_and_preserves_absence(
+    tmp_path, monkeypatch, dbt_project
+):
+    import json
+
+    database = tmp_path / "cross-source.duckdb"
+    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
+    warehouse.migrate()
+    sleep_start = datetime(2026, 9, 1, 21, tzinfo=UTC)
+    cursor = date_cursor(date(2026, 9, 2))
+    snapshot = Snapshot(
+        "self",
+        Window("sleep", cursor - timedelta(days=1), cursor + timedelta(days=2)),
+        sleep_start + timedelta(days=1),
+        tuple(
+            Record(
+                "sleep", name, cursor, at, at + timedelta(hours=1), 45, source_date=cursor.date()
+            )
+            for name, at in [("overlap", sleep_start), ("absent", sleep_start + timedelta(days=1))]
+        ),
+    )
+    FitbitBatch(snapshot).write_snapshot(
+        warehouse.connection, source_key="sleep", loaded_at=sleep_start
+    )
+    for source, platform in [("iphone_screen_time", "ios"), ("mac_screen_time", "macos")]:
+        # Test cross-source union semantics with independently supplied intervals.
+        warehouse.connection.execute(
+            f"CREATE TABLE base.{source}_interval "
+            "(device_key VARCHAR, platform VARCHAR, started_at TIMESTAMPTZ, "
+            "ended_at TIMESTAMPTZ, quality VARCHAR)"
+        )
+        for device, begin, end in [
+            ("first", -150, -90),
+            ("first", -105, -60),
+            ("first", -30, 30),
+            ("second", -60, -45),
+        ]:
+            warehouse.connection.execute(
+                f"INSERT INTO base.{source}_interval VALUES (?, ?, ?, ?, 'complete')",
+                [
+                    device,
+                    platform,
+                    sleep_start + timedelta(minutes=begin),
+                    sleep_start + timedelta(minutes=end),
+                ],
+            )
+    warehouse.close()
+    monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
+    run_dbt(target="local", project_dir=dbt_project, selector="tag:fitbit")
+    run_dbt(target="local", project_dir=dbt_project, selector="tag:cross_source")
+    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
+    try:
+        for source in ["iphone_screen_time", "mac_screen_time"]:
+            assert warehouse.query_rows(
+                f"SELECT sleep_id,device_key,screen_time_seconds FROM marts.fitbit_sleep_{source} "
+                "ORDER BY device_key"
+            ) == [("overlap", "first", 5400.0), ("overlap", "second", 900.0)]
+        manifest = json.loads((dbt_project / "target/manifest.json").read_text())
+        cross_nodes = [
+            node
+            for node in manifest["nodes"].values()
+            if node["name"].startswith("fitbit_sleep_") and node["name"] != "fitbit_sleep_sessions"
+        ]
+        assert len(cross_nodes) == 4
+        assert all(node["tags"] == ["cross_source"] for node in cross_nodes)
     finally:
         warehouse.close()

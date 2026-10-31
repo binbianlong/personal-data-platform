@@ -3,25 +3,30 @@ import pytest
 from personal_data_platform.sources import registry
 
 
-def test_registry_defaults_and_explicit_scope_keep_screen_time() -> None:
-    for source in (
-        registry.get_source(),
-        registry.get_source("screen_time", "app-in-focus"),
-    ):
-        assert (source.source_id, source.stream) == ("screen_time", "app-in-focus")
-    assert registry.source_ids() == ("owntracks", "screen_time")
-    assert registry.get_source("screen_time", "app-usage").stream == "app-usage"
-    with pytest.raises(ValueError, match="multiple streams"):
+def test_registry_exposes_independent_sources_and_preserves_iphone_default() -> None:
+    phone = registry.get_source("iphone_screen_time")
+    mac = registry.get_source("mac_screen_time")
+    assert (phone.source_id, phone.stream) == ("iphone_screen_time", "app-in-focus")
+    assert (mac.source_id, mac.stream) == ("mac_screen_time", "app-usage")
+    assert registry.get_source().source_id == phone.source_id
+    assert registry.source_ids() == ("iphone_screen_time", "mac_screen_time", "owntracks")
+    assert set(phone.required_relations).isdisjoint(mac.required_relations)
+    assert phone.raw_prefixes == ("raw/iphone_screen_time/v2/",)
+    assert mac.raw_prefixes == ("raw/mac_screen_time/v2/",)
+    assert phone.dbt_selector == "tag:iphone_screen_time"
+    assert mac.dbt_selector == "tag:mac_screen_time"
+    assert registry.get_dbt_selector("fitbit", None) == "tag:fitbit"
+    with pytest.raises(ValueError, match="unsupported source"):
         registry.get_source("screen_time")
 
 
-def test_all_streams_requires_explicit_source_and_excludes_other_sources() -> None:
-    sources = registry.get_sources("screen_time", all_streams=True)
-    assert [source.stream for source in sources] == ["app-in-focus", "app-usage"]
+def test_all_streams_is_restricted_to_selected_source() -> None:
+    sources = registry.get_sources("iphone_screen_time", all_streams=True)
+    assert [(s.source_id, s.stream) for s in sources] == [("iphone_screen_time", "app-in-focus")]
     with pytest.raises(ValueError, match="requires source"):
         registry.get_sources(all_streams=True)
     with pytest.raises(ValueError, match="cannot be combined"):
-        registry.get_sources("screen_time", "app-in-focus", all_streams=True)
+        registry.get_sources("iphone_screen_time", "app-in-focus", all_streams=True)
 
 
 @pytest.mark.parametrize(
@@ -29,10 +34,11 @@ def test_all_streams_requires_explicit_source_and_excludes_other_sources() -> No
     [
         (None, "app-in-focus", "requires source_id"),
         ("unregistered", None, "unsupported source"),
-        ("screen_time", "unregistered", "unsupported stream"),
+        ("iphone_screen_time", "app-usage", "unsupported stream"),
+        ("mac_screen_time", "app-in-focus", "unsupported stream"),
     ],
 )
-def test_registry_rejects_ambiguous_or_unknown_scope(source_id, stream, message) -> None:
+def test_registry_rejects_mixed_or_unknown_scope(source_id, stream, message) -> None:
     with pytest.raises(ValueError, match=message):
         registry.get_source(source_id, stream)
 
@@ -57,6 +63,6 @@ def test_storage_policy_drift_is_rejected(name, value, monkeypatch):
 def test_storage_policy_accepts_the_registered_namespace(monkeypatch):
     from personal_data_platform.sources.contracts import validate_runtime_policy
 
-    monkeypatch.setenv("PDP_RAW_PREFIXES_JSON", '["raw/screen_time/v2/"]')
+    monkeypatch.setenv("PDP_RAW_PREFIXES_JSON", '["raw/iphone_screen_time/v2/"]')
     monkeypatch.setenv("PDP_RAW_SUFFIXES_JSON", '[".segb.gz"]')
     validate_runtime_policy(registry.get_source())

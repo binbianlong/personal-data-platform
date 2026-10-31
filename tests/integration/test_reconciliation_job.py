@@ -7,12 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from personal_data_platform.biome.collector_state import CollectorScan
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.reconciliation.job import _relation_names, run_reconciliation
 from personal_data_platform.sources.contracts import SourceHealth
+from personal_data_platform.sources.iphone_screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.sources.registry import get_source
-from personal_data_platform.sources.screen_time.collector_state import CollectorScan
-from personal_data_platform.sources.screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 
@@ -42,10 +42,14 @@ def _warehouse() -> Warehouse:
     warehouse = _SyntheticWarehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate()
     for relation in (
-        "base.screen_time_transition",
-        "base.screen_time_interval",
-        "marts.daily_screen_time",
-        "marts.daily_screen_time_total",
+        "base.iphone_screen_time_transition",
+        "base.iphone_screen_time_interval",
+        "marts.daily_iphone_screen_time",
+        "marts.daily_iphone_screen_time_total",
+        "base.mac_screen_time_transition",
+        "base.mac_screen_time_interval",
+        "marts.daily_mac_screen_time",
+        "marts.daily_mac_screen_time_total",
     ):
         warehouse.connection.execute(f"CREATE OR REPLACE VIEW {relation} AS SELECT 1 AS value")
     return warehouse
@@ -55,10 +59,10 @@ def _warehouse() -> Warehouse:
 def test_raw_audit_returns_result_without_changing_collector_success(missing_view) -> None:
     warehouse = _warehouse()
     try:
-        warehouse.publish_heartbeat("screen_time_reconciliation", "collector", {})
+        warehouse.publish_heartbeat("iphone_screen_time_reconciliation", "collector", {})
         previous = warehouse.query_rows("SELECT * FROM ops.heartbeat")
         if missing_view:
-            warehouse.connection.execute("DROP VIEW marts.daily_screen_time_total")
+            warehouse.connection.execute("DROP VIEW marts.daily_iphone_screen_time_total")
         result = run_reconciliation(_Repository(), warehouse)
 
         assert result.ok is not missing_view
@@ -72,12 +76,12 @@ def test_raw_audit_returns_result_without_changing_collector_success(missing_vie
 def test_missing_daily_total_view_fails_reconciliation() -> None:
     warehouse = _warehouse()
     try:
-        warehouse.connection.execute("DROP VIEW marts.daily_screen_time_total")
+        warehouse.connection.execute("DROP VIEW marts.daily_iphone_screen_time_total")
 
         result = run_reconciliation(_Repository(), warehouse)
 
         assert not result.ok
-        assert result.missing_relations == ("marts.daily_screen_time_total",)
+        assert result.missing_relations == ("marts.daily_iphone_screen_time_total",)
     finally:
         warehouse.close()
 
@@ -85,14 +89,14 @@ def test_missing_daily_total_view_fails_reconciliation() -> None:
 def test_relation_inventory_ignores_other_attached_databases() -> None:
     warehouse = _warehouse()
     try:
-        warehouse.connection.execute("DROP VIEW marts.daily_screen_time")
+        warehouse.connection.execute("DROP VIEW marts.daily_iphone_screen_time")
         warehouse.connection.execute("ATTACH ':memory:' AS unrelated")
         warehouse.connection.execute("CREATE SCHEMA unrelated.marts")
         warehouse.connection.execute(
-            "CREATE VIEW unrelated.marts.daily_screen_time AS SELECT 1 AS value"
+            "CREATE VIEW unrelated.marts.daily_iphone_screen_time AS SELECT 1 AS value"
         )
 
-        assert "marts.daily_screen_time" not in _relation_names(warehouse)
+        assert "marts.daily_iphone_screen_time" not in _relation_names(warehouse)
     finally:
         warehouse.close()
 
@@ -214,7 +218,9 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
     import gzip
     from dataclasses import replace
 
-    from personal_data_platform.sources.screen_time.adapter import ScreenTimeSource
+    from personal_data_platform.sources.iphone_screen_time.adapter import (
+        IPhoneScreenTimeSource as ScreenTimeSource,
+    )
     from tests.screen_time_helpers import NOW, Repository, event, segb
 
     class LiveRepository(Repository):
@@ -255,11 +261,11 @@ def test_reconciliation_requires_current_parser_before_success(repair_mode):
         if repair_mode == "success":
             assert result.ok
             assert result.missing_object_count == 0
-            assert warehouse.query_rows("SELECT parser_version FROM base.screen_time_event") == [
-                ("corrected-parser",)
-            ]
             assert warehouse.query_rows(
-                "SELECT parser_version, app_version FROM ops.screen_time_record"
+                "SELECT parser_version FROM base.iphone_screen_time_event"
+            ) == [("corrected-parser",)]
+            assert warehouse.query_rows(
+                "SELECT parser_version, app_version FROM ops.iphone_screen_time_record"
             ) == [("corrected-parser", "corrected")]
             assert (
                 warehouse.query_value("SELECT parser_version FROM ops.ingestion_metadata")
@@ -347,8 +353,10 @@ def test_daily_records_one_outcome_and_preserves_collector_heartbeats(
         return 0
 
     monkeypatch.setattr(dbt_runner, "run_dbt_from_env", dbt)
-    sources = (get_source("screen_time", "app-in-focus"), get_source("screen_time", "app-usage"))
-    monkeypatch.setattr(job, "get_sources", lambda *args, **kwargs: sources)
+    sources = (
+        get_source("iphone_screen_time", "app-in-focus"),
+        get_source("mac_screen_time", "app-usage"),
+    )
     for source in sources:
         monkeypatch.setattr(type(source), "repository_from_env", lambda _: _Repository())
     owntracks = get_source("owntracks")
@@ -367,10 +375,10 @@ def test_daily_records_one_outcome_and_preserves_collector_heartbeats(
 
     monkeypatch.setattr(job, "audit_collector_heartbeat", audit)
     if failure == "missing-relation":
-        warehouse.connection.execute("DROP VIEW marts.daily_screen_time_total")
+        warehouse.connection.execute("DROP VIEW marts.daily_iphone_screen_time_total")
     elif failure == "relation-query":
         warehouse.connection.execute(
-            "CREATE OR REPLACE VIEW marts.daily_screen_time_total AS "
+            "CREATE OR REPLACE VIEW marts.daily_iphone_screen_time_total AS "
             "SELECT 1 AS value WHERE CAST('invalid' AS INTEGER) > 0"
         )
     if failure == "busy":
@@ -442,9 +450,14 @@ def test_daily_records_one_outcome_and_preserves_collector_heartbeats(
                 assert "failed_stage" not in details
                 assert "last_completed_target_date" in details
             else:
-                expected_stage = "audit:" + failure if failure.startswith("app-") else failure
+                expected_stage = (
+                    "audit:"
+                    + ("mac_screen_time" if failure == "app-usage" else "iphone_screen_time")
+                    if failure.startswith("app-")
+                    else failure
+                )
                 if failure in ("missing-relation", "relation-query"):
-                    expected_stage = "audit:app-in-focus"
+                    expected_stage = "audit:iphone_screen_time"
                 if failure == "old-marker-heartbeat":
                     expected_stage = "heartbeat"
                 assert details["failed_stage"] == expected_stage
@@ -453,17 +466,17 @@ def test_daily_records_one_outcome_and_preserves_collector_heartbeats(
         assert "ops.reconciliation_run" not in _relation_names(warehouse)
         if failure in ("app-in-focus", "app-usage", "missing-relation", "relation-query"):
             entries = [json.loads(line) for line in capfd.readouterr().err.splitlines()]
-            audits = [entry for entry in entries if entry.get("event") == "screen_time_audit"]
+            audits = [entry for entry in entries if entry.get("event") == "collector_audit"]
             assert len(audits) == 1
             assert audits[0]["severity"] == "ERROR" and audits[0]["status"] == "failed"
             summary = audits[0]["summary"]
             assert summary["stream"] == ("app-usage" if failure == "app-usage" else "app-in-focus")
             assert summary["collector_heartbeat_stale"] is failure.startswith("app-")
             assert summary["missing_relations"] == (
-                ["marts.daily_screen_time_total"] if failure == "missing-relation" else []
+                ["marts.daily_iphone_screen_time_total"] if failure == "missing-relation" else []
             )
             assert summary["failed_relation_queries"] == (
-                ["marts.daily_screen_time_total"] if failure == "relation-query" else None
+                ["marts.daily_iphone_screen_time_total"] if failure == "relation-query" else None
             )
         if failure in ("none", "gap", "gap-covered", "gap-edge"):
             assert phases == ["fitbit", "dbt", "owntracks", "app-in-focus", "app-usage"]
@@ -484,7 +497,7 @@ def test_daily_records_one_outcome_and_preserves_collector_heartbeats(
                     "daily_fitbit",
                     "daily_dbt",
                     "daily_owntracks",
-                    "daily_screen_time",
+                    "daily_iphone_screen_time",
                 } <= names
         if failure.startswith("gap"):
             details = json.loads(
