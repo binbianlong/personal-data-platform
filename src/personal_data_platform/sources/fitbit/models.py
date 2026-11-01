@@ -46,23 +46,18 @@ CIVIL_RECORD_AGGREGATION_VERSION = "records-civil-v1"
 AcquisitionMode = Literal["legacy", "bounded_minutes", "bounded_steps"]
 TimeBasis = Literal["utc", "civil"]
 TABLES = {
-    "steps": "fitbit_activity_interval",
-    "daily-resting-heart-rate": "fitbit_resting_heart_rate_daily",
-    "active-zone-minutes": "fitbit_activity_interval",
-    "sleep": "fitbit_sleep_session",
-    "sleep-stage": "fitbit_sleep_detail",
-    "sleep-wake": "fitbit_sleep_detail",
-    "daily-heart-rate-variability": "fitbit_hrv_daily",
-    "heart-rate-variability": "fitbit_hrv_sample",
-    "daily-respiratory-rate": "fitbit_respiratory_rate_daily",
-    "respiratory-rate-sleep-summary": "fitbit_respiratory_rate_sleep_summary",
-    "daily-oxygen-saturation": "fitbit_oxygen_saturation_daily",
-    "daily-sleep-temperature-derivations": "fitbit_sleep_temperature_daily",
-    "exercise": "fitbit_exercise",
-    "daily-vo2-max": "fitbit_vo2_max_daily",
-    "sedentary-period": "fitbit_sedentary_period",
-    "distance": "fitbit_distance_interval",
-    "time-in-heart-rate-zone": "fitbit_heart_rate_zone_interval",
+    **dict.fromkeys(DAILY_TYPES, "health_daily"),
+    "steps": "steps_interval",
+    "active-zone-minutes": "active_zone_interval",
+    "sleep": "sleep_session",
+    "sleep-stage": "sleep_detail",
+    "sleep-wake": "sleep_detail",
+    "heart-rate-variability": "hrv_sample",
+    "respiratory-rate-sleep-summary": "sleep_respiratory_summary",
+    "exercise": "exercise_session",
+    "sedentary-period": "sedentary_interval",
+    "distance": "distance_interval",
+    "time-in-heart-rate-zone": "heart_rate_zone_interval",
 }
 
 

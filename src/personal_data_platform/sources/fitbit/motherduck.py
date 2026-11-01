@@ -1,19 +1,17 @@
-"""Replace complete acquired ranges inside the warehouse's transaction."""
+"""Replace complete, freshly acquired ranges in the caller's transaction."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from .details import SleepSummary
 from .models import (
-    CIVIL_RECORD_AGGREGATION_VERSION,
+    DAILY_TYPES,
     DATE_TYPES,
-    GOOGLE_WEARABLES,
-    RECORD_AGGREGATION_VERSION,
     SAMPLE_TYPES,
     TABLES,
     HeartRateMinuteSnapshot,
@@ -22,325 +20,73 @@ from .models import (
     Window,
     WriteResult,
     aware,
-    data_source_family_for,
-    date_cursor,
 )
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
 
-_SCOPE = "subject_key=? AND data_type=? AND data_source_family=? AND aggregation_version=?"
-# For small inputs, MERGE's cold-connection overhead exceeds its smaller row payload.
-_MINUTE_MERGE_MIN_ROWS = 64
 
-
-def coverage_scope(
-    subject_key: str, data_type: str, aggregation_version: str = RECORD_AGGREGATION_VERSION
-) -> tuple[str, str, str, str]:
-    return subject_key, data_type, data_source_family_for(data_type), aggregation_version
-
-
-def _subtract(
-    ranges: list[tuple[datetime, datetime]], start: datetime, end: datetime
-) -> list[tuple[datetime, datetime]]:
-    result = []
-    for left, right in ranges:
-        if end <= left or start >= right:
-            result.append((left, right))
-        else:
-            if left < start:
-                result.append((left, start))
-            if end < right:
-                result.append((end, right))
-    return result
-
-
-@dataclass(frozen=True, slots=True)
-class _Coverage:
-    start: datetime
-    end: datetime
-    fetched_at: datetime
-    source_key: str
-    content_sha256: str
-
-
-def _read_coverage(
-    connection: DuckDBPyConnection, scope: tuple[str, str, str, str], window: Window
-) -> list[_Coverage]:
-    rows = connection.execute(
-        "SELECT range_start,range_end,fetched_at,source_key,content_sha256 "
-        f"FROM ops.fitbit_coverage WHERE {_SCOPE} "
-        "AND range_start < ? AND range_end > ? ORDER BY range_start",
-        [*scope, window.end, window.start],
-    ).fetchall()
-    return [_Coverage(*row) for row in rows]
-
-
-def _accepted_ranges(
-    snapshot: Snapshot | HeartRateMinuteSnapshot, source_key: str, coverage: list[_Coverage]
-) -> list[tuple[datetime, datetime]]:
-    accepted = [(snapshot.window.start, snapshot.window.end)]
-    for prior in coverage:
-        if (prior.fetched_at, prior.source_key) > (snapshot.fetched_at, source_key):
-            accepted = _subtract(accepted, prior.start, prior.end)
-    return accepted
-
-
-def _unchanged(coverage: list[_Coverage], window: Window, digest: str) -> bool:
-    return (
-        len(coverage) == 1
-        and coverage[0].start == window.start
-        and coverage[0].end == window.end
-        and coverage[0].content_sha256 == digest
+def heart_rate_minute_id(data_source_family: str, start: datetime, aggregation_version: str) -> str:
+    """Identify a minute independently of account and connection time zone."""
+    return _identity(
+        [data_source_family, aware(start).isoformat(timespec="microseconds"), aggregation_version]
     )
 
 
-def _replace_coverage(
-    connection: DuckDBPyConnection,
-    scope: tuple[str, str, str, str],
-    coverage: list[_Coverage],
-    accepted: list[tuple[datetime, datetime]],
-    *,
-    fetched_at: datetime,
-    source_key: str,
-    digest: str,
-) -> None:
-    if len(coverage) == len(accepted) == 1 and (coverage[0].start, coverage[0].end) == accepted[0]:
-        connection.execute(
-            "UPDATE ops.fitbit_coverage "
-            "SET fetched_at=?,source_key=?,content_sha256=?,source_sha256='' "
-            f"WHERE {_SCOPE} AND range_start=? AND range_end=?",
-            [fetched_at, source_key, digest, *scope, *accepted[0]],
-        )
-        return
-    # Split empty and nonempty acquisitions alike to protect newer subranges.
-    deleted = []
-    rows = []
-    for prior in coverage:
-        remaining = [(prior.start, prior.end)]
-        for start, end in accepted:
-            remaining = _subtract(remaining, start, end)
-        if remaining == [(prior.start, prior.end)]:
-            continue
-        deleted.append(prior.start)
-        for start, end in remaining:
-            # A fragment is not a complete acquisition; its hash is not reusable.
-            rows.append(
-                {
-                    "start": start,
-                    "end": end,
-                    "fetched_at": prior.fetched_at,
-                    "source_key": prior.source_key,
-                    "content_sha256": "",
-                }
-            )
-    rows.extend(
-        {
-            "start": start,
-            "end": end,
-            "fetched_at": fetched_at,
-            "source_key": source_key,
-            "content_sha256": digest,
-        }
-        for start, end in accepted
-    )
-    if deleted:
-        connection.execute(
-            f"DELETE FROM ops.fitbit_coverage WHERE {_SCOPE} "
-            "AND range_start IN (SELECT unnest(?::TIMESTAMPTZ[]))",
-            [*scope, deleted],
-        )
-    if rows:
-        # Keep the legacy source_sha256 column empty without changing the DB schema.
-        connection.execute(
-            "INSERT INTO ops.fitbit_coverage "
-            "SELECT ?,?,?,?,r.start::TIMESTAMPTZ,r.end::TIMESTAMPTZ,r.fetched_at::TIMESTAMPTZ,"
-            "r.source_key::VARCHAR,r.content_sha256::VARCHAR,'' "
-            "FROM unnest(?) incoming(r)",
-            [*scope, rows],
-        )
+def sleep_detail_id(kind: str, record_id: str) -> str:
+    """Keep provider identities in separate sleep-detail kind namespaces."""
+    return _identity([kind, record_id])
 
 
-def _digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value, default=str, sort_keys=True, separators=(",", ":"), allow_nan=False
-        ).encode()
-    ).hexdigest()
+def _identity(parts: list[str]) -> str:
+    return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
 
 
-def _cursor(kind: str, prefix: str = "") -> str:
-    if kind in (*DATE_TYPES, "sleep-stage", "sleep-wake"):
-        # DATE::TIMESTAMPTZ would depend on the connection's time zone.
-        return f"timezone('UTC', {prefix}source_date::TIMESTAMP)"
-    return f"{prefix}sample_at" if kind in SAMPLE_TYPES else f"{prefix}start_at"
-
-
-def _kind_filter(kind: str, prefix: str = "") -> str:
-    if kind in ("steps", "active-zone-minutes"):
-        return f"{prefix}metric='{kind}'"
-    if kind in ("sleep-stage", "sleep-wake"):
-        return f"{prefix}kind='{kind}'"
-    return "true"
-
-
-_HEALTH_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+_DAILY_FIELDS = {
+    "daily-resting-heart-rate": ("resting_heart_rate_bpm",),
     "daily-heart-rate-variability": (
-        ("source_date", "DATE"),
-        ("rmssd_ms", "DOUBLE"),
-        ("deep_sleep_rmssd_ms", "DOUBLE"),
-        ("non_rem_heart_rate_bpm", "BIGINT"),
-        ("entropy", "DOUBLE"),
+        "hrv_rmssd_ms",
+        "deep_sleep_hrv_rmssd_ms",
+        "non_rem_heart_rate_bpm",
+        "hrv_entropy",
     ),
-    "heart-rate-variability": (
-        ("sample_at", "TIMESTAMPTZ"),
-        ("offset_seconds", "INTEGER"),
-        ("source_date", "DATE"),
-        ("rmssd_ms", "DOUBLE"),
-        ("sdnn_ms", "DOUBLE"),
-    ),
-    "daily-respiratory-rate": (("source_date", "DATE"), ("breaths_per_minute", "DOUBLE")),
-    "respiratory-rate-sleep-summary": (
-        ("sample_at", "TIMESTAMPTZ"),
-        ("offset_seconds", "INTEGER"),
-        ("source_date", "DATE"),
-        ("full_breaths_per_minute", "DOUBLE"),
-        ("full_standard_deviation", "DOUBLE"),
-        ("full_signal_to_noise", "DOUBLE"),
-        ("deep_breaths_per_minute", "DOUBLE"),
-        ("deep_standard_deviation", "DOUBLE"),
-        ("deep_signal_to_noise", "DOUBLE"),
-        ("light_breaths_per_minute", "DOUBLE"),
-        ("light_standard_deviation", "DOUBLE"),
-        ("light_signal_to_noise", "DOUBLE"),
-        ("rem_breaths_per_minute", "DOUBLE"),
-        ("rem_standard_deviation", "DOUBLE"),
-        ("rem_signal_to_noise", "DOUBLE"),
-    ),
+    "daily-respiratory-rate": ("respiratory_rate_breaths_per_minute",),
     "daily-oxygen-saturation": (
-        ("source_date", "DATE"),
-        ("average_percent", "DOUBLE"),
-        ("lower_bound_percent", "DOUBLE"),
-        ("upper_bound_percent", "DOUBLE"),
-        ("standard_deviation_percent", "DOUBLE"),
+        "spo2_average_percent",
+        "spo2_lower_bound_percent",
+        "spo2_upper_bound_percent",
+        "spo2_standard_deviation_percent",
     ),
     "daily-sleep-temperature-derivations": (
-        ("source_date", "DATE"),
-        ("nightly_temperature_celsius", "DOUBLE"),
-        ("baseline_temperature_celsius", "DOUBLE"),
-        ("relative_nightly_stddev_30d_celsius", "DOUBLE"),
-    ),
-    "exercise": (
-        ("start_at", "TIMESTAMPTZ"),
-        ("end_at", "TIMESTAMPTZ"),
-        ("offset_seconds", "INTEGER"),
-        ("end_offset_seconds", "INTEGER"),
-        ("source_date", "DATE"),
-        ("exercise_type", "VARCHAR"),
-        ("display_name", "VARCHAR"),
-        ("active_duration_seconds", "DOUBLE"),
+        "nightly_skin_temperature_celsius",
+        "baseline_skin_temperature_celsius",
+        "relative_nightly_stddev_30d_celsius",
     ),
     "daily-vo2-max": (
-        ("source_date", "DATE"),
-        ("vo2_max_ml_kg_min", "DOUBLE"),
-        ("estimated", "BOOLEAN"),
-        ("cardio_fitness_level", "VARCHAR"),
-        ("covariance", "DOUBLE"),
-    ),
-    "sedentary-period": (
-        ("start_at", "TIMESTAMPTZ"),
-        ("end_at", "TIMESTAMPTZ"),
-        ("offset_seconds", "INTEGER"),
-        ("end_offset_seconds", "INTEGER"),
-        ("source_date", "DATE"),
-    ),
-    "distance": (
-        ("start_at", "TIMESTAMPTZ"),
-        ("end_at", "TIMESTAMPTZ"),
-        ("offset_seconds", "INTEGER"),
-        ("end_offset_seconds", "INTEGER"),
-        ("source_date", "DATE"),
-        ("distance_meters", "DOUBLE"),
-    ),
-    "time-in-heart-rate-zone": (
-        ("start_at", "TIMESTAMPTZ"),
-        ("end_at", "TIMESTAMPTZ"),
-        ("offset_seconds", "INTEGER"),
-        ("end_offset_seconds", "INTEGER"),
-        ("source_date", "DATE"),
-        ("zone", "VARCHAR"),
+        "vo2_max_ml_kg_min",
+        "vo2_max_estimated",
+        "cardio_fitness_level",
+        "vo2_max_covariance",
     ),
 }
+_ALL_DAILY_FIELDS = tuple(field for fields in _DAILY_FIELDS.values() for field in fields)
 
 
-def _record_fields(kind: str) -> tuple[tuple[str, ...], str]:
-    if kind in _HEALTH_FIELDS:
-        fields = _HEALTH_FIELDS[kind]
-        return tuple(name for name, _ in fields), ", ".join(
-            f"r.{name}::{sql_type}" for name, sql_type in fields
-        )
-    if kind in ("steps", "active-zone-minutes"):
-        return (
-            (
-                "metric",
-                "start_at",
-                "end_at",
-                "value",
-                "offset_seconds",
-                "end_offset_seconds",
-                "source_date",
-                "category",
-            ),
-            "r.kind::VARCHAR, r.start::TIMESTAMPTZ, r.end::TIMESTAMPTZ, r.value::DOUBLE, "
-            "r.offset_seconds::INTEGER, r.end_offset_seconds::INTEGER, r.source_date::DATE, r.category::VARCHAR",
-        )
-    if kind == "daily-resting-heart-rate":
-        return ("source_date", "beats_per_minute"), "r.source_date::DATE, r.value::DOUBLE"
-    if kind == "sleep":
-        return (
-            (
-                "source_date",
-                "start_at",
-                "end_at",
-                "sleep_minutes",
-                "offset_seconds",
-                "end_offset_seconds",
-                "sleep_type",
-                "is_main_sleep",
-                "minutes_awake",
-                "minutes_in_sleep_period",
-                "minutes_to_fall_asleep",
-                "minutes_after_wake_up",
-            ),
-            "r.source_date::DATE, r.start::TIMESTAMPTZ, r.end::TIMESTAMPTZ, r.value::DOUBLE, "
-            "r.offset_seconds::INTEGER, r.end_offset_seconds::INTEGER, r.category::VARCHAR, r.is_main_sleep::BOOLEAN, "
-            "r.minutes_awake::BIGINT, r.minutes_in_sleep_period::BIGINT, "
-            "r.minutes_to_fall_asleep::BIGINT, r.minutes_after_wake_up::BIGINT",
-        )
-    return (
-        (
-            "kind",
-            "sleep_id",
-            "source_date",
-            "start_at",
-            "end_at",
-            "offset_seconds",
-            "end_offset_seconds",
-            "category",
-        ),
-        "r.kind::VARCHAR, r.parent_id::VARCHAR, (r.cursor::TIMESTAMPTZ AT TIME ZONE 'UTC')::DATE, "
-        "r.start::TIMESTAMPTZ, r.end::TIMESTAMPTZ, r.offset_seconds::INTEGER, "
-        "r.end_offset_seconds::INTEGER, r.category::VARCHAR",
-    )
-
-
-def _record_row(record: Record) -> dict[str, object]:
-    row = asdict(record)
-    row.pop("details")
-    if record.details is not None:
-        details = asdict(record.details)
-        if record.kind == "respiratory-rate-sleep-summary":
-            row.update(
+def record_values(record: Record) -> dict[str, object]:
+    """Map every typed provider field to its public base column."""
+    kind = record.kind
+    values: dict[str, object] = {"source_date": record.source_date}
+    details = asdict(record.details) if record.details is not None else {}
+    if kind in DAILY_TYPES:
+        if kind in ("daily-resting-heart-rate", "daily-respiratory-rate"):
+            metrics: tuple[object, ...] = (record.value,)
+        else:
+            metrics = tuple(details.values())
+        return {**values, **dict(zip(_DAILY_FIELDS[kind], metrics, strict=True))}
+    if kind in SAMPLE_TYPES:
+        values.update(sample_at=record.start, offset_seconds=record.offset_seconds)
+        if kind == "respiratory-rate-sleep-summary":
+            values.update(
                 {
                     f"{stage}_{field}": value
                     for stage, stats in details.items()
@@ -348,17 +94,162 @@ def _record_row(record: Record) -> dict[str, object]:
                 }
             )
         else:
-            row.update(details)
-    elif record.kind == "sleep":
-        row.update(asdict(SleepSummary()))
-    row.update(start_at=record.start, end_at=record.end, sample_at=record.start)
-    if record.kind == "daily-respiratory-rate":
-        row["breaths_per_minute"] = record.value
-    elif record.kind == "distance":
-        row["distance_meters"] = record.value
-    elif record.kind == "time-in-heart-rate-zone":
-        row["zone"] = record.category
-    return row
+            values.update(details)
+        return values
+    values.update(
+        start_at=record.start,
+        end_at=record.end,
+        offset_seconds=record.offset_seconds,
+        end_offset_seconds=record.end_offset_seconds,
+    )
+    if kind == "sleep":
+        summary = record.details if record.details is not None else SleepSummary()
+        assert isinstance(summary, SleepSummary)
+        values.update(
+            sleep_minutes=record.value,
+            sleep_type=record.category,
+            is_main_sleep=record.is_main_sleep,
+            awake_minutes=summary.minutes_awake,
+            sleep_period_minutes=summary.minutes_in_sleep_period,
+            sleep_latency_minutes=summary.minutes_to_fall_asleep,
+            after_wake_minutes=summary.minutes_after_wake_up,
+        )
+    elif kind in ("sleep-stage", "sleep-wake"):
+        values.pop("source_date")
+        values.update(sleep_session_id=record.parent_id, kind=kind, category=record.category)
+    elif kind == "exercise":
+        values.update(
+            exercise_type=details["exercise_type"],
+            exercise_name=details["display_name"],
+            active_seconds=details["active_duration_seconds"],
+        )
+    elif kind == "steps":
+        values["steps"] = record.value
+    elif kind == "active-zone-minutes":
+        values.update(active_zone_minutes=record.value, category=record.category)
+    elif kind == "distance":
+        values["distance_meters"] = record.value
+    elif kind == "time-in-heart-rate-zone":
+        values["zone"] = record.category
+    return values
+
+
+def _column_type(column: str) -> str:
+    if column == "source_date":
+        return "DATE"
+    if column.endswith("_at"):
+        return "TIMESTAMPTZ"
+    if column in ("offset_seconds", "end_offset_seconds"):
+        return "INTEGER"
+    if column == "non_rem_heart_rate_bpm":
+        return "BIGINT"
+    if column in ("is_main_sleep", "vo2_max_estimated"):
+        return "BOOLEAN"
+    if column.endswith("_id") or column in (
+        "kind",
+        "category",
+        "sleep_type",
+        "exercise_type",
+        "exercise_name",
+        "zone",
+        "cardio_fitness_level",
+        "aggregation_version",
+    ):
+        return "VARCHAR"
+    return "DOUBLE"
+
+
+def _upsert(
+    connection: DuckDBPyConnection, table: str, key: str, rows: list[dict[str, object]]
+) -> None:
+    if not rows:
+        return
+    columns = tuple(rows[0])
+    projection = ",".join(f"r.{field}::{_column_type(field)}" for field in columns)
+    updates = ",".join(f"{field}=excluded.{field}" for field in columns if field != key)
+    connection.execute(
+        f"INSERT INTO base.{table} ({','.join(columns)}) "
+        f"SELECT {projection} FROM unnest(?) incoming(r) "
+        f"ON CONFLICT ({key}) DO UPDATE SET {updates}",
+        [rows],
+    )
+
+
+def _delete(connection: DuckDBPyConnection, table: str, key: str, ids: list[object]) -> None:
+    if ids:
+        connection.execute(
+            f"DELETE FROM base.{table} WHERE {key} IN (SELECT unnest(?::{_column_type(key)}[]))",
+            [ids],
+        )
+
+
+def _reconcile(
+    connection: DuckDBPyConnection,
+    table: str,
+    key: str,
+    incoming: list[dict[str, object]],
+    *,
+    predicate: str,
+    parameters: list[object],
+) -> tuple[int, bool]:
+    """Compare current values, including incoming identities moved from outside the range."""
+    columns = tuple(incoming[0]) if incoming else ()
+    ids = [row[key] for row in incoming]
+    existing = connection.execute(
+        f"SELECT * FROM base.{table} WHERE ({predicate}) "
+        f"OR {key} IN (SELECT unnest(?::{_column_type(key)}[]))",
+        [*parameters, ids],
+    )
+    names = [description[0] for description in existing.description]
+    current = {
+        row[names.index(key)]: dict(zip(names, row, strict=True)) for row in existing.fetchall()
+    }
+    omitted = [identity for identity in current if identity not in ids]
+    changed = [
+        row
+        for row in incoming
+        if row[key] not in current
+        or any(current[row[key]][field] != row[field] for field in columns)
+    ]
+    _delete(connection, table, key, omitted)
+    _upsert(connection, table, key, changed)
+    return len(changed), bool(omitted or changed)
+
+
+def _range(window: Window) -> tuple[str, list[object]]:
+    if window.data_type in DATE_TYPES or window.time_basis == "civil":
+        return "source_date >= ? AND source_date < ?", [window.start.date(), window.end.date()]
+    cursor = "sample_at" if window.data_type in SAMPLE_TYPES else "start_at"
+    return f"{cursor} >= ? AND {cursor} < ?", [window.start, window.end]
+
+
+def _daily(connection: DuckDBPyConnection, snapshot: Snapshot) -> tuple[int, bool]:
+    fields = _DAILY_FIELDS[snapshot.window.data_type]
+    current = dict(
+        connection.execute(
+            f"SELECT source_date,struct_pack({','.join(f'{field}:={field}' for field in _ALL_DAILY_FIELDS)}) "
+            "FROM base.health_daily WHERE source_date>=? AND source_date<?",
+            [snapshot.window.start.date(), snapshot.window.end.date()],
+        ).fetchall()
+    )
+    incoming = {record.source_date: record_values(record) for record in snapshot.records}
+    changed: list[dict[str, object]] = []
+    deleted: list[object] = []
+    submitted = 0
+    for day in current.keys() | incoming.keys():
+        row = incoming.get(day, {"source_date": day, **dict.fromkeys(fields)})
+        previous = current.get(day, dict.fromkeys(_ALL_DAILY_FIELDS))
+        if all(previous[field] == row[field] for field in fields):
+            continue
+        merged = {**previous, **row}
+        if all(merged[field] is None for field in _ALL_DAILY_FIELDS):
+            deleted.append(day)
+        else:
+            changed.append(row)
+            submitted += int(day in incoming)
+    _delete(connection, "health_daily", "source_date", deleted)
+    _upsert(connection, "health_daily", "source_date", changed)
+    return submitted, bool(changed or deleted)
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,414 +260,58 @@ class FitbitBatch:
         self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
     ) -> WriteResult:
         snapshot = self.snapshot
-        window = snapshot.window
-        version = (
-            CIVIL_RECORD_AGGREGATION_VERSION
-            if window.time_basis == "civil"
-            else RECORD_AGGREGATION_VERSION
-        )
-        scope = coverage_scope(snapshot.subject_key, window.data_type, version)
-        coverage = _read_coverage(connection, scope, window)
-        accepted = _accepted_ranges(snapshot, source_key, coverage)
-        if not accepted:
-            return WriteResult("stale", 0, ())
-        records = [asdict(record) for record in snapshot.records]
-        records.sort(key=lambda item: json.dumps(item, default=str, sort_keys=True))
-        digest = _digest(records)
-        unchanged = _unchanged(coverage, window, digest)
-        submitted = 0
-        protected: set[str] = set()
-        if window.data_type == "steps":
-            protected, submitted, changed = self._replace_steps(
-                connection, accepted, source_key=source_key, loaded_at=loaded_at
-            )
-            unchanged = bool(coverage) and not changed
-            if protected:
-                digest = ""
-        elif not unchanged:
-            protected, submitted = self._replace_records(
-                connection, accepted, source_key=source_key, loaded_at=loaded_at
-            )
-            if protected:
-                digest = ""
-        _replace_coverage(
-            connection,
-            scope,
-            coverage,
-            accepted,
-            fetched_at=snapshot.fetched_at,
-            source_key=source_key,
-            digest=digest,
-        )
-        return WriteResult(
-            "unchanged" if unchanged else "range_replaced",
-            submitted,
-            tuple(accepted),
-            len(protected),
-        )
-
-    def _replace_steps(
-        self,
-        connection: DuckDBPyConnection,
-        accepted: list[tuple[datetime, datetime]],
-        *,
-        source_key: str,
-        loaded_at: datetime,
-    ) -> tuple[set[str], int, bool]:
-        snapshot = self.snapshot
-        window = snapshot.window
-        civil = window.time_basis == "civil"
-        incoming = {
-            record.record_id: record
-            for record in snapshot.records
-            if any(start <= window.record_cursor(record) < end for start, end in accepted)
-        }
-        cursor = "timezone('UTC', r.source_date::TIMESTAMP)" if civil else "r.start_at"
-        rows = connection.execute(
-            f"""SELECT r.record_id,r.start_at,r.end_at,r.value,r.offset_seconds,
-                r.end_offset_seconds,r.source_date,r.category,r.fetched_at,r.source_key,
-                c.fetched_at,c.source_key
-            FROM base.fitbit_activity_interval r LEFT JOIN ops.fitbit_coverage c
-              ON c.subject_key=r.subject_key AND c.data_type='steps'
-             AND c.data_source_family=? AND (
-                (c.aggregation_version=? AND r.start_at >= c.range_start AND r.start_at < c.range_end)
-                OR (c.aggregation_version=? AND timezone('UTC', r.source_date::TIMESTAMP) >= c.range_start
-                    AND timezone('UTC', r.source_date::TIMESTAMP) < c.range_end))
-            WHERE r.subject_key=? AND r.metric='steps' AND
-                (({cursor} >= ? AND {cursor} < ?)
-                OR r.record_id IN (SELECT unnest(?::VARCHAR[]))
-                OR (? AND r.source_date IS NULL))""",
-            [
-                GOOGLE_WEARABLES,
-                RECORD_AGGREGATION_VERSION,
-                CIVIL_RECORD_AGGREGATION_VERSION,
-                snapshot.subject_key,
-                snapshot.window.start,
-                snapshot.window.end,
-                sorted(incoming),
-                civil,
-            ],
-        ).fetchall()
-        if civil:
-            for row in rows:
-                if (
-                    row[6] is None
-                    or row[4] is None
-                    or (aware(row[1]) + timedelta(seconds=row[4])).date() != row[6]
-                ):
-                    raise ValueError("stored steps have an ambiguous civil date")
-        existing = {row[0]: row for row in rows}
-        order = snapshot.fetched_at, source_key
-        protected = {
-            row[0]
-            for row in rows
-            if max((row[8], row[9]), (row[10], row[11]) if row[10] else (row[8], row[9])) > order
-        }
-        if incoming:
-            protected.update(
-                identity
-                for identity, fetched, key in connection.execute(
-                    "SELECT record_id,fetched_at,source_key FROM ops.fitbit_deleted_record "
-                    "WHERE subject_key=? AND data_type='steps' "
-                    "AND record_id IN (SELECT unnest(?::VARCHAR[]))",
-                    [snapshot.subject_key, sorted(incoming)],
-                ).fetchall()
-                if (fetched, key) > order
-            )
-            if civil:
-                other_window = Window(
-                    "steps", window.start - timedelta(hours=18), window.end + timedelta(hours=18)
-                )
-                other_version = RECORD_AGGREGATION_VERSION
-            else:
-                other_start = date_cursor((window.start - timedelta(hours=18)).date())
-                other_end = date_cursor((window.end + timedelta(hours=18)).date()) + timedelta(
-                    days=1
-                )
-                other_window = Window("steps", other_start, other_end, time_basis="civil")
-                other_version = CIVIL_RECORD_AGGREGATION_VERSION
-            other_coverage = _read_coverage(
-                connection,
-                coverage_scope(snapshot.subject_key, "steps", other_version),
-                other_window,
-            )
-            for identity, record in incoming.items():
-                if not other_coverage:
-                    continue
-                cursor_at = record.cursor if civil else other_window.record_cursor(record)
-                if any(
-                    prior.start <= cursor_at < prior.end
-                    and (prior.fetched_at, prior.source_key) > order
-                    for prior in other_coverage
-                ):
-                    protected.add(identity)
-        deleted = [
-            identity
-            for identity, row in existing.items()
-            if identity not in incoming
-            and identity not in protected
-            and any(
-                start <= (date_cursor(row[6]) if civil else row[1]) < end for start, end in accepted
-            )
-        ]
-        changed = [
-            record
-            for identity, record in incoming.items()
-            if identity not in protected
-            and (
-                identity not in existing
-                or tuple(existing[identity][1:8])
-                != (
-                    record.start,
-                    record.end,
-                    record.value,
-                    record.offset_seconds,
-                    record.end_offset_seconds,
-                    record.source_date,
-                    record.category,
-                )
-            )
-        ]
-        moved = [
-            existing[record.record_id][1] for record in changed if record.record_id in existing
-        ]
-        moved.extend(existing[identity][1] for identity in deleted)
-        if civil:
-            moved.extend(record.start for record in changed)
-        if moved:
-            connection.execute(
-                f"UPDATE ops.fitbit_coverage SET content_sha256='' WHERE {_SCOPE} "
-                "AND EXISTS (SELECT 1 FROM unnest(?::TIMESTAMPTZ[]) previous(cursor_at) "
-                "WHERE range_start <= previous.cursor_at AND range_end > previous.cursor_at)",
-                [*coverage_scope(snapshot.subject_key, "steps"), sorted(set(moved))],
-            )
-        if deleted:
-            connection.execute(
-                "INSERT INTO ops.fitbit_deleted_record "
-                "SELECT ?, 'steps', unnest(?::VARCHAR[]), ?, ? "
-                "ON CONFLICT (subject_key,data_type,record_id) DO UPDATE SET "
-                "fetched_at=excluded.fetched_at,source_key=excluded.source_key",
-                [snapshot.subject_key, deleted, snapshot.fetched_at, source_key],
-            )
-            connection.execute(
-                "DELETE FROM base.fitbit_activity_interval WHERE subject_key=? AND metric='steps' "
-                "AND record_id IN (SELECT unnest(?::VARCHAR[]))",
-                [snapshot.subject_key, deleted],
-            )
-        accepted_ids = sorted(set(incoming) - protected)
-        if accepted_ids:
-            connection.execute(
-                "DELETE FROM ops.fitbit_deleted_record WHERE subject_key=? AND data_type='steps' "
-                "AND record_id IN (SELECT unnest(?::VARCHAR[]))",
-                [snapshot.subject_key, accepted_ids],
-            )
-        if changed:
-            fields, projection = _record_fields("steps")
-            columns = ("subject_key", "record_id", *fields, "fetched_at", "source_key", "loaded_at")
-            updates = ", ".join(
-                f"{column}=excluded.{column}"
-                for column in columns
-                if column not in ("subject_key", "record_id", "metric")
-            )
-            connection.execute(
-                f"INSERT INTO base.fitbit_activity_interval ({', '.join(columns)}) "
-                f"SELECT ?, r.record_id::VARCHAR, {projection}, ?, ?, ? FROM unnest(?) incoming(r) "
-                f"ON CONFLICT DO UPDATE SET {updates}",
-                [
-                    snapshot.subject_key,
-                    snapshot.fetched_at,
-                    source_key,
-                    loaded_at,
-                    [asdict(record) for record in changed],
-                ],
-            )
-        return protected, len(changed), bool(changed or deleted)
-
-    def _replace_records(
-        self,
-        connection: DuckDBPyConnection,
-        accepted: list[tuple[datetime, datetime]],
-        *,
-        source_key: str,
-        loaded_at: datetime,
-    ) -> tuple[set[str], int]:
-        snapshot = self.snapshot
         kind = snapshot.window.data_type
-        main = [
-            record
-            for record in snapshot.records
-            if record.kind == kind and any(start <= record.cursor < end for start, end in accepted)
-        ]
-        protected = (
-            self._protect_existing_records(connection, main, accepted, source_key=source_key)
-            if main
-            else set()
-        )
-        ids = [record.record_id for record in main if record.record_id not in protected]
-        if kind == "sleep" and ids:
-            connection.execute(
-                "DELETE FROM base.fitbit_sleep_detail WHERE subject_key=? "
-                "AND sleep_id IN (SELECT unnest(?::VARCHAR[]))",
-                [snapshot.subject_key, ids],
-            )
-        self._update_deletions(
-            connection, accepted, ids, protected=protected, source_key=source_key
-        )
-        submitted = self._replace_rows(
-            connection, accepted, protected, source_key=source_key, loaded_at=loaded_at
-        )
-        return protected, submitted
-
-    def _protect_existing_records(
-        self,
-        connection: DuckDBPyConnection,
-        records: list[Record],
-        accepted: list[tuple[datetime, datetime]],
-        *,
-        source_key: str,
-    ) -> set[str]:
-        snapshot = self.snapshot
-        kind = snapshot.window.data_type
-        scope = coverage_scope(snapshot.subject_key, kind)
-        ids = [record.record_id for record in records]
-        cursor = _cursor(kind, "r.")
-        existing = connection.execute(
-            f"""SELECT r.record_id, {cursor}, coalesce(c.fetched_at, r.fetched_at),
-                coalesce(c.source_key, r.source_key)
-            FROM base.{TABLES[kind]} r LEFT JOIN ops.fitbit_coverage c
-              ON c.subject_key=r.subject_key AND c.data_type=?
-             AND c.data_source_family=? AND c.aggregation_version=?
-             AND {cursor} >= c.range_start AND {cursor} < c.range_end
-            WHERE r.subject_key=? AND {_kind_filter(kind, "r.")} AND r.record_id IN
-                (SELECT unnest(?::VARCHAR[]))""",
-            [*scope[1:], snapshot.subject_key, ids],
-        ).fetchall()
-        existing.extend(
-            connection.execute(
-                "SELECT record_id, NULL, fetched_at, source_key FROM ops.fitbit_deleted_record "
-                "WHERE subject_key=? AND data_type=? "
-                "AND record_id IN (SELECT unnest(?::VARCHAR[]))",
-                [snapshot.subject_key, kind, ids],
-            ).fetchall()
-        )
-        protected: set[str] = set()
-        moved: set[datetime] = set()
-        for identity, prior_cursor, fetched, prior_key in existing:
-            if (fetched, prior_key) > (snapshot.fetched_at, source_key):
-                protected.add(identity)
-            elif prior_cursor is not None and not any(
-                start <= prior_cursor < end for start, end in accepted
-            ):
-                moved.add(prior_cursor)
-        if moved:
-            connection.execute(
-                f"UPDATE ops.fitbit_coverage SET content_sha256='' WHERE {_SCOPE} "
-                "AND EXISTS (SELECT 1 FROM unnest(?::TIMESTAMPTZ[]) previous(cursor_at) "
-                "WHERE range_start <= previous.cursor_at AND range_end > previous.cursor_at)",
-                [*scope, sorted(moved)],
-            )
-        return protected
-
-    def _update_deletions(
-        self,
-        connection: DuckDBPyConnection,
-        accepted: list[tuple[datetime, datetime]],
-        accepted_ids: list[str],
-        *,
-        protected: set[str],
-        source_key: str,
-    ) -> None:
-        snapshot = self.snapshot
-        kind = snapshot.window.data_type
-        cursor = _cursor(kind)
-        for start, end in accepted:
-            connection.execute(
-                f"""INSERT INTO ops.fitbit_deleted_record
-                SELECT subject_key, ?, record_id, ?, ? FROM base.{TABLES[kind]}
-                WHERE subject_key=? AND {_kind_filter(kind)} AND {cursor} >= ? AND {cursor} < ?
-                  AND record_id NOT IN (SELECT unnest(?::VARCHAR[]))
-                ON CONFLICT (subject_key, data_type, record_id) DO UPDATE SET
-                    fetched_at=excluded.fetched_at, source_key=excluded.source_key""",
-                [
-                    kind,
-                    snapshot.fetched_at,
-                    source_key,
-                    snapshot.subject_key,
-                    start,
-                    end,
-                    [*accepted_ids, *protected],
-                ],
-            )
-        if accepted_ids:
-            connection.execute(
-                "DELETE FROM ops.fitbit_deleted_record WHERE subject_key=? AND data_type=? "
-                "AND record_id IN (SELECT unnest(?::VARCHAR[]))",
-                [snapshot.subject_key, kind, accepted_ids],
-            )
-
-    def _replace_rows(
-        self,
-        connection: DuckDBPyConnection,
-        accepted: list[tuple[datetime, datetime]],
-        protected: set[str],
-        *,
-        source_key: str,
-        loaded_at: datetime,
-    ) -> int:
-        snapshot = self.snapshot
-        kinds = (
-            ("sleep", "sleep-stage", "sleep-wake")
-            if snapshot.window.data_type == "sleep"
-            else (snapshot.window.data_type,)
-        )
-        submitted = 0
-        for kind in kinds:
+        predicate, parameters = _range(snapshot.window)
+        if kind in DAILY_TYPES:
+            submitted, changed = _daily(connection, snapshot)
+        else:
             table = TABLES[kind]
-            identity = "sleep_id" if kind in ("sleep-stage", "sleep-wake") else "record_id"
-            cursor = _cursor(kind)
-            for start, end in accepted:
-                connection.execute(
-                    f"DELETE FROM base.{table} WHERE subject_key=? AND {_kind_filter(kind)} "
-                    f"AND {cursor} >= ? AND {cursor} < ? AND {identity} NOT IN (SELECT unnest(?::VARCHAR[]))",
-                    [snapshot.subject_key, start, end, sorted(protected)],
+            key = (
+                f"{table}_id"
+                if kind != "respiratory-rate-sleep-summary"
+                else "respiratory_summary_id"
+            )
+            main = [record for record in snapshot.records if record.kind == kind]
+            incoming = [{key: record.record_id, **record_values(record)} for record in main]
+            submitted = 0
+            changed = False
+            if kind == "sleep":
+                parent_ids = [record.record_id for record in main]
+                affected = [
+                    row[0]
+                    for row in connection.execute(
+                        f"SELECT sleep_session_id FROM base.sleep_session WHERE {predicate}",
+                        parameters,
+                    ).fetchall()
+                ]
+                child_rows = [
+                    {
+                        "sleep_detail_id": sleep_detail_id(record.kind, record.record_id),
+                        **record_values(record),
+                    }
+                    for record in snapshot.records
+                    if record.kind != "sleep"
+                ]
+                count, child_changed = _reconcile(
+                    connection,
+                    "sleep_detail",
+                    "sleep_detail_id",
+                    child_rows,
+                    predicate="sleep_session_id IN (SELECT unnest(?::VARCHAR[]))",
+                    parameters=[list(set(parent_ids + affected))],
                 )
-            rows = [
-                _record_row(record)
-                for record in snapshot.records
-                if record.kind == kind
-                and any(start <= record.cursor < end for start, end in accepted)
-                and (record.parent_id or record.record_id) not in protected
-            ]
-            if rows:
-                fields, projection = _record_fields(kind)
-                columns = (
-                    "subject_key",
-                    "record_id",
-                    *fields,
-                    "fetched_at",
-                    "source_key",
-                    "loaded_at",
-                )
-                updates = ", ".join(
-                    f"{column}=excluded.{column}"
-                    for column in columns
-                    if column not in ("subject_key", "record_id", "metric", "kind")
-                )
-                conflict = "subject_key, record_id"
-                if kind in ("steps", "active-zone-minutes"):
-                    conflict = "subject_key, metric, record_id"
-                elif kind in ("sleep-stage", "sleep-wake"):
-                    conflict = "subject_key, kind, record_id"
-                # Parameter ingestion batches a day's rows into one statement.
-                connection.execute(
-                    f"""INSERT INTO base.{table} ({", ".join(columns)})
-                    SELECT ?, r.record_id::VARCHAR, {projection}, ?, ?, ? FROM unnest(?) incoming(r)
-                    ON CONFLICT ({conflict}) DO UPDATE SET {updates}
-                    WHERE (excluded.fetched_at, excluded.source_key) >= ({table}.fetched_at, {table}.source_key)""",
-                    [snapshot.subject_key, snapshot.fetched_at, source_key, loaded_at, rows],
-                )
-                submitted += len(rows)
-        return submitted
+                submitted += count
+                changed |= child_changed
+            count, main_changed = _reconcile(
+                connection, table, key, incoming, predicate=predicate, parameters=parameters
+            )
+            submitted += count
+            changed |= main_changed
+        return WriteResult(
+            "range_replaced" if changed else "unchanged",
+            submitted,
+            ((snapshot.window.start, snapshot.window.end),),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -787,104 +322,29 @@ class FitbitMinuteBatch:
         self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
     ) -> WriteResult:
         snapshot = self.snapshot
-        window = snapshot.window
-        scope = coverage_scope(snapshot.subject_key, window.data_type, snapshot.aggregation_version)
-        coverage = _read_coverage(connection, scope, window)
-        accepted = _accepted_ranges(snapshot, source_key, coverage)
-        if not accepted:
-            return WriteResult("stale", 0, ())
-        digest = _digest(
-            [asdict(row) for row in sorted(snapshot.minutes, key=lambda row: row.start)]
-        )
-        unchanged = _unchanged(coverage, window, digest)
-        submitted = 0
-        if not unchanged:
-            minutes = [
-                row
-                for row in snapshot.minutes
-                if any(start <= row.start < end for start, end in accepted)
-            ]
-            if len(minutes) >= _MINUTE_MERGE_MIN_ROWS:
-                incoming = [
-                    {
-                        "start": row.start,
-                        "average": row.average,
-                        "minimum": row.minimum,
-                        "maximum": row.maximum,
-                    }
-                    for row in minutes
-                ]
-                range_filter = "t.start_at>=? AND t.start_at<?"
-                range_parameters: list[object] = list(accepted[0])
-                if len(accepted) > 1:
-                    range_filter = (
-                        "EXISTS (SELECT 1 FROM unnest(?) a(r) "
-                        "WHERE t.start_at>=r.start AND t.start_at<r.end)"
-                    )
-                    range_parameters = [[{"start": start, "end": end} for start, end in accepted]]
-                connection.execute(
-                    "MERGE INTO base.fitbit_heart_rate_minute t USING ("
-                    "SELECT ? subject_key,? data_source_family,r.start start_at,"
-                    "? aggregation_version,r.average,r.minimum,r.maximum,"
-                    "? fetched_at,? source_key,? loaded_at FROM unnest(?) i(r)"
-                    ") s USING (subject_key,data_source_family,start_at,aggregation_version) "
-                    "WHEN MATCHED AND (t.average,t.minimum,t.maximum) "
-                    "IS DISTINCT FROM (s.average,s.minimum,s.maximum) THEN UPDATE "
-                    "WHEN NOT MATCHED THEN INSERT "
-                    "WHEN NOT MATCHED BY SOURCE AND (t.subject_key,t.data_source_family,"
-                    f"t.aggregation_version)=(?,?,?) AND {range_filter} THEN DELETE",
-                    [
-                        snapshot.subject_key,
-                        GOOGLE_WEARABLES,
-                        snapshot.aggregation_version,
-                        snapshot.fetched_at,
-                        source_key,
-                        loaded_at,
-                        incoming,
-                        snapshot.subject_key,
-                        GOOGLE_WEARABLES,
-                        snapshot.aggregation_version,
-                        *range_parameters,
-                    ],
-                )
-            else:
-                for start, end in accepted:
-                    connection.execute(
-                        "DELETE FROM base.fitbit_heart_rate_minute WHERE subject_key=? AND data_source_family=? "
-                        "AND aggregation_version=? AND start_at>=? AND start_at<?",
-                        [
-                            snapshot.subject_key,
-                            GOOGLE_WEARABLES,
-                            snapshot.aggregation_version,
-                            start,
-                            end,
-                        ],
-                    )
-                if minutes:
-                    connection.execute(
-                        "INSERT INTO base.fitbit_heart_rate_minute "
-                        "SELECT ?,r.data_source_family::VARCHAR,r.start::TIMESTAMPTZ,"
-                        "r.aggregation_version::VARCHAR,"
-                        "r.average::DOUBLE,r.minimum::DOUBLE,r.maximum::DOUBLE,"
-                        "?,?,? FROM unnest(?) incoming(r)",
-                        [
-                            snapshot.subject_key,
-                            snapshot.fetched_at,
-                            source_key,
-                            loaded_at,
-                            [asdict(row) for row in minutes],
-                        ],
-                    )
-            submitted = len(minutes)
-        _replace_coverage(
+        rows = [
+            {
+                "heart_rate_minute_id": heart_rate_minute_id(
+                    minute.data_source_family, minute.start, minute.aggregation_version
+                ),
+                "start_at": minute.start,
+                "mean_bpm": minute.average,
+                "min_bpm": minute.minimum,
+                "max_bpm": minute.maximum,
+                "aggregation_version": minute.aggregation_version,
+            }
+            for minute in snapshot.minutes
+        ]
+        submitted, changed = _reconcile(
             connection,
-            scope,
-            coverage,
-            accepted,
-            fetched_at=snapshot.fetched_at,
-            source_key=source_key,
-            digest=digest,
+            "heart_rate_minute",
+            "heart_rate_minute_id",
+            rows,
+            predicate="start_at>=? AND start_at<?",
+            parameters=[snapshot.window.start, snapshot.window.end],
         )
         return WriteResult(
-            "unchanged" if unchanged else "range_replaced", submitted, tuple(accepted)
+            "range_replaced" if changed else "unchanged",
+            submitted,
+            ((snapshot.window.start, snapshot.window.end),),
         )
