@@ -1,76 +1,90 @@
-"""Crash-safe local Screen Time Raw and warehouse loading state."""
+"""Durable pending payloads and compact Screen Time acknowledgement state."""
 
 from __future__ import annotations
 
-import json
+import fcntl
+import gzip
+import os
 import sqlite3
+import tempfile
+import zlib
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from personal_data_platform.biome.raw import (
+from .raw import (
     ScreenTimeRawIdentity,
     format_observed_at,
     gzip_raw_bytes,
-    parse_observed_at,
+    parse_raw_object_key,
     sha256_hex,
 )
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS segment_observation (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_key TEXT NOT NULL,
-    stream TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS file_state (
+    snapshot_key TEXT PRIMARY KEY,
     segment_key TEXT NOT NULL,
+    device_key TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
     observed_at TEXT NOT NULL,
-    sha256 TEXT NOT NULL,
-    object_key TEXT NOT NULL UNIQUE,
-    compressed_payload BLOB,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'uploaded')),
-    uploaded_at TEXT,
-    storage_created_at TEXT,
-    storage_generation INTEGER NOT NULL DEFAULT 1
+    parser_version TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'sent')),
+    payload_path TEXT
 );
-CREATE INDEX IF NOT EXISTS segment_observation_latest
-    ON segment_observation (device_key, stream, segment_key, id DESC);
-CREATE INDEX IF NOT EXISTS segment_observation_pending
-    ON segment_observation (status, id);
-CREATE TABLE IF NOT EXISTS collector_stream_scan (
-    stream TEXT PRIMARY KEY,
-    completed_at TEXT NOT NULL,
-    device_keys TEXT NOT NULL,
-    device_scanned_at TEXT NOT NULL
+CREATE INDEX IF NOT EXISTS file_state_segment ON file_state(segment_key, observed_at);
+CREATE TABLE IF NOT EXISTS event_reference (
+    segment_key TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    PRIMARY KEY (segment_key, event_key)
 );
 """
 
 
 @dataclass(frozen=True, slots=True)
 class PendingObservation:
-    """A durable observation awaiting warehouse loading and its gzip payload."""
-
     identity: ScreenTimeRawIdentity
     compressed_payload: bytes
     created: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class CollectorScan:
-    completed_at: datetime
-    device_keys: tuple[str, ...]
-    device_scanned_at: dict[str, datetime]
+    parser_version: str | None = None
 
 
 class CollectorState:
-    """SQLite-backed Raw archive and warehouse acknowledgement state."""
+    """Keep all pending snapshots and only the latest sent metadata per segment."""
 
     def __init__(self, path: Path, *, source_id: str) -> None:
         self.source_id = source_id
-        self.path = path
+        self.path = path.resolve()
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path.touch(mode=0o600, exist_ok=True)
         self.path.chmod(0o600)
+        self.payload_directory = self.path.with_suffix(".payloads")
         with self._connect() as connection:
+            tables = {
+                r[0]
+                for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if tables and tables != {"file_state", "event_reference"}:
+                raise RuntimeError(
+                    "collector SQLite requires explicit migration; existing state retained"
+                )
             connection.executescript(_SCHEMA)
+        self.payload_directory.mkdir(mode=0o700, exist_ok=True)
+        self.payload_directory.chmod(0o700)
+
+    @contextmanager
+    def lock(self) -> Iterator[None]:
+        """Serialize collection and drain across processes sharing this source state."""
+        fd = os.open(self.path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RuntimeError("Screen Time collector already running") from error
+            yield
+        finally:
+            os.close(fd)
 
     def prepare(
         self,
@@ -80,210 +94,197 @@ class CollectorState:
         segment_key: str,
         raw_bytes: bytes,
         observed_at: datetime,
+        parser_version: str | None = None,
     ) -> PendingObservation | None:
-        """Archive a new observation, or reuse a consecutive pending/loaded duplicate."""
         format_observed_at(observed_at)
-        content_sha256 = sha256_hex(raw_bytes)
-        compressed_payload = gzip_raw_bytes(raw_bytes)
+        digest = sha256_hex(raw_bytes)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             latest = connection.execute(
-                """
-                SELECT observed_at, sha256, object_key, compressed_payload, status
-                FROM segment_observation
-                WHERE device_key = ? AND stream = ? AND segment_key = ?
-                ORDER BY observed_at DESC, object_key DESC
-                LIMIT 1
-                """,
-                (device_key, stream, segment_key),
+                "SELECT * FROM file_state WHERE segment_key = ? ORDER BY observed_at DESC, snapshot_key DESC LIMIT 1",
+                (segment_key,),
             ).fetchone()
-            if latest is not None and latest[1] == content_sha256:
-                if latest[4] == "uploaded":
-                    connection.commit()
+            if latest is not None and latest[3] == digest:
+                if latest[6] == "pending":
+                    return self._pending_from_row(latest)
+                if latest[5] == parser_version:
                     return None
-                payload = latest[3]
-                if payload is None:
-                    raise RuntimeError("pending observation has no durable payload")
-                pending = PendingObservation(
-                    identity=_identity_from_row(
-                        source_id=self.source_id,
-                        device_key=device_key,
-                        stream=stream,
-                        segment_key=segment_key,
-                        observed_at=latest[0],
-                        sha256=latest[1],
-                    ),
-                    compressed_payload=bytes(payload),
-                    created=False,
-                )
-                if pending.identity.object_key != latest[2]:
-                    raise RuntimeError("collector state contains an inconsistent object key")
-                connection.commit()
-                return pending
-
-            effective_observed_at = observed_at.astimezone(UTC)
-            if latest is not None:
-                previous_observed_at = parse_observed_at(latest[0])
-                if effective_observed_at <= previous_observed_at:
-                    effective_observed_at = previous_observed_at + timedelta(microseconds=1)
+            effective = observed_at.astimezone(UTC)
+            previous = connection.execute("SELECT max(observed_at) FROM file_state").fetchone()[0]
+            if previous is not None and effective <= datetime.fromisoformat(previous):
+                effective = datetime.fromisoformat(previous) + timedelta(microseconds=1)
             identity = ScreenTimeRawIdentity(
-                source_id=self.source_id,
-                device_key=device_key,
-                stream=stream,
-                segment_key=segment_key,
-                observed_at=effective_observed_at,
-                sha256=content_sha256,
+                self.source_id, device_key, stream, segment_key, effective, digest
             )
+            compressed = gzip_raw_bytes(raw_bytes)
+            payload_path = self.payload_directory / (
+                sha256_hex(identity.object_key.encode()) + ".segb.gz"
+            )
+            # The rename and directory fsync precede SQLite's durable pending row.
+            fd, temporary = tempfile.mkstemp(dir=self.payload_directory)
+            try:
+                with os.fdopen(fd, "wb") as payload:
+                    payload.write(compressed)
+                    payload.flush()
+                    os.fsync(payload.fileno())
+                os.replace(temporary, payload_path)
+                _sync_directory(self.payload_directory)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
             connection.execute(
-                """
-                INSERT INTO segment_observation (
-                    device_key, stream, segment_key, observed_at, sha256,
-                    object_key, compressed_payload, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-                """,
+                "INSERT INTO file_state VALUES (?, ?, ?, ?, ?, NULL, 'pending', ?)",
                 (
-                    identity.device_key,
-                    identity.stream,
-                    identity.segment_key,
-                    format_observed_at(identity.observed_at),
-                    identity.sha256,
                     identity.object_key,
-                    compressed_payload,
+                    segment_key,
+                    device_key,
+                    digest,
+                    effective.isoformat(),
+                    str(payload_path),
                 ),
             )
             connection.commit()
-            return PendingObservation(
-                identity=identity,
-                compressed_payload=compressed_payload,
-                created=True,
-            )
+        return PendingObservation(identity, compressed, created=True)
 
     def pending(self, *, stream: str | None = None) -> list[PendingObservation]:
-        """Return observations awaiting warehouse loading in their creation order."""
         with self._connect() as connection:
             rows = connection.execute(
-                """
-                SELECT device_key, stream, segment_key, observed_at, sha256,
-                       object_key, compressed_payload
-                FROM segment_observation
-                WHERE status = 'pending' AND (? IS NULL OR stream = ?)
-                ORDER BY observed_at, object_key
-                """,
-                (stream, stream),
+                "SELECT * FROM file_state WHERE status = 'pending' ORDER BY observed_at, snapshot_key"
             ).fetchall()
-        pending: list[PendingObservation] = []
-        for row in rows:
-            if row[6] is None:
-                raise RuntimeError("pending observation has no durable payload")
-            identity = _identity_from_row(
-                source_id=self.source_id,
-                device_key=row[0],
-                stream=row[1],
-                segment_key=row[2],
-                observed_at=row[3],
-                sha256=row[4],
-            )
-            if identity.object_key != row[5]:
-                raise RuntimeError("collector state contains an inconsistent object key")
-            pending.append(
-                PendingObservation(
-                    identity=identity,
-                    compressed_payload=bytes(row[6]),
-                    created=False,
-                )
-            )
-        return pending
+        values = [self._pending_from_row(row) for row in rows]
+        return [value for value in values if stream is None or value.identity.stream == stream]
 
-    def mark_loaded(self, object_key: str, loaded_at: datetime) -> None:
-        """Retain the latest warehouse-confirmed Raw and all unconfirmed observations."""
-        timestamp = format_observed_at(loaded_at)
+    def _pending_from_row(self, row: sqlite3.Row | tuple[object, ...]) -> PendingObservation:
+        key, segment, device, digest, observed, parser, _, path = row
+        raw = parse_raw_object_key(
+            str(key),
+            source_id=self.source_id,
+            storage_created_at=datetime.fromisoformat(str(observed)),
+            storage_generation=1,
+        )
+        if (raw.logical_key, raw.subject_key, raw.sha256, raw.observed_at) != (
+            segment,
+            device,
+            digest,
+            datetime.fromisoformat(str(observed)),
+        ):
+            raise RuntimeError("collector state contains an inconsistent snapshot key")
+        try:
+            if path is None:
+                raise OSError("missing path")
+            compressed = Path(str(path)).read_bytes()
+            payload = gzip.decompress(compressed)
+        except (OSError, EOFError, ValueError, zlib.error) as error:
+            raise RuntimeError("pending payload unavailable or corrupt") from error
+        if sha256_hex(payload) != digest:
+            raise RuntimeError("pending payload hash mismatch")
+        identity = ScreenTimeRawIdentity(
+            self.source_id,
+            raw.subject_key,
+            raw.stream,
+            raw.logical_key,
+            raw.observed_at,
+            raw.sha256,
+        )
+        return PendingObservation(
+            identity, compressed, parser_version=str(parser) if parser is not None else None
+        )
+
+    def pin_parser(self, snapshot_key: str, parser_version: str) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute(
-                """
-                UPDATE segment_observation
-                SET status = 'uploaded', uploaded_at = ?
-                WHERE object_key = ?
-                """,
-                (timestamp, object_key),
-            )
-            if cursor.rowcount != 1:
-                connection.rollback()
-                raise RuntimeError(f"pending observation not found: {object_key}")
+            row = connection.execute(
+                "SELECT parser_version FROM file_state WHERE snapshot_key = ? AND status = 'pending'",
+                (snapshot_key,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("pending snapshot not found")
+            if row[0] is not None and row[0] != parser_version:
+                raise RuntimeError("pending parser version requires compatible replay")
             connection.execute(
-                """DELETE FROM segment_observation
-                WHERE status = 'uploaded' AND (device_key, stream, segment_key) = (
-                    SELECT device_key, stream, segment_key FROM segment_observation WHERE object_key = ?
-                ) AND (observed_at, object_key) < (
-                    SELECT observed_at, object_key FROM segment_observation WHERE status = 'uploaded'
-                    AND (device_key, stream, segment_key) = (
-                        SELECT device_key, stream, segment_key FROM segment_observation WHERE object_key = ?
-                    )
-                    ORDER BY observed_at DESC, object_key DESC LIMIT 1
-                )""",
-                (object_key, object_key),
+                "UPDATE file_state SET parser_version = ? WHERE snapshot_key = ?",
+                (parser_version, snapshot_key),
+            )
+
+    def invalidated_event_keys(self, snapshot_key: str, event_keys: Sequence[str]) -> list[str]:
+        """Only a same-content parser correction supplies negative evidence."""
+        with self._connect() as connection:
+            current = connection.execute(
+                "SELECT segment_key, content_sha256, parser_version FROM file_state WHERE snapshot_key = ? AND status = 'pending'",
+                (snapshot_key,),
+            ).fetchone()
+            if current is None or current[2] is None:
+                raise RuntimeError("pending parser must be pinned")
+            segment, digest, parser = current
+            previous = connection.execute(
+                "SELECT content_sha256, parser_version FROM file_state WHERE segment_key = ? AND status = 'sent'",
+                (segment,),
+            ).fetchone()
+            if (
+                previous is None
+                or previous[0] != digest
+                or previous[1] is None
+                or previous[1] == parser
+            ):
+                return []
+            unshared = connection.execute(
+                "SELECT event_key FROM event_reference r WHERE segment_key = ? AND NOT EXISTS "
+                "(SELECT 1 FROM event_reference other WHERE other.event_key = r.event_key AND other.segment_key <> r.segment_key) ORDER BY event_key",
+                (segment,),
+            ).fetchall()
+        adopted = set(event_keys)
+        return [key for (key,) in unshared if key not in adopted]
+
+    def mark_loaded(self, snapshot_key: str, *, event_keys: Sequence[str]) -> None:
+        """Atomically ACK and adopt references after the remote commit is confirmed."""
+        # Reclaim older sent bytes before pruning their only deletion evidence.
+        self.cleanup_sent_payloads()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            oldest = connection.execute(
+                "SELECT snapshot_key, segment_key, parser_version FROM file_state WHERE status = 'pending' ORDER BY observed_at, snapshot_key LIMIT 1"
+            ).fetchone()
+            if oldest is None or oldest[0] != snapshot_key:
+                raise RuntimeError("only the oldest pending snapshot may be acknowledged")
+            if oldest[2] is None:
+                raise RuntimeError("pending parser must be pinned")
+            segment = oldest[1]
+            connection.execute("DELETE FROM event_reference WHERE segment_key = ?", (segment,))
+            connection.executemany(
+                "INSERT INTO event_reference VALUES (?, ?)",
+                [(segment, key) for key in sorted(set(event_keys))],
+            )
+            connection.execute(
+                "DELETE FROM file_state WHERE segment_key = ? AND status = 'sent'", (segment,)
+            )
+            connection.execute(
+                "UPDATE file_state SET status = 'sent' WHERE snapshot_key = ?", (snapshot_key,)
             )
             connection.commit()
+        self.cleanup_sent_payloads()
 
-    def record_successful_scan(self, scan: CollectorScan, *, stream: str) -> None:
-        """Record a completed stream scan and retain each active device's latest scan."""
-        timestamp = format_observed_at(scan.completed_at)
+    def cleanup_sent_payloads(self) -> None:
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            previous = connection.execute(
-                "SELECT device_scanned_at FROM collector_stream_scan WHERE stream = ?", (stream,)
-            ).fetchone()
-            device_times = json.loads(previous[0]) if previous else {}
-            device_times.update(
-                {key: format_observed_at(value) for key, value in scan.device_scanned_at.items()}
-            )
-            device_times = {
-                key: value for key, value in device_times.items() if key in scan.device_keys
-            }
-            connection.execute(
-                """INSERT INTO collector_stream_scan VALUES (?, ?, ?, ?)
-                ON CONFLICT (stream) DO UPDATE SET
-                    completed_at = excluded.completed_at,
-                    device_keys = excluded.device_keys,
-                    device_scanned_at = excluded.device_scanned_at""",
-                (stream, timestamp, json.dumps(scan.device_keys), json.dumps(device_times)),
-            )
-
-    def last_successful_scan(self, *, stream: str) -> CollectorScan | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT completed_at, device_keys, device_scanned_at "
-                "FROM collector_stream_scan WHERE stream = ?",
-                (stream,),
-            ).fetchone()
-        if row is None:
-            return None
-        return CollectorScan(
-            parse_observed_at(row[0]),
-            tuple(json.loads(row[1])),
-            {key: parse_observed_at(value) for key, value in json.loads(row[2]).items()},
-        )
+            rows = connection.execute(
+                "SELECT snapshot_key, payload_path FROM file_state WHERE status = 'sent' AND payload_path IS NOT NULL"
+            ).fetchall()
+            for key, path in rows:
+                Path(path).unlink(missing_ok=True)
+                _sync_directory(Path(path).parent)
+                connection.execute(
+                    "UPDATE file_state SET payload_path = NULL WHERE snapshot_key = ? AND status = 'sent'",
+                    (key,),
+                )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
         connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute("PRAGMA synchronous = FULL")
         return connection
 
 
-def _identity_from_row(
-    *,
-    source_id: str,
-    device_key: str,
-    stream: str,
-    segment_key: str,
-    observed_at: str,
-    sha256: str,
-) -> ScreenTimeRawIdentity:
-    return ScreenTimeRawIdentity(
-        source_id=source_id,
-        device_key=device_key,
-        stream=stream,
-        segment_key=segment_key,
-        observed_at=parse_observed_at(observed_at),
-        sha256=sha256,
-    )
+def _sync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

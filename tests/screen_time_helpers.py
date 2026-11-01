@@ -161,3 +161,74 @@ def _record(raw: RawObject) -> ParsedScreenTimeRecord:
         original_payload=b"payload",
         parser_version="app-in-focus-v1",
     )
+
+
+class ScreenTimeWarehouse:
+    """Transaction-backed local boundary for source runtime tests."""
+
+    def __init__(self, path=":memory:", *, fail_at=None):
+        import duckdb
+
+        self.connection = duckdb.connect(str(path))
+        self.connection.execute("CREATE SCHEMA IF NOT EXISTS base")
+        for source in ("iphone_screen_time", "mac_screen_time"):
+            self.connection.execute(
+                f"CREATE TABLE IF NOT EXISTS base.{source}_event (event_key VARCHAR PRIMARY KEY, device_key VARCHAR, bundle_id VARCHAR, event_at TIMESTAMPTZ, state VARCHAR, is_valid BOOLEAN)"
+            )
+        self.connection_usable = True
+        self.fail_at = fail_at
+        self.locked = False
+
+    def migrate(self):
+        pass
+
+    def has_screen_time_events(self, *, source_id):
+        return self.connection.execute(
+            f"SELECT EXISTS (SELECT 1 FROM base.{source_id}_event)"
+        ).fetchone()[0]
+
+    def acquire_job_lock(self, job, owner, *, lease_seconds):
+        if self.locked:
+            return False
+        self.locked = True
+        return True
+
+    def release_job_lock(self, job, owner):
+        self.locked = False
+
+    def commit_screen_time_snapshot(
+        self, raw, batch, *, invalidated_event_keys, owner_id, deadline
+    ):
+        from personal_data_platform.biome.motherduck import write_state
+
+        assert self.locked
+        self.connection.execute("BEGIN")
+        try:
+            count = write_state(
+                self.connection,
+                raw,
+                batch,
+                source_id=raw.source_id,
+                invalidated_event_keys=invalidated_event_keys,
+            )
+            if self.fail_at in {"events", "commit_before"}:
+                raise OSError("database response lost")
+            self.connection.execute("COMMIT")
+            if self.fail_at == "commit_after":
+                raise OSError("database response lost")
+            return count
+        except OSError:
+            if self.fail_at != "commit_after":
+                self.connection.execute("ROLLBACK")
+            if self.fail_at.startswith("commit"):
+                self.connection_usable = False
+            raise
+
+    def close(self):
+        self.connection.close()
+
+    def query_rows(self, sql, args=None):
+        return self.connection.execute(sql, args or []).fetchall()
+
+    def query_value(self, sql):
+        return self.query_rows(sql)[0][0]
