@@ -179,7 +179,9 @@ def test_provider_unknowns_and_missing_daily_metrics_are_not_filled(warehouse):
     ) == [(None, None)]
     for identifier, activities in [("missing", None), ("empty", []), ("unknown", ["new-label"])]:
         warehouse.connection.execute(
-            "INSERT INTO base.location_point (location_point_id,motion_activities) VALUES (?,?)",
+            "INSERT INTO base.location_point "
+            "(location_point_id,motion_activities,device_key,observed_at,latitude,longitude) "
+            "VALUES (?,?,'phone',TIMESTAMPTZ '2026-10-31T01:00:00Z',35,139)",
             [identifier, activities],
         )
     assert warehouse.query_rows(
@@ -188,18 +190,28 @@ def test_provider_unknowns_and_missing_daily_metrics_are_not_filled(warehouse):
 
 
 def test_sleep_parent_and_detail_can_be_replaced_in_one_transaction(warehouse):
-    warehouse.connection.execute("INSERT INTO base.sleep_session (sleep_session_id) VALUES ('s')")
     warehouse.connection.execute(
-        "INSERT INTO base.sleep_detail (sleep_detail_id,sleep_session_id,category) "
-        "VALUES ('d','s','unknown-stage')"
+        "INSERT INTO base.sleep_session (sleep_session_id,start_at,end_at) "
+        "VALUES ('s',TIMESTAMPTZ '2026-10-31T01:00:00Z',TIMESTAMPTZ '2026-10-31T02:00:00Z')"
+    )
+    warehouse.connection.execute(
+        "INSERT INTO base.sleep_detail "
+        "(sleep_detail_id,sleep_session_id,category,kind,start_at,end_at) "
+        "VALUES ('d','s','unknown-stage','sleep-stage',"
+        "TIMESTAMPTZ '2026-10-31T01:00:00Z',TIMESTAMPTZ '2026-10-31T02:00:00Z')"
     )
     warehouse.connection.execute("BEGIN")
     warehouse.connection.execute("DELETE FROM base.sleep_detail")
     warehouse.connection.execute("DELETE FROM base.sleep_session")
-    warehouse.connection.execute("INSERT INTO base.sleep_session (sleep_session_id) VALUES ('s')")
     warehouse.connection.execute(
-        "INSERT INTO base.sleep_detail (sleep_detail_id,sleep_session_id,category) "
-        "VALUES ('d','s','new-stage')"
+        "INSERT INTO base.sleep_session (sleep_session_id,start_at,end_at) "
+        "VALUES ('s',TIMESTAMPTZ '2026-10-31T01:00:00Z',TIMESTAMPTZ '2026-10-31T02:00:00Z')"
+    )
+    warehouse.connection.execute(
+        "INSERT INTO base.sleep_detail "
+        "(sleep_detail_id,sleep_session_id,category,kind,start_at,end_at) "
+        "VALUES ('d','s','new-stage','sleep-stage',"
+        "TIMESTAMPTZ '2026-10-31T01:00:00Z',TIMESTAMPTZ '2026-10-31T02:00:00Z')"
     )
     warehouse.connection.execute("COMMIT")
     assert warehouse.query_rows(
@@ -234,4 +246,189 @@ def test_app_identity_is_platform_and_bundle_id_without_seeded_values(warehouse)
     with pytest.raises(duckdb.ConstraintException):
         warehouse.connection.execute(
             "INSERT INTO base.app VALUES ('ios','same.bundle','Duplicate')"
+        )
+
+
+# Minimal, valid records leave provider dates, offsets, and optional details absent.
+REQUIRED_RECORDS = {
+    "sleep_session": {
+        "sleep_session_id": "sleep",
+        "start_at": "2026-10-31T01:00:00Z",
+        "end_at": "2026-10-31T02:00:00Z",
+    },
+    "sleep_detail": {
+        "sleep_detail_id": "detail",
+        "sleep_session_id": "sleep",
+        "kind": "sleep-stage",
+        "start_at": "2026-10-31T01:00:00Z",
+        "end_at": "2026-10-31T02:00:00Z",
+    },
+    "heart_rate_minute": {
+        "heart_rate_minute_id": "minute",
+        "start_at": "2026-10-31T01:00:00Z",
+        "mean_bpm": 70.0,
+        "min_bpm": 60.0,
+        "max_bpm": 80.0,
+        "aggregation_version": "minute-v1",
+    },
+    "steps_interval": {
+        "steps_interval_id": "steps",
+        "start_at": "2026-10-31T01:00:00Z",
+        "end_at": "2026-10-31T02:00:00Z",
+        "steps": 12.0,
+    },
+    "active_zone_interval": {
+        "active_zone_interval_id": "azm",
+        "start_at": "2026-10-31T01:00:00Z",
+        "end_at": "2026-10-31T02:00:00Z",
+        "active_zone_minutes": 1.0,
+    },
+    "exercise_session": {
+        "exercise_session_id": "exercise",
+        "start_at": "2026-10-31T01:00:00Z",
+        "end_at": "2026-10-31T02:00:00Z",
+        "exercise_type": "unknown-sport",
+        "exercise_name": "Unknown sport",
+    },
+    "sedentary_interval": {
+        "sedentary_interval_id": "sedentary",
+        "start_at": "2026-10-31T01:00:00Z",
+        "end_at": "2026-10-31T02:00:00Z",
+    },
+    "distance_interval": {
+        "distance_interval_id": "distance",
+        "start_at": "2026-10-31T01:00:00Z",
+        "end_at": "2026-10-31T02:00:00Z",
+        "distance_meters": 10.0,
+    },
+    "heart_rate_zone_interval": {
+        "heart_rate_zone_interval_id": "zone",
+        "start_at": "2026-10-31T01:00:00Z",
+        "end_at": "2026-10-31T02:00:00Z",
+        "zone": "new-provider-zone",
+    },
+    "hrv_sample": {"hrv_sample_id": "hrv", "sample_at": "2026-10-31T01:00:00Z"},
+    "sleep_respiratory_summary": {
+        "respiratory_summary_id": "respiratory",
+        "sample_at": "2026-10-31T01:00:00Z",
+    },
+    "location_point": {
+        "location_point_id": "location",
+        "device_key": "phone",
+        "observed_at": "2026-10-31T01:00:00Z",
+        "latitude": 35.0,
+        "longitude": 139.0,
+    },
+    "iphone_screen_time_event": {
+        "event_key": "phone-event",
+        "device_key": "phone",
+        "bundle_id": "unknown-app",
+        "event_at": "2026-10-31T01:00:00.125Z",
+        "state": "start",
+        "is_valid": True,
+    },
+    "mac_screen_time_event": {
+        "event_key": "mac-event",
+        "device_key": "mac",
+        "bundle_id": "unknown-app",
+        "event_at": "2026-10-31T01:00:00.125Z",
+        "state": "end",
+        "is_valid": False,
+    },
+}
+
+
+def _insert_required_record(warehouse, table):
+    record = REQUIRED_RECORDS[table]
+    warehouse.connection.execute(
+        f"INSERT INTO base.{table} ({','.join(record)}) VALUES ({','.join('?' for _ in record)})",
+        list(record.values()),
+    )
+
+
+@pytest.mark.parametrize(
+    "table,column",
+    [(table, column) for table, record in REQUIRED_RECORDS.items() for column in record],
+)
+def test_records_reject_missing_identity_and_required_values(warehouse, table, column):
+    _insert_required_record(warehouse, table)
+    with pytest.raises(duckdb.ConstraintException):
+        warehouse.connection.execute(f"UPDATE base.{table} SET {column}=NULL")
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "sleep_session",
+        "sleep_detail",
+        "steps_interval",
+        "active_zone_interval",
+        "exercise_session",
+        "sedentary_interval",
+        "distance_interval",
+        "heart_rate_zone_interval",
+    ],
+)
+@pytest.mark.parametrize("end_at", ["2026-10-31T01:00:00Z", "2026-10-31T00:59:59.999Z"])
+def test_intervals_reject_zero_and_negative_duration(warehouse, table, end_at):
+    _insert_required_record(warehouse, table)
+    with pytest.raises(duckdb.ConstraintException):
+        warehouse.connection.execute(f"UPDATE base.{table} SET end_at=?", [end_at])
+
+
+@pytest.mark.parametrize(
+    "column,value",
+    [
+        ("start_at", "2026-10-31T01:00:00.001Z"),
+        ("start_at", "2026-10-31T01:00:01Z"),
+        ("min_bpm", -1),
+        ("min_bpm", 71),
+        ("mean_bpm", 81),
+        ("max_bpm", 69),
+        ("mean_bpm", float("nan")),
+        ("min_bpm", float("-inf")),
+        ("max_bpm", float("inf")),
+    ],
+)
+def test_heart_rate_minute_rejects_misaligned_or_invalid_statistics(warehouse, column, value):
+    _insert_required_record(warehouse, "heart_rate_minute")
+    with pytest.raises(duckdb.ConstraintException):
+        warehouse.connection.execute(f"UPDATE base.heart_rate_minute SET {column}=?", [value])
+
+
+@pytest.mark.parametrize(
+    "column,value",
+    [("latitude", 90.001), ("latitude", -90.001), ("longitude", 180.001), ("longitude", -180.001)],
+)
+def test_location_rejects_out_of_range_coordinates(warehouse, column, value):
+    _insert_required_record(warehouse, "location_point")
+    with pytest.raises(duckdb.ConstraintException):
+        warehouse.connection.execute(f"UPDATE base.location_point SET {column}=?", [value])
+
+
+@pytest.mark.parametrize(
+    "table,column",
+    [
+        ("steps_interval", "steps"),
+        ("active_zone_interval", "active_zone_minutes"),
+        ("sleep_session", "sleep_minutes"),
+    ],
+)
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf")])
+def test_existing_finite_nonnegative_metric_contracts_are_preserved(
+    warehouse, table, column, value
+):
+    _insert_required_record(warehouse, table)
+    with pytest.raises(duckdb.ConstraintException):
+        warehouse.connection.execute(f"UPDATE base.{table} SET {column}=?", [value])
+
+
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf")])
+def test_daily_resting_heart_rate_preserves_finite_nonnegative_contract(warehouse, value):
+    warehouse.connection.execute(
+        "INSERT INTO base.health_daily (source_date) VALUES ('2026-10-31')"
+    )
+    with pytest.raises(duckdb.ConstraintException):
+        warehouse.connection.execute(
+            "UPDATE base.health_daily SET resting_heart_rate_bpm=?", [value]
         )
