@@ -1,25 +1,23 @@
-from datetime import UTC, datetime, timedelta
-
-import pytest
-
 from personal_data_platform.biome.audit import audit_source
-from personal_data_platform.biome.collector_state import CollectorScan
-
-NOW = datetime(2026, 10, 5, tzinfo=UTC)
-DEVICE = "a" * 64
-
-
-class Repository:
-    def __init__(self, completed_at):
-        self.scan = CollectorScan(completed_at, (DEVICE,), {DEVICE: completed_at})
-
-    def last_successful_scan(self):
-        return self.scan
+from personal_data_platform.biome.collector_state import CollectorState
+from personal_data_platform.biome.storage import BiomeLocalRepository
+from personal_data_platform.sources.iphone_screen_time.adapter import IPhoneScreenTimeSource
+from tests.screen_time_helpers import NOW
 
 
-@pytest.mark.parametrize("age_hours,healthy", [(25, True), (48, True), (49, False)])
-def test_collector_sleep_is_reported_only_after_48_hours(age_hours, healthy) -> None:
-    health = audit_source(Repository(NOW - timedelta(hours=age_hours)), [], NOW)
-    assert health.ok is healthy
-    assert health.details["collector_scan_stale"] is (not healthy)
-    assert health.details["stale_collector_count"] == (0 if healthy else 1)
+def test_local_health_checks_pending_bytes_without_claiming_collector_liveness(tmp_path):
+    state = CollectorState(tmp_path / "state.db", source_id="iphone_screen_time")
+    repository = BiomeLocalRepository(state=state, source=IPhoneScreenTimeSource())
+    health = audit_source(repository, [], NOW)
+    assert health.ok
+    assert health.details == {"pending_snapshot_count": 0, "collector_liveness": "local_logs"}
+    state.prepare(
+        device_key="a" * 64,
+        stream="app-in-focus",
+        segment_key="b" * 64,
+        raw_bytes=b"bytes",
+        observed_at=NOW,
+    )
+    health = audit_source(repository, [], NOW)
+    assert not health.ok
+    assert health.details["pending_snapshot_count"] == 1

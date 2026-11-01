@@ -6,6 +6,8 @@ import pytest
 
 from personal_data_platform.biome.collector import CollectorSourceError, ScreenTimeCollector
 from personal_data_platform.biome.collector_state import CollectorState
+from personal_data_platform.loader.models import RawDecodeError
+from personal_data_platform.sources.iphone_screen_time.adapter import IPhoneScreenTimeSource
 from personal_data_platform.sources.iphone_screen_time.collector import (
     BiomeScreenTimeSource,
 )
@@ -16,13 +18,7 @@ from personal_data_platform.sources.iphone_screen_time.raw import (
 from personal_data_platform.sources.iphone_screen_time.runtime import load_pending
 from personal_data_platform.sources.iphone_screen_time.storage import LocalRepository
 from personal_data_platform.sources.registry import get_source
-from personal_data_platform.storage.motherduck import (
-    Warehouse,
-    WarehouseConfig,
-    WarehouseConnectionError,
-    connect,
-)
-from tests.screen_time_helpers import event, segb
+from tests.screen_time_helpers import ScreenTimeWarehouse, event, segb
 
 SECRET = b"x" * 32
 NOW = datetime(2026, 10, 8, tzinfo=UTC)
@@ -54,19 +50,22 @@ def _collector(tmp_path):
 
 def test_a_b_a_and_unchanged_snapshot_are_durable_and_idempotent(tmp_path):
     collector, state, repo, remote = _collector(tmp_path)
-    wh = Warehouse(connect(WarehouseConfig(":memory:")))
+    wh = ScreenTimeWarehouse()
     wh.migrate()
     keys = []
     try:
         for bundle in ("a", "b", "a"):
             (remote / "100").write_bytes(segb(event(bundle))[0])
-            collector.collect_once()
+            collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
             keys.append(state.pending()[0].identity.object_key)
-            load_pending(state, wh, now=NOW)
+            load_pending(state, wh)
             assert state.pending() == []
-            assert len(list(repo.list_raw("raw/iphone_screen_time/v2/"))) == 1
+            assert len(list(repo.list_raw("raw/iphone_screen_time/v2/"))) == 0
         assert len(set(keys)) == 3
-        assert collector.collect_once().skipped == 1
+        assert (
+            collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version).skipped
+            == 1
+        )
         assert state.pending() == []
         assert wh.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 2
     finally:
@@ -76,12 +75,12 @@ def test_a_b_a_and_unchanged_snapshot_are_durable_and_idempotent(tmp_path):
 def test_repeated_scans_keep_every_changed_pending_snapshot_until_load(tmp_path):
     collector, state, repo, remote = _collector(tmp_path)
     (remote / "100").write_bytes(segb(event("a"))[0])
-    collector.collect_once()
+    collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
     original = state.pending()[0]
-    collector.collect_once()
+    collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
     assert len(state.pending()) == 1
     (remote / "100").write_bytes(segb(event("b"))[0])
-    collector.collect_once()
+    collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
     assert len(state.pending()) == 2
     assert state.pending()[0].compressed_payload == original.compressed_payload
     assert repo.get_raw(original.identity.object_key, generation=1) == original.compressed_payload
@@ -94,7 +93,7 @@ def test_collector_ignores_tombstone_files(tmp_path):
     tombstones.mkdir()
     (tombstones / "unneeded").write_bytes(b"not-an-event")
 
-    result = collector.collect_once()
+    result = collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
 
     assert (result.segments, result.archived, result.deferred) == (1, 1, 0)
     assert len(state.pending()) == 1
@@ -104,16 +103,17 @@ def test_crc_valid_unsupported_payload_remains_pending_for_parser_recovery(tmp_p
     collector, state, repo, remote = _collector(tmp_path)
     body = segb(event("unknown-schema") + b"\xf3\x01")[0]
     (remote / "100").write_bytes(body)
-    assert collector.collect_once().deferred == 0
+    assert (
+        collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version).deferred == 0
+    )
     pending = state.pending()[0]
     (remote / "100").unlink()
-    wh = Warehouse(connect(WarehouseConfig(":memory:")))
+    wh = ScreenTimeWarehouse()
     wh.migrate()
     try:
-        with pytest.raises(CollectorSourceError, match="Raw ingestion failed"):
-            load_pending(state, wh, now=NOW)
+        with pytest.raises(RawDecodeError):
+            load_pending(state, wh)
         assert [p.identity.object_key for p in state.pending()] == [pending.identity.object_key]
-        assert wh.query_value("SELECT count(*) FROM ops.heartbeat") == 0
         assert (
             decode_segment_envelope(
                 gzip.decompress(repo.get_raw(pending.identity.object_key, generation=1))
@@ -127,92 +127,37 @@ def test_crc_valid_unsupported_payload_remains_pending_for_parser_recovery(tmp_p
 def test_competing_lease_preserves_pending_and_does_not_publish_heartbeat(tmp_path):
     collector, state, _, remote = _collector(tmp_path)
     (remote / "100").write_bytes(segb(event("a"))[0])
-    collector.collect_once()
-    wh = Warehouse(connect(WarehouseConfig(":memory:")))
+    collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
+    wh = ScreenTimeWarehouse()
     wh.migrate()
     try:
         wh.acquire_job_lock("loader", "competitor", lease_seconds=7500)
         with pytest.raises(RuntimeError, match="lease"):
-            load_pending(state, wh, now=NOW)
+            load_pending(state, wh)
         assert len(state.pending()) == 1
-        assert wh.query_value("SELECT count(*) FROM ops.heartbeat") == 0
-        assert wh.query_value("SELECT owner_id FROM ops.job_lock") == "competitor"
+        assert wh.locked
     finally:
         wh.close()
 
 
-@pytest.mark.parametrize("failure", ["release", "commit_before", "commit_after"])
-def test_liveness_and_lease_release_are_atomic(tmp_path, failure):
-    collector, state, _, _ = _collector(tmp_path)
-    collector.collect_once()
-    config = WarehouseConfig(str(tmp_path / "atomic.duckdb"))
-    wh = Warehouse(connect(config))
-    wh.migrate()
-
-    class InterruptedFinalization:
-        def __init__(self, connection):
-            self.connection = connection
-            self.publishing = self.failed = False
-            self.after_failure = []
-
-        def execute(self, sql, *args):
-            if self.failed:
-                self.after_failure.append(sql)
-            self.publishing |= "INSERT INTO ops.heartbeat" in sql
-            if (
-                self.publishing
-                and not self.failed
-                and (
-                    (failure == "release" and sql.startswith("DELETE FROM ops.job_lock"))
-                    or (failure.startswith("commit") and sql == "COMMIT")
-                )
-            ):
-                self.failed = True
-                if failure == "commit_after":
-                    self.connection.execute(sql, *args)
-                raise OSError("finalization response lost")
-            return self.connection.execute(sql, *args)
-
-        def __getattr__(self, name):
-            return getattr(self.connection, name)
-
-    wrapper = InterruptedFinalization(wh.connection)
-    wh.connection = wrapper
-    try:
-        with pytest.raises((OSError, WarehouseConnectionError)):
-            load_pending(state, wh, now=NOW)
-        if failure.startswith("commit"):
-            assert wh.connection_usable is False
-            assert wrapper.after_failure == []
-    finally:
-        wh.close()
-    wh = Warehouse(connect(config))
-    try:
-        assert wh.query_value("SELECT count(*) FROM ops.heartbeat") == (
-            1 if failure == "commit_after" else 0
-        )
-        assert wh.query_value("SELECT count(*) FROM ops.job_lock") == (
-            1 if failure == "commit_before" else 0
-        )
-    finally:
-        wh.close()
-
-
-def test_removed_source_file_keeps_its_local_raw(tmp_path):
+def test_removed_source_file_keeps_historical_events_and_refs(tmp_path):
     collector, state, repo, remote = _collector(tmp_path)
-    body = segb(event("a"))[0]
-    (remote / "100").write_bytes(body)
-    collector.collect_once()
-    raw = state.pending()[0]
-    state.mark_loaded(raw.identity.object_key, NOW)
+    (remote / "100").write_bytes(segb(event("a"))[0])
+    collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
+    wh = ScreenTimeWarehouse()
+    load_pending(state, wh)
+    with state._connect() as db:
+        refs = db.execute("SELECT * FROM event_reference").fetchall()
     (remote / "100").unlink()
-    collector.collect_once()
-    assert (
-        decode_segment_envelope(
-            gzip.decompress(repo.get_raw(raw.identity.object_key, generation=1))
-        )[0]
-        == body
-    )
+    collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
+    load_pending(state, wh)
+    assert wh.query_rows("SELECT bundle_id, is_valid FROM base.iphone_screen_time_event") == [
+        ("a", True)
+    ]
+    with state._connect() as db:
+        assert db.execute("SELECT * FROM event_reference").fetchall() == refs
+    assert list(repo.list_raw("raw/iphone_screen_time/v2/")) == []
+    wh.close()
 
 
 @pytest.mark.parametrize(
@@ -221,12 +166,12 @@ def test_removed_source_file_keeps_its_local_raw(tmp_path):
 def test_invalid_snapshot_does_not_replace_valid_raw_or_advance_scan(tmp_path, body):
     collector, state, repo, remote = _collector(tmp_path)
     (remote / "100").write_bytes(segb(event("valid"))[0])
-    collector.collect_once()
-    previous = state.last_successful_scan(stream="app-in-focus")
+    collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
     original = state.pending()[0]
     (remote / "100").write_bytes(body)
-    assert collector.collect_once().deferred == 1
-    assert state.last_successful_scan(stream="app-in-focus") == previous
+    assert (
+        collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version).deferred == 1
+    )
     assert len(state.pending()) == 1
     assert repo.get_raw(original.identity.object_key, generation=1) == original.compressed_payload
 
@@ -234,9 +179,9 @@ def test_invalid_snapshot_does_not_replace_valid_raw_or_advance_scan(tmp_path, b
 def test_old_event_time_is_not_a_watermark(tmp_path):
     collector, state, _, remote = _collector(tmp_path)
     (remote / "200").write_bytes(segb(event("newer", timestamp=100))[0])
-    collector.collect_once()
+    collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
     (remote / "100").write_bytes(segb(event("late", timestamp=10))[0])
-    collector.collect_once()
+    collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
     assert len(state.pending()) == 2
 
 
@@ -245,7 +190,7 @@ def test_non_allowlisted_device_is_not_collected(tmp_path):
     other = tmp_path / "remote" / "other"
     other.mkdir()
     (other / "100").write_bytes(segb(event("other"))[0])
-    collector.collect_once()
+    collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
     assert state.pending() == []
 
 
@@ -253,5 +198,5 @@ def test_non_numeric_segment_is_a_scan_failure(tmp_path):
     collector, state, _, remote = _collector(tmp_path)
     (remote / "unknown").write_bytes(segb(event("a"))[0])
     with pytest.raises(CollectorSourceError, match="non-numeric"):
-        collector.collect_once()
-    assert state.last_successful_scan(stream="app-in-focus") is None
+        collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
+    assert state.pending() == []

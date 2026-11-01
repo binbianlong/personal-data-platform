@@ -32,9 +32,7 @@ class IPhoneScreenTimeSource:
     raw_suffixes: tuple[str, ...] = (".segb.gz",)
     required_relations: tuple[str, ...] = (
         "base.iphone_screen_time_event",
-        "base.iphone_screen_time_transition",
-        "base.iphone_screen_time_interval",
-        "marts.daily_iphone_screen_time",
+        "marts.iphone_screen_time_interval",
         "marts.daily_iphone_screen_time_total",
     )
     dbt_selector = "tag:iphone_screen_time"
@@ -81,12 +79,7 @@ class IPhoneScreenTimeSource:
     ) -> SourceHealth:
         from personal_data_platform.biome.audit import audit_source
 
-        return audit_source(
-            repository,
-            observations,
-            now,
-            allow_inactive=True,
-        )
+        return audit_source(repository, observations, now)
 
     def inventory(self, observations: Sequence[RawObject]) -> dict[str, object]:
         return {

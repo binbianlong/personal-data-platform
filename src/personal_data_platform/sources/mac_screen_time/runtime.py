@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
 
 from personal_data_platform.biome import runtime as _runtime
 from personal_data_platform.biome.collector import ScreenTimeCollector
@@ -48,16 +47,8 @@ def warehouse_config() -> WarehouseConfig:
     return WarehouseConfig(database=database, token=token)
 
 
-def load_pending(
-    state: CollectorState,
-    warehouse: Warehouse,
-    *,
-    now: datetime | None = None,
-    publish_success: bool = True,
-) -> None:
-    _runtime.load_pending(
-        state, warehouse, source=MacScreenTimeSource(), now=now, publish_success=publish_success
-    )
+def load_pending(state: CollectorState, warehouse: Warehouse) -> None:
+    _runtime.load_pending(state, warehouse, source=MacScreenTimeSource())
 
 
 def collector_source(config: CollectorConfig) -> BiomeMacAppUsageSource:

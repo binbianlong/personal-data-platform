@@ -1,4 +1,4 @@
-"""Screen Time Raw and collector controls in local SQLite."""
+"""Read only durable, unacknowledged Screen Time payloads."""
 
 from __future__ import annotations
 
@@ -7,47 +7,30 @@ from collections.abc import Iterable
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import RawCodec
 
-from .collector_state import CollectorScan, CollectorState
-from .raw import (
-    parse_observed_at,
-)
+from .collector_state import CollectorState
 
 
 class BiomeLocalRepository:
-    """Read immutable observations and collector controls from the existing SQLite state."""
-
     def __init__(self, *, state: CollectorState, source: RawCodec) -> None:
+        if state.source_id != source.source_id:
+            raise ValueError("collector state belongs to a different source")
         self.state = state
         self._source = source
 
     def list_raw(self, prefix: str) -> Iterable[RawObject]:
-        with self.state._connect() as connection:
-            rows = connection.execute(
-                """SELECT object_key, coalesce(storage_created_at, observed_at),
-                          storage_generation
-                FROM segment_observation WHERE stream = ? AND compressed_payload IS NOT NULL
-                ORDER BY observed_at, object_key""",
-                (self._source.stream,),
-            ).fetchall()
-        for key, created_at, generation in rows:
-            if key.startswith(prefix):
+        for pending in self.state.pending(stream=self._source.stream):
+            identity = pending.identity
+            if identity.object_key.startswith(prefix):
                 yield self._source.parse_raw_key(
-                    key,
-                    storage_created_at=parse_observed_at(created_at),
-                    storage_generation=generation,
+                    identity.object_key,
+                    storage_created_at=identity.observed_at,
+                    storage_generation=1,
                 )
 
     def get_raw(self, key: str, *, generation: int) -> bytes:
-        with self.state._connect() as connection:
-            row = connection.execute(
-                "SELECT storage_generation, compressed_payload FROM segment_observation WHERE object_key = ? AND stream = ?",
-                (key, self._source.stream),
-            ).fetchone()
-        if row is None or row[1] is None:
-            raise ValueError(f"Raw observation is unavailable: {key}")
-        if row[0] != generation:
+        if generation != 1:
             raise ValueError(f"Raw generation mismatch: {key}")
-        return bytes(row[1])
-
-    def last_successful_scan(self) -> CollectorScan | None:
-        return self.state.last_successful_scan(stream=self._source.stream)
+        for pending in self.state.pending(stream=self._source.stream):
+            if pending.identity.object_key == key:
+                return pending.compressed_payload
+        raise ValueError(f"Raw observation is unavailable: {key}")

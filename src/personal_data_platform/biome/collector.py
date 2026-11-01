@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Protocol
 
 from personal_data_platform.biome.collector_state import (
-    CollectorScan,
     CollectorState,
 )
 from personal_data_platform.biome.raw import (
@@ -117,7 +116,7 @@ class ScreenTimeCollector:
     def stream(self) -> str:
         return self._source.raw_stream
 
-    def collect_once(self) -> CollectionStats:
+    def collect_once(self, *, parser_version: str | None = None) -> CollectionStats:
         """Archive valid snapshots while retaining all observations awaiting loading."""
         if not self._allowed_device_keys:
             raise CollectorSourceError("Screen Time device allowlist is empty")
@@ -144,7 +143,6 @@ class ScreenTimeCollector:
             )
 
         segment_count = 0
-        device_segment_counts: dict[str, int] = {}
         skipped = 0
         deferred = 0
         for device in devices:
@@ -177,13 +175,13 @@ class ScreenTimeCollector:
                     segment_key=segment_key,
                     raw_bytes=envelope,
                     observed_at=observed_at,
+                    parser_version=parser_version,
                 )
                 if observation is None:
                     skipped += 1
                     continue
                 if observation.created:
                     archived += 1
-            device_segment_counts[device_key] = len(segments)
 
         stats = CollectionStats(
             devices=len(devices),
@@ -192,17 +190,7 @@ class ScreenTimeCollector:
             skipped=skipped,
             deferred=deferred,
         )
-        if deferred:
-            return stats
-        completed_at = self._clock()
-        self._state.record_successful_scan(
-            CollectorScan(
-                completed_at,
-                tuple(sorted(self._allowed_device_keys)),
-                {key: completed_at for key in device_segment_counts},
-            ),
-            stream=self.stream,
-        )
+
         return stats
 
 

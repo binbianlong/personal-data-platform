@@ -8,12 +8,12 @@ import pytest
 from personal_data_platform.biome.collector import ScreenTimeCollector
 from personal_data_platform.biome.collector_state import CollectorState
 from personal_data_platform.biome.raw import build_device_key
+from personal_data_platform.loader.models import RawDecodeError
 from personal_data_platform.sources.iphone_screen_time.collector import BiomeScreenTimeSource
 from personal_data_platform.sources.iphone_screen_time.runtime import load_pending as load_phone
 from personal_data_platform.sources.mac_screen_time.collector import BiomeMacAppUsageSource
 from personal_data_platform.sources.mac_screen_time.runtime import load_pending as load_mac
-from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-from tests.screen_time_helpers import event, mac_usage_event, segb
+from tests.screen_time_helpers import ScreenTimeWarehouse, event, mac_usage_event, segb
 
 NOW = datetime(2026, 10, 8, tzinfo=UTC)
 SECRET = b"x" * 32
@@ -60,21 +60,21 @@ def _collectors(tmp_path):
     return collectors, states
 
 
-def test_mac_and_phone_load_independently_and_publish_only_their_heartbeat(tmp_path):
+def test_mac_and_phone_load_independently(tmp_path):
     collectors, states = _collectors(tmp_path)
     for collector in collectors:
         assert collector.collect_once().deferred == 0
-    wh = Warehouse(connect(WarehouseConfig(":memory:")))
+    wh = ScreenTimeWarehouse()
     wh.migrate()
     try:
-        load_phone(states[0], wh, now=NOW)
-        assert wh.query_rows("SELECT monitor_name FROM ops.heartbeat") == [
-            ("iphone_screen_time_reconciliation",)
-        ]
+        load_phone(states[0], wh)
+        assert wh.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 1
         assert len(states[1].pending()) == 1
-        load_mac(states[1], wh, now=NOW)
-        assert wh.query_rows("SELECT platform FROM base.iphone_screen_time_event") == [("ios",)]
-        assert wh.query_rows("SELECT platform FROM base.mac_screen_time_event") == [("macos",)]
+        load_mac(states[1], wh)
+        assert wh.query_rows("SELECT bundle_id FROM base.iphone_screen_time_event") == [
+            ("phone.app",)
+        ]
+        assert wh.query_rows("SELECT bundle_id FROM base.mac_screen_time_event") == [("mac.app",)]
         assert all(state.pending() == [] for state in states)
     finally:
         wh.close()
@@ -87,13 +87,13 @@ def test_missing_mac_directory_does_not_prevent_phone_capture_and_load(tmp_path)
     with pytest.raises(RuntimeError, match="directory is missing"):
         collectors[1].collect_once()
     collectors[0].collect_once()
-    wh = Warehouse(connect(WarehouseConfig(":memory:")))
+    wh = ScreenTimeWarehouse()
     wh.migrate()
     try:
-        load_phone(states[0], wh, now=NOW)
+        load_phone(states[0], wh)
         assert wh.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 1
         assert wh.query_value("SELECT count(*) FROM base.mac_screen_time_event") == 0
-        assert states[1].last_successful_scan(stream="app-usage") is None
+        assert states[1].pending() == []
     finally:
         wh.close()
 
@@ -104,17 +104,15 @@ def test_phone_payload_failure_does_not_block_mac_capture_or_loading(tmp_path):
     for collector in collectors:
         collector.collect_once()
     phone_pending = states[0].pending()[0]
-    wh = Warehouse(connect(WarehouseConfig(":memory:")))
+    wh = ScreenTimeWarehouse()
     wh.migrate()
     try:
-        with pytest.raises(RuntimeError, match="Raw ingestion failed"):
-            load_phone(states[0], wh, now=NOW)
-        load_mac(states[1], wh, now=NOW)
-        assert states[0].pending()[0] == phone_pending
+        with pytest.raises(RawDecodeError):
+            load_phone(states[0], wh)
+        load_mac(states[1], wh)
+        assert states[0].pending()[0].identity == phone_pending.identity
         assert wh.query_value("SELECT count(*) FROM base.mac_screen_time_event") == 1
-        assert wh.query_rows("SELECT monitor_name FROM ops.heartbeat") == [
-            ("mac_screen_time_reconciliation",)
-        ]
+        assert wh.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 0
     finally:
         wh.close()
 
@@ -122,8 +120,8 @@ def test_phone_payload_failure_does_not_block_mac_capture_or_loading(tmp_path):
 def test_mac_only_collection_does_not_mark_phone_inactive(tmp_path):
     collectors, states = _collectors(tmp_path)
     collectors[1].collect_once()
-    assert states[0].last_successful_scan(stream="app-in-focus") is None
-    assert states[1].last_successful_scan(stream="app-usage").device_keys
+    assert states[0].pending() == []
+    assert len(states[1].pending()) == 1
 
 
 def test_mac_source_requires_exactly_one_local_device(tmp_path):
