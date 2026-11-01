@@ -33,7 +33,7 @@ def _read_applied(connection: DuckDBPyConnection, checksums: dict[str, str]) -> 
     if not applied:
         existing = connection.execute(
             "SELECT count(*) FROM information_schema.tables "
-            "WHERE table_catalog=current_database() AND table_schema IN ('base','ops') "
+            "WHERE table_catalog=current_database() AND table_schema IN ('base','ops','marts') "
             "AND NOT (table_schema='ops' AND table_name='schema_migration')"
         ).fetchone()
         if existing and existing[0]:
