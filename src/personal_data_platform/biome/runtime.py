@@ -17,7 +17,7 @@ from personal_data_platform.sources.contracts import SourceAdapter
 from personal_data_platform.storage.factory import WarehouseConfig, open_warehouse
 from personal_data_platform.storage.warehouse import Warehouse
 
-from .collector import CollectorSourceError, ScreenTimeCollector
+from .collector import CollectionStats, CollectorSourceError, ScreenTimeCollector
 from .collector_state import CollectorState
 from .motherduck import BiomeBatch, adopted_records
 
@@ -52,8 +52,26 @@ def collect(
         result = "failed"
         stage = "lock"
         details: dict[str, object] = {}
+
+        def capture() -> CollectionStats:
+            nonlocal stage
+            stage = "collection"
+            stats = collector.collect_once(parser_version=source.parser_version)
+            details.update(
+                devices=stats.devices,
+                segments=stats.segments,
+                archived=stats.archived,
+                skipped=stats.skipped,
+                deferred=stats.deferred,
+            )
+            return stats
+
         try:
             with state.lock():
+                stage = "bootstrap"
+                with state._connect() as connection:
+                    initialized = connection.execute("PRAGMA user_version").fetchone()[0] == 1
+                stats = capture() if initialized else None
                 stage = "connection"
                 warehouse = open_warehouse(warehouse_config())
                 try:
@@ -61,18 +79,11 @@ def collect(
                     if not schema_initialized:
                         warehouse.migrate()
                         schema_initialized = True
-                    stage = "bootstrap"
-                    with _warehouse_lease(warehouse):
-                        _ensure_initialized(state, warehouse)
-                    stage = "collection"
-                    stats = collector.collect_once(parser_version=source.parser_version)
-                    details.update(
-                        devices=stats.devices,
-                        segments=stats.segments,
-                        archived=stats.archived,
-                        skipped=stats.skipped,
-                        deferred=stats.deferred,
-                    )
+                    if stats is None:
+                        stage = "bootstrap"
+                        with _warehouse_lease(warehouse):
+                            _ensure_initialized(state, warehouse)
+                        stats = capture()
                     stage = "delivery"
                     details["loaded"] = _load_pending(state, warehouse, source=source)
                     if stats.deferred:
@@ -140,7 +151,11 @@ def _load_pending(state: CollectorState, warehouse: Warehouse, *, source: Source
             if time.monotonic() >= deadline:
                 raise TimeoutError("Screen Time delivery deadline exceeded")
             identity = pending.identity
-            state.pin_parser(identity.object_key, source.parser_version)
+            if (
+                pending.parser_version is not None
+                and pending.parser_version != source.parser_version
+            ):
+                raise RuntimeError("pending parser version requires compatible replay")
             raw = source.parse_raw_key(
                 identity.object_key, storage_created_at=identity.observed_at, storage_generation=1
             )
@@ -149,6 +164,7 @@ def _load_pending(state: CollectorState, warehouse: Warehouse, *, source: Source
                 raise RuntimeError("decoded parser version does not match pinned pending version")
             records = adopted_records(cast(BiomeBatch, batch))
             keys = [r.event_key for r in records if r.event_key is not None]
+            state.pin_parser(identity.object_key, source.parser_version)
             invalidated = state.invalidated_event_keys(raw.key, keys)
             warehouse.commit_screen_time_snapshot(
                 raw, batch, invalidated_event_keys=invalidated, owner_id=owner, deadline=deadline

@@ -25,6 +25,9 @@ def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatc
     segment = remote / "100"
     segment.write_bytes(segb(event("synthetic.first"))[0])
     state_path = tmp_path / "collector.db"
+    state = CollectorState(state_path, source_id="iphone_screen_time")
+    with state._connect() as connection:
+        connection.execute("PRAGMA user_version = 1")
     for name, value in {
         "PDP_IPHONE_SCREEN_TIME_SYNC_DB_PATH": str(sync),
         "PDP_IPHONE_SCREEN_TIME_APP_IN_FOCUS_REMOTE_DIR": str(remote.parent),
@@ -81,11 +84,11 @@ def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatc
 
     assert runtime.collect(watch=True) == 0
     assert len(migrations) == (2 if failure == "migration" else 1)
-    assert scans == [0, 0, 0]
+    assert scans == ([1, 0, 0] if failure is not None else [0, 0, 0])
     warehouse = Warehouse(warehouse_config.database)
     try:
-        assert warehouse.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == (
-            1 if failure is not None else 2
-        )
+        assert warehouse.query_rows(
+            "SELECT bundle_id FROM base.iphone_screen_time_event ORDER BY rowid"
+        ) == [("synthetic.first",), ("synthetic.second",)]
     finally:
         warehouse.close()
