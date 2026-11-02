@@ -1,37 +1,13 @@
 name: personal_data_platform
 version: "1.0.0"
 config-version: 2
-
 profile: personal_data_platform
 model-paths: ["models"]
 test-paths: ["tests"]
 macro-paths: ["macros"]
-clean-targets: ["target", "dbt_packages"]
-
 models:
   personal_data_platform:
-    base:
-      +schema: base
-      +materialized: view
-      iphone_screen_time:
-        +tags: [iphone_screen_time]
-      mac_screen_time:
-        +tags: [mac_screen_time]
-    marts:
-      +schema: marts
-      +materialized: view
-      iphone_screen_time:
-        +tags: [iphone_screen_time]
-      mac_screen_time:
-        +tags: [mac_screen_time]
-      cross_source:
-        +tags: [cross_source]
-
-data_tests:
-  personal_data_platform:
-    iphone_screen_time:
-      +tags: [iphone_screen_time]
-    mac_screen_time:
-      +tags: [mac_screen_time]
-    cross_source:
-      +tags: [cross_source]
+    +schema: marts
+    +materialized: view
+    +persist_docs: {relation: true, columns: true}
+    +pre-hook: "{{ lease_fence() }}"
