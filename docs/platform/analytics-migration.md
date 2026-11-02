@@ -30,7 +30,7 @@ uv run --locked python -m scripts.migrate_analytics_schema \
   --mac-output /path/to/prepared/mac/collector.db
 ```
 
-旧12 checksum、旧 base/ops の列とキー、単一 Fitbit account、日次の重複、睡眠詳細の親、lease、Screen Time の参照・snapshot・parser・pending payload を検査する。想定外があれば先に原因を解決する。特に後の sent より古い pending は順序を安全に保てないため停止する。旧 source と対象 stage が同一、target が canonical、あるいは stage に既存のオブジェクトがある場合も停止する。
+旧12 checksum、旧 base/ops の列とキー、単一 Fitbit account、日次の重複、睡眠詳細の親、lease、Screen Time の参照・snapshot・parser・pending payload を検査する。想定外があれば先に原因を解決する。特に後の sent、または warehouse で確定済みの snapshot より古い pending は順序を安全に保てないため停止する。warehouse への保存だけ済んで ACK が失われた pending は、成功 receipt の parser 版を引き継ぐ。再送には同じ parser 版が必要となり、異なる版では停止する。旧 source と対象 stage が同一、target が canonical、あるいは stage に既存のオブジェクトがある場合も停止する。
 
 事前検査に成功したら、同じコマンドに `--apply` を追加する。新 baseline の実際の履歴を適用し、SQL で全履歴を stage へ投影する。投影と stage の全行を双方向に比較し、dbt が lease を取得して7ビューを構築する。両 SQLite は別々に生成し、旧 ops の DISTINCT 参照、pending の圧縮 bytes と hash、最新 sent metadata を検証してから有効化済み marker を設定する。旧 SQLite は変更しない。完了後も source/stage の履歴、全表と参照、全ビューの結果、stage の定義に一時 catalog への依存がないことを確認する。失敗や応答消失後は状況を調べ、部分 stage を完成品として使わない。
 

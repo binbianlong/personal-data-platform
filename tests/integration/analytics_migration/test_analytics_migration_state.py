@@ -50,56 +50,77 @@ def test_pending_payload_is_preserved_and_dry_run_creates_nothing(tmp_path):
     assert len(pending) == 1
     assert pending[0].identity == identity
     assert pending[0].compressed_payload == compressed
+    assert pending[0].parser_version is None
     with sqlite3.connect(new) as db:
         assert db.execute("PRAGMA user_version").fetchone() == (1,)
     warehouse.close()
 
 
-def test_old_pending_before_sent_rejected_before_output(tmp_path):
+@pytest.mark.parametrize(
+    ("source_id", "stream"),
+    [("iphone_screen_time", "app-in-focus"), ("mac_screen_time", "app-usage")],
+)
+@pytest.mark.parametrize("latest_status", ["uploaded", "pending"])
+@pytest.mark.parametrize("apply", [False, True])
+def test_pending_before_confirmed_warehouse_snapshot_rejected_before_output(
+    tmp_path, source_id, stream, latest_status, apply
+):
     from datetime import timedelta
-
-    import pytest
 
     warehouse = duckdb.connect()
     warehouse.execute(Path("tests/fixtures/analytics_migration/legacy_schema.sql").read_text())
     old, new = tmp_path / "old.db", tmp_path / "new" / "collector.db"
     device, segment = "a" * 64, "b" * 64
     first = datetime(2026, 1, 1, tzinfo=UTC)
-    data = b"content"
-    digest = hashlib.sha256(data).hexdigest()
-    pending = ScreenTimeRawIdentity(
-        "iphone_screen_time", device, "app-in-focus", segment, first, digest
-    )
-    sent = ScreenTimeRawIdentity(
-        "iphone_screen_time", device, "app-in-focus", segment, first + timedelta(seconds=1), digest
-    )
+    identities = []
     with sqlite3.connect(old) as db:
         db.executescript(LEGACY_SQLITE_SCHEMA)
-        for item, status in [(pending, "pending"), (sent, "uploaded")]:
+        for index, (data, status) in enumerate([(b"older", "pending"), (b"newer", latest_status)]):
+            item = ScreenTimeRawIdentity(
+                source_id,
+                device,
+                stream,
+                segment,
+                first + timedelta(seconds=index),
+                hashlib.sha256(data).hexdigest(),
+            )
+            identities.append(item)
             db.execute(
                 "INSERT INTO segment_observation (device_key,stream,segment_key,observed_at,sha256,object_key,compressed_payload,status) VALUES (?,?,?,?,?,?,?,?)",
                 (
                     device,
-                    item.stream,
+                    stream,
                     segment,
                     format_observed_at(item.observed_at),
-                    digest,
+                    item.sha256,
                     item.object_key,
                     gzip.compress(data, mtime=0),
                     status,
                 ),
             )
+    confirmed = identities[1]
     warehouse.execute(
-        "INSERT INTO ops.iphone_screen_time_segment VALUES (?, ?, ?, ?, ?)",
-        [device, sent.stream, segment, sent.observed_at, sent.object_key],
+        f'INSERT INTO ops."{source_id}_segment" VALUES (?, ?, ?, ?, ?)',
+        [device, stream, segment, confirmed.observed_at, confirmed.object_key],
     )
     warehouse.execute(
-        "INSERT INTO ops.ingestion_metadata (object_key,source_id,schema_version,subject_key,source_stream,logical_key,observed_at,content_sha256,byte_size,status,parser_version,started_at) VALUES (?, 'iphone_screen_time', 2, ?, 'app-in-focus', ?, ?, ?, 7, 'succeeded', 'v1', ?)",
-        [sent.object_key, device, segment, sent.observed_at, digest, sent.observed_at],
+        "INSERT INTO ops.ingestion_metadata (object_key,source_id,schema_version,subject_key,source_stream,logical_key,observed_at,content_sha256,byte_size,status,parser_version,started_at) VALUES (?, ?, 2, ?, ?, ?, ?, ?, 5, 'succeeded', 'v1', ?)",
+        [
+            confirmed.object_key,
+            source_id,
+            device,
+            stream,
+            segment,
+            confirmed.observed_at,
+            confirmed.sha256,
+            confirmed.observed_at,
+        ],
     )
+    before = old.read_bytes()
     with pytest.raises(ValueError, match="pending snapshot"):
-        migrate_state(warehouse, old, new, source_id="iphone_screen_time", apply=True)
+        migrate_state(warehouse, old, new, source_id=source_id, apply=apply)
     assert not new.parent.exists()
+    assert old.read_bytes() == before
     warehouse.close()
 
 
@@ -269,57 +290,137 @@ def test_mac_distinct_refs_preserve_multiple_segments_and_inactive_event(tmp_pat
     warehouse.close()
 
 
-def test_committed_pending_with_lost_ack_is_kept_pending(tmp_path):
+@pytest.mark.parametrize(
+    ("source_id", "platform", "stream"),
+    [("iphone_screen_time", "ios", "app-in-focus"), ("mac_screen_time", "macos", "app-usage")],
+)
+@pytest.mark.parametrize("previous_sent", [False, True])
+def test_committed_pending_with_lost_ack_keeps_parser_and_rejects_different_replay(
+    tmp_path, source_id, platform, stream, previous_sent
+):
+    from datetime import timedelta
+
+    from personal_data_platform.biome.runtime import load_pending
+    from personal_data_platform.sources.registry import get_source
+    from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+
     warehouse = duckdb.connect()
     warehouse.execute(Path("tests/fixtures/analytics_migration/legacy_schema.sql").read_text())
     old, new = tmp_path / "old.db", tmp_path / "out" / "collector.db"
     raw = b"pending"
+    compressed = gzip.compress(raw, mtime=0)
     identity = ScreenTimeRawIdentity(
-        "iphone_screen_time",
+        source_id,
         "a" * 64,
-        "app-in-focus",
+        stream,
         "b" * 64,
         datetime(2026, 1, 1, tzinfo=UTC),
         hashlib.sha256(raw).hexdigest(),
     )
+    snapshots = [(identity, "pending", "v1")]
+    if previous_sent:
+        previous = ScreenTimeRawIdentity(
+            source_id,
+            identity.device_key,
+            stream,
+            identity.segment_key,
+            identity.observed_at - timedelta(seconds=1),
+            identity.sha256,
+        )
+        snapshots.insert(0, (previous, "uploaded", "v0"))
     with sqlite3.connect(old) as db:
         db.executescript(LEGACY_SQLITE_SCHEMA)
-        db.execute(
-            "INSERT INTO segment_observation (device_key,stream,segment_key,observed_at,sha256,object_key,compressed_payload,status) VALUES (?,?,?,?,?,?,?,?)",
-            (
-                identity.device_key,
-                identity.stream,
-                identity.segment_key,
-                format_observed_at(identity.observed_at),
-                identity.sha256,
-                identity.object_key,
-                gzip.compress(raw, mtime=0),
-                "pending",
-            ),
+        for item, status, parser in snapshots:
+            db.execute(
+                "INSERT INTO segment_observation (device_key,stream,segment_key,observed_at,sha256,object_key,compressed_payload,status) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    item.device_key,
+                    stream,
+                    item.segment_key,
+                    format_observed_at(item.observed_at),
+                    item.sha256,
+                    item.object_key,
+                    compressed,
+                    status,
+                ),
+            )
+            warehouse.execute(
+                "INSERT INTO ops.ingestion_metadata (object_key,source_id,schema_version,subject_key,source_stream,logical_key,observed_at,content_sha256,byte_size,status,parser_version,started_at) VALUES (?, ?, 2, ?, ?, ?, ?, ?, 7, 'succeeded', ?, ?)",
+                [
+                    item.object_key,
+                    source_id,
+                    item.device_key,
+                    stream,
+                    item.segment_key,
+                    item.observed_at,
+                    item.sha256,
+                    parser,
+                    item.observed_at,
+                ],
+            )
+    warehouse.execute(
+        f'INSERT INTO ops."{source_id}_segment" VALUES (?,?,?,?,?)',
+        [
+            identity.device_key,
+            stream,
+            identity.segment_key,
+            identity.observed_at,
+            identity.object_key,
+        ],
+    )
+    warehouse.execute(
+        f'INSERT INTO base."{source_id}_event" (event_key,device_key,platform,source_stream,bundle_id,event_at,state,object_key,segment_key,observed_at,parser_version,unknown_field_count,duplicate_occurrence_count,is_active,loaded_at) '
+        "VALUES ('event',?,?,?,'app',?,'start',?,?,?,'v1',0,1,true,?)",
+        [
+            identity.device_key,
+            platform,
+            stream,
+            identity.observed_at,
+            identity.object_key,
+            identity.segment_key,
+            identity.observed_at,
+            identity.observed_at,
+        ],
+    )
+    warehouse.execute(
+        f'INSERT INTO ops."{source_id}_record" (physical_id,device_key,source_stream,segment_key,record_offset,record_metadata_offset,event_key,bundle_id,event_at,state,parser_version,unknown_field_count) '
+        "VALUES ('physical',?,?,?,1,2,'event','app',?,'start','v1',0)",
+        [identity.device_key, stream, identity.segment_key, identity.observed_at],
+    )
+    before = old.read_bytes()
+    migrate_state(warehouse, old, new, source_id=source_id, apply=True)
+    state = CollectorState(new, source_id=source_id)
+    pending = state.pending()[0]
+    assert pending.identity == identity
+    assert pending.compressed_payload == compressed
+    assert pending.parser_version == "v1"
+    with sqlite3.connect(new) as db:
+        assert db.execute(
+            "SELECT parser_version FROM file_state WHERE status='sent'"
+        ).fetchall() == ([("v0",)] if previous_sent else [])
+        assert db.execute("SELECT segment_key,event_key FROM event_reference").fetchall() == [
+            (identity.segment_key, "event")
+        ]
+    stage = Warehouse(connect(WarehouseConfig(":memory:")))
+    try:
+        stage.migrate()
+        stage.connection.execute(
+            f"INSERT INTO base.{source_id}_event VALUES ('event',?,'app',?,'start',true)",
+            [identity.device_key, identity.observed_at],
         )
-    warehouse.execute(
-        "INSERT INTO ops.iphone_screen_time_segment VALUES (?,?,?,?,?)",
-        [
-            identity.device_key,
-            identity.stream,
-            identity.segment_key,
-            identity.observed_at,
-            identity.object_key,
-        ],
-    )
-    warehouse.execute(
-        "INSERT INTO ops.ingestion_metadata (object_key,source_id,schema_version,subject_key,source_stream,logical_key,observed_at,content_sha256,byte_size,status,parser_version,started_at) VALUES (?, 'iphone_screen_time', 2, ?, 'app-in-focus', ?, ?, ?, 7, 'succeeded', 'v1', ?)",
-        [
-            identity.object_key,
-            identity.device_key,
-            identity.segment_key,
-            identity.observed_at,
-            identity.sha256,
-            identity.observed_at,
-        ],
-    )
-    migrate_state(warehouse, old, new, source_id="iphone_screen_time", apply=True)
-    assert CollectorState(new, source_id="iphone_screen_time").pending()[0].identity == identity
+        source = get_source(source_id)
+        assert source.parser_version != "v1"
+        with pytest.raises(RuntimeError, match="pending parser version"):
+            load_pending(state, stage, source=source)
+        assert state.pending()[0].parser_version == "v1"
+        assert stage.connection.execute(
+            f'SELECT is_valid FROM base."{source_id}_event"'
+        ).fetchall() == [(True,)]
+        with sqlite3.connect(new) as db:
+            assert db.execute("SELECT count(*) FROM event_reference").fetchone() == (1,)
+    finally:
+        stage.close()
+    assert old.read_bytes() == before
     warehouse.close()
 
 

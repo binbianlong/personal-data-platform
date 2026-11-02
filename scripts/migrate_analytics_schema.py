@@ -367,10 +367,12 @@ def migrate_state(
     for _, segment, observed, _, _, _, status in rows:
         if status == "pending" and segment in latest and observed <= latest[segment][1]:
             raise ValueError("pending snapshot precedes or ties sent snapshot")
+        if status == "pending" and segment in segment_map and observed < segment_map[segment][1]:
+            raise ValueError("pending snapshot precedes warehouse-confirmed snapshot")
     if not set(latest).issubset(segment_map):
         raise ValueError("warehouse and local sent segments differ")
     by_key = {row[4]: row for row in rows}
-    parser_by_segment = {}
+    parser_by_key = {}
     required_keys = {item[2] for item in latest.values()} | {
         item[2] for item in segment_map.values()
     }
@@ -399,14 +401,14 @@ def migrate_state(
         return receipt[7]
 
     for segment, (device, observed, key, digest) in latest.items():
-        parser_by_segment[segment] = receipt_parser(device, segment, observed, key, digest)
+        parser_by_key[key] = receipt_parser(device, segment, observed, key, digest)
     for segment, (device, observed, key) in segment_map.items():
         row = by_key.get(key)
         if row is None or (row[0], row[1], row[2]) != (device, segment, observed):
             raise ValueError("warehouse and local segment snapshots differ")
         if row[6] == "uploaded" and latest.get(segment, (None, None, None))[2] != key:
             raise ValueError("warehouse segment references an obsolete uploaded snapshot")
-        receipt_parser(device, segment, observed, key, row[3])
+        parser_by_key[key] = receipt_parser(device, segment, observed, key, row[3])
     mismatch = warehouse.execute(
         f'SELECT count(*) FROM ops."{source_id}_record" r '
         f'JOIN ops."{source_id}_segment" s USING(device_key,source_stream,segment_key) '
@@ -446,7 +448,7 @@ def migrate_state(
                         device,
                         digest,
                         observed.isoformat(),
-                        parser_by_segment.get(segment) if status == "uploaded" else None,
+                        parser_by_key.get(key),
                         "sent" if status == "uploaded" else "pending",
                         path,
                     ),
@@ -480,7 +482,7 @@ def migrate_state(
                         device,
                         digest,
                         observed.isoformat(),
-                        parser_by_segment.get(segment) if status == "uploaded" else None,
+                        parser_by_key.get(key),
                         "sent" if status == "uploaded" else "pending",
                         path,
                     )
