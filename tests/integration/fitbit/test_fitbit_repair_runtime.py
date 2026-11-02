@@ -70,9 +70,11 @@ def test_manual_retry_records_first_unfinished_day_and_preserves_committed_data(
     assert first["completed_scopes"] == 2 and first["failed_scopes"] == 1
     assert first["first_incomplete"]["start"] == str(failed_day)
     warehouse = manual_env.warehouse()
-    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 2
-    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") > 0
-    assert warehouse.query_value("SELECT count(*) FROM ops.job_run") == 0
+    assert warehouse.query_value("SELECT count(*) FROM base.steps_interval") == 2
+    assert {r for r in warehouse.relation_names() if r.startswith("ops.")} == {
+        "ops.job_lock",
+        "ops.schema_migration",
+    }
     assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     warehouse.close()
 
@@ -81,18 +83,19 @@ def test_manual_retry_records_first_unfinished_day_and_preserves_committed_data(
     retry = json.loads(capsys.readouterr().out)
     assert retry["completed_scopes"] == 3 and retry["first_incomplete"] is None
     warehouse = manual_env.warehouse()
-    assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 3
-    assert warehouse.query_value("SELECT count(*) FROM ops.job_run") == 0
+    assert warehouse.query_value("SELECT count(*) FROM base.steps_interval") == 3
+    assert {r for r in warehouse.relation_names() if r.startswith("ops.")} == {
+        "ops.job_lock",
+        "ops.schema_migration",
+    }
     assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     warehouse.close()
     assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 0
     warehouse = manual_env.warehouse()
-    assert (
-        warehouse.query_value(
-            "SELECT count(*) FROM ops.ingestion_metadata WHERE source_id='fitbit'"
-        )
-        == 0
-    )
+    assert warehouse.query_value("SELECT count(*) FROM base.steps_interval") == 3
+    assert manual_env.api.calls[-3:] == [
+        Window("steps", start + timedelta(days=i), start + timedelta(days=i + 1)) for i in range(3)
+    ]
     warehouse.close()
 
 
@@ -102,11 +105,14 @@ def test_manual_old_narrow_range_keeps_exact_bounds(manual_env, capsys):
     assert runtime.run_sync_from_env(start=start, end=end, data_types=("steps",)) == 0
     assert manual_env.api.calls == [Window("steps", start, end)]
     warehouse = manual_env.warehouse()
-    assert warehouse.query_rows("SELECT range_start,range_end FROM ops.fitbit_coverage") == [
-        (start, end)
+    assert warehouse.query_rows("SELECT start_at,end_at FROM base.steps_interval") == [
+        (start, start + timedelta(minutes=1))
     ]
     assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
-    assert warehouse.query_value("SELECT count(*) FROM ops.job_run") == 0
+    assert {r for r in warehouse.relation_names() if r.startswith("ops.")} == {
+        "ops.job_lock",
+        "ops.schema_migration",
+    }
     warehouse.close()
 
 
@@ -202,7 +208,10 @@ def test_daily_repair_fetches_all_types_using_shared_warehouse_and_owner(tmp_pat
                         datetime(2026, 10, 11, 15, tzinfo=UTC),
                     ),
                 ]
-        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 32
+        assert {r for r in warehouse.relation_names() if r.startswith("ops.")} == {
+            "ops.job_lock",
+            "ops.schema_migration",
+        }
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
     finally:
         warehouse.close()
@@ -223,8 +232,8 @@ def test_old_notification_still_fetches_its_historical_range(manual_env, mode):
         )
         assert result.ok and result.completed_scopes == 1
         assert manual_env.api.calls == [window]
-        assert warehouse.query_rows("SELECT range_start,range_end FROM ops.fitbit_coverage") == [
-            (window.start, window.end)
+        assert warehouse.query_rows("SELECT start_at,end_at FROM base.steps_interval") == [
+            (window.start, window.start + timedelta(minutes=1))
         ]
     finally:
         warehouse.close()

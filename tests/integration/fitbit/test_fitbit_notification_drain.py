@@ -20,11 +20,11 @@ def test_drain_commits_before_success_and_redelivery_does_not_duplicate(tmp_path
     for _ in range(2):
         assert drain_notification(runner, notice(), subscriber=subscriber).ok
         with closing(factory()) as warehouse:
-            assert warehouse.query_rows("SELECT value FROM base.fitbit_activity_interval") == [
-                (10,)
-            ]
-            assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 1
-            assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 0
+            assert warehouse.query_rows("SELECT steps FROM base.steps_interval") == [(10,)]
+            assert {r for r in warehouse.relation_names() if r.startswith("ops.")} == {
+                "ops.job_lock",
+                "ops.schema_migration",
+            }
             assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     assert api.calls == [WINDOW, WINDOW]
     entries = [
@@ -68,11 +68,11 @@ def test_drain_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monk
     assert scopes[0].summary["fetched_rows"] is None
     assert scopes[0].summary["submitted_rows"] is None
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 10
+        assert warehouse.query_value("SELECT steps FROM base.steps_interval") == 10
     monkeypatch.setattr(api, "fetch_snapshot", fetch)
     assert drain_notification(runner, notice(), subscriber=subscriber).ok
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 20
+        assert warehouse.query_value("SELECT steps FROM base.steps_interval") == 20
 
 
 def test_drain_busy_preserves_owner_and_expired_lease_can_retry(tmp_path, caplog):
@@ -139,7 +139,7 @@ def test_drain_unknown_commit_returns_retry_and_redelivery_keeps_one_row(tmp_pat
     assert any(record.levelno >= logging.ERROR for record in caplog.records)
     assert not subscriber.acks
     with closing(factory()) as warehouse:
-        assert warehouse.query_rows("SELECT value FROM base.fitbit_activity_interval") == [(10,)]
+        assert warehouse.query_rows("SELECT steps FROM base.steps_interval") == [(10,)]
         warehouse.connection.execute(
             "UPDATE ops.job_lock SET expires_at=current_timestamp - INTERVAL '1 second'"
         )
@@ -147,7 +147,7 @@ def test_drain_unknown_commit_returns_retry_and_redelivery_keeps_one_row(tmp_pat
     assert drain_notification(runner, notice(), subscriber=subscriber).ok
     assert api.calls == [WINDOW, WINDOW]
     with closing(factory()) as warehouse:
-        assert warehouse.query_rows("SELECT value FROM base.fitbit_activity_interval") == [(10,)]
+        assert warehouse.query_rows("SELECT steps FROM base.steps_interval") == [(10,)]
 
 
 def test_drain_deadline_keeps_unfinished_scope_for_redelivery(tmp_path):
@@ -166,8 +166,8 @@ def test_drain_deadline_keeps_unfinished_scope_for_redelivery(tmp_path):
     assert not drain_notification(runner, notice(), subscriber=subscriber).ok
     assert not subscriber.acks
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_activity_interval") == 0
-        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 0
+        assert warehouse.query_value("SELECT count(*) FROM base.steps_interval") == 0
+        assert "ops.fitbit_coverage" not in warehouse.relation_names()
     api.fetch_snapshot = original
     runner.monotonic = lambda: 0.0
     assert drain_notification(runner, notice(), subscriber=subscriber).ok

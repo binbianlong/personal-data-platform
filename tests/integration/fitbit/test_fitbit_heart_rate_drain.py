@@ -51,7 +51,7 @@ def test_waits_for_tail_before_api_and_warehouse_and_retry_completes(tmp_path, c
         "endTime": "2026-10-09T15:02:00Z",
     }
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 2
+        assert warehouse.query_value("SELECT count(*) FROM base.heart_rate_minute") == 2
     scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
     assert [r.status for r in scopes] == ["succeeded"]
     assert scopes[0].summary["acquisition_mode"] == "bounded_minutes"
@@ -77,16 +77,16 @@ def test_shortened_api_range_is_not_committed_or_acknowledged(tmp_path, caplog):
     assert not drain_notification(runner, notice(window), subscriber=subscriber).ok
     assert not subscriber.acks
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 0
-        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 0
+        assert warehouse.query_value("SELECT count(*) FROM base.heart_rate_minute") == 0
+        assert "ops.fitbit_coverage" not in warehouse.relation_names()
     scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
     assert len(scopes) == 1
     assert scopes[0].status == "deferred"
     assert scopes[0].summary["submitted_rows"] is None
 
 
-@pytest.mark.parametrize("state", ["changed", "empty", "stale"])
-def test_replaces_only_target_minutes_and_preserves_newer_data(tmp_path, caplog, state):
+@pytest.mark.parametrize("state", ["changed", "empty", "unchanged"])
+def test_replaces_only_target_minutes_and_preserves_outside_scope_data(tmp_path, caplog, state):
     runner, _, factory = direct_setup(tmp_path)
     subscriber = Subscriber()
     wide = Window("heart-rate", NOW, NOW + timedelta(minutes=3))
@@ -103,12 +103,19 @@ def test_replaces_only_target_minutes_and_preserves_newer_data(tmp_path, caplog,
             warehouse.connection, source_key="seed", loaded_at=NOW + timedelta(minutes=10)
         )
         warehouse.connection.execute("COMMIT")
-    fetched = NOW + timedelta(minutes=4 if state == "stale" else 11)
+    fetched = NOW + timedelta(minutes=11)
     runner.clock = lambda: NOW + timedelta(minutes=11)
     points = (
         []
         if state == "empty"
-        else [rollup(NOW + timedelta(minutes=1), average=80, minimum=70, maximum=90)]
+        else [
+            rollup(
+                NOW + timedelta(minutes=1),
+                average=60 if state == "unchanged" else 80,
+                minimum=50 if state == "unchanged" else 70,
+                maximum=70 if state == "unchanged" else 90,
+            )
+        ]
     )
     transport = FakeTransport([{"rollupDataPoints": points}])
     runner.client = client(transport, clock=lambda: fetched)
@@ -120,14 +127,14 @@ def test_replaces_only_target_minutes_and_preserves_newer_data(tmp_path, caplog,
         if state == "empty"
         else [
             (NOW, 60),
-            (NOW + timedelta(minutes=1), 60 if state == "stale" else 80),
+            (NOW + timedelta(minutes=1), 60 if state == "unchanged" else 80),
             (NOW + timedelta(minutes=2), 60),
         ]
     )
     with closing(factory()) as warehouse:
         assert (
             warehouse.query_rows(
-                "SELECT start_at,average FROM base.fitbit_heart_rate_minute ORDER BY start_at"
+                "SELECT start_at,mean_bpm FROM base.heart_rate_minute ORDER BY start_at"
             )
             == expected
         )
@@ -137,7 +144,7 @@ def test_replaces_only_target_minutes_and_preserves_newer_data(tmp_path, caplog,
     }
     scope = next(r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition")
     assert scope.summary["submitted_rows"] == (1 if state == "changed" else 0)
-    assert scope.summary["outcome"] == ("stale" if state == "stale" else "range_replaced")
+    assert scope.summary["outcome"] == ("unchanged" if state == "unchanged" else "range_replaced")
     assert (
         scope.summary["requested_start"]
         == scope.summary["acquired_start"]
@@ -180,8 +187,8 @@ def test_api_or_write_failure_does_not_commit(tmp_path, monkeypatch, caplog, fai
     assert not drain_notification(runner, notice(window), subscriber=subscriber).ok
     assert not subscriber.acks
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 0
-        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 0
+        assert warehouse.query_value("SELECT count(*) FROM base.heart_rate_minute") == 0
+        assert "ops.fitbit_coverage" not in warehouse.relation_names()
     scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
     assert len(scopes) == 1
     assert scopes[0].status == "failed"
@@ -227,11 +234,11 @@ def test_uncertain_commit_retries_and_redelivery_does_not_duplicate_minutes(tmp_
     assert scope.status == "unknown"
     assert scope.summary["submitted_rows"] is None
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.heart_rate_minute") == 1
         warehouse.connection.execute(
             "UPDATE ops.job_lock SET expires_at=current_timestamp - INTERVAL '1 second'"
         )
     runner.warehouse_factory = factory
     assert drain_notification(runner, notice(window), subscriber=subscriber).ok
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.heart_rate_minute") == 1

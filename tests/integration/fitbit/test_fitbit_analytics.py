@@ -191,7 +191,7 @@ def test_minute_daily_average_has_observed_minute_semantics(
         warehouse.close()
 
 
-def test_minute_writer_empty_deletes_and_stale_snapshot_protects_newer_subrange(tmp_path):
+def test_minute_writer_empty_deletes_only_reacquired_range(tmp_path):
     from personal_data_platform.sources.fitbit.models import (
         HeartRateMinute,
         HeartRateMinuteSnapshot,
@@ -224,16 +224,16 @@ def test_minute_writer_empty_deletes_and_stale_snapshot_protects_newer_subrange(
         FitbitMinuteBatch(
             snapshot(base + timedelta(hours=3), [minute(narrow.start, 100)], narrow)
         ).write_snapshot(warehouse.connection, source_key="new", loaded_at=base)
-        FitbitMinuteBatch(snapshot(base + timedelta(hours=2), [])).write_snapshot(
-            warehouse.connection, source_key="stale", loaded_at=base
+        FitbitMinuteBatch(snapshot(base + timedelta(hours=4), [], narrow)).write_snapshot(
+            warehouse.connection, source_key="empty-narrow", loaded_at=base
         )
-        assert warehouse.query_rows(
-            "SELECT start_at,average FROM base.fitbit_heart_rate_minute"
-        ) == [(narrow.start, 100)]
+        assert warehouse.query_rows("SELECT start_at,mean_bpm FROM base.heart_rate_minute") == [
+            (base, 60)
+        ]
         FitbitMinuteBatch(snapshot(base + timedelta(hours=4), [])).write_snapshot(
             warehouse.connection, source_key="empty", loaded_at=base
         )
-        assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 0
+        assert warehouse.query_value("SELECT count(*) FROM base.heart_rate_minute") == 0
     finally:
         warehouse.close()
 
@@ -279,9 +279,7 @@ def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path)
             FitbitMinuteBatch(acquired).write_snapshot(
                 warehouse.connection, source_key="partial", loaded_at=base
             )
-        assert warehouse.query_rows(
-            "SELECT average,source_key FROM base.fitbit_heart_rate_minute"
-        ) == [(60, "existing")]
+        assert warehouse.query_rows("SELECT mean_bpm FROM base.heart_rate_minute") == [(60,)]
     finally:
         warehouse.close()
 
