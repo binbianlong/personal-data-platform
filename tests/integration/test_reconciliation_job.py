@@ -131,6 +131,8 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
                 "succeeded" if failure == "none" else "deferred" if failure == "busy" else "failed",
             ]
         )
+        assert events[0]["severity"] == ("ERROR" if failure == "logging" else "INFO")
+        assert events[-1]["severity"] == ("INFO" if failure in {"none", "busy"} else "ERROR")
         summary = events[-1]["summary"]
         assert summary["run_id"] == events[0]["summary"]["run_id"]
         assert summary["target_date"] and summary["started_at"] and summary["completed_at"]
@@ -167,3 +169,18 @@ def test_relation_inventory_ignores_other_attached_databases():
         assert "marts.foreign_view" not in warehouse.relation_names()
     finally:
         warehouse.close()
+
+
+@pytest.mark.parametrize("level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+@pytest.mark.parametrize("outcome", ["none", "busy", "fitbit"])
+def test_daily_execution_history_is_independent_of_detail_log_level(
+    monkeypatch, capfd, level, outcome
+):
+    monkeypatch.setenv("LOG_LEVEL", level)
+    test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd, outcome)
+    # Required events do not lower the configured level for ordinary messages.
+    assert logging.getLogger(
+        "personal_data_platform.reconciliation"
+    ).getEffectiveLevel() == getattr(logging, level)
+    logging.getLogger("personal_data_platform.reconciliation").info("ordinary detail")
+    assert ("ordinary detail" in capfd.readouterr().err) == (level in {"DEBUG", "INFO"})

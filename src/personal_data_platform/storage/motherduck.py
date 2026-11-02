@@ -99,7 +99,9 @@ class Warehouse:
         apply_migrations(self, migrations)
 
     @contextmanager
-    def _transaction(self, operation: str) -> Iterator[None]:
+    def _transaction(
+        self, operation: str, *, defer_commit_conflict: bool = False
+    ) -> Iterator[None]:
         if not self.connection_usable:
             raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
         try:
@@ -119,6 +121,26 @@ class Warehouse:
         try:
             self.connection.execute("COMMIT")
         except Exception as error:
+            if defer_commit_conflict:
+                import duckdb
+
+                if isinstance(
+                    error, (duckdb.TransactionException, duckdb.ConstraintException)
+                ) and (
+                    "PRIMARY KEY or UNIQUE constraint violation" in str(error)
+                    and "duplicate key" in str(error)
+                ):
+                    # A rejected lease INSERT is known not to have committed.
+                    # Confirm that its transaction ended before reusing this connection.
+                    try:
+                        self.connection.execute("BEGIN TRANSACTION")
+                        self.connection.execute("ROLLBACK")
+                    except Exception as cleanup_error:
+                        self.connection_usable = False
+                        raise WarehouseConnectionError(
+                            f"{operation} abort could not be verified"
+                        ) from cleanup_error
+                    raise
             self.connection_usable = False
             raise WarehouseConnectionError(f"{operation} commit outcome unknown") from error
 
@@ -245,7 +267,7 @@ class Warehouse:
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=lease_seconds)
         try:
-            with self._transaction("lease acquisition"):
+            with self._transaction("lease acquisition", defer_commit_conflict=True):
                 current = self.connection.execute(
                     "SELECT owner_id, expires_at FROM ops.job_lock WHERE job_name=?", [job_name]
                 ).fetchone()

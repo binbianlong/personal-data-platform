@@ -148,7 +148,8 @@ def test_later_migration_fences_same_lease_and_rolls_back_on_expiry(
     assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 1
 
 
-def test_competing_acquisition_defers_without_poisoning_connection(tmp_path):
+@pytest.mark.parametrize("race", ["after_select", "before_commit"])
+def test_competing_acquisition_defers_without_poisoning_connection(tmp_path, race):
     path = str(tmp_path / "acquire.duckdb")
     first = Warehouse(connect(WarehouseConfig(path)))
     first.migrate()
@@ -157,8 +158,10 @@ def test_competing_acquisition_defers_without_poisoning_connection(tmp_path):
 
     class CompetingAcquisition:
         def execute(self, sql, *args):
+            if race == "before_commit" and sql == "COMMIT":
+                assert second.acquire_job_lock("loader", "second", lease_seconds=120)
             result = original.execute(sql, *args)
-            if sql.startswith("SELECT owner_id, expires_at"):
+            if race == "after_select" and sql.startswith("SELECT owner_id, expires_at"):
                 assert second.acquire_job_lock("loader", "second", lease_seconds=120)
             return result
 
@@ -170,6 +173,10 @@ def test_competing_acquisition_defers_without_poisoning_connection(tmp_path):
         assert not first.acquire_job_lock("loader", "first", lease_seconds=120)
         assert first.connection_usable
         second.require_job_lock("second")
+        # The losing transaction was aborted, and a new transaction is usable.
+        first.connection = original
+        second.release_job_lock("loader", "second")
+        assert first.acquire_job_lock("loader", "retry", lease_seconds=120)
     finally:
         first.close()
         second.close()
@@ -203,3 +210,38 @@ def test_fence_shortening_preserves_required_remaining_time(
             with warehouse._transaction("fencing margin"):
                 warehouse.fence_job_lock("owner", remaining_seconds=1)
         assert warehouse.query_value("SELECT expires_at FROM ops.job_lock") == expires
+
+
+@pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize("error_type", [OSError, duckdb.TransactionException])
+def test_unknown_lease_acquisition_commit_keeps_connection_unusable(
+    warehouse, committed, error_type
+):
+    original = warehouse.connection
+    statements_after_loss = []
+
+    class LostResponse:
+        lost = False
+
+        def execute(self, sql, *args):
+            if self.lost:
+                statements_after_loss.append(sql)
+            if sql == "COMMIT":
+                if committed:
+                    original.execute(sql, *args)
+                self.lost = True
+                raise error_type("lease commit response lost")
+            return original.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(original, name)
+
+    warehouse.connection = LostResponse()
+    try:
+        with pytest.raises(WarehouseConnectionError, match="commit outcome unknown"):
+            warehouse.acquire_job_lock("loader", "owner", lease_seconds=120)
+        assert not warehouse.connection_usable
+        warehouse.release_job_lock("loader", "owner")
+        assert statements_after_loss == []
+    finally:
+        warehouse.connection = original

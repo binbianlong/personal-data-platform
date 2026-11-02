@@ -177,7 +177,10 @@ def _run_daily_reconciliation() -> int:
         return seconds
 
     def event(value: str) -> None:
-        LOGGER.log(
+        # Execution history must survive filters for ordinary diagnostic logs.
+        execution_logger = logging.getLogger(__name__ + ".execution")
+        execution_logger.setLevel(logging.INFO)
+        execution_logger.log(
             logging.ERROR if value == "failed" else logging.INFO,
             "daily reconciliation %s",
             value,
