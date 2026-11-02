@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from personal_data_platform.biome.collector_state import CollectorState
 from personal_data_platform.biome.raw import ScreenTimeRawIdentity, format_observed_at
@@ -102,7 +103,8 @@ def test_old_pending_before_sent_rejected_before_output(tmp_path):
     warehouse.close()
 
 
-def test_distinct_refs_preserve_multiple_segments_and_inactive_event(tmp_path):
+@pytest.mark.parametrize("active", [False, True])
+def test_distinct_refs_preserve_multiple_segments_and_inactive_event(tmp_path, active):
     warehouse = duckdb.connect()
     warehouse.execute(Path("tests/fixtures/analytics_migration/legacy_schema.sql").read_text())
     old, new = tmp_path / "old.db", tmp_path / "stage" / "collector.db"
@@ -137,8 +139,8 @@ def test_distinct_refs_preserve_multiple_segments_and_inactive_event(tmp_path):
                 [identity.object_key, device, segment, observed, digest, observed],
             )
     warehouse.execute(
-        "INSERT INTO base.iphone_screen_time_event (event_key,device_key,platform,source_stream,bundle_id,event_at,state,object_key,segment_key,observed_at,parser_version,unknown_field_count,duplicate_occurrence_count,is_active,loaded_at) VALUES ('event', ?, 'ios', 'app-in-focus', 'app', ?, 'start', ?, ?, ?, 'v1', 0, 1, false, ?)",
-        [device, observed, keys[0].object_key, keys[0].segment_key, observed, observed],
+        "INSERT INTO base.iphone_screen_time_event (event_key,device_key,platform,source_stream,bundle_id,event_at,state,object_key,segment_key,observed_at,parser_version,unknown_field_count,duplicate_occurrence_count,is_active,loaded_at) VALUES ('event', ?, 'ios', 'app-in-focus', 'app', ?, 'start', ?, ?, ?, 'v1', 0, 1, ?, ?)",
+        [device, observed, keys[0].object_key, keys[0].segment_key, observed, active, observed],
     )
     for n, segment in enumerate([keys[0].segment_key, keys[0].segment_key, keys[1].segment_key]):
         warehouse.execute(
@@ -166,10 +168,26 @@ def test_distinct_refs_preserve_multiple_segments_and_inactive_event(tmp_path):
             source_id="iphone_screen_time",
             apply=False,
         )
+    warehouse.execute(
+        "UPDATE ops.iphone_screen_time_record SET parser_version='v1' WHERE physical_id='p0'"
+    )
+    warehouse.execute(
+        "UPDATE ops.iphone_screen_time_record SET bundle_id='wrong' WHERE physical_id='p1'"
+    )
+    with pytest.raises(ValueError, match="inconsistent Screen Time reference"):
+        migrate_state(
+            warehouse,
+            old,
+            tmp_path / "mismatch" / "collector.db",
+            source_id="iphone_screen_time",
+            apply=False,
+        )
+    assert not (tmp_path / "mismatch").exists()
     warehouse.close()
 
 
-def test_mac_distinct_refs_preserve_multiple_segments_and_inactive_event(tmp_path):
+@pytest.mark.parametrize("active", [False, True])
+def test_mac_distinct_refs_preserve_multiple_segments_and_inactive_event(tmp_path, active):
     warehouse = duckdb.connect()
     warehouse.execute(Path("tests/fixtures/analytics_migration/legacy_schema.sql").read_text())
     old, new = tmp_path / "old.db", tmp_path / "stage" / "collector.db"
@@ -204,8 +222,8 @@ def test_mac_distinct_refs_preserve_multiple_segments_and_inactive_event(tmp_pat
                 [identity.object_key, device, segment, observed, digest, observed],
             )
     warehouse.execute(
-        "INSERT INTO base.mac_screen_time_event (event_key,device_key,platform,source_stream,bundle_id,event_at,state,object_key,segment_key,observed_at,parser_version,unknown_field_count,duplicate_occurrence_count,is_active,loaded_at) VALUES ('event', ?, 'macos', 'app-usage', 'app', ?, 'start', ?, ?, ?, 'v1', 0, 1, false, ?)",
-        [device, observed, keys[0].object_key, keys[0].segment_key, observed, observed],
+        "INSERT INTO base.mac_screen_time_event (event_key,device_key,platform,source_stream,bundle_id,event_at,state,object_key,segment_key,observed_at,parser_version,unknown_field_count,duplicate_occurrence_count,is_active,loaded_at) VALUES ('event', ?, 'macos', 'app-usage', 'app', ?, 'start', ?, ?, ?, 'v1', 0, 1, ?, ?)",
+        [device, observed, keys[0].object_key, keys[0].segment_key, observed, active, observed],
     )
     for n, segment in enumerate([keys[0].segment_key, keys[0].segment_key, keys[1].segment_key]):
         warehouse.execute(
@@ -233,6 +251,21 @@ def test_mac_distinct_refs_preserve_multiple_segments_and_inactive_event(tmp_pat
             source_id="mac_screen_time",
             apply=False,
         )
+    warehouse.execute(
+        "UPDATE ops.mac_screen_time_record SET parser_version='v1' WHERE physical_id='p0'"
+    )
+    warehouse.execute(
+        "UPDATE ops.mac_screen_time_record SET bundle_id='wrong' WHERE physical_id='p1'"
+    )
+    with pytest.raises(ValueError, match="inconsistent Screen Time reference"):
+        migrate_state(
+            warehouse,
+            old,
+            tmp_path / "mismatch" / "collector.db",
+            source_id="mac_screen_time",
+            apply=False,
+        )
+    assert not (tmp_path / "mismatch").exists()
     warehouse.close()
 
 
@@ -456,4 +489,35 @@ def test_uncheckpointed_legacy_sqlite_is_rejected_without_creating_files(tmp_pat
     assert wal.read_bytes() == b"uncheckpointed"
     assert old.read_bytes() == before
     assert not new.parent.exists()
+    warehouse.close()
+
+
+@pytest.mark.parametrize(
+    ("source_id", "platform", "stream"),
+    [("iphone_screen_time", "ios", "app-in-focus"), ("mac_screen_time", "macos", "app-usage")],
+)
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("active", [False, True])
+def test_unreferenced_event_only_permitted_when_inactive(
+    tmp_path, source_id, platform, stream, apply, active
+):
+    warehouse = duckdb.connect()
+    warehouse.execute(Path("tests/fixtures/analytics_migration/legacy_schema.sql").read_text())
+    warehouse.execute(
+        f'INSERT INTO base."{source_id}_event" (event_key,device_key,platform,source_stream,bundle_id,event_at,state,object_key,segment_key,observed_at,parser_version,unknown_field_count,duplicate_occurrence_count,is_active,loaded_at) '
+        "VALUES ('orphan','device',?,?, 'app',current_timestamp,'start','object','segment',current_timestamp,'v1',0,0,?,current_timestamp)",
+        [platform, stream, active],
+    )
+    old, target = tmp_path / "old.db", tmp_path / "prepared" / "collector.db"
+    with sqlite3.connect(old) as db:
+        db.executescript(LEGACY_SQLITE_SCHEMA)
+    source_before = old.read_bytes()
+    if active:
+        with pytest.raises(ValueError, match="active.*reference"):
+            migrate_state(warehouse, old, target, source_id=source_id, apply=apply)
+        assert not target.parent.exists()
+    else:
+        migrate_state(warehouse, old, target, source_id=source_id, apply=apply)
+        assert target.exists() is apply
+    assert old.read_bytes() == source_before
     warehouse.close()

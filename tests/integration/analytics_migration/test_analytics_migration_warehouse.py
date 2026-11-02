@@ -510,3 +510,62 @@ def test_cli_apply_stages_both_states_after_warehouse(tmp_path):
                 row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
             } == {"file_state", "event_reference"}
     assert old_contents == {path: path.read_bytes() for path in (iphone, mac)}
+
+
+@pytest.mark.parametrize(
+    ("source_id", "platform", "stream"),
+    [("iphone_screen_time", "ios", "app-in-focus"), ("mac_screen_time", "macos", "app-usage")],
+)
+@pytest.mark.parametrize("apply", [False, True])
+def test_cli_rejects_active_unreferenced_event_before_all_outputs(
+    tmp_path, source_id, platform, stream, apply
+):
+    import os
+    import sqlite3
+    import subprocess
+    import sys
+
+    from scripts.analytics_migration_preflight import LEGACY_SQLITE_SCHEMA
+
+    source, target = tmp_path / "old.duckdb", tmp_path / "new.duckdb"
+    legacy_file(source)
+    connection = duckdb.connect(str(source))
+    connection.execute(
+        f'INSERT INTO base."{source_id}_event" (event_key,device_key,platform,source_stream,bundle_id,event_at,state,object_key,segment_key,observed_at,parser_version,unknown_field_count,duplicate_occurrence_count,is_active,loaded_at) '
+        "VALUES ('orphan','device',?,?,'app',current_timestamp,'start','object','segment',current_timestamp,'v1',0,0,true,current_timestamp)",
+        [platform, stream],
+    )
+    connection.close()
+    iphone, mac = tmp_path / "iphone.db", tmp_path / "mac.db"
+    for path in (iphone, mac):
+        with sqlite3.connect(path) as db:
+            db.executescript(LEGACY_SQLITE_SCHEMA)
+    originals = {path: path.read_bytes() for path in (source, iphone, mac)}
+    outputs = [tmp_path / "i" / "collector.db", tmp_path / "m" / "collector.db"]
+    command = [
+        sys.executable,
+        "-m",
+        "scripts.migrate_analytics_schema",
+        "--source-db",
+        str(source),
+        "--target-db",
+        str(target),
+        "--iphone-state",
+        str(iphone),
+        "--mac-state",
+        str(mac),
+        "--iphone-output",
+        str(outputs[0]),
+        "--mac-output",
+        str(outputs[1]),
+    ]
+    if apply:
+        command.append("--apply")
+    result = subprocess.run(
+        command, env={**os.environ, "PDP_FITBIT_SUBJECT_KEY": "account"}, capture_output=True
+    )
+    assert result.returncode != 0
+    assert b"active Screen Time event has no physical reference" in result.stderr
+    assert not target.exists()
+    assert all(not path.parent.exists() for path in outputs)
+    assert originals == {path: path.read_bytes() for path in originals}

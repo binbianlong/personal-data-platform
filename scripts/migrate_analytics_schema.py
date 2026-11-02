@@ -298,6 +298,13 @@ def migrate_state(
     ).fetchone()[0]
     if bad:
         raise ValueError("orphaned or inconsistent Screen Time reference")
+    orphaned_active = warehouse.execute(
+        f'SELECT count(*) FROM base."{source_id}_event" e '
+        f'WHERE e.is_active AND NOT EXISTS (SELECT 1 FROM ops."{source_id}_record" r '
+        "WHERE r.event_key=e.event_key)"
+    ).fetchone()[0]
+    if orphaned_active:
+        raise ValueError("active Screen Time event has no physical reference")
     refs = warehouse.execute(
         f'SELECT DISTINCT segment_key,event_key FROM ops."{source_id}_record" '
         "ORDER BY segment_key,event_key"
