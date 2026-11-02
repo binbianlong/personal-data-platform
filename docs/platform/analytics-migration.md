@@ -36,6 +36,8 @@ uv run --locked python -m scripts.migrate_analytics_schema \
 
 旧処理は削除通知（tombstone）を送信済みにしても warehouse の segment を作らない。その記録は保存済み payload の hash・削除通知の形式・成功 receipt を確認できる場合だけ、参照イベントを持たない sent 状態として引き継ぐ。通常イベントの segment 欠落は引き続き拒否する。
 
+MotherDuckのdbt処理が残す空の`dbt_temp`スキーマは許容する。この領域を含め、予定外のテーブル・ビュー・マクロ・sequenceがある場合は拒否する。
+
 ## SQLite の配置準備
 
 collector が停止したまま、各 OS について次を実行する。初回は `--apply` を省略して検査し、成功後に追加する。canonical の旧 SQLite はこの操作では変更しない。pending の payload は canonical と同じ親ディレクトリの `collector.payloads` にコピーし、パスを書き換えた `collector.db.ready` を作る。既存の ready や payload ディレクトリがあると停止する。

@@ -569,3 +569,25 @@ def test_cli_rejects_active_unreferenced_event_before_all_outputs(
     assert not target.exists()
     assert all(not path.parent.exists() for path in outputs)
     assert originals == {path: path.read_bytes() for path in originals}
+
+
+def test_stage_allows_empty_adapter_schema_but_rejects_its_objects_and_other_schemas(tmp_path):
+    from scripts.migrate_analytics_schema import verify_stage
+
+    source, target = tmp_path / "old.duckdb", tmp_path / "stage.duckdb"
+    legacy_file(source)
+    migrate_warehouse(source, target, subject="account", apply=True)
+    connection = duckdb.connect(str(target))
+    try:
+        catalog = connection.execute("SELECT current_database()").fetchone()[0]
+        connection.execute("CREATE SCHEMA dbt_temp")
+        verify_stage(connection, catalog)
+        connection.execute("CREATE TABLE dbt_temp.unexpected(value INTEGER)")
+        with pytest.raises(ValueError, match="unexpected objects"):
+            verify_stage(connection, catalog)
+        connection.execute("DROP TABLE dbt_temp.unexpected")
+        connection.execute("CREATE SCHEMA unexpected")
+        with pytest.raises(ValueError, match="schema inventory"):
+            verify_stage(connection, catalog)
+    finally:
+        connection.close()

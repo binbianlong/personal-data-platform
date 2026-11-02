@@ -829,7 +829,9 @@ def verify_stage(connection: Any, catalog: str) -> None:
     schemas = connection.execute(
         "SELECT schema_name FROM duckdb_schemas() WHERE database_name=? AND NOT internal", [catalog]
     ).fetchall()
-    if {row[0] for row in schemas} != {"base", "ops", "marts"}:
+    # MotherDuck's dbt adapter leaves this empty work schema behind.
+    # The complete relation/function inventories still reject objects inside it.
+    if {row[0] for row in schemas} - {"dbt_temp"} != {"base", "ops", "marts"}:
         raise ValueError("stage schema inventory mismatch")
     extras = connection.execute(
         "SELECT count(*) FROM duckdb_functions() WHERE database_name=? "
