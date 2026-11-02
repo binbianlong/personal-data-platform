@@ -1,12 +1,8 @@
-"""Maintain current Screen Time copies and durable analytical history."""
+"""Source event statements executed inside the warehouse's fenced transaction."""
 
 from __future__ import annotations
 
-import hashlib
-import logging
-import re
-from collections.abc import Iterable, Sequence
-from datetime import datetime
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol
 
 from personal_data_platform.raw.models import RawObject
@@ -24,83 +20,14 @@ class BiomeBatch(Protocol):
     def records(self) -> Sequence[ParsedScreenTimeRecord]: ...
 
 
-LOGGER = logging.getLogger(__name__)
-RECORD_COLUMNS = (
-    "physical_id",
-    "device_key",
-    "source_stream",
-    "segment_key",
-    "record_offset",
-    "record_metadata_offset",
-    "event_key",
-    "bundle_id",
-    "event_at",
-    "state",
-    "transition_reason",
-    "kind",
-    "app_version",
-    "app_build",
-    "platform_flag",
-    "parser_version",
-    "unknown_field_count",
-)
-EVENT_COLUMNS = (
-    "event_key",
-    "device_key",
-    "platform",
-    "source_stream",
-    "bundle_id",
-    "event_at",
-    "state",
-    "kind",
-    "object_key",
-    "segment_key",
-    "observed_at",
-    "parser_version",
-    "unknown_field_count",
-    "duplicate_occurrence_count",
-)
-ANALYTICAL_COLUMNS = tuple(
-    name
-    for name in EVENT_COLUMNS
-    if name
-    not in {
-        "object_key",
-        "segment_key",
-        "observed_at",
-    }
-)
+EVENT_COLUMNS = ("event_key", "device_key", "bundle_id", "event_at", "state", "is_valid")
 
 
-def write_state(
-    connection: DuckDBPyConnection,
-    raw: RawObject,
-    batch: BiomeBatch,
-    *,
-    loaded_at: datetime,
-    source_id: str,
-) -> None:
-    if re.fullmatch(r"[a-z][a-z0-9_]*", source_id) is None:
-        raise ValueError("invalid source_id")
+def adopted_records(batch: BiomeBatch) -> list[ParsedScreenTimeRecord]:
+    """Resolve metadata slots before deduplicating valid source events."""
     if batch.segment_kind == "tombstones":
-        return
-    scope = [raw.subject_key, raw.stream, raw.logical_key]
-    connection.execute(f"""
-        CREATE OR REPLACE TEMP TABLE {source_id}_affected_event (event_key VARCHAR PRIMARY KEY);
-        CREATE OR REPLACE TEMP TABLE {source_id}_input AS
-        SELECT *, NULL::DOUBLE AS record_timestamp_cocoa, NULL::VARCHAR AS digest
-        FROM ops.{source_id}_record WHERE false;
-    """)
-    previous = connection.execute(
-        f"SELECT observed_at, object_key FROM ops.{source_id}_segment "
-        "WHERE device_key = ? AND source_stream = ? AND segment_key = ?",
-        scope,
-    ).fetchone()
-    if previous is not None and (raw.observed_at, raw.key) < previous:
-        return
-
-    # The highest metadata entry defines a physical slot, even when erased or invalid.
-    positions = set()
+        return []
+    positions: set[int] = set()
     latest: dict[int, ParsedScreenTimeRecord] = {}
     for record in batch.records:
         if record.record_metadata_offset in positions:
@@ -109,166 +36,72 @@ def write_state(
         prior = latest.get(record.record_offset)
         if prior is None or record.record_metadata_offset > prior.record_metadata_offset:
             latest[record.record_offset] = record
-
-    rows = []
+    events: dict[str, ParsedScreenTimeRecord] = {}
     for record in latest.values():
         if (
-            record.record_state.upper() != "WRITTEN"
-            or record.crc_passed is False
-            or record.record_kind != "event"
-            or record.event_key is None
+            record.record_state.upper() == "WRITTEN"
+            and record.crc_passed is not False
+            and record.record_kind == "event"
+            and record.event_key is not None
+            and record.bundle_id is not None
+            and record.event_at is not None
+            and record.in_foreground is not None
         ):
-            continue
-        digest = hashlib.sha256(record.original_payload).hexdigest()
-        rows.append(
-            [
-                digest,
-                *scope,
-                record.record_offset,
-                record.record_metadata_offset,
-                record.event_key,
-                record.bundle_id,
-                record.event_at,
-                "start" if record.in_foreground else "end",
-                record.transition_reason,
-                record.kind,
-                record.app_version,
-                record.app_build,
-                record.platform_flag,
-                record.parser_version,
-                record.unknown_field_count,
-                record.record_timestamp_cocoa,
-                digest,
-            ]
+            events[record.event_key] = record
+    return list(events.values())
+
+
+def write_state(
+    connection: DuckDBPyConnection,
+    raw: RawObject,
+    batch: BiomeBatch,
+    *,
+    source_id: str,
+    invalidated_event_keys: Sequence[str] = (),
+) -> int:
+    if source_id not in {"iphone_screen_time", "mac_screen_time"} or raw.source_id != source_id:
+        raise ValueError("invalid Screen Time source")
+    if batch.segment_kind == "tombstones":
+        return 0
+    records = adopted_records(batch)
+    table = f"base.{source_id}_event"
+    count = 0
+    adopted = {r.event_key for r in records}
+    invalidated = sorted(set(invalidated_event_keys) - adopted)
+    if invalidated:
+        count += len(
+            connection.execute(
+                f"UPDATE {table} SET is_valid = false WHERE is_valid AND event_key IN (SELECT unnest(?::VARCHAR[])) RETURNING event_key",
+                [invalidated],
+            ).fetchall()
         )
-    if rows:
-        # One columnar statement avoids a remote statement per physical record.
-        columns = [list(column) for column in zip(*rows, strict=True)]
-        connection.execute(
-            f"INSERT INTO {source_id}_input SELECT " + ",".join("unnest(?)" for _ in columns),
-            columns,
+    if records:
+        rows = [
+            (
+                r.event_key,
+                r.device_key,
+                r.bundle_id,
+                r.event_at,
+                "start" if r.in_foreground else "end",
+                True,
+            )
+            for r in records
+        ]
+        columns = [list(values) for values in zip(*rows, strict=True)]
+        types = ("VARCHAR", "VARCHAR", "VARCHAR", "TIMESTAMPTZ", "VARCHAR", "BOOLEAN")
+        count += len(
+            connection.execute(
+                f"INSERT INTO {table} ({', '.join(EVENT_COLUMNS)}) SELECT "
+                + ", ".join(f"unnest(?::{kind}[])" for kind in types)
+                + " ON CONFLICT (event_key) DO UPDATE SET "
+                + ", ".join(f"{column} = excluded.{column}" for column in EVENT_COLUMNS[1:])
+                + " WHERE "
+                + " OR ".join(
+                    f"{table}.{column} IS DISTINCT FROM excluded.{column}"
+                    for column in EVENT_COLUMNS[1:]
+                )
+                + " RETURNING event_key",
+                columns,
+            ).fetchall()
         )
-        connection.execute(f"""
-            UPDATE {source_id}_input SET physical_id = ops.{source_id}_physical_id(
-                device_key, source_stream, segment_key, record_offset, record_metadata_offset,
-                record_timestamp_cocoa, digest
-            );
-        """)
-    connection.execute(
-        f"ALTER TABLE {source_id}_input DROP COLUMN record_timestamp_cocoa; "
-        f"ALTER TABLE {source_id}_input DROP COLUMN digest"
-    )
-
-    connection.execute(
-        f"CREATE OR REPLACE TEMP TABLE {source_id}_previous AS "
-        f"SELECT * FROM ops.{source_id}_record WHERE device_key = ? "
-        "AND source_stream = ? AND segment_key = ?",
-        scope,
-    )
-    distinct = " OR ".join(
-        f"old.{column} IS DISTINCT FROM incoming.{column}"
-        for column in RECORD_COLUMNS
-        if column != "physical_id"
-    )
-    connection.execute(f"""
-        CREATE OR REPLACE TEMP TABLE {source_id}_changes AS
-        SELECT old.event_key AS old_event_key, incoming.event_key AS new_event_key,
-               incoming.physical_id AS new_physical_id
-        FROM {source_id}_previous old FULL JOIN {source_id}_input incoming USING (physical_id)
-        WHERE old.physical_id IS NULL OR incoming.physical_id IS NULL OR {distinct};
-        INSERT OR IGNORE INTO {source_id}_affected_event
-        SELECT old_event_key FROM {source_id}_changes WHERE old_event_key IS NOT NULL
-        UNION SELECT new_event_key FROM {source_id}_changes WHERE new_event_key IS NOT NULL;
-    """)
-    # A later observation can change which duplicate copy is representative.
-    if previous is None or (raw.observed_at, raw.key) > previous:
-        connection.execute(
-            f"INSERT OR IGNORE INTO {source_id}_affected_event "
-            f"SELECT DISTINCT event_key FROM {source_id}_input"
-        )
-
-    connection.execute(
-        f"INSERT INTO ops.{source_id}_segment VALUES (?, ?, ?, ?, ?) "
-        "ON CONFLICT (device_key, source_stream, segment_key) DO UPDATE SET "
-        "observed_at = excluded.observed_at, object_key = excluded.object_key "
-        "WHERE (excluded.observed_at, excluded.object_key) > "
-        f"(ops.{source_id}_segment.observed_at, ops.{source_id}_segment.object_key)",
-        [*scope, raw.observed_at, raw.key],
-    )
-
-    # Preserve historical values before removing their last current physical copy.
-    connection.execute(
-        f"UPDATE base.{source_id}_event e SET is_active = false, loaded_at = ? "
-        "WHERE e.is_active AND e.event_key IN "
-        f"(SELECT event_key FROM {source_id}_previous) "
-        f"AND NOT EXISTS (SELECT 1 FROM {source_id}_input i WHERE i.event_key = e.event_key) "
-        f"AND NOT EXISTS (SELECT 1 FROM ops.{source_id}_record r "
-        "WHERE r.event_key = e.event_key AND "
-        "(r.device_key, r.source_stream, r.segment_key) <> (?, ?, ?))",
-        [loaded_at, *scope],
-    )
-    connection.execute(
-        f"DELETE FROM ops.{source_id}_record WHERE device_key = ? AND source_stream = ? "
-        "AND segment_key = ? AND physical_id NOT IN "
-        f"(SELECT physical_id FROM {source_id}_input)",
-        scope,
-    )
-    update_columns = ", ".join(
-        f"{column} = excluded.{column}" for column in RECORD_COLUMNS if column != "physical_id"
-    )
-    connection.execute(
-        f"INSERT INTO ops.{source_id}_record SELECT incoming.* FROM {source_id}_input incoming "
-        "WHERE incoming.physical_id IN "
-        f"(SELECT new_physical_id FROM {source_id}_changes WHERE new_physical_id IS NOT NULL) "
-        "ON CONFLICT (physical_id) DO UPDATE SET " + update_columns
-    )
-
-    event_columns = (*EVENT_COLUMNS, "is_active", "loaded_at")
-    connection.execute(
-        f"INSERT INTO base.{source_id}_event ({', '.join(event_columns)}) "
-        f"SELECT *, ? FROM ops.{source_id}_resolve("
-        f"(SELECT list(event_key) FROM {source_id}_affected_event)) "
-        "ON CONFLICT (event_key) DO UPDATE SET "
-        + ", ".join(
-            f"{column} = excluded.{column}" for column in event_columns if column != "event_key"
-        )
-        + " WHERE "
-        + " OR ".join(
-            f"base.{source_id}_event.{column} IS DISTINCT FROM excluded.{column}"
-            for column in (*ANALYTICAL_COLUMNS, "is_active")
-        ),
-        [loaded_at],
-    )
-    count_row = connection.execute(f"SELECT count(*) FROM {source_id}_affected_event").fetchone()
-    assert count_row is not None
-    LOGGER.info("Screen Time affected events=%d", count_row[0])
-
-
-def receipt_candidates(live_raw: Iterable[RawObject], *, source_id: str) -> list[RawObject]:
-    by_scope: dict[tuple[str, str, str], list[RawObject]] = {}
-    for raw in live_raw:
-        if raw.source_id == source_id:
-            by_scope.setdefault((raw.subject_key, raw.stream, raw.logical_key), []).append(raw)
-    return [values[0] for values in by_scope.values() if len(values) == 1]
-
-
-def prune_receipts(
-    connection: DuckDBPyConnection, confirmed: Iterable[RawObject], *, source_id: str
-) -> None:
-    for raw in confirmed:
-        connection.execute(
-            "DELETE FROM ops.ingestion_metadata "
-            f"WHERE source_id = '{source_id}' AND status = 'succeeded' "
-            "AND subject_key = ? AND source_stream = ? AND logical_key = ? "
-            "AND (observed_at, object_key) < (?, ?)",
-            [raw.subject_key, raw.stream, raw.logical_key, raw.observed_at, raw.key],
-        )
-
-
-def current_object_keys(connection: DuckDBPyConnection, *, source_id: str, stream: str) -> set[str]:
-    return {
-        row[0]
-        for row in connection.execute(
-            f"SELECT object_key FROM ops.{source_id}_segment WHERE source_stream = ?", [stream]
-        ).fetchall()
-    }
+    return count

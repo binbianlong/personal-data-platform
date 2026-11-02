@@ -1,82 +1,53 @@
 # Mac Screen Timeのデータモデル
 
-## Local Raw observation
+## Local pendingと参照
 
-Rawは専用SQLite `collector.db`のgzip BLOBとして保存する。CollectorとLoaderは同じ保存形式を使う。
-keyと保存metadataのgenerationを取込台帳との照合に使う。
+専用SQLite `collector.db`の永続表は`file_state`と`event_reference`の2つ。
+送信待ちのgzip envelopeは、隣接する`collector.payloads` directoryの外部ファイルへ保存する。
+SQLiteにRaw BLOBや送信済み全履歴は持たない。snapshot keyの形式は次のとおり。
 
 ```text
 raw/mac_screen_time/v2/<device_key>/app-usage/<segment_key>/<observed_at>/<sha256>.segb.gz
 ```
 
-`observed_at`は取得完了UTC時刻。hashはgzip前のenvelope全体に対するSHA-256である。
-Raw v2 envelopeはsegment種別と元SEGBを保持し、元bytesを復元できる。端末identifierや絶対pathは保存しない。
-分割移行ではobject keyのsource部分だけを変更し、payload、hash、event key、疑似化のHMAC domainを維持する。
-
-## 疑似化key
-
-`device_key`はdevice identifier、`segment_key`はdevice・stream・segment相対pathをHMAC-SHA-256で疑似化する。
-secretの扱いは[取得仕様](acquisition.md#認証と疑似化secret)を参照する。
+hashはgzip前envelopeのSHA-256。SQLiteの`observed_at`は取得UTC時刻のISO 8601表現。
+`device_key`は端末identifier、`segment_key`は端末・stream・相対pathをHMAC-SHA-256で疑似化する。
 
 ## Observation semantics
 
-`device_key + stream + segment_key`をlogical scopeとする。直前の保存済み観測とSHA-256が同じ場合だけskipし、`A→B→A`は3回の観測として取り込む。
-Rawを先にSQLiteへcommitし、MotherDuck台帳の成功確認後だけ`uploaded`へ進める。この状態名はwarehouse取込済みを表す。
-各scopeの最新成功版と全pendingを残し、古い成功版を整理する。元ファイルがBiomeから消えても最新保存版は無期限に残す。
-更新前Rawの再解析やRawだけからの全履歴復元は保証しない。
+`file_state`はsnapshot key、segment、端末、hash、取得時刻、parser版、pending/sent、payload pathを保持する。
+`event_reference`はsegmentと採用済みイベントIDの対応。最新sent metadataと全pendingを保持する。
+同じ内容・parserの連続sentだけを省略し、A→B→Aはそれぞれ取り込む。
 
-## Collector scan
+処理順序はpayloadの永続化→pending記録→全件DB COMMIT確認→SQLiteの参照更新とsent化→ファイル削除。
+COMMIT不明やACK失敗では同じbytesとIDを再送し、後続snapshotは追い越さない。
+解析に成功した後、最初のDB試行前にparserを固定する。未知parserで失敗したbytesは対応版で再解析できる。
+DB試行済みのpendingを互換性のないparserで暗黙再解釈しない。
 
-専用SQLiteの`collector_stream_scan`にstream・device別の最終scan時刻と有効なdevice集合を保存する。
-集合が空なら明示的な休止状態とし、外したdeviceの更新は要求しない。他方のsourceのscan・休止状態は更新しない。
-監視条件は[運用](operations.md#crash-recoveryと監視)を参照する。
+初回状態のuser_version=0は、共有lease内でbaseが空と確認するか、移行参照の検証が終わるまで取得しない。
+検証済みのuser_version=1では、DB障害中もローカル取得を続けてpendingを残す。
+ファイル永続化後・pending登録前のクラッシュで生じた未参照ファイルは、自動削除せず手動で確認する。
 
 ## `base.mac_screen_time_event`
 
-同じイベントは1行とし、無効化は`is_active=false`で分析行を残す。
-元ファイルの最新snapshotから有効な物理recordを選び、同じイベントの別segmentのコピーも照合する。
-更新で消えたイベントを集計から外すが、取得前に消えたpayloadは復元できない。Appleの削除済みの印は照合しない。
+カラムは`event_key`, `device_key`, `bundle_id`, `event_at`, `state`, `is_valid`。
+端末・stream・Bundle ID・元の時刻・開始/終了・kindからイベントを識別し、segmentやoffsetはIDに含めない。
+同じイベントは1行。`is_valid=false`で分析から除き、履歴の行は残す。
 
-`ops.mac_screen_time_segment`は`(observed_at, object_key)`順の最新snapshot、`ops.mac_screen_time_record`は現行の有効recordを保持する。
-古いRawの再解析で現行状態を巻き戻さない。分析項目・parser version・物理コピー数・有効状態が変わった場合だけ分析行を更新するため、
-`observed_at`は全再観測の最新日時ではない。現在保存しているRawの取込時刻・件数は`ops.ingestion_metadata`で確認する。
+元ファイルの消失、TTL、別内容snapshotでの省略だけでは無効化しない。
+同一bytesのparser訂正で除外されたイベントで、ほかのsegment参照がない場合にだけ無効化する。
+source専用のMotherDuck opsやheartbeatはない。
 
-## Recordの取り込み
+## 利用区間と日次合計
 
-`ops.ingestion_metadata`のrecord数は削除済み・CRC不一致を含む。削除記録のRawは取込対象から外す。
-削除済み・CRC不一致のrecordは現行候補から外し、不要になった物理recordはイベント更新と同じtransactionで削除する。
-保存中の最新版Rawは再解析できるが、整理済みの旧版Rawと成功台帳は残さない。
+`marts.mac_screen_time_interval`は有効イベントを端末内で対応付け、正の長さの区間だけ公開する。
+同じappのendが次のstart以前なら観測区間。endより先に次のstartがあれば推定区間で、`is_inferred=true`。
+`boundary_event_key`が終了の根拠を示す。対応できない記録はbaseに残る。
 
-## `event_key`
+`marts.daily_mac_screen_time_total`はJST日につき1行。同じOSの全端末の重複区間を和集合にし、観測を推定より優先する。
+`observed_seconds`、追加分の`inferred_seconds`、両者の`total_seconds`、`unresolved_event_count`を返す。
+iPhoneとMacは独立。未解決イベントだけの日は秒数NULL、記録も区間もない日は行を作らない。当日は途中経過。
+小数秒を保持し、午前0時で終わる区間から翌日の0秒片は作らない。訂正はビューへ即時反映する。
 
-端末・stream・Bundle ID・元の時刻・開始/終了・kindから同一イベントを識別する。
-同じイベントが別segmentに現れるため、segmentやrecord offsetはkeyに含めない。
-
-## `base.mac_screen_time_transition` / `base.mac_screen_time_interval`
-
-transitionは`base.mac_screen_time_event`の`is_active=true`だけを公開する。
-intervalはtransitionを`device_key + source_stream`内でevent時刻順に対応付ける。
-同時刻ならendをstartより先に扱い、次のstartと同時刻の観測済みendを区間の終点に使う。
-
-| 入力 | `quality` |
-|---|---|
-| startの後に同じappのend | `complete` |
-| 対応endより先に次のapp start | `inferred_end_from_next_start` |
-| 対応endがないstart | `missing_end` |
-| 対応startとして使われないend | `missing_start` |
-
-重複コピーの存在は`has_duplicate_source`で保持し、区間の対応付け品質と区別する。
-
-## `marts.daily_mac_screen_time` / `marts.daily_mac_screen_time_total`
-
-有効なintervalをAsia/Tokyoの日境界で分割し、日・端末・Bundle IDごとに集計する。
-`complete_seconds`は対応endがある秒数、`inferred_seconds`は次のstartから終了を推定した秒数、`total_seconds`は両方の合計となる。
-表示名は解決せず、Bundle IDを公開値とする。`_total`はアプリ別Viewを日・端末ごとに合計する。
-異なる端末の利用時間は合算しない。
-
-両日次Viewは小数秒を保持し、`*_interval_parts`は日境界で分割した片数であってアプリ起動回数ではない。
-終了が午前0時なら翌日のゼロ秒片を作らず、`missing_start`・`missing_end`・ゼロ秒区間を加算しない。
-対象がない日・端末・アプリは行を作らないため、不在だけでは利用ゼロと記録不足を区別できない。当日は途中経過である。
-訂正・無効化は即時反映し、dbt実行は初回作成・定義変更時に必要となる。
-
-クエリ例とFitbitとの横断分析は[分析クエリ](../../analytics/queries.md)を参照する。
+全履歴の正本はbase。pendingだけを使った全履歴rebuildは行わず、DB移行ではbaseと対応するSQLite参照を引き継ぐ。
+全カラムは[基礎スキーマ](../../platform/data-model.md)を参照する。

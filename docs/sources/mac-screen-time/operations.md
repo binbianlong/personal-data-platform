@@ -15,21 +15,20 @@ pdp mac-screen-time collect --once
 pdp mac-screen-time collect --watch
 ```
 
-このsourceの全対象を[取得仕様](acquisition.md#segb-container)に従って保存してからLoaderを実行する。
-保存だけ成功しても取込成功とはみなさず、JSONの`loaded`と`pending`を確認する。
-不完全snapshotの回も保存済みpendingは取り込めるが、成功heartbeatは更新しない。
-`--watch`は通信障害・lease競合・走査失敗をstderrへ記録し、次周期に再試行する。
-他方のCollectorは別process・設定・SQLiteを使う。共通`loader` leaseによる書込競合は延期して再試行する。
+初回の空base確認または参照移行が完了した状態で、各snapshotを外部pendingファイルへ保存してから送信する。
+JSONの`event="screen_time_collection"`、`result`、`stage`、`loaded`と、SQLiteのpendingを確認する。
+初期化済みなら接続障害・lease競合中も取得を続け、`--watch`で順に再送する。
+同じsourceのprocess lockと、他sourceと共有するDBのloader leaseを使う。
 
 ## Crash recoveryと監視
 
-再起動後もpendingの同じkey・bytesで再試行し、commit結果が不明な場合は再接続後にMotherDuck台帳を確認する。
-端末を設定から外しても保存済みRawは残す。設定変更はLaunchAgentを再生成・再起動して反映する。
+再起動後はpendingの同じkey・bytesで再試行する。COMMIT確認後にだけSQLiteをACKし、payloadを削除する。
+成功不明のpendingを互換性のないparserで再解釈しない。解析に失敗しDB未試行のbytesは、対応parserで再試行できる。
+端末の設定解除や元ファイル消失で過去のbaseイベントは削除しない。設定変更はLaunchAgentの再生成・再起動で反映する。
 
-このsourceでpendingがなく、取込とローカル監査が成功した回だけ、MacがMotherDuckの
-`mac_screen_time_reconciliation` heartbeatを更新する。他方のsourceのheartbeatは更新しない。
-Cloud Runの日次Jobはこの成功時刻・`scan_completed_at`が48時間以内かを確認し、DB relationとdbtを検証する。
-Collectorを停止したsourceも成功記録の鮮度を確認する。Cloud RunはMacの成功記録を更新しない。新eventの有無だけで障害を判定しない。
+このsourceの稼働確認はMacのCollectorログを使う。MotherDuckのsource heartbeatは持たず、日次JobもMacの鮮度を判定しない。
+完全な空スキャンは成功し、新しいアプリ利用がないことだけでは障害とみなさない。
+ファイル永続化後・pending登録前の停止で残った未参照spoolは、送信済みと証明できないため自動削除しない。
 
 ## 設定と診断
 
@@ -87,7 +86,7 @@ tail -F "$HOME/Library/Logs/personal-data-platform/mac-screen-time-collector.std
   "$HOME/Library/Logs/personal-data-platform/mac-screen-time-collector.stderr.log"
 ```
 
-設定変更・token更新・Rebuild前は先に停止する。
+設定変更・token更新・移行前は先に停止する。
 
 ```bash
 launchctl bootout "gui/$(id -u)" "$collector_plist"
@@ -95,12 +94,9 @@ launchctl bootout "gui/$(id -u)" "$collector_plist"
 
 ## LoaderとRebuild
 
-Collectorが通常の取り込みを行う。手動の`pdp loader --source mac_screen_time --stream app-usage`と
-`pdp rebuild --source mac_screen_time --stream app-usage`も同じローカルRawを読む。
-Rebuild中はCollectorを停止し、inventory取得から再生完了までRawを固定する。
-別の空scratch DB、`--allow-partial-history`、dbt検証などは[Platform運用](../../platform/operations.md#rebuild)に従う。
-`pdp dbt --source mac_screen_time`はこのsourceのモデルだけを作成・検証する。
+通常の取り込みと再送はCollectorが行う。汎用object loaderはOwnTracks用であり、このsourceのpending状態を代替しない。
+`pdp dbt --source mac_screen_time`はこのsourceの区間・日次ビューを作成・検証する。
 
-イベント・補助状態・台帳は同じ時点でバックアップ・復元する。保存するのは各ファイルの最新版であり、
-更新前Rawによる再解析とRawだけからの全履歴復元は保証しない。
-旧共通DBからの一度限りの移行は[分割切替](../../platform/operations.md#screen-timeの分割切替)に従う。
+送信済みのRawは残さず、全履歴の正本はMotherDuckのbase。pendingだけによる全履歴rebuildは拒否する。
+DB移行ではbaseのイベント・有効状態とSQLiteの参照を引き継ぎ、両Collectorを停止して検証する。
+旧SQLiteを新しいstateとして空初期化せず、[分析スキーマ移行](../../platform/analytics-migration.md)に従う。

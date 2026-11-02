@@ -151,8 +151,8 @@ def test_civil_full_partial_full_trace_exact_filters_and_changed_rows(tmp_path, 
         assert scope.summary["attempt_id"] == result.summary["attempt_id"]
     with closing(factory()) as warehouse:
         assert warehouse.query_rows(
-            "SELECT record_id,value,fetched_at FROM base.fitbit_activity_interval ORDER BY record_id"
-        ) == [("a", 12.0, NOW), ("b", 20.0, NOW + timedelta(seconds=1))]
+            "SELECT steps_interval_id,steps FROM base.steps_interval ORDER BY steps_interval_id"
+        ) == [("a", 12.0), ("b", 20.0)]
         assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     summaries = json.dumps(
         [r.summary for r in caplog.records if hasattr(r, "summary")], default=str
@@ -293,10 +293,13 @@ def test_same_http_steps_coalesce_once_and_preserve_corrections_deletions_and_li
     scopes = [r for r in caplog.records if getattr(r, "event", None) == "fitbit_acquisition"]
     assert [r.summary["submitted_rows"] for r in scopes] == [2, 1, 0, 0, 0]
     with closing(factory()) as warehouse:
-        assert warehouse.query_rows(
-            "SELECT record_id,value FROM base.fitbit_activity_interval"
-        ) == [("a", 20.0)]
-        assert warehouse.query_rows("SELECT record_id FROM ops.fitbit_deleted_record") == [("b",)]
+        assert warehouse.query_rows("SELECT steps_interval_id,steps FROM base.steps_interval") == [
+            ("a", 20.0)
+        ]
+        assert {r for r in warehouse.relation_names() if r.startswith("ops.")} == {
+            "ops.job_lock",
+            "ops.schema_migration",
+        }
         assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
     received = [
         r.summary
@@ -421,5 +424,5 @@ def test_slow_coalesced_scopes_can_each_commit_without_retry_starvation(tmp_path
     assert subscriber.acks == ["secret-ack-0", "secret-ack-1"]
     assert len(api.calls) == 2
     with closing(Warehouse(duckdb.connect(path))) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 2
+        assert warehouse.query_value("SELECT count(*) FROM base.steps_interval") == 0
         assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0

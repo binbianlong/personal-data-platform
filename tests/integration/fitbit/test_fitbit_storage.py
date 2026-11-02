@@ -35,15 +35,13 @@ def test_shared_activity_ids_are_isolated_by_metric(warehouse):
     apply(warehouse, steps)
     apply(warehouse, azm)
     apply(warehouse, snapshot(None, version=3))
-    apply(warehouse, steps)
-    assert warehouse.query_rows(
-        "SELECT metric,record_id,value FROM base.fitbit_activity_interval"
-    ) == [("active-zone-minutes", "0", 2.0)]
-    assert warehouse.query_rows("SELECT data_type FROM ops.fitbit_deleted_record") == [("steps",)]
+    assert warehouse.query_rows("SELECT active_zone_minutes FROM base.active_zone_interval") == [
+        (2.0,)
+    ]
+    assert warehouse.query_value("SELECT count(*) FROM base.steps_interval") == 0
     apply(warehouse, snapshot(20, version=4))
-    assert warehouse.query_rows(
-        "SELECT metric,value FROM base.fitbit_activity_interval ORDER BY metric"
-    ) == [("active-zone-minutes", 2.0), ("steps", 20.0)]
+    assert warehouse.query_value("SELECT steps FROM base.steps_interval") == 20
+    assert warehouse.query_value("SELECT active_zone_minutes FROM base.active_zone_interval") == 2
 
 
 @pytest.mark.parametrize("timezone", ["UTC", "Asia/Tokyo"])
@@ -58,18 +56,19 @@ def test_provider_date_replacement_is_independent_of_session_timezone(warehouse,
     )
     apply(warehouse, data)
     assert warehouse.query_rows(
-        "SELECT source_date,beats_per_minute FROM base.fitbit_resting_heart_rate_daily"
+        "SELECT source_date,resting_heart_rate_bpm FROM base.health_daily"
     ) == [(date(2026, 9, 1), 60.0)]
     apply(warehouse, replace(data, records=(), fetched_at=at + timedelta(days=2)))
+    assert warehouse.query_value("SELECT count(*) FROM base.health_daily") == 0
     apply(warehouse, data)
-    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_resting_heart_rate_daily") == 0
+    assert warehouse.query_value("SELECT resting_heart_rate_bpm FROM base.health_daily") == 60
     sleeping = sleep_snapshot(1, 1)
     apply(warehouse, sleeping)
     apply(
         warehouse, replace(sleeping, records=(), fetched_at=sleeping.fetched_at + timedelta(days=1))
     )
-    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_sleep_session") == 0
-    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_sleep_detail") == 0
+    assert warehouse.query_value("SELECT count(*) FROM base.sleep_session") == 0
+    assert warehouse.query_value("SELECT count(*) FROM base.sleep_detail") == 0
 
 
 def test_sleep_details_keep_overlapping_kinds_and_api_summary_minutes(warehouse):
@@ -82,19 +81,18 @@ def test_sleep_details_keep_overlapping_kinds_and_api_summary_minutes(warehouse)
         category=None,
     )
     apply(warehouse, replace(data, records=(*data.records, wake)))
-    assert warehouse.query_rows("SELECT sleep_minutes FROM base.fitbit_sleep_session") == [(45.0,)]
+    assert warehouse.query_rows("SELECT sleep_minutes FROM base.sleep_session") == [(45.0,)]
     assert warehouse.query_rows(
-        "SELECT kind,record_id,sleep_id,source_date,epoch(end_at-start_at) "
-        "FROM base.fitbit_sleep_detail ORDER BY kind"
+        "SELECT kind,sleep_session_id,epoch(end_at-start_at) FROM base.sleep_detail ORDER BY kind"
     ) == [
-        ("sleep-stage", "shared", "session", date(2026, 9, 1), 3600.0),
-        ("sleep-wake", "shared", "session", date(2026, 9, 1), 30.0),
+        ("sleep-stage", "session", 3600.0),
+        ("sleep-wake", "session", 30.0),
     ]
     apply(warehouse, sleep_snapshot(1, 2, child="shared"))
-    assert warehouse.query_rows("SELECT kind FROM base.fitbit_sleep_detail") == [("sleep-stage",)]
+    assert warehouse.query_rows("SELECT kind FROM base.sleep_detail") == [("sleep-stage",)]
 
 
-def test_minutes_and_records_share_coverage_without_affecting_each_other(warehouse):
+def test_minutes_and_records_do_not_affect_each_other(warehouse):
     steps = snapshot()
     at = steps.window.start
     minute = HeartRateMinute(at, at + timedelta(minutes=1), 60, 50, 70, GOOGLE_WEARABLES)
@@ -106,10 +104,8 @@ def test_minutes_and_records_share_coverage_without_affecting_each_other(warehou
     FitbitMinuteBatch(replace(data, minutes=(), fetched_at=at + timedelta(days=2))).write_snapshot(
         warehouse.connection, source_key="empty", loaded_at=at
     )
-    FitbitMinuteBatch(data).write_snapshot(warehouse.connection, source_key="stale", loaded_at=at)
-    assert warehouse.query_rows("SELECT data_type FROM ops.fitbit_coverage ORDER BY data_type") == [
-        ("heart-rate",),
-        ("steps",),
-    ]
-    assert warehouse.query_value("SELECT count(*) FROM base.fitbit_heart_rate_minute") == 0
-    assert warehouse.query_value("SELECT value FROM base.fitbit_activity_interval") == 10
+    assert warehouse.query_value("SELECT count(*) FROM base.heart_rate_minute") == 0
+    assert warehouse.query_value("SELECT steps FROM base.steps_interval") == 10
+    FitbitMinuteBatch(data).write_snapshot(warehouse.connection, source_key="fresh", loaded_at=at)
+    assert warehouse.query_value("SELECT count(*) FROM base.heart_rate_minute") == 1
+    assert warehouse.query_value("SELECT steps FROM base.steps_interval") == 10

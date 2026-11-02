@@ -27,8 +27,6 @@ def configure_logging(namespace: str) -> None:
     """Configure one application namespace once, leaving the root logger unchanged."""
     name = os.environ.get("LOG_LEVEL", "INFO").upper()
     level = logging.getLevelNamesMapping().get(name)
-    if level is None:
-        raise ValueError("LOG_LEVEL must be a standard logging level")
     logger = logging.getLogger(namespace)
     handler = next(
         (
@@ -45,5 +43,7 @@ def configure_logging(namespace: str) -> None:
         logger.addHandler(handler)
     else:
         handler.setStream(sys.stderr)
-    logger.setLevel(level)
+    logger.setLevel(logging.INFO if level is None else level)
     logger.propagate = False
+    if level is None:
+        raise ValueError("LOG_LEVEL must be a standard logging level")

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,14 +14,12 @@ from personal_data_platform.recovery.rebuild import (
     rebuild_inventory,
     require_empty_rebuild_target,
     run_rebuild,
-    run_rebuild_all,
     run_rebuild_from_env,
     validate_rebuild_target,
 )
 from personal_data_platform.sources.iphone_screen_time.raw import ScreenTimeRawIdentity
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-from tests.screen_time_helpers import Repository, event, mac_usage_event, segb
 
 
 def test_unlimited_gcs_rebuild_uses_read_only_adc_and_restores_environment(tmp_path, monkeypatch):
@@ -43,59 +40,6 @@ def test_unlimited_gcs_rebuild_uses_read_only_adc_and_restores_environment(tmp_p
     monkeypatch.setattr(OwnTracksSource, "repository_from_env", lambda _: EmptyRepository())
     assert run_rebuild_from_env(dry_run=True, target_db=None, source_id="owntracks") == 0
     assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == "previous-adc"
-
-
-@pytest.mark.parametrize("source_id", ["iphone_screen_time", "mac_screen_time"])
-def test_source_rebuild_builds_only_its_own_daily_views(tmp_path, monkeypatch, source_id) -> None:
-    from personal_data_platform.dbt_runner import run_dbt as real_run_dbt
-
-    database = tmp_path / "scratch.duckdb"
-    monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
-    monkeypatch.setattr(
-        "personal_data_platform.recovery.rebuild.open_warehouse",
-        lambda _config: Warehouse(connect(WarehouseConfig(str(database)))),
-    )
-    calls = []
-
-    def build_views(*, target, selector, config):
-        calls.append((target, selector))
-        real_run_dbt(target="local", selector=selector)
-
-    monkeypatch.setattr("personal_data_platform.recovery.rebuild.run_dbt", build_views)
-    source = get_source(source_id)
-    repository = Repository()
-    if source_id == "iphone_screen_time":
-        payloads = [event("app", 100.0), event("app", 160.0, foreground=False)]
-    else:
-        when = datetime(2026, 9, 13, tzinfo=UTC).timestamp()
-        payloads = [
-            mac_usage_event("app", when, start=True),
-            mac_usage_event("app", when + 60, start=False),
-        ]
-    for index, payload in enumerate(payloads):
-        repository.add(str(index), segb(payload)[0], stream=source.stream)
-    inventory = (source, repository, tuple(value[0] for value in repository.objects.values()))
-    assert (
-        run_rebuild_all(
-            (inventory,),
-            target_db="scratch",
-            token="local",
-            production_db="production",
-            allow_partial_history=True,
-        )
-        == 0
-    )
-    assert calls == [("prod", "tag:" + source_id)]
-    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
-    try:
-        assert warehouse.query_value(f"SELECT count(*) FROM base.{source_id}_event") == 2
-        assert (
-            warehouse.query_value(f"SELECT total_seconds FROM marts.daily_{source_id}_total") == 60
-        )
-        other = "mac_screen_time" if source_id == "iphone_screen_time" else "iphone_screen_time"
-        assert f"marts.daily_{other}" not in warehouse.relation_names()
-    finally:
-        warehouse.close()
 
 
 def _raw(
@@ -246,6 +190,7 @@ def test_rebuild_uses_scratch_credentials_and_restores_environment(monkeypatch, 
             token="scratch_token",
             production_db="production_database",
             allow_partial_history=True,
+            source=get_source("owntracks"),
         )
 
     if dbt_fails:
@@ -255,7 +200,7 @@ def test_rebuild_uses_scratch_credentials_and_restores_environment(monkeypatch, 
         assert rebuild() == 0
 
     assert connections == [WarehouseConfig(database="scratch_database", token="scratch_token")]
-    assert dbt_calls == [("prod", get_source().dbt_selector)]
+    assert dbt_calls == [("prod", get_source("owntracks").dbt_selector)]
     assert os.environ["MOTHERDUCK_DATABASE"] == "ambient_database"
     assert os.environ["MOTHERDUCK_TOKEN"] == "ambient_token"
 
@@ -270,156 +215,77 @@ def test_rebuild_requires_explicit_partial_history_acknowledgement() -> None:
         )
 
 
-def test_rebuild_uses_one_inventory_and_fails_if_a_listed_generation_disappears(
-    monkeypatch,
-) -> None:
-    observed_at = datetime(2026, 8, 27, tzinfo=UTC)
-    raw = _raw("disappeared", "a", observed_at, observed_at, generation=9)
+@pytest.mark.parametrize("source_id", ["iphone_screen_time", "mac_screen_time"])
+def test_screen_time_rebuild_refuses_pending_only_history_before_connect(monkeypatch, source_id):
+    def unexpected(*a, **k):
+        raise AssertionError("must reject before connecting")
 
-    class Repository:
-        def __init__(self) -> None:
-            self.list_calls = 0
-
-        def list_raw(self, prefix):
-            self.list_calls += 1
-            return [raw] if raw.key.startswith(prefix) else []
-
-        def get_raw(self, key, *, generation):
-            assert (key, generation) == (raw.key, 9)
-            raise FileNotFoundError("lifecycle deleted the listed generation")
-
-    repository = Repository()
-    monkeypatch.setattr(
-        "personal_data_platform.recovery.rebuild.open_warehouse",
-        lambda config: Warehouse(connect(WarehouseConfig(":memory:"))),
-    )
-
-    assert (
+    monkeypatch.setattr("personal_data_platform.recovery.rebuild.open_warehouse", unexpected)
+    with pytest.raises(ValueError, match="canonical base"):
         run_rebuild(
-            repository,  # type: ignore[arg-type]
-            target_db="scratch_database",
-            token="scratch_token",
-            production_db="production_database",
+            SimpleNamespace(list_raw=unexpected),
+            target_db="scratch",
+            token="local",
+            production_db="production",
             allow_partial_history=True,
+            source=get_source(source_id),
         )
-        == 1
-    )
-    assert repository.list_calls == 1
 
 
-def test_rebuild_keeps_the_selected_source_stream_and_all_schema_generations(monkeypatch):
-    import gzip
+@pytest.mark.parametrize("missing_generation", [False, True])
+def test_owntracks_rebuild_replays_one_pinned_inventory_into_empty_scratch(
+    monkeypatch, tmp_path, missing_generation
+):
+    from personal_data_platform.recovery import rebuild
+    from tests.integration.owntracks.test_location_point import Store
 
-    from personal_data_platform.sources.contracts import SourceHealth
+    source = get_source("owntracks")
+    store = Store()
+    raw = store.add()
+    database = str(tmp_path / "scratch.duckdb")
+    lists, dbt_calls = [], []
+    original_list = store.list_raw
 
-    observed_at = datetime(2026, 8, 27, tzinfo=UTC)
-    payload = b"synthetic-payload"
-    observations = [
-        RawObject(
-            key=f"raw/synthetic/v{version}/metrics/account/day.json.gz",
-            source_id="synthetic",
-            schema_version=version,
-            subject_key="account",
-            stream="metrics",
-            logical_key="day",
-            observed_at=observed_at,
-            sha256=hashlib.sha256(payload).hexdigest(),
-            storage_created_at=observed_at,
-            storage_generation=version + 10,
-        )
-        for version in (1, 2)
-    ]
-    listed = []
-    read = []
-    written = []
-    dbt_calls = []
+    def list_once(prefix):
+        lists.append(prefix)
+        return original_list(prefix)
 
-    class Batch:
-        parser_version = "synthetic-1"
-        record_count = 1
+    store.list_raw = list_once
+    if missing_generation:
 
+        def missing(key, *, generation):
+            assert (key, generation) == (raw.key, 12)
+            raise FileNotFoundError("generation removed")
+
+        store.get_raw = missing
     monkeypatch.setattr(
-        Warehouse,
-        "_write_batch",
-        lambda self, raw, batch, **kwargs: written.append(raw),
+        rebuild, "open_warehouse", lambda config: Warehouse(connect(WarehouseConfig(database)))
     )
-
-    class Source:
-        parser_version = Batch.parser_version
-        source_id = "synthetic"
-        stream = "metrics"
-        schema_versions = (1, 2)
-        raw_prefixes = ("raw/synthetic/v1/metrics/", "raw/synthetic/v2/metrics/")
-        raw_suffixes = (".json.gz",)
-        required_relations = ()
-        dbt_selector = "tag:synthetic_metrics"
-        monitor_name = "synthetic_metrics_reconciliation"
-
-        def validate_raw_key(self, key):
-            assert key.startswith(self.raw_prefixes)
-
-        def parse_raw_key(self, key, *, storage_created_at, storage_generation):
-            return replace(
-                next(raw for raw in observations if raw.key == key),
-                storage_created_at=storage_created_at,
-                storage_generation=storage_generation,
+    monkeypatch.setattr(rebuild, "run_dbt", lambda **kw: dbt_calls.append(kw))
+    result = run_rebuild(
+        store,
+        target_db="scratch",
+        token="local",
+        production_db="production",
+        allow_partial_history=True,
+        source=source,
+    )
+    assert result == int(missing_generation)
+    assert lists == list(source.raw_prefixes)
+    assert len(dbt_calls) == int(not missing_generation)
+    warehouse = Warehouse(connect(WarehouseConfig(database)))
+    try:
+        assert warehouse.location_point_ids() == (
+            set() if missing_generation else {raw.logical_key}
+        )
+        with pytest.raises(ValueError, match="existing"):
+            run_rebuild(
+                store,
+                target_db="scratch",
+                token="local",
+                production_db="production",
+                allow_partial_history=True,
+                source=source,
             )
-
-        def decode(self, raw, value):
-            assert value == payload
-            return Batch()
-
-        def audit(self, repository, values, now):
-            return SourceHealth(ok=True, details={})
-
-        def inventory(self, values):
-            return {"synthetic_count": len(values)}
-
-    class Repository:
-        def list_raw(self, prefix):
-            listed.append(prefix)
-            return [raw for raw in observations if raw.key.startswith(prefix)]
-
-        def get_raw(self, key, *, generation):
-            read.append((key, generation))
-            return gzip.compress(payload)
-
-    source = Source()
-    monkeypatch.setattr(
-        "personal_data_platform.recovery.rebuild.open_warehouse",
-        lambda config: Warehouse(connect(WarehouseConfig(":memory:"))),
-    )
-    monkeypatch.setattr(
-        "personal_data_platform.recovery.rebuild.run_dbt",
-        lambda **kwargs: dbt_calls.append(kwargs),
-    )
-
-    assert (
-        run_rebuild(
-            Repository(),
-            target_db="scratch_database",
-            token="scratch_token",
-            production_db="production_database",
-            allow_partial_history=True,
-            source=source,
-        )
-        == 0
-    )
-
-    assert listed == list(source.raw_prefixes)
-    assert read == [(raw.key, raw.storage_generation) for raw in observations]
-    assert written == observations
-    assert dbt_calls == [
-        {
-            "target": "prod",
-            "selector": source.dbt_selector,
-            "config": WarehouseConfig("scratch_database", "scratch_token"),
-        }
-    ]
-    inventory = rebuild_inventory(observations, source=source)
-    assert inventory["source_id"] == "synthetic"
-    assert inventory["stream"] == "metrics"
-    assert inventory["schema_versions"] == [1, 2]
-    assert inventory["subject_count"] == inventory["scope_count"] == 1
-    assert inventory["synthetic_count"] == 2
-    assert "device_count" not in inventory
+    finally:
+        warehouse.close()

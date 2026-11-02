@@ -47,13 +47,13 @@ def test_loader_retries_and_skips_using_a_connection_free_warehouse():
             assert self.owner == owner_id
             self.owner = None
 
-        def succeeded_keys_for(self, observations, *, parser_version):
-            return {value.key for value in observations} & self.loaded
+        def location_point_ids(self, ids=None):
+            return set(ids or ()) & self.loaded
 
-        def load_object(self, value, *, byte_size, batch):
-            assert value == raw and byte_size > 0
+        def load_object(self, value, *, batch, owner_id, deadline):
+            assert value == raw and owner_id == self.owner and deadline > 0
             self.locations[value.logical_key] = (batch.message["lat"], batch.message["lon"])
-            self.loaded.add(value.key)
+            self.loaded.add(value.logical_key)
             return batch.record_count
 
         def interrupt(self):

@@ -53,7 +53,7 @@ def test_network_profile_keeps_commit_ack_and_separates_api_queue_and_db(
     assert phases["pubsub_pull"]["sent_bytes"] == 100
     assert phases["pubsub_ack"]["sent_bytes"] == 70
     assert phases["lock_check"]["calls"] > 0
-    assert phases["coverage_write"]["calls"] > 0
+    assert phases["lock_write"]["calls"] > 0
     assert "secret-ack" not in json.dumps(summary)
 
 
@@ -64,7 +64,7 @@ def drainer(runner, subscriber):
 
 
 def test_drain_groups_duplicates_with_one_session_and_commits_before_ack(tmp_path, caplog):
-    runner, api, factory = direct_setup(tmp_path, states=(None,))
+    runner, api, factory = direct_setup(tmp_path, states=(10,))
     messages = [raw_message("a"), raw_message("b")]
     from tests.unit.fitbit.test_fitbit_batch import NOW as RECEIVED_AT
 
@@ -73,7 +73,7 @@ def test_drain_groups_duplicates_with_one_session_and_commits_before_ack(tmp_pat
     class ObservingSubscriber(Subscriber):
         def acknowledge(self, **kwargs):
             with closing(factory()) as warehouse:
-                assert warehouse.query_value("SELECT count(*) FROM ops.fitbit_coverage") == 1
+                assert warehouse.query_rows("SELECT steps FROM base.steps_interval") == [(10,)]
             super().acknowledge(**kwargs)
 
     subscriber = ObservingSubscriber([messages])

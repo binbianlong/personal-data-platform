@@ -99,12 +99,13 @@ def run_dbt_from_env(
             if not acquired:
                 raise JobAlreadyRunning("loader already has an unexpired job lease")
         warehouse.require_job_lock(owner, remaining_seconds=timeout_seconds)
-        run_dbt(
-            target=target,
-            timeout_seconds=timeout_seconds,
-            selector=selector,
-            config=config,
-        )
+        with temporary_environment({"PDP_DBT_LEASE_OWNER": owner}):
+            run_dbt(
+                target=target,
+                timeout_seconds=timeout_seconds,
+                selector=selector,
+                config=config,
+            )
         warehouse.require_job_lock(owner)
         return 0
     finally:

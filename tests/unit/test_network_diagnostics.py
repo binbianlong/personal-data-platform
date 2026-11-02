@@ -89,7 +89,7 @@ def test_reset_on_one_interface_is_not_hidden_by_growth_on_another(tmp_path, mon
 @pytest.mark.parametrize("failure", ["unavailable", "reset", "interfaces_changed"])
 def test_bad_counter_does_not_report_partial_or_zero_success(counter, monkeypatch, failure):
     with net.network_run("test") as profile:
-        with net.network_phase("coverage_write"):
+        with net.network_phase("data_write"):
             counter.sent += 50
         if failure == "unavailable":
             counter.broken = True
@@ -130,16 +130,16 @@ def test_disabled_measurement_does_not_read_counters_or_wrap_connection(monkeypa
 def test_sql_probe_preserves_transactions_results_and_hides_payloads(counter):
     with net.network_run("test") as profile:
         connection = net.instrument_connection(duckdb.connect())
-        connection.execute("CREATE SCHEMA ops")
-        connection.execute("CREATE TABLE ops.fitbit_coverage (value VARCHAR)")
+        connection.execute("CREATE SCHEMA base")
+        connection.execute("CREATE TABLE base.probe_value (value VARCHAR)")
         connection.execute("BEGIN")
-        connection.execute("INSERT INTO ops.fitbit_coverage VALUES (?)", ["private-health-value"])
+        connection.execute("INSERT INTO base.probe_value VALUES (?)", ["private-health-value"])
         connection.execute("ROLLBACK")
-        assert connection.execute("SELECT * FROM ops.fitbit_coverage").fetchall() == []
+        assert connection.execute("SELECT * FROM base.probe_value").fetchall() == []
         with pytest.raises(duckdb.Error):
             connection.execute("SELECT * FROM missing_table")
-        connection.execute("INSERT INTO ops.fitbit_coverage VALUES (?)", ["synthetic-secret"])
-        assert connection.execute("SELECT * FROM ops.fitbit_coverage").fetchone() == (
+        connection.execute("INSERT INTO base.probe_value VALUES (?)", ["synthetic-secret"])
+        assert connection.execute("SELECT * FROM base.probe_value").fetchone() == (
             "synthetic-secret",
         )
         connection.close()
@@ -149,8 +149,8 @@ def test_sql_probe_preserves_transactions_results_and_hides_payloads(counter):
     assert "missing_table" not in encoded
     phases = {row["phase"] for row in profile.summary()["phases"]}
     assert {
-        "coverage_read",
-        "coverage_write",
+        "data_compare",
+        "data_write",
         "transaction_begin",
         "transaction_rollback",
     } <= phases

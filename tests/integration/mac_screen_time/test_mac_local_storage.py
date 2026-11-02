@@ -1,40 +1,34 @@
-from datetime import UTC, datetime
+"""Mac pending state cannot consume the iPhone namespace."""
 
-from personal_data_platform.biome.collector_state import CollectorScan, CollectorState
+import pytest
+
+from personal_data_platform.biome.collector_state import CollectorState
+from personal_data_platform.biome.raw import encode_segment_envelope
+from personal_data_platform.sources.iphone_screen_time.adapter import IPhoneScreenTimeSource
+from personal_data_platform.sources.mac_screen_time.adapter import MacScreenTimeSource
 from personal_data_platform.sources.mac_screen_time.storage import LocalRepository
-from personal_data_platform.sources.registry import get_source
-
-NOW = datetime(2026, 10, 8, tzinfo=UTC)
+from tests.screen_time_helpers import NOW, mac_usage_event, segb
 
 
-def test_mac_audit_requires_its_own_device_scan_even_when_iphone_is_fresh(tmp_path):
-    from personal_data_platform.biome.audit import audit_source
-
-    state = CollectorState(tmp_path / "collector.db", source_id="mac_screen_time")
-    repository = LocalRepository(state=state, source=get_source("mac_screen_time", "app-usage"))
-    state.record_successful_scan(CollectorScan(NOW, ("b" * 64,), {}), stream="app-usage")
-    health = audit_source(repository, [], NOW)
-    assert not health.ok and health.details["missing_collector_scan_count"] == 1
-    state.record_successful_scan(
-        CollectorScan(NOW, ("b" * 64,), {"b" * 64: NOW}), stream="app-usage"
-    )
-    assert audit_source(repository, [], NOW).ok
+def test_mac_repository_rejects_counterpart_state(tmp_path):
+    state = CollectorState(tmp_path / "phone.db", source_id="iphone_screen_time")
+    with pytest.raises(ValueError, match="different source"):
+        LocalRepository(state=state, source=MacScreenTimeSource())
 
 
-def test_mac_raw_without_scan_is_not_treated_as_never_activated(tmp_path) -> None:
-    from personal_data_platform.sources.mac_screen_time.raw import ScreenTimeRawIdentity
-
-    now = datetime(2026, 9, 26, tzinfo=UTC)
-    source = get_source("mac_screen_time", "app-usage")
-    repository = LocalRepository(
-        state=CollectorState(tmp_path / "collector.db", source_id="mac_screen_time"), source=source
-    )
-    raw_key = ScreenTimeRawIdentity(
+def test_mac_payload_and_state_are_independent(tmp_path):
+    state = CollectorState(tmp_path / "mac.db", source_id="mac_screen_time")
+    pending = state.prepare(
         device_key="b" * 64,
         stream="app-usage",
         segment_key="c" * 64,
-        observed_at=now,
-        sha256="d" * 64,
-    ).object_key
-    raw = source.parse_raw_key(raw_key, storage_created_at=now, storage_generation=1)
-    assert not source.audit(repository, [raw], now).ok
+        raw_bytes=encode_segment_envelope(segb(mac_usage_event("mac.app", 1000.25, start=True))[0]),
+        observed_at=NOW,
+    )
+    repository = LocalRepository(state=state, source=MacScreenTimeSource())
+    assert [raw.key for raw in repository.list_raw("raw/mac_screen_time/")] == [
+        pending.identity.object_key
+    ]
+    assert list(repository.list_raw("raw/iphone_screen_time/")) == []
+    with pytest.raises(ValueError, match="different source"):
+        LocalRepository(state=state, source=IPhoneScreenTimeSource())

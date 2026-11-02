@@ -91,33 +91,25 @@ def test_daily_and_session_views_keep_native_values_and_day_boundaries(
     warehouse = Warehouse(connect(WarehouseConfig(str(database))))
     try:
         assert warehouse.query_rows(
-            "SELECT activity_date, distance_meters, sedentary_seconds, heart_rate_zone_moderate_seconds, "
-            "heart_rate_zone_light_seconds, heart_rate_zone_vigorous_seconds, heart_rate_zone_peak_seconds, "
-            "active_zone_minutes FROM marts.daily_fitbit_health ORDER BY activity_date"
-        ) == [
-            (date(2026, 9, 1), 60.0, 60.0, 60.0, None, None, None, 2.0),
-            (date(2026, 9, 2), 60.0, 60.0, 60.0, None, None, None, 2.0),
-            (date(2026, 9, 3), None, None, None, None, None, None, None),
-        ]
+            "SELECT activity_date, active_zone_minutes, cardio_azm_minutes "
+            "FROM marts.daily_active_zone ORDER BY activity_date"
+        ) == [(date(2026, 9, 1), 2.0, 2.0), (date(2026, 9, 2), 2.0, 2.0)]
         assert warehouse.query_rows(
             "SELECT hrv_rmssd_ms, deep_sleep_hrv_rmssd_ms, respiratory_rate_breaths_per_minute, "
-            "spo2_average_percent, spo2_lower_bound_percent, spo2_upper_bound_percent, spo2_standard_deviation_percent, "
-            "sleep_temperature_delta_celsius, vo2_max_ml_kg_min, vo2_max_estimated "
-            "FROM marts.daily_fitbit_health ORDER BY activity_date"
-        ) == [
-            (42.5, 51.0, 14.25, 97.5, 96.0, 99.0, 0.75, -0.25, 48.5, False),
-            (None,) * 10,
-            (None,) * 10,
-        ]
+            "spo2_average_percent, spo2_lower_bound_percent, spo2_upper_bound_percent, "
+            "spo2_standard_deviation_percent, vo2_max_ml_kg_min, vo2_max_estimated "
+            "FROM base.health_daily WHERE source_date = ?",
+            [date(2026, 9, 1)],
+        ) == [(42.5, 51.0, 14.25, 97.5, 96.0, 99.0, 0.75, 48.5, False)]
         assert warehouse.query_rows(
-            "SELECT minutes_awake, minutes_in_sleep_period, minutes_to_fall_asleep, minutes_after_wake_up FROM marts.fitbit_sleep_sessions"
+            "SELECT awake_minutes, sleep_period_minutes, sleep_latency_minutes, after_wake_minutes FROM base.sleep_session"
         ) == [(10, 480, 0, 2)]
         assert warehouse.query_rows(
-            "SELECT exercise_id, activity_date, source_date, exercise_type, active_duration_seconds, elapsed_seconds "
-            "FROM marts.fitbit_exercise_sessions ORDER BY exercise_id"
+            "SELECT exercise_session_id, source_date, exercise_type, active_seconds "
+            "FROM base.exercise_session ORDER BY exercise_session_id"
         ) == [
-            ("record-1", date(2026, 9, 1), date(2026, 9, 1), "NEW_EXERCISE", 90.5, 120.0),
-            ("travel", date(2026, 9, 1), date(2026, 8, 31), "NEW_EXERCISE", None, 120.0),
+            ("record-1", date(2026, 9, 1), "NEW_EXERCISE", 90.5),
+            ("travel", date(2026, 8, 31), "NEW_EXERCISE", None),
         ]
     finally:
         warehouse.close()

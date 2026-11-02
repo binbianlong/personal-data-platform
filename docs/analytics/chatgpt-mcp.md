@@ -16,14 +16,14 @@ https://api.motherduck.com/mcp
 複数人向けのmarts限定公開には使わない。Raw bucketと取得用tokenはこの接続へ渡さない。
 preflightには本番DB/shareへの接続を許可しない。
 
-共有は元DBと同じ名前`personal_data_platform`でattachする。dbtのview・macroがこのDB名を参照するため、
-share名を接続名にすると集計の参照が失敗する。shareを作成した際に返されるURLを使う。
+分析接続の既定aliasは`personal_data_platform`にそろえ、既存shareのURLを使う。
+新しいmartsはschema修飾の参照を使い、一時的な移行DB名へ依存させない。
 
 ```sql
 ATTACH '<pdp_analyticsのshare URL>' AS personal_data_platform;
 ```
 
-この別名の制約は[MotherDuckの共有仕様](https://motherduck.com/docs/key-tasks/sharing-data/sharing-overview/#views-and-fully-qualified-table-references)に従う。
+完全修飾参照を持つviewの制約は[MotherDuckの共有仕様](https://motherduck.com/docs/key-tasks/sharing-data/sharing-overview/#views-and-fully-qualified-table-references)に従う。
 
 ## ChatGPT設定
 
@@ -40,7 +40,7 @@ MotherDuck側の認証と権限は[Remote MCP接続仕様](https://motherduck.co
 
 ```text
 成功すること:
-- catalogからpersonal_data_platformとmarts.daily_iphone_screen_time / marts.daily_mac_screen_timeを発見できる
+- catalogからpersonal_data_platformとmarts.daily_iphone_screen_time_total / marts.daily_mac_screen_time_totalを発見できる
 - SELECTで日次利用秒数を取得できる
 
 拒否されること:

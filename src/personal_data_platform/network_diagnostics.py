@@ -210,10 +210,6 @@ def _sql_phase(query: object) -> str:
         return "lock_check" if read else "lock_write"
     if table.startswith("INFORMATION_SCHEMA.") or table == "OPS.SCHEMA_MIGRATION":
         return "schema_check"
-    if table == "OPS.FITBIT_COVERAGE":
-        return "coverage_read" if read else "coverage_write"
-    if table == "OPS.FITBIT_DELETED_RECORD":
-        return "deletion_read" if read else "deletion_write"
     if table.startswith("BASE."):
         return "data_compare" if read else "data_write"
     if table.startswith("OPS."):

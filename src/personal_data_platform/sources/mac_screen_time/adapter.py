@@ -32,9 +32,7 @@ class MacScreenTimeSource:
     raw_suffixes: tuple[str, ...] = (".segb.gz",)
     required_relations: tuple[str, ...] = (
         "base.mac_screen_time_event",
-        "base.mac_screen_time_transition",
-        "base.mac_screen_time_interval",
-        "marts.daily_mac_screen_time",
+        "marts.mac_screen_time_interval",
         "marts.daily_mac_screen_time_total",
     )
     dbt_selector = "tag:mac_screen_time"
@@ -81,12 +79,7 @@ class MacScreenTimeSource:
     ) -> SourceHealth:
         from personal_data_platform.biome.audit import audit_source
 
-        return audit_source(
-            repository,
-            observations,
-            now,
-            allow_inactive=True,
-        )
+        return audit_source(repository, observations, now)
 
     def inventory(self, observations: Sequence[RawObject]) -> dict[str, object]:
         return {

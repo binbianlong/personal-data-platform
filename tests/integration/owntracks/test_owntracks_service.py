@@ -144,8 +144,8 @@ def test_worker_commits_before_ack_and_redelivery_has_one_row(tmp_path):
     for _ in range(2):
         assert client.post("/notifications/owntracks", json=notification(store)).status_code == 204
         with closing(factory()) as warehouse:
-            assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 1
-            assert warehouse.query_value("SELECT status FROM ops.ingestion_metadata") == "succeeded"
+            assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 1
+            assert len(warehouse.location_point_ids()) == 1
             assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
 
 
@@ -161,7 +161,7 @@ def test_worker_rejects_mismatched_storage_metadata_without_writing(tmp_path, fi
         == 400
     )
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 0
+        assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 0
 
 
 def test_worker_lease_conflict_retries_and_preserves_competing_owner(tmp_path, caplog):
@@ -174,7 +174,7 @@ def test_worker_lease_conflict_retries_and_preserves_competing_owner(tmp_path, c
     assert not any(record.levelno >= logging.ERROR for record in caplog.records)
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
-        assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 0
+        assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 0
         warehouse.release_job_lock("loader", "daily")
     assert client.post("/notifications/owntracks", json=notification(store)).status_code == 204
 
@@ -213,9 +213,9 @@ def test_worker_unknown_commit_retries_from_durable_success(tmp_path):
     processor.warehouse_factory = uncertain_factory
     assert client.post("/notifications/owntracks", json=notification(store)).status_code == 503
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 1
         warehouse.connection.execute("UPDATE ops.job_lock SET expires_at=now()-INTERVAL '1 second'")
     processor.warehouse_factory = factory
     assert client.post("/notifications/owntracks", json=notification(store)).status_code == 204
     with closing(factory()) as warehouse:
-        assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 1

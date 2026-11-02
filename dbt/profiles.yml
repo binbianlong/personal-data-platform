@@ -5,9 +5,9 @@ personal_data_platform:
       type: duckdb
       path: "{{ env_var('DBT_DUCKDB_PATH', '../var/personal-data-platform.duckdb') }}"
       schema: main
-      threads: 4
+      threads: 1
     prod:
       type: duckdb
       path: "md:{{ env_var('MOTHERDUCK_DATABASE') }}?attach_mode=single&motherduck_token={{ env_var('DBT_ENV_SECRET_MOTHERDUCK_TOKEN') }}"
       schema: main
-      threads: 4
+      threads: 1

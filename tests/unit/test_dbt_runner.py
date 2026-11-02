@@ -1,4 +1,5 @@
 import os
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -213,3 +214,19 @@ def test_explicit_dbt_config_uses_scratch_target_and_restores_environment(
     assert os.environ["MOTHERDUCK_DATABASE"] == "production"
     assert os.environ["MOTHERDUCK_TOKEN"] == "production-token"
     assert os.environ["DBT_ENV_SECRET_MOTHERDUCK_TOKEN"] == "previous-secret"
+
+
+def test_cloud_dbt_passes_lease_owner_to_models(monkeypatch):
+    warehouse = MagicMock()
+    warehouse.acquire_job_lock.return_value = True
+    warehouse.connection_usable = True
+    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
+    monkeypatch.setattr(
+        dbt_runner, "run_dbt", lambda **kwargs: calls.append(os.environ.get("PDP_DBT_LEASE_OWNER"))
+    )
+    calls = []
+    with patch.dict(os.environ, {"DBT_TARGET": "prod"}):
+        dbt_runner.run_dbt_from_env(
+            lease_owner="owner-a", config=dbt_runner.WarehouseConfig("scratch")
+        )
+    assert calls == ["owner-a"]

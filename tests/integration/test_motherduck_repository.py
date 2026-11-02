@@ -1,20 +1,14 @@
-from __future__ import annotations
+"""Warehouse source writes have atomic data and only two common ops tables."""
 
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+import time
+from contextlib import closing
+from dataclasses import replace
 
 import pytest
 
-from personal_data_platform.sources.iphone_screen_time.batch import (
-    IPhoneScreenTimeBatch as ScreenTimeBatch,
-)
-from personal_data_platform.sources.iphone_screen_time.parser import PARSER_VERSION
-from personal_data_platform.storage.motherduck import (
-    Warehouse,
-    WarehouseConfig,
-    connect,
-)
-from tests.screen_time_helpers import _raw, _record
+from personal_data_platform.sources.owntracks import motherduck
+from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from tests.integration.owntracks.test_owntracks_ingestion import location_store
 
 
 def test_cloud_connection_is_scoped_to_the_requested_database(monkeypatch):
@@ -37,203 +31,6 @@ def test_cloud_connection_is_scoped_to_the_requested_database(monkeypatch):
     ]
 
 
-def test_screen_time_receipts_prune_only_confirmed_compacted_scope(tmp_path):
-    import gzip
-
-    from personal_data_platform.sources.iphone_screen_time.adapter import (
-        IPhoneScreenTimeSource as ScreenTimeSource,
-    )
-    from tests.screen_time_helpers import Repository, event, segb
-
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "receipts.duckdb"))))
-    warehouse.migrate()
-    repository = Repository()
-    source = ScreenTimeSource()
-    old = repository.add("100", segb(event("app.old"))[0])
-    current = repository.add("100", segb(event("app.current"))[0])
-    unrelated = repository.add("200", segb(event("app.other"))[0])
-    for raw in (old, current, unrelated):
-        warehouse.load_object(
-            raw,
-            byte_size=1,
-            batch=source.decode(raw, gzip.decompress(repository.objects[raw.key][1])),
-        )
-    warehouse.prune_biome_receipts(
-        [current], source_id=source.source_id, parser_version=source.parser_version
-    )
-    assert warehouse.query_rows(
-        "SELECT object_key FROM ops.ingestion_metadata ORDER BY object_key"
-    ) == [(key,) for key in sorted((current.key, unrelated.key))]
-    warehouse.close()
-
-
-def test_screen_time_receipts_need_one_confirmed_live_raw(tmp_path):
-    import gzip
-
-    from personal_data_platform.sources.iphone_screen_time.adapter import (
-        IPhoneScreenTimeSource as ScreenTimeSource,
-    )
-    from tests.screen_time_helpers import Repository, event, segb
-
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "receipts.duckdb"))))
-    warehouse.migrate()
-    repository = Repository()
-    source = ScreenTimeSource()
-    old = repository.add("100", segb(event("app.old"))[0])
-    current = repository.add("100", segb(event("app.current"))[0])
-    for raw in (old, current):
-        warehouse.load_object(
-            raw,
-            byte_size=1,
-            batch=source.decode(raw, gzip.decompress(repository.objects[raw.key][1])),
-        )
-    connection = warehouse.connection
-
-    class NoTransaction:
-        def execute(self, sql, *args):
-            assert not sql.startswith(("BEGIN", "COMMIT"))
-            return connection.execute(sql, *args)
-
-        def __getattr__(self, name):
-            return getattr(connection, name)
-
-    warehouse.connection = NoTransaction()
-    warehouse.prune_biome_receipts(
-        [], source_id=source.source_id, parser_version=source.parser_version
-    )
-    warehouse.prune_biome_receipts(
-        [old, current], source_id=source.source_id, parser_version=source.parser_version
-    )
-    assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 2
-    unconfirmed = replace(current, storage_generation=2)
-    warehouse.prune_biome_receipts(
-        [unconfirmed], source_id=source.source_id, parser_version=source.parser_version
-    )
-    assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 2
-    warehouse.close()
-
-
-def test_run_history_prunes_after_seven_days_but_keeps_daily_gap_marker():
-    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
-    warehouse.migrate()
-    now = datetime(2026, 10, 11, tzinfo=UTC)
-    old = now - timedelta(days=8)
-    recent = now - timedelta(days=6)
-    warehouse.connection.execute(
-        "INSERT INTO ops.job_run VALUES "
-        "('old-daily', 'daily-reconciliation-west', 'succeeded', ?, ?, ?), "
-        "('old-other', 'loader', 'failed', ?, ?, NULL), "
-        "('recent', 'loader', 'succeeded', ?, ?, NULL)",
-        [old, old, '{"last_completed_target_date":"2026-10-02"}', old, old, recent, recent],
-    )
-    warehouse.prune_run_history(now=now)
-    assert warehouse.query_rows("SELECT run_id FROM ops.job_run ORDER BY run_id") == [
-        ("old-daily",),
-        ("recent",),
-    ]
-    warehouse.close()
-
-
-def test_run_history_keeps_latest_daily_marker_across_previous_and_current_names():
-    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
-    warehouse.migrate()
-    now = datetime(2026, 10, 11, tzinfo=UTC)
-    older = now - timedelta(days=9)
-    newer = now - timedelta(days=8)
-    warehouse.connection.execute(
-        "INSERT INTO ops.job_run VALUES "
-        "('previous', 'daily-reconciliation-west', 'succeeded', ?, ?, ?), "
-        "('current', 'daily-reconciliation', 'succeeded', ?, ?, ?)",
-        [
-            older,
-            older,
-            '{"last_completed_target_date":"2026-10-01"}',
-            newer,
-            newer,
-            '{"last_completed_target_date":"2026-10-02"}',
-        ],
-    )
-    warehouse.prune_run_history(now=now)
-    assert warehouse.query_rows("SELECT run_id FROM ops.job_run") == [("current",)]
-    warehouse.close()
-
-
-def test_migration_and_object_load_are_idempotent(tmp_path) -> None:
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "test.duckdb"))))
-    try:
-        warehouse.migrate()
-        raw = _raw()
-
-        assert warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch([_record(raw)])) == 1
-        assert warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch([_record(raw)])) == 0
-        assert warehouse.succeeded_keys(source_id="iphone_screen_time", stream="app-in-focus") == {
-            raw.key
-        }
-        assert warehouse.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 1
-        assert (
-            warehouse.query_value("SELECT storage_created_at FROM ops.ingestion_metadata")
-            == raw.storage_created_at
-        )
-    finally:
-        warehouse.close()
-
-
-def test_failed_load_can_be_retried(tmp_path) -> None:
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "test.duckdb"))))
-    try:
-        warehouse.migrate()
-        raw = _raw()
-        warehouse.mark_failed(raw, byte_size=0, error=ValueError("broken"))
-
-        assert warehouse.ingestion_counts(
-            source_id="iphone_screen_time", stream="app-in-focus"
-        ) == {"failed": 1}
-        assert (
-            warehouse.query_value("SELECT storage_created_at FROM ops.ingestion_metadata")
-            == raw.storage_created_at
-        )
-        assert warehouse.load_object(raw, byte_size=100, batch=ScreenTimeBatch([_record(raw)])) == 1
-        assert warehouse.ingestion_counts(
-            source_id="iphone_screen_time", stream="app-in-focus"
-        ) == {"succeeded": 1}
-    finally:
-        warehouse.close()
-
-
-def test_new_generation_is_not_trusted_until_it_is_reloaded(tmp_path) -> None:
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "test.duckdb"))))
-    try:
-        warehouse.migrate()
-        original = _raw()
-        assert (
-            warehouse.load_object(
-                original, byte_size=100, batch=ScreenTimeBatch([_record(original)])
-            )
-            == 1
-        )
-        recreated_at = datetime(2026, 10, 27, 1, tzinfo=UTC)
-        recreated = _raw(storage_created_at=recreated_at, storage_generation=2)
-
-        assert warehouse.succeeded_keys_for([recreated]) == set()
-        assert (
-            warehouse.load_object(
-                recreated, byte_size=100, batch=ScreenTimeBatch([_record(recreated)])
-            )
-            == 1
-        )
-
-        assert warehouse.succeeded_keys_for([recreated]) == {original.key}
-        assert warehouse.query_rows(
-            """
-            SELECT storage_created_at, storage_generation
-            FROM ops.ingestion_metadata
-            """
-        ) == [(recreated_at, 2)]
-        assert warehouse.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 1
-    finally:
-        warehouse.close()
-
-
 def test_job_lease_rejects_a_second_owner(tmp_path) -> None:
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "test.duckdb"))))
     try:
@@ -250,159 +47,69 @@ def test_job_lease_rejects_a_second_owner(tmp_path) -> None:
         warehouse.close()
 
 
-@dataclass(frozen=True)
-class _MetricBatch:
-    amount: int = 7
-    fail: bool = False
-    parser_version: str = "fixture-metric-v1"
-    record_count: int = 1
+def test_migration_and_location_load_are_idempotent():
+    source, store, _, _ = location_store()
+    from personal_data_platform.loader.job import run_loader
 
-
-class _MetricWarehouse(Warehouse):
-    def _write_batch(self, raw, batch, *, loaded_at):
-        if not isinstance(batch, _MetricBatch):
-            return super()._write_batch(raw, batch, loaded_at=loaded_at)
-        self.connection.execute("DELETE FROM base.fixture_metric WHERE object_key = ?", [raw.key])
-        self.connection.execute(
-            "INSERT INTO base.fixture_metric VALUES (?, ?, ?)",
-            [raw.key, batch.amount, loaded_at],
-        )
-        if batch.fail:
-            raise ValueError("source writer failed after inserting a row")
-
-
-def _metric_warehouse() -> Warehouse:
-    warehouse = _MetricWarehouse(connect(WarehouseConfig(":memory:")))
-    warehouse.migrate()
-    warehouse.connection.execute(
-        """
-        CREATE TABLE base.fixture_metric (
-            object_key VARCHAR PRIMARY KEY, amount INTEGER NOT NULL, loaded_at TIMESTAMPTZ NOT NULL
-        )
-        """
-    )
-    return warehouse
-
-
-def test_ingestion_queries_isolate_both_source_and_stream() -> None:
-    warehouse = _metric_warehouse()
-    try:
-        screen_time = _raw()
-        other_stream = replace(screen_time, key="raw/other-stream", stream="other-stream")
-        other_source = replace(screen_time, key="raw/other-source", source_id="fixture_health")
-        warehouse.load_object(screen_time, byte_size=10, batch=_MetricBatch())
-        warehouse.mark_failed(other_stream, byte_size=0, error=ValueError("other stream"))
-        warehouse.load_object(other_source, byte_size=10, batch=_MetricBatch())
-        scope = {"source_id": screen_time.source_id, "stream": screen_time.stream}
-        assert warehouse.succeeded_keys(**scope) == {screen_time.key}
-        assert warehouse.ingestion_counts(**scope) == {"succeeded": 1}
-        assert set(warehouse.active_ingestion_states(**scope)) == {screen_time.key}
-        assert warehouse.ingestion_counts(
-            source_id=other_stream.source_id, stream=other_stream.stream
-        ) == {"failed": 1}
-    finally:
-        warehouse.close()
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("source_id", "fixture_health"), ("stream", "other-stream"), ("schema_version", 3)],
-)
-def test_object_identity_cannot_cross_sources_streams_or_versions(field, value) -> None:
-    warehouse = _metric_warehouse()
-    try:
-        raw = _raw()
-        warehouse.load_object(raw, byte_size=10, batch=_MetricBatch())
-        mismatched = replace(raw, **{field: value})
-        assert warehouse.succeeded_keys_for([mismatched]) == set()
-        with pytest.raises(RuntimeError, match="immutable object identity changed"):
-            warehouse.load_object(mismatched, byte_size=10, batch=_MetricBatch())
-        with pytest.raises(RuntimeError, match="immutable object identity changed"):
-            warehouse.mark_failed(mismatched, byte_size=0, error=ValueError("decode failed"))
-        assert warehouse.succeeded_keys_for([raw]) == {raw.key}
-        assert warehouse.query_value("SELECT status FROM ops.ingestion_metadata") == "succeeded"
-    finally:
-        warehouse.close()
-
-
-def test_a_non_screen_time_batch_writes_typed_rows_with_source_identity() -> None:
-    warehouse = _metric_warehouse()
-    try:
-        raw = replace(
-            _raw(), key="raw/fixture-health", source_id="fixture_health", subject_key="account"
-        )
-        assert warehouse.load_object(raw, byte_size=10, batch=_MetricBatch(amount=42)) == 1
-        assert warehouse.query_value("SELECT amount FROM base.fixture_metric") == 42
-        assert warehouse.query_rows(
-            """
-            SELECT source_id, subject_key, logical_key, parser_version
-            FROM ops.ingestion_metadata
-            """
-        ) == [("fixture_health", "account", raw.logical_key, "fixture-metric-v1")]
-        assert warehouse.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 0
-    finally:
-        warehouse.close()
+    with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
+        warehouse.migrate()
+        assert run_loader(store, warehouse, source=source).records == 1
+        warehouse.migrate()
+        assert run_loader(store, warehouse, source=source).skipped == 1
+        assert len(warehouse.location_point_ids()) == 1
+        assert {r for r in warehouse.relation_names() if r.startswith("ops.")} == {
+            "ops.job_lock",
+            "ops.schema_migration",
+        }
+        for obsolete in (
+            "begin_job",
+            "finish_job",
+            "finish_collection",
+            "mark_failed",
+            "succeeded_keys_for",
+            "prune_biome_receipts",
+            "active_ingestion_states",
+            "latest_completed_target_date",
+        ):
+            assert not hasattr(warehouse, obsolete)
 
 
 @pytest.mark.parametrize("previously_loaded", [False, True])
-def test_source_writer_failure_rolls_back_records_and_object_state(previously_loaded) -> None:
-    warehouse = _metric_warehouse()
-    try:
-        original = _raw()
+def test_source_writer_failure_rolls_back_without_changing_existing_points(
+    monkeypatch, previously_loaded
+):
+    source, store, _, payload = location_store()
+    raw = store.list_raw(source.raw_prefixes[0])[0]
+    batch = source.decode(raw, payload)
+    with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
+        warehouse.migrate()
+        assert warehouse.acquire_job_lock("loader", "owner", lease_seconds=120)
+        kwargs = {"owner_id": "owner", "deadline": time.monotonic() + 10}
         if previously_loaded:
-            warehouse.load_object(original, byte_size=10, batch=_MetricBatch(amount=1))
-        attempted = replace(original, storage_generation=2)
-        with pytest.raises(ValueError, match="source writer failed") as failure:
-            warehouse.load_object(attempted, byte_size=10, batch=_MetricBatch(amount=2, fail=True))
+            warehouse.load_object(raw, batch=batch, **kwargs)
+        before = warehouse.query_rows("SELECT * FROM base.location_point")
+        writer = motherduck.write_batch
 
-        assert warehouse.query_rows("SELECT amount FROM base.fixture_metric") == (
-            [(1,)] if previously_loaded else []
-        )
-        assert warehouse.query_rows(
-            "SELECT status, storage_generation FROM ops.ingestion_metadata"
-        ) == ([("succeeded", 1)] if previously_loaded else [])
+        def interrupted(*args, **kwargs):
+            writer(*args, **kwargs)
+            raise RuntimeError("source failed")
 
-        warehouse.mark_failed(attempted, byte_size=10, error=failure.value)
-        assert warehouse.query_rows(
-            "SELECT status, storage_generation FROM ops.ingestion_metadata"
-        ) == [("failed", 2)]
-        assert warehouse.query_rows("SELECT amount FROM base.fixture_metric") == (
-            [(1,)] if previously_loaded else []
-        )
-    finally:
-        warehouse.close()
-
-
-def test_empty_screen_time_batch_keeps_its_decoder_version_and_source_identity() -> None:
-    warehouse = _metric_warehouse()
-    try:
-        raw = _raw()
-        assert (
+        monkeypatch.setattr(motherduck, "write_batch", interrupted)
+        with pytest.raises(RuntimeError, match="source failed"):
             warehouse.load_object(
-                raw,
-                byte_size=10,
-                batch=ScreenTimeBatch([]),
+                raw, batch=replace(batch, message={**batch.message, "lat": 36}), **kwargs
             )
-            == 0
-        )
-        assert warehouse.query_rows(
-            """
-            SELECT parser_version, record_count, subject_key, logical_key
-            FROM ops.ingestion_metadata
-            """
-        ) == [(PARSER_VERSION, 0, raw.subject_key, raw.logical_key)]
-        assert warehouse.query_rows(
-            "SELECT device_key, segment_key FROM ops.iphone_screen_time_segment"
-        ) == [(raw.subject_key, raw.logical_key)]
-        failed_raw = replace(raw, key="raw/failed")
-        warehouse.mark_failed(
-            failed_raw,
-            byte_size=0,
-            error=ValueError("decode failed"),
-        )
-        assert warehouse.query_rows(
-            "SELECT subject_key, logical_key FROM ops.ingestion_metadata WHERE object_key = ?",
-            [failed_raw.key],
-        ) == [(raw.subject_key, raw.logical_key)]
-    finally:
-        warehouse.close()
+        assert warehouse.query_rows("SELECT * FROM base.location_point") == before
+        assert warehouse.connection_usable
+
+
+def test_location_id_lookup_can_filter_current_event_without_fetching_full_inventory():
+    from personal_data_platform.loader.job import run_loader
+
+    source, store, _, _ = location_store()
+    raw = store.list_raw(source.raw_prefixes[0])[0]
+    with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
+        warehouse.migrate()
+        run_loader(store, warehouse, source=source)
+        assert warehouse.location_point_ids([]) == set()
+        assert warehouse.location_point_ids([raw.logical_key, "absent"]) == {raw.logical_key}

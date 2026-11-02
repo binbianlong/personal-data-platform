@@ -1,358 +1,404 @@
--- Initial platform schema.
-
-CREATE SCHEMA IF NOT EXISTS ops;
+-- 個人の行動・健康データを保存する基礎スキーマ。
 CREATE SCHEMA IF NOT EXISTS base;
 CREATE SCHEMA IF NOT EXISTS marts;
+CREATE SCHEMA IF NOT EXISTS ops;
 
-CREATE TABLE IF NOT EXISTS ops.ingestion_metadata (
-    object_key VARCHAR PRIMARY KEY,
-    source_id VARCHAR NOT NULL,
-    schema_version UINTEGER NOT NULL,
-    subject_key VARCHAR NOT NULL,
-    source_stream VARCHAR NOT NULL,
-    logical_key VARCHAR NOT NULL,
-    observed_at TIMESTAMPTZ NOT NULL,
-    content_sha256 VARCHAR NOT NULL,
-    byte_size UBIGINT NOT NULL,
-    status VARCHAR NOT NULL CHECK (status IN ('loading', 'succeeded', 'failed')),
-    parser_version VARCHAR,
-    record_count UINTEGER,
-    started_at TIMESTAMPTZ NOT NULL,
-    completed_at TIMESTAMPTZ,
-    error_type VARCHAR,
-    error_message VARCHAR,
-    retry_count UINTEGER NOT NULL DEFAULT 0,
-    storage_created_at TIMESTAMPTZ,
-    storage_generation UBIGINT,
-    retention_expired_at TIMESTAMPTZ,
-    retention_started_at TIMESTAMPTZ
+CREATE TABLE IF NOT EXISTS ops.schema_migration (
+    migration_id VARCHAR PRIMARY KEY,
+    checksum VARCHAR NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS ops.job_run (
-    run_id VARCHAR PRIMARY KEY,
-    job_name VARCHAR NOT NULL,
-    status VARCHAR NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
-    started_at TIMESTAMPTZ NOT NULL,
-    completed_at TIMESTAMPTZ,
-    details JSON
-);
-
-CREATE TABLE IF NOT EXISTS ops.job_lock (
+CREATE TABLE ops.job_lock (
     job_name VARCHAR PRIMARY KEY,
     owner_id VARCHAR NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL
 );
+COMMENT ON TABLE ops.schema_migration IS '適用済みSQL migrationの台帳。1行はSQLファイル1本。';
+COMMENT ON COLUMN ops.schema_migration.migration_id IS 'SQLファイル名。主キー。NULL不可。';
+COMMENT ON COLUMN ops.schema_migration.checksum IS '適用したSQLのSHA-256。NULL不可。';
+COMMENT ON COLUMN ops.schema_migration.applied_at IS '適用時刻。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON TABLE ops.job_lock IS '共有writerの期限付き排他lease。1行はjob名ごとの現在の所有者。';
+COMMENT ON COLUMN ops.job_lock.job_name IS '排他対象job名。主キー。NULL不可。';
+COMMENT ON COLUMN ops.job_lock.owner_id IS 'lease所有者の実行識別子。NULL不可。';
+COMMENT ON COLUMN ops.job_lock.expires_at IS 'lease失効時刻。タイムゾーン付きの絶対時刻。NULL不可。';
 
-CREATE TABLE IF NOT EXISTS ops.reconciliation_run (
-    run_id VARCHAR PRIMARY KEY,
-    status VARCHAR NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
-    started_at TIMESTAMPTZ NOT NULL,
-    completed_at TIMESTAMPTZ,
-    raw_object_count UBIGINT,
-    loaded_object_count UBIGINT,
-    missing_object_count UBIGINT,
-    failed_object_count UBIGINT,
-    details JSON
-);
 
-CREATE TABLE IF NOT EXISTS ops.heartbeat (
-    monitor_name VARCHAR PRIMARY KEY,
-    succeeded_at TIMESTAMPTZ NOT NULL,
-    run_id VARCHAR NOT NULL,
-    details JSON
-);
-
-CREATE TABLE base.screen_time_event (
-    event_key VARCHAR PRIMARY KEY,
-    device_key VARCHAR NOT NULL,
-    platform VARCHAR NOT NULL,
-    source_stream VARCHAR NOT NULL,
-    bundle_id VARCHAR NOT NULL,
-    event_at TIMESTAMPTZ NOT NULL,
-    state VARCHAR NOT NULL CHECK (state IN ('start', 'end')),
-    transition_reason VARCHAR,
-    kind UINTEGER,
-    app_version VARCHAR,
-    app_build VARCHAR,
-    platform_flag UINTEGER,
-    object_key VARCHAR NOT NULL,
-    segment_key VARCHAR NOT NULL,
-    segment_filename VARCHAR NOT NULL,
-    record_offset UBIGINT NOT NULL,
-    record_metadata_offset UBIGINT NOT NULL,
-    observed_at TIMESTAMPTZ NOT NULL,
-    parser_version VARCHAR NOT NULL,
-    unknown_field_count UINTEGER NOT NULL,
-    duplicate_occurrence_count UINTEGER NOT NULL,
-    is_active BOOLEAN NOT NULL,
-    loaded_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE ops.screen_time_segment (
-    device_key VARCHAR NOT NULL,
-    source_stream VARCHAR NOT NULL,
-    segment_key VARCHAR NOT NULL,
-    observed_at TIMESTAMPTZ NOT NULL,
-    object_key VARCHAR NOT NULL,
-    source_segment_name VARCHAR,
-    name_ambiguous BOOLEAN NOT NULL DEFAULT false,
-    source_segment_names VARCHAR[] NOT NULL DEFAULT [],
-    PRIMARY KEY (device_key, source_stream, segment_key)
-);
-
--- Decoded fields permit choosing another physical copy after a correction.
--- Original protobuf/SEGB bytes remain exclusively in Raw.
-CREATE TABLE ops.screen_time_record (
-    physical_id VARCHAR PRIMARY KEY,
-    device_key VARCHAR NOT NULL,
-    source_stream VARCHAR NOT NULL,
-    segment_key VARCHAR NOT NULL,
-    record_offset UBIGINT NOT NULL,
-    record_metadata_offset UBIGINT NOT NULL,
-    payload_length UINTEGER NOT NULL,
-    record_timestamp_cocoa DOUBLE,
-    event_key VARCHAR NOT NULL,
-    bundle_id VARCHAR NOT NULL,
-    event_at TIMESTAMPTZ NOT NULL,
-    state VARCHAR NOT NULL,
-    transition_reason VARCHAR,
-    kind UINTEGER,
-    app_version VARCHAR,
-    app_build VARCHAR,
-    platform_flag UINTEGER,
-    parser_version VARCHAR NOT NULL,
-    unknown_field_count UINTEGER NOT NULL,
-    segment_filename VARCHAR NOT NULL,
-    observed_at TIMESTAMPTZ NOT NULL,
-    object_key VARCHAR NOT NULL,
-    is_current BOOLEAN NOT NULL,
-    is_valid BOOLEAN NOT NULL
-);
-CREATE INDEX screen_time_record_scope ON ops.screen_time_record
-    (device_key, source_stream, segment_key);
-CREATE INDEX screen_time_record_event ON ops.screen_time_record (event_key);
-
-CREATE TABLE ops.screen_time_tombstone (
-    physical_id VARCHAR PRIMARY KEY,
-    device_key VARCHAR NOT NULL,
-    source_stream VARCHAR NOT NULL,
-    segment_key VARCHAR NOT NULL,
-    target_segment_name VARCHAR,
-    target_offset UBIGINT,
-    target_length UINTEGER,
-    target_event_timestamp DOUBLE,
-    deletion_reason UINTEGER,
-    observed_at TIMESTAMPTZ NOT NULL,
-    object_key VARCHAR NOT NULL,
-    is_valid BOOLEAN NOT NULL,
-    resolution VARCHAR NOT NULL
-);
-CREATE INDEX screen_time_tombstone_target ON ops.screen_time_tombstone
-    (device_key, source_stream, target_segment_name);
-CREATE INDEX screen_time_tombstone_scope ON ops.screen_time_tombstone
-    (device_key, source_stream, segment_key);
-CREATE TABLE ops.screen_time_deletion_match (
-    tombstone_id VARCHAR NOT NULL,
-    physical_id VARCHAR NOT NULL,
-    PRIMARY KEY (tombstone_id, physical_id)
-);
-CREATE INDEX screen_time_match_record ON ops.screen_time_deletion_match (physical_id);
-
--- The digest identifies content at a physical position, independent of observation
--- count and parser version. Parser corrections replace the normalized fields.
-CREATE MACRO ops.screen_time_physical_id(device, stream, segment, record_position, metadata, stamp, digest)
-AS sha256(to_json(struct_pack(device := device, stream := stream, segment := segment,
-                             record_position := record_position, metadata := metadata,
-                             stamp := stamp, digest := digest)));
-
--- Match deletions only when the observed name uniquely identifies a segment.
-CREATE MACRO ops.screen_time_matching_record(keys) AS TABLE (
-WITH tombstones AS (
-    SELECT * FROM ops.screen_time_tombstone WHERE physical_id IN (SELECT unnest(keys))
-), targets AS (
-    SELECT DISTINCT device_key, source_stream, target_segment_name FROM tombstones
-), names AS (
-    SELECT s.device_key, s.source_stream, alias.source_segment_name,
-           min(s.segment_key) AS segment_key
-    FROM ops.screen_time_segment s
-    CROSS JOIN unnest(s.source_segment_names) AS alias(source_segment_name)
-    JOIN targets t ON s.device_key = t.device_key AND s.source_stream = t.source_stream
-        AND alias.source_segment_name = t.target_segment_name
-    GROUP BY s.device_key, s.source_stream, alias.source_segment_name
-    HAVING count(*) = 1 AND NOT bool_or(name_ambiguous)
-)
-SELECT t.physical_id AS tombstone_id, r.physical_id
-FROM tombstones t
-JOIN names n ON t.device_key = n.device_key AND t.source_stream = n.source_stream
-    AND t.target_segment_name = n.source_segment_name
-JOIN ops.screen_time_record r ON r.device_key = n.device_key AND r.source_stream = n.source_stream
-    AND r.segment_key = n.segment_key AND r.record_metadata_offset = t.target_offset
-    AND r.payload_length = t.target_length
-    AND abs(r.record_timestamp_cocoa - t.target_event_timestamp) <= 0.000001
-WHERE t.is_valid AND r.is_valid AND t.deletion_reason IN (1, 2)
-);
-
--- Resolve platform from each record's source stream.
-CREATE MACRO ops.screen_time_resolve(keys) AS TABLE (
-    WITH records AS (
-        SELECT * FROM ops.screen_time_record WHERE event_key IN (SELECT unnest(keys))
-    ), effects AS (
-        SELECT r.physical_id, bool_or(t.deletion_reason = 1) AS ttl,
-               bool_or(t.deletion_reason = 2) AS deleted
-        FROM records r
-        JOIN ops.screen_time_deletion_match m ON m.physical_id = r.physical_id
-        JOIN ops.screen_time_tombstone t ON t.physical_id = m.tombstone_id
-        GROUP BY r.physical_id
-    ), eligible AS (
-        SELECT r.*, r.is_valid AND (r.is_current OR coalesce(e.ttl, false))
-            AND NOT bool_or(coalesce(e.deleted, false)) OVER (PARTITION BY r.event_key) AS active
-        FROM records r LEFT JOIN effects e USING (physical_id)
-    ), copies AS (
-        SELECT * FROM eligible
-        QUALIFY row_number() OVER (
-            PARTITION BY device_key, source_stream, segment_key, record_offset, event_key
-            ORDER BY active DESC, observed_at DESC, object_key DESC, record_metadata_offset DESC
-        ) = 1
-    ), ranked AS (
-        SELECT *, count(*) FILTER (WHERE active) OVER (PARTITION BY event_key) AS copy_count
-        FROM copies
-        QUALIFY row_number() OVER (
-            PARTITION BY event_key
-            ORDER BY active DESC, observed_at DESC, object_key DESC, record_metadata_offset DESC
-        ) = 1
-    )
-    SELECT event_key, device_key,
-           CASE
-               WHEN source_stream IN ('app-in-focus', 'App.InFocus') THEN 'ios'
-               WHEN source_stream = 'app-usage' THEN 'macos'
-               ELSE error('unsupported Screen Time source stream')
-           END AS platform,
-           source_stream, bundle_id, event_at, state,
-           transition_reason, kind, app_version, app_build, platform_flag, object_key, segment_key,
-           segment_filename, record_offset, record_metadata_offset, observed_at, parser_version,
-           unknown_field_count, greatest(copy_count - 1, 0)::UINTEGER AS duplicate_occurrence_count,
-           active AS is_active
-    FROM ranked
-);
-
-CREATE VIEW base.screen_time_transition AS
-SELECT * EXCLUDE (is_active, loaded_at) FROM base.screen_time_event WHERE is_active;
-
--- Physical activity intervals; metric is part of the record identity.
-CREATE TABLE base.fitbit_activity_interval (
-    subject_key VARCHAR NOT NULL,
-    metric VARCHAR NOT NULL CHECK (metric IN ('steps', 'active-zone-minutes')),
-    record_id VARCHAR NOT NULL,
+CREATE TABLE base.sleep_session (
+    sleep_session_id VARCHAR PRIMARY KEY,
     start_at TIMESTAMPTZ NOT NULL,
     end_at TIMESTAMPTZ NOT NULL,
-    value DOUBLE NOT NULL,
-    offset_seconds INTEGER,
-    end_offset_seconds INTEGER,
     source_date DATE,
-    category VARCHAR,
-    fetched_at TIMESTAMPTZ NOT NULL,
-    source_key VARCHAR NOT NULL,
-    loaded_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (subject_key, metric, record_id),
-    CHECK (end_at > start_at),
-    CHECK (isfinite(value) AND value >= 0)
-);
-
--- A provider civil date is not a physical UTC timestamp.
-CREATE TABLE base.fitbit_resting_heart_rate_daily (
-    subject_key VARCHAR NOT NULL,
-    record_id VARCHAR NOT NULL,
-    source_date DATE NOT NULL,
-    beats_per_minute DOUBLE NOT NULL,
-    fetched_at TIMESTAMPTZ NOT NULL,
-    source_key VARCHAR NOT NULL,
-    loaded_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (subject_key, record_id),
-    CHECK (isfinite(beats_per_minute) AND beats_per_minute >= 0)
-);
-
-CREATE TABLE base.fitbit_sleep_session (
-    subject_key VARCHAR NOT NULL,
-    record_id VARCHAR NOT NULL,
-    source_date DATE NOT NULL,
-    start_at TIMESTAMPTZ NOT NULL,
-    end_at TIMESTAMPTZ NOT NULL,
     sleep_minutes DOUBLE,
-    offset_seconds INTEGER,
-    end_offset_seconds INTEGER,
     sleep_type VARCHAR,
     is_main_sleep BOOLEAN,
-    fetched_at TIMESTAMPTZ NOT NULL,
-    source_key VARCHAR NOT NULL,
-    loaded_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (subject_key, record_id),
+    awake_minutes DOUBLE,
+    sleep_period_minutes DOUBLE,
+    sleep_latency_minutes DOUBLE,
+    after_wake_minutes DOUBLE,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
     CHECK (end_at > start_at),
     CHECK (sleep_minutes IS NULL OR (isfinite(sleep_minutes) AND sleep_minutes >= 0))
 );
+COMMENT ON TABLE base.sleep_session IS '睡眠1回。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.sleep_session.sleep_session_id IS '睡眠セッションの識別子。NULL不可。';
+COMMENT ON COLUMN base.sleep_session.start_at IS '提供元の睡眠開始時刻。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.sleep_session.end_at IS '提供元の睡眠終了時刻。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.sleep_session.source_date IS '提供元が付けた睡眠日付。提供元の日付を保持し日本時間へ置換しない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_session.sleep_minutes IS '提供元サマリーの実睡眠分数。開始・終了の差ではない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_session.sleep_type IS '提供元の睡眠データ種別。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_session.is_main_sleep IS '提供元の主睡眠フラグ。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_session.awake_minutes IS '睡眠期間内の覚醒分数。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_session.sleep_period_minutes IS '提供元の睡眠期間分数。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_session.sleep_latency_minutes IS '入眠までの分数。自動記録の0が既定値の場合もある。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_session.after_wake_minutes IS '提供元の起床後分数。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_session.offset_seconds IS '開始時刻に付属する提供元のUTCオフセット秒。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_session.end_offset_seconds IS '終了時刻に付属する提供元のUTCオフセット秒。NULLは不明・未取得・未算出。';
 
--- Stages and short wake intervals can overlap and have independent identities.
-CREATE TABLE base.fitbit_sleep_detail (
-    subject_key VARCHAR NOT NULL,
-    kind VARCHAR NOT NULL CHECK (kind IN ('sleep-stage', 'sleep-wake')),
-    record_id VARCHAR NOT NULL,
-    sleep_id VARCHAR NOT NULL,
-    source_date DATE NOT NULL,
+CREATE TABLE base.sleep_detail (
+    sleep_detail_id VARCHAR PRIMARY KEY,
+    sleep_session_id VARCHAR NOT NULL,
+    kind VARCHAR NOT NULL,
     start_at TIMESTAMPTZ NOT NULL,
     end_at TIMESTAMPTZ NOT NULL,
+    category VARCHAR,
     offset_seconds INTEGER,
     end_offset_seconds INTEGER,
-    category VARCHAR,
-    fetched_at TIMESTAMPTZ NOT NULL,
-    source_key VARCHAR NOT NULL,
-    loaded_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (subject_key, kind, record_id),
     CHECK (end_at > start_at)
 );
+COMMENT ON TABLE base.sleep_detail IS '睡眠段階・短い覚醒の区間。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.sleep_detail.sleep_detail_id IS '詳細区間の識別子。NULL不可。';
+COMMENT ON COLUMN base.sleep_detail.sleep_session_id IS '親となるbase.sleep_sessionのID。NULL不可。';
+COMMENT ON COLUMN base.sleep_detail.kind IS 'sleep-stage、sleep-wakeなどの詳細種別。NULL不可。';
+COMMENT ON COLUMN base.sleep_detail.start_at IS '区間開始。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.sleep_detail.end_at IS '区間終了。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.sleep_detail.category IS 'deep・light・rem・awake・short-awakeningなどの分類。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_detail.offset_seconds IS '開始時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_detail.end_offset_seconds IS '終了時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
 
--- Complete UTC minute windows from the Google wearables heart rate rollup.
-CREATE TABLE base.fitbit_heart_rate_minute (
-    subject_key VARCHAR NOT NULL,
-    data_source_family VARCHAR NOT NULL,
+CREATE TABLE base.heart_rate_minute (
+    heart_rate_minute_id VARCHAR PRIMARY KEY,
     start_at TIMESTAMPTZ NOT NULL,
+    mean_bpm DOUBLE NOT NULL,
+    min_bpm DOUBLE NOT NULL,
+    max_bpm DOUBLE NOT NULL,
     aggregation_version VARCHAR NOT NULL,
-    end_at TIMESTAMPTZ NOT NULL,
-    average DOUBLE NOT NULL,
-    minimum DOUBLE NOT NULL,
-    maximum DOUBLE NOT NULL,
-    sample_count BIGINT,
-    fetched_at TIMESTAMPTZ NOT NULL,
-    source_key VARCHAR NOT NULL,
-    loaded_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (subject_key, data_source_family, start_at, aggregation_version),
-    CHECK (end_at = start_at + INTERVAL '1 minute'),
     CHECK (date_trunc('minute', start_at) = start_at),
-    CHECK (isfinite(average) AND isfinite(minimum) AND isfinite(maximum)),
-    CHECK (minimum >= 0 AND minimum <= average AND average <= maximum),
-    CHECK (sample_count IS NULL OR sample_count > 0)
+    CHECK (isfinite(mean_bpm) AND isfinite(min_bpm) AND isfinite(max_bpm)),
+    CHECK (min_bpm >= 0 AND min_bpm <= mean_bpm AND mean_bpm <= max_bpm)
 );
+COMMENT ON TABLE base.heart_rate_minute IS '1分ごとの心拍。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.heart_rate_minute.heart_rate_minute_id IS '系列・開始分・集計方式を含めた識別子。NULL不可。';
+COMMENT ON COLUMN base.heart_rate_minute.start_at IS 'UTCの1分区間の開始。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.heart_rate_minute.mean_bpm IS '分平均心拍。bpm。NULL不可。';
+COMMENT ON COLUMN base.heart_rate_minute.min_bpm IS '分最小心拍。bpm。NULL不可。';
+COMMENT ON COLUMN base.heart_rate_minute.max_bpm IS '分最大心拍。bpm。NULL不可。';
+COMMENT ON COLUMN base.heart_rate_minute.aggregation_version IS '分集計の方式の版。NULL不可。';
 
--- Complete acquisition ranges for every metric, including empty responses.
-CREATE TABLE ops.fitbit_coverage (
-    subject_key VARCHAR NOT NULL,
-    data_type VARCHAR NOT NULL,
-    data_source_family VARCHAR NOT NULL,
-    aggregation_version VARCHAR NOT NULL,
-    range_start TIMESTAMPTZ NOT NULL,
-    range_end TIMESTAMPTZ NOT NULL,
-    fetched_at TIMESTAMPTZ NOT NULL,
-    source_key VARCHAR NOT NULL,
-    content_sha256 VARCHAR NOT NULL,
-    source_sha256 VARCHAR NOT NULL,
-    PRIMARY KEY (subject_key, data_type, data_source_family, aggregation_version, range_start),
-    CHECK (range_end > range_start)
+CREATE TABLE base.steps_interval (
+    steps_interval_id VARCHAR PRIMARY KEY,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+    source_date DATE,
+    steps DOUBLE NOT NULL,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    CHECK (end_at > start_at),
+    CHECK (isfinite(steps) AND steps >= 0)
 );
+COMMENT ON TABLE base.steps_interval IS '歩数の区間記録。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.steps_interval.steps_interval_id IS '歩数区間の識別子。NULL不可。';
+COMMENT ON COLUMN base.steps_interval.start_at IS '区間開始。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.steps_interval.end_at IS '区間終了。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.steps_interval.source_date IS '提供元の日付。提供元の日付を保持し日本時間へ置換しない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.steps_interval.steps IS '区間内の歩数増分。累積歩数ではない。NULL不可。';
+COMMENT ON COLUMN base.steps_interval.offset_seconds IS '開始時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.steps_interval.end_offset_seconds IS '終了時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
 
--- Keep ordering after an ID moves between ranges and is later deleted.
-CREATE TABLE ops.fitbit_deleted_record (
-    subject_key VARCHAR NOT NULL,
-    data_type VARCHAR NOT NULL,
-    record_id VARCHAR NOT NULL,
-    fetched_at TIMESTAMPTZ NOT NULL,
-    source_key VARCHAR NOT NULL,
-    PRIMARY KEY (subject_key, data_type, record_id)
+CREATE TABLE base.active_zone_interval (
+    active_zone_interval_id VARCHAR PRIMARY KEY,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+    source_date DATE,
+    active_zone_minutes DOUBLE NOT NULL,
+    category VARCHAR,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    CHECK (end_at > start_at),
+    CHECK (isfinite(active_zone_minutes) AND active_zone_minutes >= 0)
 );
+COMMENT ON TABLE base.active_zone_interval IS 'アクティブゾーン分数の区間。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.active_zone_interval.active_zone_interval_id IS '区間の識別子。NULL不可。';
+COMMENT ON COLUMN base.active_zone_interval.start_at IS '区間開始。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.active_zone_interval.end_at IS '区間終了。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.active_zone_interval.source_date IS '提供元の日付。提供元の日付を保持し日本時間へ置換しない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.active_zone_interval.active_zone_minutes IS '提供元で重み付け済みのアクティブゾーン分数。NULL不可。';
+COMMENT ON COLUMN base.active_zone_interval.category IS 'fat_burn・cardio・peak・分類未指定など。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.active_zone_interval.offset_seconds IS '開始時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.active_zone_interval.end_offset_seconds IS '終了時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+
+CREATE TABLE base.exercise_session (
+    exercise_session_id VARCHAR PRIMARY KEY,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+    source_date DATE,
+    exercise_type VARCHAR NOT NULL,
+    exercise_name VARCHAR NOT NULL,
+    active_seconds DOUBLE,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    CHECK (end_at > start_at)
+);
+COMMENT ON TABLE base.exercise_session IS '種類付きの運動記録。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.exercise_session.exercise_session_id IS '運動セッションの識別子。NULL不可。';
+COMMENT ON COLUMN base.exercise_session.start_at IS '開始時刻。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.exercise_session.end_at IS '終了時刻。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.exercise_session.source_date IS '提供元の開始日付。提供元の日付を保持し日本時間へ置換しない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.exercise_session.exercise_type IS '提供元の運動種類。未知の種類も保持する。NULL不可。';
+COMMENT ON COLUMN base.exercise_session.exercise_name IS '提供元の運動表示名。NULL不可。';
+COMMENT ON COLUMN base.exercise_session.active_seconds IS '休止を除いた活動秒数。未提供ならNULL。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.exercise_session.offset_seconds IS '開始時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.exercise_session.end_offset_seconds IS '終了時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+
+CREATE TABLE base.sedentary_interval (
+    sedentary_interval_id VARCHAR PRIMARY KEY,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+    source_date DATE,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    CHECK (end_at > start_at)
+);
+COMMENT ON TABLE base.sedentary_interval IS '不活動区間。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.sedentary_interval.sedentary_interval_id IS '不活動区間の識別子。NULL不可。';
+COMMENT ON COLUMN base.sedentary_interval.start_at IS '区間開始。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.sedentary_interval.end_at IS '区間終了。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.sedentary_interval.source_date IS '提供元の日付。提供元の日付を保持し日本時間へ置換しない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sedentary_interval.offset_seconds IS '開始時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sedentary_interval.end_offset_seconds IS '終了時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+
+CREATE TABLE base.distance_interval (
+    distance_interval_id VARCHAR PRIMARY KEY,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+    source_date DATE,
+    distance_meters DOUBLE NOT NULL,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    CHECK (end_at > start_at)
+);
+COMMENT ON TABLE base.distance_interval IS '提供元の距離記録。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.distance_interval.distance_interval_id IS '距離区間の識別子。NULL不可。';
+COMMENT ON COLUMN base.distance_interval.start_at IS '区間開始。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.distance_interval.end_at IS '区間終了。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.distance_interval.source_date IS '提供元の日付。提供元の日付を保持し日本時間へ置換しない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.distance_interval.distance_meters IS '提供元が報告した区間距離。m。NULL不可。';
+COMMENT ON COLUMN base.distance_interval.offset_seconds IS '開始時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.distance_interval.end_offset_seconds IS '終了時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+
+CREATE TABLE base.heart_rate_zone_interval (
+    heart_rate_zone_interval_id VARCHAR PRIMARY KEY,
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ NOT NULL,
+    source_date DATE,
+    zone VARCHAR NOT NULL,
+    offset_seconds INTEGER,
+    end_offset_seconds INTEGER,
+    CHECK (end_at > start_at)
+);
+COMMENT ON TABLE base.heart_rate_zone_interval IS '心拍ゾーン区間。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.heart_rate_zone_interval.heart_rate_zone_interval_id IS '区間の識別子。NULL不可。';
+COMMENT ON COLUMN base.heart_rate_zone_interval.start_at IS '区間開始。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.heart_rate_zone_interval.end_at IS '区間終了。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.heart_rate_zone_interval.source_date IS '提供元の日付。提供元の日付を保持し日本時間へ置換しない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.heart_rate_zone_interval.zone IS 'LIGHT・MODERATE・VIGOROUS・PEAKなどの提供元分類。NULL不可。';
+COMMENT ON COLUMN base.heart_rate_zone_interval.offset_seconds IS '開始時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.heart_rate_zone_interval.end_offset_seconds IS '終了時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+
+CREATE TABLE base.health_daily (
+    source_date DATE PRIMARY KEY,
+    resting_heart_rate_bpm DOUBLE,
+    hrv_rmssd_ms DOUBLE,
+    deep_sleep_hrv_rmssd_ms DOUBLE,
+    non_rem_heart_rate_bpm BIGINT,
+    hrv_entropy DOUBLE,
+    respiratory_rate_breaths_per_minute DOUBLE,
+    spo2_average_percent DOUBLE,
+    spo2_lower_bound_percent DOUBLE,
+    spo2_upper_bound_percent DOUBLE,
+    spo2_standard_deviation_percent DOUBLE,
+    nightly_skin_temperature_celsius DOUBLE,
+    baseline_skin_temperature_celsius DOUBLE,
+    relative_nightly_stddev_30d_celsius DOUBLE,
+    vo2_max_ml_kg_min DOUBLE,
+    vo2_max_estimated BOOLEAN,
+    cardio_fitness_level VARCHAR,
+    vo2_max_covariance DOUBLE,
+    CHECK (resting_heart_rate_bpm IS NULL OR (isfinite(resting_heart_rate_bpm) AND resting_heart_rate_bpm >= 0))
+);
+COMMENT ON TABLE base.health_daily IS '提供元の日次健康指標。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.health_daily.source_date IS '提供元の日付。提供元の日付を保持し日本時間へ置換しない。NULL不可。';
+COMMENT ON COLUMN base.health_daily.resting_heart_rate_bpm IS '安静時心拍。bpm。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.hrv_rmssd_ms IS '日次平均RMSSD。ms。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.deep_sleep_hrv_rmssd_ms IS '深睡眠時のRMSSD。ms。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.non_rem_heart_rate_bpm IS 'non-REM睡眠時の心拍。bpm。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.hrv_entropy IS '提供元の心拍間隔分布のエントロピー。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.respiratory_rate_breaths_per_minute IS '提供元の日次呼吸数。回/分。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.spo2_average_percent IS 'SpO2平均。%。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.spo2_lower_bound_percent IS 'SpO2の信頼区間下限。最小値ではない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.spo2_upper_bound_percent IS 'SpO2の信頼区間上限。最大値ではない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.spo2_standard_deviation_percent IS '過去7〜30日の日次SpO2平均に関する標準偏差。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.nightly_skin_temperature_celsius IS '夜間皮膚温。℃。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.baseline_skin_temperature_celsius IS '基準皮膚温。℃。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.relative_nightly_stddev_30d_celsius IS '提供元の相対夜間温度の30日標準偏差。℃。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.vo2_max_ml_kg_min IS '日次VO2 max。ml/kg/min。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.vo2_max_estimated IS '提供元が付けた推定フラグ。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.cardio_fitness_level IS '提供元の心肺フィットネス分類。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.health_daily.vo2_max_covariance IS '提供元のVO2 max共分散値。NULLは不明・未取得・未算出。';
+
+CREATE TABLE base.hrv_sample (
+    hrv_sample_id VARCHAR PRIMARY KEY,
+    sample_at TIMESTAMPTZ NOT NULL,
+    source_date DATE,
+    rmssd_ms DOUBLE,
+    sdnn_ms DOUBLE,
+    offset_seconds INTEGER
+);
+COMMENT ON TABLE base.hrv_sample IS 'HRVの詳細サンプル。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.hrv_sample.hrv_sample_id IS 'サンプルの識別子。NULL不可。';
+COMMENT ON COLUMN base.hrv_sample.sample_at IS '測定時刻。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.hrv_sample.source_date IS '提供元の日付。提供元の日付を保持し日本時間へ置換しない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.hrv_sample.rmssd_ms IS 'サンプルのRMSSD。ms。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.hrv_sample.sdnn_ms IS 'サンプルのSDNN。ms。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.hrv_sample.offset_seconds IS '測定時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+
+CREATE TABLE base.sleep_respiratory_summary (
+    respiratory_summary_id VARCHAR PRIMARY KEY,
+    sample_at TIMESTAMPTZ NOT NULL,
+    source_date DATE,
+    full_breaths_per_minute DOUBLE,
+    full_standard_deviation DOUBLE,
+    full_signal_to_noise DOUBLE,
+    deep_breaths_per_minute DOUBLE,
+    deep_standard_deviation DOUBLE,
+    deep_signal_to_noise DOUBLE,
+    light_breaths_per_minute DOUBLE,
+    light_standard_deviation DOUBLE,
+    light_signal_to_noise DOUBLE,
+    rem_breaths_per_minute DOUBLE,
+    rem_standard_deviation DOUBLE,
+    rem_signal_to_noise DOUBLE,
+    offset_seconds INTEGER
+);
+COMMENT ON TABLE base.sleep_respiratory_summary IS '睡眠呼吸の詳細サマリー。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.respiratory_summary_id IS 'サンプルの識別子。NULL不可。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.sample_at IS '提供元の測定時刻。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.source_date IS '提供元の日付。提供元の日付を保持し日本時間へ置換しない。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.full_breaths_per_minute IS '睡眠全体の呼吸数。回/分。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.full_standard_deviation IS '睡眠全体の呼吸数の標準偏差。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.full_signal_to_noise IS '睡眠全体の提供元SNR。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.deep_breaths_per_minute IS '深睡眠の呼吸数。回/分。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.deep_standard_deviation IS '深睡眠の呼吸数の標準偏差。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.deep_signal_to_noise IS '深睡眠の提供元SNR。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.light_breaths_per_minute IS '浅い睡眠の呼吸数。回/分。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.light_standard_deviation IS '浅い睡眠の呼吸数の標準偏差。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.light_signal_to_noise IS '浅い睡眠の提供元SNR。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.rem_breaths_per_minute IS 'REM睡眠の呼吸数。回/分。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.rem_standard_deviation IS 'REM睡眠の呼吸数の標準偏差。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.rem_signal_to_noise IS 'REM睡眠の提供元SNR。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.sleep_respiratory_summary.offset_seconds IS '測定時刻の提供元UTCオフセット秒。NULLは不明・未取得・未算出。';
+
+CREATE TABLE base.location_point (
+    location_point_id VARCHAR PRIMARY KEY,
+    device_key VARCHAR NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    latitude DOUBLE NOT NULL,
+    longitude DOUBLE NOT NULL,
+    accuracy_meters DOUBLE,
+    speed_kmh DOUBLE,
+    motion_activities VARCHAR[],
+    CHECK (latitude BETWEEN -90 AND 90),
+    CHECK (longitude BETWEEN -180 AND 180)
+);
+COMMENT ON TABLE base.location_point IS '位置情報。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.location_point.location_point_id IS '端末と記録内容から識別する測位ID。NULL不可。';
+COMMENT ON COLUMN base.location_point.device_key IS '測位した端末のソース内キー。NULL不可。';
+COMMENT ON COLUMN base.location_point.observed_at IS '測位時刻。サーバー受信時刻ではない。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.location_point.latitude IS '緯度。度。NULL不可。';
+COMMENT ON COLUMN base.location_point.longitude IS '経度。度。NULL不可。';
+COMMENT ON COLUMN base.location_point.accuracy_meters IS '提供元の測位精度。m。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.location_point.speed_kmh IS '提供元の速度。km/h。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.location_point.motion_activities IS '提供元の活動ラベル配列。NULL・空配列・未知値を保持する。NULLは不明・未取得・未算出。';
+
+CREATE TABLE base.iphone_screen_time_event (
+    event_key VARCHAR PRIMARY KEY,
+    device_key VARCHAR NOT NULL,
+    bundle_id VARCHAR NOT NULL,
+    event_at TIMESTAMPTZ NOT NULL,
+    state VARCHAR NOT NULL CHECK (state IN ('start', 'end')),
+    is_valid BOOLEAN NOT NULL DEFAULT TRUE
+);
+COMMENT ON TABLE base.iphone_screen_time_event IS 'スクリーンタイムのアプリ開始・終了イベント。1行は一意なイベント。送信ファイル消失だけでは無効化しない。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.iphone_screen_time_event.event_key IS 'イベントの識別子。主キー。再送しても同じキーを使う。NULL不可。';
+COMMENT ON COLUMN base.iphone_screen_time_event.device_key IS '記録元の端末。NULL不可。';
+COMMENT ON COLUMN base.iphone_screen_time_event.bundle_id IS 'アプリの識別子。NULL不可。';
+COMMENT ON COLUMN base.iphone_screen_time_event.event_at IS 'イベントが起きた時刻。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.iphone_screen_time_event.state IS 'start＝前面利用開始、end＝終了。NULL不可。';
+COMMENT ON COLUMN base.iphone_screen_time_event.is_valid IS '現在の分析に採用する記録ならTRUE。NULL不可。';
+
+CREATE TABLE base.mac_screen_time_event (
+    event_key VARCHAR PRIMARY KEY,
+    device_key VARCHAR NOT NULL,
+    bundle_id VARCHAR NOT NULL,
+    event_at TIMESTAMPTZ NOT NULL,
+    state VARCHAR NOT NULL CHECK (state IN ('start', 'end')),
+    is_valid BOOLEAN NOT NULL DEFAULT TRUE
+);
+COMMENT ON TABLE base.mac_screen_time_event IS 'スクリーンタイムのアプリ開始・終了イベント。1行は一意なイベント。送信ファイル消失だけでは無効化しない。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.mac_screen_time_event.event_key IS 'イベントの識別子。主キー。再送しても同じキーを使う。NULL不可。';
+COMMENT ON COLUMN base.mac_screen_time_event.device_key IS '記録元の端末。NULL不可。';
+COMMENT ON COLUMN base.mac_screen_time_event.bundle_id IS 'アプリの識別子。NULL不可。';
+COMMENT ON COLUMN base.mac_screen_time_event.event_at IS 'イベントが起きた時刻。タイムゾーン付きの絶対時刻。NULL不可。';
+COMMENT ON COLUMN base.mac_screen_time_event.state IS 'start＝前面利用開始、end＝終了。NULL不可。';
+COMMENT ON COLUMN base.mac_screen_time_event.is_valid IS '現在の分析に採用する記録ならTRUE。NULL不可。';
+
+CREATE TABLE base.app (
+    platform VARCHAR NOT NULL CHECK (platform IN ('ios', 'macos')),
+    bundle_id VARCHAR NOT NULL,
+    app_name VARCHAR,
+    PRIMARY KEY (platform, bundle_id)
+);
+COMMENT ON TABLE base.app IS 'アプリ名の対応。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.app.platform IS 'iosまたはmacos。NULL不可。';
+COMMENT ON COLUMN base.app.bundle_id IS 'そのOSでのアプリ識別子。NULL不可。';
+COMMENT ON COLUMN base.app.app_name IS '本人が分かるアプリ名。NULLは不明・未取得・未算出。';
+
+CREATE TABLE base.profile (
+    profile_id VARCHAR PRIMARY KEY,
+    sex VARCHAR,
+    height_cm DOUBLE,
+    birth_date DATE,
+    home_place_id VARCHAR,
+    university_place_id VARCHAR
+);
+COMMENT ON TABLE base.profile IS '本人の固定情報。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.profile.profile_id IS '本人の設定行ID。NULL不可。';
+COMMENT ON COLUMN base.profile.sex IS '本人が入力した性別。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.profile.height_cm IS '現在の身長。cm。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.profile.birth_date IS '生年月日。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.profile.home_place_id IS '現在の自宅を示すbase.placeのID。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.profile.university_place_id IS '大学を示すbase.placeのID。NULLは不明・未取得・未算出。';
+
+CREATE TABLE base.place (
+    place_id VARCHAR PRIMARY KEY,
+    place_name VARCHAR,
+    latitude DOUBLE,
+    longitude DOUBLE,
+    radius_meters DOUBLE
+);
+COMMENT ON TABLE base.place IS '自宅・大学などの場所。NULLは不明・未取得・未算出を表す。';
+COMMENT ON COLUMN base.place.place_id IS '場所の識別子。NULL不可。';
+COMMENT ON COLUMN base.place.place_name IS '自宅・大学などの表示名。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.place.latitude IS '代表地点の緯度。度。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.place.longitude IS '代表地点の経度。度。NULLは不明・未取得・未算出。';
+COMMENT ON COLUMN base.place.radius_meters IS '円で場所判定するときの半径。m。NULLは不明・未取得・未算出。';

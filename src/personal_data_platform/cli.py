@@ -5,6 +5,13 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable, Sequence
+from typing import TypedDict
+
+
+class _LoaderOptions(TypedDict, total=False):
+    prefix: str
+    reprocess: bool
+    all_streams: bool
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
     configure_mac(commands.add_parser("mac-screen-time", help="collect Mac Screen Time"))
 
     loader = commands.add_parser("loader", help="load saved Raw into MotherDuck")
+    loader.add_argument("--prefix", help="canonical Raw key prefix to load")
+    loader.add_argument(
+        "--reprocess",
+        action="store_true",
+        help="explicitly replay selected OwnTracks Raw even when base IDs exist",
+    )
     dbt = commands.add_parser("dbt", help="apply analytics models")
     commands.add_parser("reconciliation", help="run all daily ingestion, repair and audit stages")
     commands.add_parser("preflight", help="validate cloud runtime connectivity")
@@ -103,12 +116,17 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "loader":
         from personal_data_platform.loader.job import run_loader_from_env
 
+        options: _LoaderOptions = {}
+        if args.prefix is not None:
+            options["prefix"] = args.prefix
+        if args.reprocess:
+            options["reprocess"] = True
+        if args.all_streams:
+            options["all_streams"] = True
         return _run_job(
-            run_loader_from_env,
-            source_id=args.source_id,
-            stream=args.stream,
-            **({"all_streams": True} if args.all_streams else {}),
+            run_loader_from_env, source_id=args.source_id, stream=args.stream, **options
         )
+
     if args.command == "dbt":
         from personal_data_platform.dbt_runner import run_dbt_from_env
 

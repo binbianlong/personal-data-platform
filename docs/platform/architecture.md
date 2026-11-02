@@ -1,85 +1,65 @@
 # アーキテクチャ
 
-Screen TimeはMac、OwnTracksはGCP `us-west1`でRawを保存し、FitbitはAPIから直接取り込む。分析履歴はMotherDuck `us-west-2`へ保存する。
+行動・健康の分析履歴はMotherDuckの`personal_data_platform`へ保存する。分析用shareは`pdp_analytics`。
 
 ```text
-iPhone Screen Time Collector -> 専用SQLite Raw -> Loader -> MotherDuck -> source heartbeat
-Mac Screen Time Collector -> 専用SQLite Raw -> Loader -> MotherDuck -> source heartbeat
-OwnTracks -> receiver -> GCS Raw -> Pub/Sub push -> 非公開worker -> Loader -> MotherDuck
-Google Health Webhook -> receiver -> Pub/Sub queue -> 毎時workerがpull
-  -> API完全取得 -> MotherDuckへ直接書込 -> DB commit後ACK
+iPhone Collector -> 専用SQLite + pendingファイル -> base.iphone_screen_time_event
+Mac Collector    -> 専用SQLite + pendingファイル -> base.mac_screen_time_event
+OwnTracks -> receiver -> GCS Raw -> Pub/Sub -> worker -> base.location_point
+Google Health Webhook -> receiver -> Pub/Sub -> worker -> API完全取得 -> base
 
-MotherDuck base -> dbt View -> read-only share / Remote MCP
-日次Job -> Fitbit補修 -> dbt -> OwnTracks Raw補修 -> Macの取込heartbeat・DB監査 -> Healthchecks
+base 18物理表 -> dbt marts 7ビュー -> read-only share / Remote MCP
+日次Job -> Fitbit直近2日補修 -> dbt -> OwnTracks差分修復 -> relation検査 -> Healthchecks
+実行結果 -> JSONログ
 ```
 
-| source / stream | 取得元 | Raw・復旧元 |
-|---|---|---|
-| `iphone_screen_time / app-in-focus` | Macへ同期されたiPhoneのApp.InFocus | SEGBをMacのSQLiteへ保存 |
-| `mac_screen_time / app-usage` | Mac自身のScreenTime.AppUsage | SEGBをMacのSQLiteへ保存 |
-| `fitbit / health` | Google Health API | アプリ側データをAPIで再取得。PDP内のRaw保存なし |
-| `owntracks / location` | iPhone OwnTracks HTTP | 正規化JSON gzipをGCSへ保存 |
+## データの配置
 
-receiverは認証と通知・Raw保存までを担当し、API取得やDB書込はworkerが行う。
-時刻・lease・監視・復旧は[Platform運用](operations.md)、アクセス境界は[セキュリティ](security.md)を参照する。
+| 配置 | 所有者・内容 |
+|---|---|
+| `base` | Pythonのsource writerが保存する提供元の記録・日次値・手動設定。18物理表 |
+| `marts` | dbtが定義する利用区間・日次集計。7ビューで、元データの変更をquery時に反映する |
+| `ops.job_lock` | 全writerが共有する期限付きlease |
+| `ops.schema_migration` | 適用済みSQLとchecksum |
+| 各CollectorのSQLite | `file_state`と`event_reference`。送信待ちと確定済み参照 |
+| GCS | OwnTracksの不変Raw。無期限保持 |
 
-## 共通処理とsourceの責任
+カラム・単位・NULL・日付の定義は[データモデル](data-model.md)と各table/columnのCOMMENTを参照する。
+coreレイヤーやsource別の取り込み台帳は持たない。本人設定と場所は手動登録し、推測で埋めない。
 
-共通処理はRawの検証・取込台帳・transaction・再試行を、各`src/personal_data_platform/sources/<source>/`は
-取得・wire format・正規化・source固有の保存ルールを所有する。日境界・集計・source横断JOINはdbt Viewへ置く。
+## 保存と再試行
 
-取込・監査・ジョブの制御は`storage/warehouse.py`のWarehouse契約を使い、接続や任意SQLを扱わない。
-batchは型付きデータのみを持ち、source固有のSQLは各sourceの`motherduck.py`へ置く。
-MotherDuck実装がsourceの保存処理を呼び出し、transactionの開始・rollback・commitを管理する。
-接続生成とdbtの認証設定は`storage/factory.py`へ集約し、接続とdbtに同じ設定を渡す。
+共通Warehouseは接続・transaction・leaseを所有し、型付きbatchからsource固有の保存処理を呼ぶ。
+各sourceのSQLは`src/personal_data_platform/sources/<source>/motherduck.py`に置き、source writer自身はcommitしない。
 
-Raw adapterは一つのsource/streamを担当し、保持中の全Raw schema版を再生できるようにする。
-FitbitはRaw adapterへ登録せず、API取得したsnapshotをWarehouseの操作で保存する。dbt selectorはRaw adapterから独立して解決する。
-Raw schema版とparser versionは別で、parser versionを更新すると保持中の旧parser成功分も再解析する。
-共通処理は他sourceへCollectorのscan記録を要求せず、未知のsource/streamを既存decoderへ流すfallbackを設けない。
+leaseはAPI取得前から保存まで保持する。書込みtransactionでは所有者と期限を条件に同じlease行へ実際に書き込み、
+別所有者への引き継ぎと競合させる。初回の空DB作成以外のDDLも同じleaseに従う。
+COMMIT結果不明やROLLBACK失敗では接続を再利用せず、後続の保存・ACKを止める。
 
-iPhone・Macのsourceはそれぞれ設定、取得、decoder、Adapter、writer、CLIとLaunchAgentを所有する。
-`biome/`はSEGB、Raw v2 envelope、疑似化、SQLite archive、収集engineなどsource名を判断しない共通処理を持つ。
-相互sourceへの依存はなく、一方のscan・取込・監査・heartbeat失敗は他方の状態を変更しない。
-書込は他sourceと同じ`loader` leaseで直列化する。横断分析はトップレベルの`dbt/models/cross_source/`へ置く。
+| source | 再試行・復旧 |
+|---|---|
+| OwnTracks | Rawの端末・内容から作る決定的IDで再送を判定。GCSとbase IDを照合し欠落を修復する |
+| Fitbit | lease内でAPIを取得し直す。完全取得できた種別・範囲だけ更新し、古い保存済みレスポンスは再適用しない |
+| iPhone / Mac | pendingの同じbytes・IDを順番に再送する。DB確定→SQLite ACK/参照更新→ファイル削除 |
 
-## Rawと保持期限
+OwnTracksのparser変更は`loader --reprocess`で対象範囲を明示する。通常のID照合はparser版を記録しない。
+Screen Timeの送信完了bytesは残さず、元ファイルの消失だけでbase履歴を無効化しない。
+全履歴の移行ではbaseをコピーする。FitbitはAPIで再取得可能な範囲、OwnTracksは保存済みGCS Rawからも復元できる。
 
-- Rawはcreate-onlyの決定的gzip。展開後bytesのSHA-256と観測時刻をkeyへ含め、同じkeyのretryには同じbytesを使う。
-- 連続する同一内容は省くが、`A -> B -> A`を過去のhashだけで除外しない。
-- Screen Timeは各元ファイルの最新成功版と未取込分をSQLiteへ保持する。保存期限はなく、Biomeから消えたファイルも残す。
-- Fitbitはアプリ側のデータをAPIで取得する。PDP内ではAPIレスポンスをメモリだけで扱い、Rawを永続保存しない。
-- OwnTracksの位置RawはGCSに無期限保存する。
+## Sourceの分離
 
-MotherDuckはRaw整理後も分析履歴を保持し、OwnTracks以外の全期間のDB復元をRawだけで保証しない。
-key・payload・重複排除条件は[iPhone Screen Time](../sources/iphone-screen-time/data-model.md)、
-[Mac Screen Time](../sources/mac-screen-time/data-model.md)、
-[Fitbit](../sources/fitbit/data-model.md)、[OwnTracks](../sources/owntracks/data-model.md)のデータモデルを参照する。
+`iphone_screen_time`と`mac_screen_time`は別の取得処理・設定・SQLite・base table・LaunchAgentを持つ。
+`biome/`はSEGB、envelope、疑似化、pending state、収集engineの共通処理を持つ。
+片方の取得・送信失敗は他方のローカル状態を変更しない。DBへの書込みは共通leaseで直列化する。
 
-## Loaderと永続化
+FitbitはRaw adapterへ登録せず、API取得したsnapshotを直接保存する。新しいsourceには取得・型付きbatch・source writer、
+必要なbase定義、selectorと必須relation、再試行テストを追加する。適用済みmigrationは変更せず、変更分のSQLを追記する。
 
-Loaderは選択scopeのRawをgeneration固定で読み、gzip展開・SHA-256検証後にdecodeする。
-Raw identity・generation・parser versionが一致する成功だけをskipする。
-型付き行、sourceの補助状態、取込成功はWarehouseが所有する1 transactionでcommitする。
-書込失敗はrollbackして別transactionに失敗記録を残す。commit結果不明・rollback失敗では接続を閉じ、
-後続Rawや失敗記録を書き込まず、再接続後の台帳から再試行を判断する。
-Fitbitは完全取得範囲を直接commitし、結果不明では接続を破棄して再配信時にAPIを再取得する。
+## 運用境界
 
-Macはローカル保存後に同じprocessでLoaderを実行し、DB成功確認後に旧成功Raw・対応する旧成功台帳を整理する。
-pending・失敗・不完全snapshotがある回はstream heartbeatを更新しない。
-Raw単位の再試行には取込台帳、Macの鮮度確認にはstream heartbeat、日次結果には`ops.job_run`を使う。
-DBと外部HTTPはatomicではないため、外部送信失敗はJob失敗として扱う。
+日次・sourceの結果はログで確認する。日次成功は外部Healthchecksの応答成功後だけ記録し、競合延期では成功pingを送らない。
+Macの稼働確認はCollectorログを使い、最後のアプリ利用時刻を稼働時刻と解釈しない。
+Cloud Run失敗・Pub/Sub滞留・receiver/worker ERRORの監視は継続する。
 
-## Source・stream追加手順
-
-1. `sources/<source>/`へ取得・型付きbatch・監査を実装する。Rawを保存するsourceはcodecとRaw adapterを`sources/registry.py`へ登録する。
-2. dbt selectorと必須relationを定義し、Rawを保存する場合は全prefix/schema、parser version、保持条件と保存先種別も定義する。
-3. baseの変更は新しいforward migrationへ追加し、MotherDuck実装からsourceの保存処理を呼び出す。適用済みSQLを書き換えず、sourceの保存処理ではcommitしない。
-4. dbtのmodel/testへselector用tagを付け、scope混入拒否、再実行、rollback、generation固定を検証する。
-5. Terraformで取得identity・実行経路・監視と、必要な場合だけRaw権限・Lifecycleを設定し、[DB更新手順](operations.md#dbの初期化と更新)で有効にする。
-
-## 保存先の追加
-
-新しい保存先はWarehouse契約の実装、sourceごとの保存処理、接続設定とdbtの対応を追加する。
-現在のDDLとdbt SQLはMotherDuck用であり、新しい保存先での排他・原子的な確定・訂正と削除の検証が必要となる。
-移行する履歴は、保持中のRaw・Fitbitのアプリ側データから再取得できる範囲と、既存DBの履歴を確認して決める。
+[運用](operations.md)、[セキュリティ](security.md)、[旧スキーマからの移行](analytics-migration.md)を参照する。
+保存先を追加する場合はWarehouse、source SQL、DDL、dbtに加え、その保存先での排他・確定・訂正反映を検証する。

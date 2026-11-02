@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import uuid
+import zlib
 from collections.abc import Callable, Iterable, Mapping
 
 from personal_data_platform.raw.models import RawObject
@@ -38,7 +39,7 @@ def _decompress_and_verify(raw: RawObject, stored: bytes) -> bytes:
         raise RawDecodeError(f"raw object is not gzip encoded: {raw.key}")
     try:
         payload = gzip.decompress(stored)
-    except gzip.BadGzipFile as error:
+    except (gzip.BadGzipFile, EOFError, zlib.error) as error:
         raise RawDecodeError(f"raw object has invalid gzip data: {raw.key}") from error
     actual = hashlib.sha256(payload).hexdigest()
     if actual != raw.sha256:
@@ -54,6 +55,7 @@ def run_loader(
     *,
     source: SourceAdapter | None = None,
     prefix: str | None = None,
+    reprocess: bool = False,
     _lease_owner: str | None = None,
     _deadline: float | None = None,
 ) -> LoadSummary:
@@ -61,7 +63,13 @@ def run_loader(
     source = source or get_source()
     refs = list_source_raw(repository, source, prefix)
     return run_loader_objects(
-        repository, warehouse, refs, source=source, _lease_owner=_lease_owner, _deadline=_deadline
+        repository,
+        warehouse,
+        refs,
+        source=source,
+        reprocess=reprocess,
+        _lease_owner=_lease_owner,
+        _deadline=_deadline,
     )
 
 
@@ -71,11 +79,16 @@ def run_loader_objects(
     observations: Iterable[RawObject],
     *,
     source: SourceAdapter,
+    reprocess: bool = False,
     _lease_owner: str | None = None,
     buffered_payloads: Mapping[str, bytes] | None = None,
     _deadline: float | None = None,
 ) -> LoadSummary:
     """Load only generation-pinned references; never list storage or run migrations."""
+    if source.source_id != "owntracks":
+        raise ValueError(
+            "object loader supports OwnTracks only; Screen Time uses its local pending queue"
+        )
     refs = validate_observations(source, observations)
     run_id = str(uuid.uuid4())
     # All source streams share one warehouse write lease. Source selection does not
@@ -100,11 +113,12 @@ def run_loader_objects(
     try:
         guard()
         timer = interrupt_after(warehouse, deadline - time.monotonic())
-        already_loaded = warehouse.succeeded_keys_for(refs, parser_version=source.parser_version)
-        pending = [raw for raw in refs if raw.key not in already_loaded]
+        already_loaded = (
+            set() if reprocess else warehouse.location_point_ids(raw.logical_key for raw in refs)
+        )
+        pending = [raw for raw in refs if raw.logical_key not in already_loaded]
         for raw in pending:
             guard()
-            byte_size = 0
             try:
                 stored = (
                     buffered_payloads[raw.key]
@@ -112,18 +126,18 @@ def run_loader_objects(
                     else repository.get_raw(raw.key, generation=raw.storage_generation)
                 )
                 payload = _decompress_and_verify(raw, stored)
-                byte_size = len(payload)
                 batch = source.decode(raw, payload)
                 guard()
-                record_count += warehouse.load_object(raw, byte_size=byte_size, batch=batch)
+                record_count += warehouse.load_object(
+                    raw, batch=batch, owner_id=_lease_owner or run_id, deadline=deadline
+                )
                 succeeded += 1
             except (WarehouseConnectionError, TimeoutError):
                 raise
-            except Exception as error:
+            except Exception:
                 guard()
                 failed += 1
                 LOGGER.exception("failed to load raw object %s", raw.key)
-                warehouse.mark_failed(raw, byte_size=byte_size, error=error)
         summary = LoadSummary(
             discovered=len(refs),
             skipped=len(refs) - len(pending),
@@ -185,7 +199,12 @@ def run_loader_all(
 
 
 def run_loader_from_env(
-    *, source_id: str | None = None, stream: str | None = None, all_streams: bool = False
+    *,
+    source_id: str | None = None,
+    stream: str | None = None,
+    all_streams: bool = False,
+    prefix: str | None = None,
+    reprocess: bool = False,
 ) -> int:
     """Runtime entrypoint used by a source-scoped Cloud Run loader job."""
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -196,6 +215,8 @@ def run_loader_from_env(
     )
     for source in sources:
         validate_runtime_policy(source)
+    if all_streams and (prefix is not None or reprocess):
+        raise ValueError("prefix/reprocess requires a single source stream")
     warehouse = open_warehouse()
     try:
         warehouse.migrate()
@@ -207,7 +228,13 @@ def run_loader_from_env(
                     repository_factory=lambda source: source.repository_from_env(),
                 )
             else:
-                summary = run_loader(sources[0].repository_from_env(), warehouse, source=sources[0])
+                summary = run_loader(
+                    sources[0].repository_from_env(),
+                    warehouse,
+                    source=sources[0],
+                    prefix=prefix,
+                    reprocess=reprocess,
+                )
         except JobAlreadyRunning:
             LOGGER.info(
                 "loader skipped source=%s: another run is active",

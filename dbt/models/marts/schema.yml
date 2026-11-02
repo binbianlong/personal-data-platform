@@ -1,0 +1,107 @@
+version: 2
+models:
+- name: iphone_screen_time_interval
+  description: iphone_screen_time_interval の分析ビュー。
+  columns:
+  - name: start_event_key
+    description: start_event_key。
+  - name: device_key
+    description: device_key。
+  - name: bundle_id
+    description: bundle_id。
+  - name: started_at
+    description: started_at。
+  - name: ended_at
+    description: ended_at。
+  - name: duration_seconds
+    description: duration_seconds。
+  - name: is_inferred
+    description: is_inferred。
+  - name: boundary_event_key
+    description: boundary_event_key。
+- name: daily_iphone_screen_time_total
+  description: daily_iphone_screen_time_total の分析ビュー。
+  columns:
+  - name: activity_date
+    description: activity_date。
+  - name: observed_seconds
+    description: observed_seconds。
+  - name: inferred_seconds
+    description: inferred_seconds。
+  - name: total_seconds
+    description: total_seconds。
+  - name: unresolved_event_count
+    description: unresolved_event_count。
+- name: mac_screen_time_interval
+  description: mac_screen_time_interval の分析ビュー。
+  columns:
+  - name: start_event_key
+    description: start_event_key。
+  - name: device_key
+    description: device_key。
+  - name: bundle_id
+    description: bundle_id。
+  - name: started_at
+    description: started_at。
+  - name: ended_at
+    description: ended_at。
+  - name: duration_seconds
+    description: duration_seconds。
+  - name: is_inferred
+    description: is_inferred。
+  - name: boundary_event_key
+    description: boundary_event_key。
+- name: daily_mac_screen_time_total
+  description: daily_mac_screen_time_total の分析ビュー。
+  columns:
+  - name: activity_date
+    description: activity_date。
+  - name: observed_seconds
+    description: observed_seconds。
+  - name: inferred_seconds
+    description: inferred_seconds。
+  - name: total_seconds
+    description: total_seconds。
+  - name: unresolved_event_count
+    description: unresolved_event_count。
+- name: daily_steps
+  description: daily_steps の分析ビュー。
+  columns:
+  - name: activity_date
+    description: activity_date。
+  - name: steps
+    description: steps。
+  - name: interval_part_count
+    description: interval_part_count。
+  - name: has_prorated_intervals
+    description: has_prorated_intervals。
+- name: daily_active_zone
+  description: daily_active_zone の分析ビュー。
+  columns:
+  - name: activity_date
+    description: activity_date。
+  - name: active_zone_minutes
+    description: active_zone_minutes。
+  - name: fat_burn_azm_minutes
+    description: fat_burn_azm_minutes。
+  - name: cardio_azm_minutes
+    description: cardio_azm_minutes。
+  - name: peak_azm_minutes
+    description: peak_azm_minutes。
+  - name: unspecified_azm_minutes
+    description: unspecified_azm_minutes。
+  - name: interval_part_count
+    description: interval_part_count。
+  - name: has_prorated_intervals
+    description: has_prorated_intervals。
+- name: daily_sleep_detail
+  description: daily_sleep_detail の分析ビュー。
+  columns:
+  - name: sleep_date
+    description: sleep_date。
+  - name: kind
+    description: kind。
+  - name: category
+    description: category。
+  - name: total_minutes
+    description: total_minutes。
