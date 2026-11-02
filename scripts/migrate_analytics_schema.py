@@ -258,7 +258,11 @@ def migrate_state(
     import zlib
 
     from personal_data_platform.biome.collector_state import _SCHEMA
-    from personal_data_platform.biome.raw import parse_observed_at, parse_raw_object_key
+    from personal_data_platform.biome.raw import (
+        decode_segment_envelope,
+        parse_observed_at,
+        parse_raw_object_key,
+    )
     from scripts.analytics_migration_preflight import validate_legacy_sqlite
 
     streams = {"iphone_screen_time": "app-in-focus", "mac_screen_time": "app-usage"}
@@ -275,7 +279,7 @@ def migrate_state(
         validate_legacy_sqlite(old)
         observations = old.execute(
             "SELECT device_key,stream,segment_key,observed_at,sha256,object_key,"
-            "CASE WHEN status='pending' THEN compressed_payload ELSE NULL END,status,storage_generation "
+            "compressed_payload,status,storage_generation "
             "FROM segment_observation ORDER BY observed_at,object_key"
         ).fetchall()
     segment_rows = warehouse.execute(
@@ -369,8 +373,19 @@ def migrate_state(
             raise ValueError("pending snapshot precedes or ties sent snapshot")
         if status == "pending" and segment in segment_map and observed < segment_map[segment][1]:
             raise ValueError("pending snapshot precedes warehouse-confirmed snapshot")
-    if not set(latest).issubset(segment_map):
-        raise ValueError("warehouse and local sent segments differ")
+    # Legacy tombstone snapshots were ACKed without creating warehouse segments.
+    for segment in set(latest) - set(segment_map):
+        key = latest[segment][2]
+        payload = next(row[5] for row in rows if row[4] == key)
+        try:
+            data = gzip.decompress(payload)
+            if (
+                hashlib.sha256(data).hexdigest() != latest[segment][3]
+                or decode_segment_envelope(data)[1] != "tombstones"
+            ):
+                raise ValueError("unverified sent tombstone")
+        except (OSError, EOFError, TypeError, ValueError, zlib.error) as error:
+            raise ValueError("warehouse and local sent segments differ") from error
     by_key = {row[4]: row for row in rows}
     parser_by_key = {}
     required_keys = {item[2] for item in latest.values()} | {

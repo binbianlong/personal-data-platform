@@ -34,6 +34,8 @@ uv run --locked python -m scripts.migrate_analytics_schema \
 
 事前検査に成功したら、同じコマンドに `--apply` を追加する。新 baseline の実際の履歴を適用し、SQL で全履歴を stage へ投影する。投影と stage の全行を双方向に比較し、dbt が lease を取得して7ビューを構築する。両 SQLite は別々に生成し、旧 ops の DISTINCT 参照、pending の圧縮 bytes と hash、最新 sent metadata を検証してから有効化済み marker を設定する。旧 SQLite は変更しない。完了後も source/stage の履歴、全表と参照、全ビューの結果、stage の定義に一時 catalog への依存がないことを確認する。失敗や応答消失後は状況を調べ、部分 stage を完成品として使わない。
 
+旧処理は削除通知（tombstone）を送信済みにしても warehouse の segment を作らない。その記録は保存済み payload の hash・削除通知の形式・成功 receipt を確認できる場合だけ、参照イベントを持たない sent 状態として引き継ぐ。通常イベントの segment 欠落は引き続き拒否する。
+
 ## SQLite の配置準備
 
 collector が停止したまま、各 OS について次を実行する。初回は `--apply` を省略して検査し、成功後に追加する。canonical の旧 SQLite はこの操作では変更しない。pending の payload は canonical と同じ親ディレクトリの `collector.payloads` にコピーし、パスを書き換えた `collector.db.ready` を作る。既存の ready や payload ディレクトリがあると停止する。

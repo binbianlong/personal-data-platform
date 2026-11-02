@@ -622,3 +622,77 @@ def test_unreferenced_event_only_permitted_when_inactive(
         assert target.exists() is apply
     assert old.read_bytes() == source_before
     warehouse.close()
+
+
+@pytest.mark.parametrize(
+    ("source_id", "stream"),
+    [("iphone_screen_time", "app-in-focus"), ("mac_screen_time", "app-usage")],
+)
+@pytest.mark.parametrize("case", ["tombstones", "events", "corrupt", "bad-receipt"])
+@pytest.mark.parametrize("apply", [False, True])
+def test_sent_tombstone_without_warehouse_segment_requires_payload_and_receipt(
+    tmp_path, source_id, stream, case, apply
+):
+    from personal_data_platform.biome.raw import encode_segment_envelope
+
+    warehouse = duckdb.connect()
+    warehouse.execute(Path("tests/fixtures/analytics_migration/legacy_schema.sql").read_text())
+    old, new = tmp_path / "old.db", tmp_path / "prepared" / "collector.db"
+    data = encode_segment_envelope(
+        b"ignored deletion notice", kind="events" if case == "events" else "tombstones"
+    )
+    identity = ScreenTimeRawIdentity(
+        source_id,
+        "a" * 64,
+        stream,
+        "b" * 64,
+        datetime(2026, 1, 1, tzinfo=UTC),
+        hashlib.sha256(data).hexdigest(),
+    )
+    with sqlite3.connect(old) as db:
+        db.executescript(LEGACY_SQLITE_SCHEMA)
+        db.execute(
+            "INSERT INTO segment_observation (device_key,stream,segment_key,observed_at,sha256,object_key,compressed_payload,status) VALUES (?,?,?,?,?,?,?,'uploaded')",
+            (
+                identity.device_key,
+                stream,
+                identity.segment_key,
+                format_observed_at(identity.observed_at),
+                identity.sha256,
+                identity.object_key,
+                gzip.compress(b"wrong" if case == "corrupt" else data, mtime=0),
+            ),
+        )
+    warehouse.execute(
+        "INSERT INTO ops.ingestion_metadata (object_key,source_id,schema_version,subject_key,source_stream,logical_key,observed_at,content_sha256,byte_size,status,parser_version,started_at) VALUES (?, ?, 2, ?, ?, ?, ?, ?, ?, ?, 'v1', ?)",
+        [
+            identity.object_key,
+            source_id,
+            identity.device_key,
+            stream,
+            identity.segment_key,
+            identity.observed_at,
+            identity.sha256,
+            len(data),
+            "failed" if case == "bad-receipt" else "succeeded",
+            identity.observed_at,
+        ],
+    )
+    before = old.read_bytes()
+    if case != "tombstones":
+        with pytest.raises(ValueError):
+            migrate_state(warehouse, old, new, source_id=source_id, apply=apply)
+        assert not new.parent.exists()
+    else:
+        migrate_state(warehouse, old, new, source_id=source_id, apply=apply)
+        if apply:
+            with sqlite3.connect(new) as db:
+                assert db.execute(
+                    "SELECT status,parser_version,payload_path FROM file_state"
+                ).fetchall() == [("sent", "v1", None)]
+                assert db.execute("SELECT count(*) FROM event_reference").fetchone() == (0,)
+            assert not CollectorState(new, source_id=source_id).pending()
+        else:
+            assert not new.parent.exists()
+    assert old.read_bytes() == before
+    warehouse.close()
