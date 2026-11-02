@@ -39,7 +39,9 @@ def sleep_detail_id(kind: str, record_id: str) -> str:
 
 
 def _identity(parts: list[str]) -> str:
-    return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(parts, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
 
 
 _DAILY_FIELDS = {
