@@ -43,7 +43,8 @@ GitHubのDependency graphとDependabot alertsを有効にし、PR作成はRenova
 上位依存の制約で更新できない場合はその依存も確認する。alert対象外のOS package等はこの経路では検知できない。
 
 `uv.lock`の変更は開発用依存だけでも本番imageの再build・deployを起動するため、deploy結果を確認できる日にマージする。
-MacではCollectorを停止してからcheckoutを更新し、`just sync`で依存を同期して再起動する。
+Macの稼働用checkoutは`~/Library/Application Support/personal-data-platform/runtime`とし、検証済みcommitのdetached HEADで稼働する。
+Collectorを停止してからそのcheckoutを更新し、`uv sync --locked --no-dev`で依存を同期して再起動する。
 Cloud Runのdeploy、次の日次Job、Screen TimeのCollector実行ログを確認する。復旧には[Deploy](#deploy)のrollback手順を使う。
 
 ## DBの初期化と更新
