@@ -227,3 +227,15 @@ def test_unknown_source_is_rejected_before_cloud_access(monkeypatch, capsys):
     )
     assert main(["loader", "--source", "unknown"]) == 1
     assert "unsupported source" in capsys.readouterr().err
+
+
+def test_loader_explicit_reprocess_keeps_selected_raw_prefix(monkeypatch):
+    calls = []
+    fake_module = types.ModuleType("personal_data_platform.loader.job")
+    fake_module.run_loader_from_env = lambda **kwargs: calls.append(kwargs) or 0
+    monkeypatch.setitem(sys.modules, "personal_data_platform.loader.job", fake_module)
+    prefix = "raw/owntracks/v1/" + "a" * 64 + "/location/2026/10/"
+    assert main(["loader", "--source", "owntracks", "--prefix", prefix, "--reprocess"]) == 0
+    assert calls == [
+        {"source_id": "owntracks", "stream": None, "prefix": prefix, "reprocess": True}
+    ]

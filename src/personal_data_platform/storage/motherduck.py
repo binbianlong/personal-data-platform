@@ -1,23 +1,21 @@
-"""Transactional MotherDuck/DuckDB persistence for decoded raw observations."""
+"""Transactional MotherDuck/DuckDB persistence under a shared writer lease."""
 
 from __future__ import annotations
 
-import json
+import math
 import os
 import re
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from personal_data_platform.network_diagnostics import instrument_connection, network_phase
 from personal_data_platform.raw.models import RawObject
-from personal_data_platform.reconciliation.models import DAILY_JOB_HISTORY_NAMES
 from personal_data_platform.sources.contracts import DecodedBatch
 from personal_data_platform.sources.fitbit.models import (
     HeartRateMinuteSnapshot,
@@ -32,15 +30,7 @@ from personal_data_platform.sources.mac_screen_time.batch import MacScreenTimeBa
 from personal_data_platform.sources.owntracks import motherduck as owntracks
 from personal_data_platform.sources.owntracks.batch import OwnTracksBatch
 from personal_data_platform.storage.migrations import apply_migrations
-from personal_data_platform.storage.warehouse import (
-    IngestionState as IngestionState,
-)
-from personal_data_platform.storage.warehouse import (
-    WarehouseConnectionError as WarehouseConnectionError,
-)
-from personal_data_platform.storage.warehouse import (
-    WarehouseLeaseError,
-)
+from personal_data_platform.storage.warehouse import WarehouseConnectionError, WarehouseLeaseError
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
@@ -95,20 +85,8 @@ def connect(config: WarehouseConfig) -> DuckDBPyConnection:
         )
 
 
-def _raw_identity(raw: RawObject) -> tuple[str, int, str, str, str, datetime, str]:
-    return (
-        raw.source_id,
-        raw.schema_version,
-        raw.subject_key,
-        raw.stream,
-        raw.logical_key,
-        raw.observed_at,
-        raw.sha256,
-    )
-
-
 class Warehouse:
-    """Small repository that makes a raw object's load status atomic."""
+    """Commit source records atomically, with no remote ingestion receipts."""
 
     def __init__(self, connection: DuckDBPyConnection) -> None:
         self.connection = cast("DuckDBPyConnection", instrument_connection(connection))
@@ -119,460 +97,6 @@ class Warehouse:
 
     def migrate(self, migrations: Path | None = None) -> None:
         apply_migrations(self, migrations)
-
-    def succeeded_keys(self, *, source_id: str, stream: str) -> set[str]:
-        rows = self.connection.execute(
-            """
-            SELECT object_key
-            FROM ops.ingestion_metadata
-            WHERE source_id = ? AND source_stream = ?
-              AND status = 'succeeded'
-            """,
-            [source_id, stream],
-        ).fetchall()
-        return {row[0] for row in rows}
-
-    def succeeded_keys_for(
-        self, raw_objects: Iterable[RawObject], *, parser_version: str | None = None
-    ) -> set[str]:
-        """Return active successes matching the live Raw identity and GCS generation."""
-
-        materialized = tuple(raw_objects)
-        live_identities = {
-            value.key: (*_raw_identity(value), value.storage_generation) for value in materialized
-        }
-        if not live_identities:
-            return set()
-        rows: list[tuple[Any, ...]] = []
-        for source_id, stream in sorted(
-            {(value.source_id, value.stream) for value in materialized}
-        ):
-            rows.extend(
-                self.connection.execute(
-                    """
-                    SELECT object_key, source_id, schema_version, subject_key,
-                           source_stream, logical_key, observed_at,
-                           content_sha256, storage_generation
-                    FROM ops.ingestion_metadata
-                    WHERE source_id = ? AND source_stream = ?
-                      AND status = 'succeeded'
-                      AND (? IS NULL OR parser_version = ?)
-                    """,
-                    [source_id, stream, parser_version, parser_version],
-                ).fetchall()
-            )
-        return {
-            str(object_key)
-            for object_key, *identity in rows
-            if live_identities.get(str(object_key)) == tuple(identity)
-        }
-
-    def ingestion_counts(self, *, source_id: str, stream: str) -> dict[str, int]:
-        rows = self.connection.execute(
-            """
-            SELECT status, count(*)
-            FROM ops.ingestion_metadata
-            WHERE source_id = ? AND source_stream = ?
-            GROUP BY status
-            """,
-            [source_id, stream],
-        ).fetchall()
-        return {str(status): int(count) for status, count in rows}
-
-    def active_ingestion_states(self, *, source_id: str, stream: str) -> dict[str, IngestionState]:
-        """Return the confirmed outcomes for a source stream."""
-        rows = self.connection.execute(
-            """SELECT object_key, status FROM ops.ingestion_metadata
-            WHERE source_id = ? AND source_stream = ?""",
-            [source_id, stream],
-        ).fetchall()
-        return {key: IngestionState(key, status) for key, status in rows}
-
-    def _existing_object(self, raw: RawObject) -> tuple[Any, ...] | None:
-        current = self.connection.execute(
-            """
-            SELECT status, content_sha256, storage_generation,
-                   source_id, schema_version, subject_key, source_stream,
-                   logical_key, observed_at, parser_version
-            FROM ops.ingestion_metadata
-            WHERE object_key = ?
-            """,
-            [raw.key],
-        ).fetchone()
-        if current and (*current[3:9], current[1]) != _raw_identity(raw):
-            raise RuntimeError(f"immutable object identity changed: {raw.key}")
-        return current
-
-    def _write_batch(self, raw: RawObject, batch: DecodedBatch, *, loaded_at: datetime) -> None:
-        if isinstance(batch, IPhoneScreenTimeBatch) and raw.source_id == "iphone_screen_time":
-            iphone_screen_time.write_state(self.connection, raw, batch, loaded_at=loaded_at)
-        elif isinstance(batch, MacScreenTimeBatch) and raw.source_id == "mac_screen_time":
-            mac_screen_time.write_state(self.connection, raw, batch, loaded_at=loaded_at)
-        elif isinstance(batch, OwnTracksBatch) and raw.source_id == "owntracks":
-            owntracks.write_batch(self.connection, raw, batch, loaded_at=loaded_at)
-        else:
-            raise ValueError(f"unsupported decoded batch for source: {raw.source_id}")
-
-    def commit_fitbit_snapshot(
-        self,
-        snapshot: Snapshot | HeartRateMinuteSnapshot,
-        *,
-        source_key: str,
-        loaded_at: datetime,
-        owner_id: str,
-        deadline: float,
-        monotonic: Callable[[], float] = time.monotonic,
-    ) -> WriteResult:
-        """Replace a complete acquisition and coverage while holding the writer lease."""
-        if not self.connection_usable:
-            raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
-
-        def guard() -> None:
-            seconds = deadline - monotonic()
-            if seconds <= 0:
-                raise TimeoutError("acquisition execution budget exhausted")
-            self.require_job_lock(owner_id, remaining_seconds=max(1, int(seconds)))
-
-        batch: FitbitBatch | FitbitMinuteBatch
-        batch = (
-            FitbitMinuteBatch(snapshot)
-            if isinstance(snapshot, HeartRateMinuteSnapshot)
-            else FitbitBatch(snapshot)
-        )
-        guard()
-        try:
-            self.connection.execute("BEGIN")
-        except Exception as error:
-            self.connection_usable = False
-            raise WarehouseConnectionError("cannot begin acquisition transaction") from error
-        try:
-            result = batch.write_snapshot(
-                self.connection, source_key=source_key, loaded_at=loaded_at
-            )
-            guard()
-        except Exception:
-            try:
-                self.connection.execute("ROLLBACK")
-            except Exception as error:
-                self.connection_usable = False
-                raise WarehouseConnectionError("acquisition rollback outcome unknown") from error
-            raise
-        try:
-            self.connection.execute("COMMIT")
-        except Exception as error:
-            self.connection_usable = False
-            raise WarehouseConnectionError("acquisition commit outcome unknown") from error
-        return result
-
-    def load_object(
-        self,
-        raw: RawObject,
-        *,
-        byte_size: int,
-        batch: DecodedBatch,
-        _in_transaction: bool = False,
-    ) -> int:
-        """Commit source records and their success state in one transaction."""
-
-        if not self.connection_usable:
-            raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
-        now = datetime.now(UTC)
-        try:
-            if not _in_transaction:
-                self.connection.execute("BEGIN TRANSACTION")
-        except Exception as error:
-            self.connection_usable = False
-            raise WarehouseConnectionError("cannot begin transaction; reopen warehouse") from error
-        try:
-            current = self._existing_object(raw)
-            if (
-                current
-                and current[0] == "succeeded"
-                and current[2] == raw.storage_generation
-                and current[9] == batch.parser_version
-            ):
-                if not _in_transaction:
-                    self.connection.execute("ROLLBACK")
-                return 0
-
-            self._write_batch(raw, batch, loaded_at=now)
-            self.connection.execute(
-                """
-                INSERT INTO ops.ingestion_metadata (
-                    object_key, source_id, schema_version, subject_key, source_stream,
-                    logical_key, observed_at, content_sha256, byte_size, status,
-                    parser_version, record_count, started_at, completed_at, error_type,
-                    error_message, retry_count, storage_created_at, storage_generation
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, ?,
-                          NULL, NULL, 0, ?, ?)
-                ON CONFLICT (object_key) DO UPDATE SET
-                    status = 'succeeded', parser_version = excluded.parser_version,
-                    subject_key = excluded.subject_key, logical_key = excluded.logical_key,
-                    byte_size = excluded.byte_size, record_count = excluded.record_count,
-                    started_at = excluded.started_at, completed_at = excluded.completed_at,
-                    error_type = NULL, error_message = NULL,
-                    storage_created_at = excluded.storage_created_at,
-                    storage_generation = excluded.storage_generation,
-                    retry_count = ops.ingestion_metadata.retry_count + 1
-                """,
-                [
-                    raw.key,
-                    raw.source_id,
-                    raw.schema_version,
-                    raw.subject_key,
-                    raw.stream,
-                    raw.logical_key,
-                    raw.observed_at,
-                    raw.sha256,
-                    byte_size,
-                    batch.parser_version,
-                    batch.record_count,
-                    now,
-                    now,
-                    raw.storage_created_at,
-                    raw.storage_generation,
-                ],
-            )
-        except Exception:
-            if _in_transaction:
-                raise
-            try:
-                self.connection.execute("ROLLBACK")
-            except Exception as rollback_error:
-                self.connection_usable = False
-                raise WarehouseConnectionError(
-                    "rollback failed; reopen warehouse"
-                ) from rollback_error
-            raise
-        try:
-            if not _in_transaction:
-                self.connection.execute("COMMIT")
-        except Exception as error:
-            # Never write a failed receipt or process another Raw on an uncertain connection.
-            # A new connection decides from the persisted success receipt.
-            self.connection_usable = False
-            raise WarehouseConnectionError("commit outcome unknown; reopen warehouse") from error
-        return batch.record_count
-
-    def load_objects(self, objects: Iterable[tuple[RawObject, int, DecodedBatch]]) -> int:
-        """Commit a validated group of observations and source writes atomically."""
-        if not self.connection_usable:
-            raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
-        self.connection.execute("BEGIN TRANSACTION")
-        try:
-            count = sum(
-                self.load_object(raw, byte_size=size, batch=batch, _in_transaction=True)
-                for raw, size, batch in objects
-            )
-        except Exception:
-            try:
-                self.connection.execute("ROLLBACK")
-            except Exception as error:
-                self.connection_usable = False
-                raise WarehouseConnectionError("rollback failed; reopen warehouse") from error
-            raise
-        try:
-            self.connection.execute("COMMIT")
-        except Exception as error:
-            self.connection_usable = False
-            raise WarehouseConnectionError("commit outcome unknown; reopen warehouse") from error
-        return count
-
-    def mark_failed(
-        self,
-        raw: RawObject,
-        *,
-        byte_size: int,
-        error: Exception,
-    ) -> None:
-        if not self.connection_usable:
-            raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
-        now = datetime.now(UTC)
-        self.connection.execute("BEGIN TRANSACTION")
-        try:
-            self._existing_object(raw)
-            self.connection.execute(
-                """
-                INSERT INTO ops.ingestion_metadata (
-                    object_key, source_id, schema_version, subject_key, source_stream, logical_key,
-                    observed_at, content_sha256, byte_size, status, parser_version, record_count,
-                    started_at, completed_at, error_type, error_message, retry_count,
-                    storage_created_at, storage_generation
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'failed', NULL, NULL, ?, ?, ?, ?,
-                          0, ?, ?)
-                ON CONFLICT (object_key) DO UPDATE SET
-                    status = 'failed', completed_at = excluded.completed_at,
-                    subject_key = excluded.subject_key, logical_key = excluded.logical_key,
-                    error_type = excluded.error_type, error_message = excluded.error_message,
-                    storage_created_at = excluded.storage_created_at,
-                    storage_generation = excluded.storage_generation,
-                    retry_count = ops.ingestion_metadata.retry_count + 1
-                """,
-                [
-                    raw.key,
-                    raw.source_id,
-                    raw.schema_version,
-                    raw.subject_key,
-                    raw.stream,
-                    raw.logical_key,
-                    raw.observed_at,
-                    raw.sha256,
-                    byte_size,
-                    now,
-                    now,
-                    type(error).__name__,
-                    str(error)[:4000],
-                    raw.storage_created_at,
-                    raw.storage_generation,
-                ],
-            )
-            self.connection.execute("COMMIT")
-        except Exception:
-            self.connection.execute("ROLLBACK")
-            raise
-
-    def begin_job(self, job_name: str, run_id: str) -> None:
-        self.connection.execute(
-            "INSERT INTO ops.job_run VALUES (?, ?, 'running', ?, NULL, NULL)",
-            [run_id, job_name, datetime.now(UTC)],
-        )
-
-    def acquire_job_lock(self, job_name: str, owner_id: str, *, lease_seconds: int) -> bool:
-        now = datetime.now(UTC)
-        expires_at = now + timedelta(seconds=lease_seconds)
-        self.connection.execute("BEGIN TRANSACTION")
-        try:
-            current = self.connection.execute(
-                "SELECT owner_id, expires_at FROM ops.job_lock WHERE job_name = ?", [job_name]
-            ).fetchone()
-            if current is not None and current[0] != owner_id and current[1] > now:
-                self.connection.execute("ROLLBACK")
-                return False
-            if current is None:
-                self.connection.execute(
-                    "INSERT INTO ops.job_lock VALUES (?, ?, ?)",
-                    [job_name, owner_id, expires_at],
-                )
-            else:
-                self.connection.execute(
-                    "UPDATE ops.job_lock SET owner_id = ?, expires_at = ? WHERE job_name = ?",
-                    [owner_id, expires_at, job_name],
-                )
-            self.connection.execute("COMMIT")
-            return True
-        except Exception:
-            self.connection.execute("ROLLBACK")
-            raise
-
-    def release_job_lock(self, job_name: str, owner_id: str) -> None:
-        if not self.connection_usable:
-            return
-        self.connection.execute(
-            "DELETE FROM ops.job_lock WHERE job_name = ? AND owner_id = ?", [job_name, owner_id]
-        )
-
-    def require_job_lock(self, owner_id: str, *, remaining_seconds: int = 1) -> None:
-        """Stop before writing if the common loader lease is lost or nearly expired."""
-        row = self.connection.execute(
-            "SELECT owner_id, expires_at FROM ops.job_lock WHERE job_name='loader'"
-        ).fetchone()
-        if (
-            row is None
-            or row[0] != owner_id
-            or row[1] <= datetime.now(UTC) + timedelta(seconds=remaining_seconds)
-        ):
-            raise WarehouseLeaseError("loader lease ownership lost or insufficient time remains")
-
-    def finish_job(self, run_id: str, *, succeeded: bool, details: dict[str, object]) -> None:
-        self.connection.execute(
-            """
-            UPDATE ops.job_run SET status = ?, completed_at = ?, details = ?
-            WHERE run_id = ?
-            """,
-            [
-                "succeeded" if succeeded else "failed",
-                datetime.now(UTC),
-                json.dumps(details, sort_keys=True),
-                run_id,
-            ],
-        )
-
-    def prune_run_history(self, *, now: datetime) -> None:
-        cutoff = now - timedelta(days=7)
-        self.connection.execute(
-            "DELETE FROM ops.job_run "
-            "WHERE coalesce(completed_at, started_at) < ? "
-            "AND run_id <> coalesce(( "
-            "SELECT run_id FROM ops.job_run "
-            "WHERE job_name IN (?, ?) AND status = 'succeeded' "
-            "AND json_extract_string(details, '$.last_completed_target_date') IS NOT NULL "
-            "ORDER BY completed_at DESC LIMIT 1), '')",
-            [cutoff, *DAILY_JOB_HISTORY_NAMES],
-        )
-
-    def query_value(self, sql: str, parameters: list[Any] | None = None) -> Any:
-        row = self.connection.execute(sql, parameters or []).fetchone()
-        return None if row is None else row[0]
-
-    def query_rows(self, sql: str, parameters: list[Any] | None = None) -> list[tuple[Any, ...]]:
-        return self.connection.execute(sql, parameters or []).fetchall()
-
-    def finish_collection(
-        self, owner_id: str, *, heartbeats: list[tuple[str, dict[str, object]]]
-    ) -> None:
-        """Publish stream successes and release their lease in one transaction."""
-        rows = [{"name": name, "details": json.dumps(details)} for name, details in heartbeats]
-        try:
-            row = self.connection.execute(
-                "BEGIN TRANSACTION; "
-                "SELECT owner_id,expires_at FROM ops.job_lock WHERE job_name='loader'"
-            ).fetchone()
-        except Exception as error:
-            self.connection_usable = False
-            raise WarehouseConnectionError("cannot begin collection finalization") from error
-        try:
-            if (
-                row is None
-                or row[0] != owner_id
-                or row[1] <= datetime.now(UTC) + timedelta(seconds=1)
-            ):
-                raise WarehouseLeaseError(
-                    "loader lease ownership lost or insufficient time remains"
-                )
-            self.connection.execute(
-                "INSERT INTO ops.heartbeat "
-                "SELECT r.name::VARCHAR,?::TIMESTAMPTZ,?::VARCHAR,r.details::JSON "
-                "FROM unnest(?) stream(r) ON CONFLICT (monitor_name) DO UPDATE SET "
-                "succeeded_at=excluded.succeeded_at,run_id=excluded.run_id,details=excluded.details",
-                [datetime.now(UTC), owner_id, rows],
-            )
-            self.release_job_lock("loader", owner_id)
-        except Exception as error:
-            try:
-                self.connection.execute("ROLLBACK")
-            except Exception:
-                self.connection_usable = False
-                raise WarehouseConnectionError("collection finalization rollback failed") from error
-            raise
-        try:
-            self.connection.execute("COMMIT")
-        except Exception as error:
-            self.connection_usable = False
-            raise WarehouseConnectionError(
-                "collection finalization commit outcome unknown"
-            ) from error
-
-    def publish_heartbeat(self, monitor_name: str, run_id: str, details: dict[str, object]) -> None:
-        self.connection.execute(
-            """
-            INSERT INTO ops.heartbeat VALUES (?, ?, ?, ?)
-            ON CONFLICT (monitor_name) DO UPDATE SET
-                succeeded_at = excluded.succeeded_at,
-                run_id = excluded.run_id,
-                details = excluded.details
-            """,
-            [monitor_name, datetime.now(UTC), run_id, json.dumps(details, sort_keys=True)],
-        )
 
     @contextmanager
     def _transaction(self, operation: str) -> Iterator[None]:
@@ -585,7 +109,7 @@ class Warehouse:
             raise WarehouseConnectionError(f"cannot begin {operation}; reopen warehouse") from error
         try:
             yield
-        except Exception:
+        except BaseException:
             try:
                 self.connection.execute("ROLLBACK")
             except Exception as error:
@@ -598,32 +122,167 @@ class Warehouse:
             self.connection_usable = False
             raise WarehouseConnectionError(f"{operation} commit outcome unknown") from error
 
+    def require_job_lock(self, owner_id: str, *, remaining_seconds: int = 1) -> None:
+        """Read-only preflight; transactional writers must also fence the lease."""
+        if not self.connection_usable:
+            raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
+        row = self.connection.execute(
+            "SELECT owner_id, expires_at FROM ops.job_lock WHERE job_name='loader'"
+        ).fetchone()
+        if (
+            row is None
+            or row[0] != owner_id
+            or row[1] <= datetime.now(UTC) + timedelta(seconds=remaining_seconds)
+        ):
+            raise WarehouseLeaseError("loader lease ownership lost or insufficient time remains")
+
+    def fence_job_lock(self, owner_id: str, *, remaining_seconds: int = 1) -> None:
+        """Write the shared row inside a transaction to conflict with takeover."""
+        threshold = datetime.now(UTC) + timedelta(seconds=remaining_seconds)
+        # A real expiry-column write establishes the dependency on takeover.
+        # DuckDB's RETURNING path and no-op updates do not reliably do this.
+        # The one-microsecond reduction never extends the lease.
+        row = self.connection.execute(
+            "UPDATE ops.job_lock SET expires_at=expires_at - INTERVAL 1 MICROSECOND "
+            "WHERE job_name='loader' AND owner_id=? AND expires_at>?",
+            [owner_id, threshold + timedelta(microseconds=1)],
+        ).fetchone()
+        if row is None or row[0] != 1:
+            raise WarehouseLeaseError("loader lease ownership lost or insufficient time remains")
+
+    def _remaining(self, deadline: float, monotonic: Callable[[], float]) -> int:
+        seconds = deadline - monotonic()
+        if seconds <= 0:
+            raise TimeoutError("warehouse write deadline exceeded")
+        return max(1, math.ceil(seconds))
+
+    @contextmanager
+    def _write_transaction(
+        self, owner_id: str, deadline: float, *, monotonic: Callable[[], float] = time.monotonic
+    ) -> Iterator[None]:
+        self.require_job_lock(owner_id, remaining_seconds=self._remaining(deadline, monotonic))
+        with self._transaction("source write"):
+            self.fence_job_lock(owner_id, remaining_seconds=self._remaining(deadline, monotonic))
+            yield
+            self.fence_job_lock(owner_id, remaining_seconds=self._remaining(deadline, monotonic))
+
+    def commit_fitbit_snapshot(
+        self,
+        snapshot: Snapshot | HeartRateMinuteSnapshot,
+        *,
+        source_key: str,
+        loaded_at: datetime,
+        owner_id: str,
+        deadline: float,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> WriteResult:
+        batch = (
+            FitbitMinuteBatch(snapshot)
+            if isinstance(snapshot, HeartRateMinuteSnapshot)
+            else FitbitBatch(snapshot)
+        )
+        with self._write_transaction(owner_id, deadline, monotonic=monotonic):
+            return batch.write_snapshot(self.connection, source_key=source_key, loaded_at=loaded_at)
+
+    def commit_screen_time_snapshot(
+        self,
+        raw: RawObject,
+        batch: DecodedBatch,
+        *,
+        invalidated_event_keys: Sequence[str],
+        owner_id: str,
+        deadline: float,
+    ) -> int:
+        if isinstance(batch, IPhoneScreenTimeBatch) and raw.source_id == "iphone_screen_time":
+            with self._write_transaction(owner_id, deadline):
+                return iphone_screen_time.write_state(
+                    self.connection, raw, batch, invalidated_event_keys=invalidated_event_keys
+                )
+        if isinstance(batch, MacScreenTimeBatch) and raw.source_id == "mac_screen_time":
+            with self._write_transaction(owner_id, deadline):
+                return mac_screen_time.write_state(
+                    self.connection, raw, batch, invalidated_event_keys=invalidated_event_keys
+                )
+        raise ValueError(f"unsupported Screen Time batch for source: {raw.source_id}")
+
+    def has_screen_time_events(self, *, source_id: str) -> bool:
+        if source_id not in {"iphone_screen_time", "mac_screen_time"}:
+            raise ValueError(f"unsupported Screen Time source: {source_id}")
+        row = self.connection.execute(
+            f"SELECT EXISTS (SELECT 1 FROM base.{source_id}_event)"
+        ).fetchone()
+        return bool(row and row[0])
+
+    def location_point_ids(self, ids: Iterable[str] | None = None) -> set[str]:
+        """Filter incoming IDs; full inventory is reserved for reconciliation."""
+        if ids is None:
+            rows = self.connection.execute(
+                "SELECT location_point_id FROM base.location_point"
+            ).fetchall()
+        else:
+            keys = tuple(set(ids))
+            if not keys:
+                return set()
+            rows = self.connection.execute(
+                "SELECT location_point_id FROM base.location_point WHERE location_point_id IN (SELECT unnest(?::VARCHAR[]))",
+                [keys],
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def load_object(
+        self, raw: RawObject, *, batch: DecodedBatch, owner_id: str, deadline: float
+    ) -> int:
+        if not isinstance(batch, OwnTracksBatch) or raw.source_id != "owntracks":
+            raise ValueError(
+                "object loader supports only OwnTracks; Screen Time uses its local pending queue"
+            )
+        with self._write_transaction(owner_id, deadline):
+            return owntracks.write_batch(self.connection, raw, batch)
+
+    def acquire_job_lock(self, job_name: str, owner_id: str, *, lease_seconds: int) -> bool:
+        import duckdb
+
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(seconds=lease_seconds)
+        try:
+            with self._transaction("lease acquisition"):
+                current = self.connection.execute(
+                    "SELECT owner_id, expires_at FROM ops.job_lock WHERE job_name=?", [job_name]
+                ).fetchone()
+                if current is not None and current[0] != owner_id and current[1] > now:
+                    return False
+                if current is None:
+                    self.connection.execute(
+                        "INSERT INTO ops.job_lock VALUES (?, ?, ?)",
+                        [job_name, owner_id, expires_at],
+                    )
+                else:
+                    self.connection.execute(
+                        "UPDATE ops.job_lock SET owner_id=?, expires_at=? WHERE job_name=?",
+                        [owner_id, expires_at, job_name],
+                    )
+        except (duckdb.TransactionException, duckdb.ConstraintException):
+            return False
+        return True
+
+    def release_job_lock(self, job_name: str, owner_id: str) -> None:
+        if not self.connection_usable:
+            return
+        with self._transaction("lease release"):
+            self.connection.execute(
+                "DELETE FROM ops.job_lock WHERE job_name=? AND owner_id=?", [job_name, owner_id]
+            )
+
     def interrupt(self) -> None:
         if self.connection_usable:
             self.connection.interrupt()
 
-    def prune_biome_receipts(
-        self, live_raw: Iterable[RawObject], *, source_id: str, parser_version: str
-    ) -> None:
-        writer = _biome_writer(source_id)
-        candidates = writer.receipt_candidates(live_raw)
-        confirmed = self.succeeded_keys_for(candidates, parser_version=parser_version)
-        if not confirmed:
-            return
-        with self._transaction("receipt pruning"):
-            writer.prune_receipts(
-                self.connection, [raw for raw in candidates if raw.key in confirmed]
-            )
+    def query_value(self, sql: str, parameters: list[Any] | None = None) -> Any:
+        row = self.connection.execute(sql, parameters or []).fetchone()
+        return None if row is None else row[0]
 
-    def current_biome_object_keys(self, *, source_id: str, stream: str) -> set[str]:
-        return set(_biome_writer(source_id).current_object_keys(self.connection, stream=stream))
-
-    def get_heartbeat(self, monitor_name: str) -> tuple[datetime, str] | None:
-        row = self.connection.execute(
-            "SELECT succeeded_at, details FROM ops.heartbeat WHERE monitor_name = ?",
-            [monitor_name],
-        ).fetchone()
-        return None if row is None else (row[0], str(row[1]))
+    def query_rows(self, sql: str, parameters: list[Any] | None = None) -> list[tuple[Any, ...]]:
+        return self.connection.execute(sql, parameters or []).fetchall()
 
     def relation_names(self) -> set[str]:
         rows = self.connection.execute(
@@ -636,27 +295,6 @@ class Warehouse:
         if re.fullmatch(r"(?:base|marts|ops)\.[a-z_][a-z0-9_]*", relation) is None:
             raise ValueError(f"invalid warehouse relation: {relation}")
         self.connection.execute(f"SELECT count(*) FROM {relation}").fetchone()
-
-    def latest_completed_target_date(self) -> date | None:
-        row = self.connection.execute(
-            "SELECT json_extract_string(details,'$.last_completed_target_date') "
-            "FROM ops.job_run WHERE job_name IN (?, ?) AND status='succeeded' "
-            "AND json_extract_string(details,'$.last_completed_target_date') IS NOT NULL "
-            "ORDER BY completed_at DESC LIMIT 1",
-            list(DAILY_JOB_HISTORY_NAMES),
-        ).fetchone()
-        return date.fromisoformat(str(row[0])) if row is not None else None
-
-    def complete_daily_job(
-        self, run_id: str, *, details: dict[str, object], now: datetime, deadline: float
-    ) -> None:
-        with self._transaction("daily completion"):
-            self.prune_run_history(now=now)
-            self.finish_job(run_id, succeeded=True, details=details)
-            seconds = int(deadline - time.monotonic())
-            if seconds <= 0:
-                raise TimeoutError("daily reconciliation deadline exceeded")
-            self.require_job_lock(run_id, remaining_seconds=seconds)
 
     def require_empty_target(self) -> None:
         count = self.connection.execute(
@@ -680,11 +318,3 @@ class Warehouse:
             return {"ok": True, "tested_at": datetime.now(UTC).isoformat()}
         finally:
             self.connection.execute(f"DROP TABLE IF EXISTS preflight.{table}")
-
-
-def _biome_writer(source_id: str) -> ModuleType:
-    if source_id == "iphone_screen_time":
-        return iphone_screen_time
-    if source_id == "mac_screen_time":
-        return mac_screen_time
-    raise ValueError(f"unsupported Biome source: {source_id}")

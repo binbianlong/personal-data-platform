@@ -1,21 +1,16 @@
-"""Reconcile saved Raw with warehouse ingestion state."""
+"""Reconcile OwnTracks Raw IDs and record daily outcomes in JSON logs."""
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
+from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime, timedelta
 
-from personal_data_platform.biome.audit import (
-    audit_collector_heartbeat,
-    filter_ingestion_states,
-)
 from personal_data_platform.loader.deadline import interrupt_after
-from personal_data_platform.loader.job import (
-    LOADER_LEASE_SECONDS,
-    run_loader,
-)
+from personal_data_platform.loader.job import LOADER_LEASE_SECONDS, run_loader_objects
 from personal_data_platform.logging_config import configure_logging
 from personal_data_platform.raw.models import RawObject
 from personal_data_platform.sources.contracts import (
@@ -23,11 +18,12 @@ from personal_data_platform.sources.contracts import (
     SourceAdapter,
     list_source_raw,
     selected_prefixes,
+    validate_observations,
     validate_runtime_policy,
 )
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.factory import WarehouseConfig, open_warehouse
-from personal_data_platform.storage.warehouse import IngestionState, Warehouse
+from personal_data_platform.storage.warehouse import Warehouse
 
 from .heartbeat import daily_heartbeat_urls, publish_http_heartbeat
 from .models import DAILY_JOB_NAME, ReconciliationResult
@@ -42,7 +38,7 @@ def _relation_names(warehouse: Warehouse) -> set[str]:
 def _failed_relation_queries(
     warehouse: Warehouse, relations: set[str], required_relations: tuple[str, ...]
 ) -> tuple[str, ...]:
-    failed: list[str] = []
+    failed = []
     for relation in required_relations:
         if relation not in relations:
             continue
@@ -52,22 +48,6 @@ def _failed_relation_queries(
             LOGGER.exception("required relation query failed: %s", relation)
             failed.append(relation)
     return tuple(failed)
-
-
-def _aware_utc(value: object) -> datetime | None:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        return None
-    return value.astimezone(UTC)
-
-
-def _active_status_keys(states: dict[str, IngestionState], status: str) -> set[str]:
-    return {key for key, value in states.items() if value.status == status}
-
-
-def _list_raw_by_key(
-    repository: RawRepository, source: SourceAdapter, prefix: str | None
-) -> dict[str, RawObject]:
-    return {value.key: value for value in list_source_raw(repository, source, prefix)}
 
 
 def run_reconciliation(
@@ -81,117 +61,77 @@ def run_reconciliation(
     raw_objects: tuple[RawObject, ...] | None = None,
     _lease_owner: str | None = None,
 ) -> ReconciliationResult:
-    """Audit Raw/warehouse parity and repair missing loads."""
-
-    source = source or get_source()
+    """Compare complete GCS logical IDs directly with base, repairing missing points."""
+    source = source or get_source("owntracks")
+    if source.source_id != "owntracks":
+        raise ValueError(
+            "Raw reconciliation supports OwnTracks; Screen Time history is canonical in base"
+        )
     if selected_prefixes(source, prefix) != source.raw_prefixes:
         raise ValueError("reconciliation must audit every canonical prefix for the source stream")
-    started_at = _aware_utc(now or datetime.now(UTC))
-    if started_at is None:
+    started_at = now or datetime.now(UTC)
+    if started_at.tzinfo is None:
         raise ValueError("reconciliation time must be timezone-aware")
-    run_id = str(uuid.uuid4())
-    supplied_inventory = raw_objects is not None
     if _lease_owner is not None:
         warehouse.require_job_lock(_lease_owner)
-    raw_by_key = (
-        {value.key: value for value in raw_objects}
+    refs = (
+        list(validate_observations(source, raw_objects))
         if raw_objects is not None
-        else _list_raw_by_key(repository, source, prefix)
+        else list_source_raw(repository, source, prefix)
     )
-    raw_refs = list(raw_by_key.values())
-    raw_keys = set(raw_by_key)
-    parser_version = source.parser_version
-    loaded_keys = warehouse.succeeded_keys_for(raw_refs, parser_version=parser_version)
-    missing_before_repair = raw_keys - loaded_keys
-    repair_summary: dict[str, int] | None = None
-    if missing_before_repair and repair_missing:
-        if _lease_owner is None:
-            summary = run_loader(repository, warehouse, source=source, prefix=prefix)
-        else:
-            summary = run_loader(
-                repository, warehouse, source=source, prefix=prefix, _lease_owner=_lease_owner
-            )
-        repair_summary = {
-            "discovered": summary.discovered,
-            "skipped": summary.skipped,
-            "succeeded": summary.succeeded,
-            "failed": summary.failed,
-            "records": summary.records,
-        }
-    states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
-    # A repair or concurrent loader can commit keys newer than the initial listing.
-    # Refresh before classifying any active warehouse key as absent from GCS.
-    if not supplied_inventory and set(states) - raw_keys:
-        latest_raw_by_key = _list_raw_by_key(repository, source, prefix)
-        for key in set(states):
-            if key in latest_raw_by_key:
-                raw_by_key[key] = latest_raw_by_key[key]
-        raw_refs = list(raw_by_key.values())
-        raw_keys = set(raw_by_key)
-        states = warehouse.active_ingestion_states(source_id=source.source_id, stream=source.stream)
-
-    if source.source_id in ("iphone_screen_time", "mac_screen_time"):
-        states = filter_ingestion_states(
-            warehouse, states, raw_keys=raw_keys, source_id=source.source_id, stream=source.stream
+    raw_ids = {raw.logical_key for raw in refs}
+    loaded_ids = warehouse.location_point_ids()
+    missing_before = raw_ids - loaded_ids
+    repair_summary = None
+    if missing_before and repair_missing:
+        summary = run_loader_objects(
+            repository, warehouse, refs, source=source, _lease_owner=_lease_owner
         )
-    checked_at = started_at if now is not None else datetime.now(UTC)
-    succeeded_keys = warehouse.succeeded_keys_for(raw_refs, parser_version=parser_version)
-    failed_keys = _active_status_keys(states, "failed")
-    live_loaded_keys = raw_keys & succeeded_keys
-    missing = raw_keys - succeeded_keys
-
-    absent_loaded = _active_status_keys(states, "succeeded") - raw_keys
-    absent_uningested = {
-        key for key, value in states.items() if value.status != "succeeded"
-    } - raw_keys
-    source_health = source.audit(repository, raw_refs, checked_at)
-    failed = len(failed_keys)
-    available_relations = _relation_names(warehouse)
-    missing_relations = tuple(sorted(set(source.required_relations) - available_relations))
-    failed_relation_queries = _failed_relation_queries(
-        warehouse, available_relations, source.required_relations
-    )
-    succeeded = (
-        source_health.ok
-        and not missing
-        and not absent_loaded
-        and not absent_uningested
-        and failed == 0
-        and not missing_relations
-        and not failed_relation_queries
-    )
-    completed_at = datetime.now(UTC)
+        repair_summary = asdict(summary)
+    loaded_ids = warehouse.location_point_ids()
+    # A worker may have loaded an upload newer than the initial inventory.
+    # Refresh only these candidate orphan IDs, without reconstructing GCS keys.
+    if raw_objects is None and loaded_ids - raw_ids:
+        raw_ids |= {
+            raw.logical_key
+            for raw in list_source_raw(repository, source, prefix)
+            if raw.logical_key in loaded_ids
+        }
+    missing, orphaned = raw_ids - loaded_ids, loaded_ids - raw_ids
+    failed = int(repair_summary["failed"]) if repair_summary else 0
+    health = source.audit(repository, refs, started_at)
+    available = warehouse.relation_names()
+    missing_relations = tuple(sorted(set(source.required_relations) - available))
+    failed_queries = _failed_relation_queries(warehouse, available, source.required_relations)
+    ok = health.ok and not (missing or orphaned or failed or missing_relations or failed_queries)
     details: dict[str, object] = {
-        **source_health.details,
+        **health.details,
         "source_id": source.source_id,
         "stream": source.stream,
-        "schema_versions": list(source.schema_versions),
-        "missing_before_repair": len(missing_before_repair),
+        "missing_before_repair": len(missing_before),
         "repair_summary": repair_summary,
-        "total_object_count": len(states),
-        "missing_raw_object_count": len(absent_loaded | absent_uningested),
-        "unrecoverable_uningested_object_count": len(absent_uningested),
-        "live_loaded_object_count": len(live_loaded_keys),
+        "total_object_count": len(loaded_ids),
+        "missing_raw_object_count": len(orphaned),
+        "live_loaded_object_count": len(raw_ids & loaded_ids),
         "live_unloaded_object_count": len(missing),
-        "orphaned_loaded_object_count": len(absent_loaded),
+        "orphaned_loaded_object_count": len(orphaned),
         "missing_relations": list(missing_relations),
-        "failed_relation_queries": list(failed_relation_queries),
+        "failed_relation_queries": list(failed_queries),
     }
-    result = ReconciliationResult(
-        run_id=run_id,
-        status="succeeded" if succeeded else "failed",
+    return ReconciliationResult(
+        run_id=str(uuid.uuid4()),
+        status="succeeded" if ok else "failed",
         started_at=started_at,
-        completed_at=completed_at,
-        raw_object_count=len(raw_keys),
-        loaded_object_count=len(live_loaded_keys),
+        completed_at=datetime.now(UTC),
+        raw_object_count=len(raw_ids),
+        loaded_object_count=len(raw_ids & loaded_ids),
         missing_object_count=len(missing),
         failed_object_count=failed,
-        orphaned_loaded_object_count=len(absent_loaded),
+        orphaned_loaded_object_count=len(orphaned),
         missing_relations=missing_relations,
-        failed_relation_queries=failed_relation_queries,
+        failed_relation_queries=failed_queries,
         details=details,
     )
-    return result
 
 
 def run_reconciliation_from_env() -> int:
@@ -201,162 +141,150 @@ def run_reconciliation_from_env() -> int:
         return _run_daily_reconciliation()
 
 
+class _StageFailed(RuntimeError):
+    """A stage returned an explicit failure outcome."""
+
+
 def _run_daily_reconciliation() -> int:
     from zoneinfo import ZoneInfo
 
     from personal_data_platform.dbt_runner import run_dbt_from_env
     from personal_data_platform.network_diagnostics import network_phase
-    from personal_data_platform.sources.fitbit.runtime import DAILY_REPAIR_DAYS, run_daily_repair
+    from personal_data_platform.sources.fitbit.runtime import run_daily_repair
 
-    configure_logging("personal_data_platform.reconciliation")
-    urls = daily_heartbeat_urls()
-    sources = (get_source("iphone_screen_time"), get_source("mac_screen_time"))
-    for source in sources:
-        validate_runtime_policy(source)
-    owntracks = get_source("owntracks")
-    validate_runtime_policy(owntracks)
-    config = WarehouseConfig.from_env()
-    warehouse = open_warehouse(config)
     owner = str(uuid.uuid4())
     now = datetime.now(UTC)
     target_date = now.astimezone(ZoneInfo("Asia/Tokyo")).date() - timedelta(days=1)
     deadline = time.monotonic() + 100 * 60
-    acquired = job_started = completed = False
+    warehouse = None
+    acquired = False
     timer = None
-    stage = "startup"
-    details: dict[str, object] = {"planned_target_date": target_date.isoformat()}
+    stage, status = "startup", "failed"
+    details: dict[str, object] = {
+        "run_id": owner,
+        "target_date": target_date.isoformat(),
+        "started_at": now.isoformat(),
+        "completed_at": None,
+        "failed_stage": None,
+    }
 
     def remaining() -> int:
         seconds = int(deadline - time.monotonic())
         if seconds <= 0:
             raise TimeoutError("daily reconciliation deadline exceeded")
+        assert warehouse is not None
         warehouse.require_job_lock(owner, remaining_seconds=seconds)
         return seconds
 
+    def event(value: str) -> None:
+        LOGGER.log(
+            logging.ERROR if value == "failed" else logging.INFO,
+            "daily reconciliation %s",
+            value,
+            extra={
+                "event": "reconciliation",
+                "status": value,
+                "job_name": DAILY_JOB_NAME,
+                "summary": details.copy(),
+            },
+        )
+
     try:
+        configure_logging("personal_data_platform.reconciliation")
+        event("running")
+        urls = daily_heartbeat_urls()
+        sources = (get_source("iphone_screen_time"), get_source("mac_screen_time"))
+        owntracks = get_source("owntracks")
+        for source in (*sources, owntracks):
+            validate_runtime_policy(source)
+        config = WarehouseConfig.from_env()
+        warehouse = open_warehouse(config)
+        stage = "migration"
         warehouse.migrate()
+        stage = "lease"
         acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=LOADER_LEASE_SECONDS)
         if not acquired:
-            LOGGER.info(
-                "daily reconciliation deferred: shared loader busy",
-                extra={"event": "reconciliation", "status": "deferred"},
-            )
-            return 0
-        timer = interrupt_after(warehouse, remaining())
-        warehouse.begin_job(DAILY_JOB_NAME, owner)
-        job_started = True
-        previous = warehouse.latest_completed_target_date()
-        if previous:
-            first_missing = previous + timedelta(days=1)
-            repair_start = target_date - timedelta(days=DAILY_REPAIR_DAYS - 1)
-            if first_missing < repair_start:
-                gap = {
-                    "from": first_missing.isoformat(),
-                    "through": (repair_start - timedelta(days=1)).isoformat(),
-                }
-                details["manual_repair_required"] = gap
-                LOGGER.warning(
-                    "manual Fitbit repair required",
-                    extra={"event": "fitbit_manual_repair", **gap},
+            status = "deferred"
+        else:
+            timer = interrupt_after(warehouse, remaining())
+            stage = "fitbit"
+            with network_phase("daily_fitbit"):
+                repair = run_daily_repair(
+                    now=now, warehouse=warehouse, lease_owner=owner, timeout_seconds=remaining()
                 )
-        stage = "fitbit"
-        with network_phase("daily_fitbit"):
-            repair = run_daily_repair(
-                now=now, warehouse=warehouse, lease_owner=owner, timeout_seconds=remaining()
+            details["fitbit"] = (
+                json.loads(json.dumps(asdict(repair), default=str))
+                if is_dataclass(repair) and not isinstance(repair, type)
+                else {"ok": repair.ok}
             )
-        if not repair.ok:
-            return 1
-        stage = "dbt"
-        with network_phase("daily_dbt"):
-            if run_dbt_from_env(lease_owner=owner, timeout_seconds=remaining(), config=config):
-                return 1
-        stage = "owntracks"
-        remaining()
-        with network_phase("daily_owntracks"):
-            owntracks_result = run_reconciliation(
-                owntracks.repository_from_env(),
-                warehouse,
-                source=owntracks,
-                _lease_owner=owner,
-            )
-        details["owntracks"] = owntracks_result.details
-        if not owntracks_result.ok:
-            LOGGER.error("OwnTracks Raw reconciliation failed")
-            return 1
-        for source in sources:
-            stage = "audit:" + source.source_id
+            if not repair.ok:
+                raise _StageFailed("Fitbit repair failed")
+            stage = "dbt"
+            with network_phase("daily_dbt"):
+                dbt_status = run_dbt_from_env(
+                    lease_owner=owner, timeout_seconds=remaining(), config=config
+                )
+            details["dbt"] = {"exit_status": dbt_status}
+            if dbt_status:
+                raise _StageFailed("dbt failed")
+            stage = "owntracks"
             remaining()
-            with network_phase("daily_" + source.source_id):
-                health = audit_collector_heartbeat(warehouse, source, datetime.now(UTC))
-                relations = _relation_names(warehouse)
-                missing_relations = sorted(set(source.required_relations) - relations)
-                failed_queries = (
-                    _failed_relation_queries(warehouse, relations, source.required_relations)
-                    if health.ok and not missing_relations
-                    else None
+            with network_phase("daily_owntracks"):
+                owntracks_result = run_reconciliation(
+                    owntracks.repository_from_env(), warehouse, source=owntracks, _lease_owner=owner
                 )
-                if not health.ok or missing_relations or failed_queries:
-                    LOGGER.error(
-                        "Collector audit failed: %s",
-                        source.source_id,
-                        extra={
-                            "event": "collector_audit",
-                            "status": "failed",
-                            "summary": {
-                                "source_id": source.source_id,
-                                "stream": source.stream,
-                                **health.details,
-                                "missing_relations": missing_relations,
-                                "failed_relation_queries": list(failed_queries)
-                                if failed_queries is not None
-                                else None,
-                            },
-                        },
+            details["owntracks"] = owntracks_result.details
+            if not owntracks_result.ok:
+                raise _StageFailed("OwnTracks Raw reconciliation failed")
+            for source in sources:
+                stage = "relations:" + source.source_id
+                remaining()
+                with network_phase("daily_" + source.source_id):
+                    relations = warehouse.relation_names()
+                    missing = sorted(set(source.required_relations) - relations)
+                    failed = _failed_relation_queries(
+                        warehouse, relations, source.required_relations
                     )
-                    return 1
-        remaining()
-        payload: dict[str, object] = {
-            "run_id": owner,
-            "completed_at": datetime.now(UTC).isoformat(),
-            "job_name": DAILY_JOB_NAME,
-            "status": "succeeded",
-        }
-        stage = "completion"
-        details["last_completed_target_date"] = target_date.isoformat()
-        warehouse.complete_daily_job(
-            owner, details=details, now=datetime.now(UTC), deadline=deadline
-        )
-        completed = True
-        stage = "heartbeat"
-        remaining()
-        publish_http_heartbeat(urls["daily"], {**payload, "monitor": "daily"})
-        LOGGER.info(
-            "daily reconciliation succeeded",
-            extra={
-                "event": "reconciliation",
-                "status": "succeeded",
-                "job_name": DAILY_JOB_NAME,
-            },
-        )
-        return 0
+                    details[source.source_id] = {
+                        "missing_relations": missing,
+                        "failed_relation_queries": list(failed),
+                        "collector_liveness": "local_logs",
+                    }
+                    if missing or failed:
+                        raise _StageFailed("required Screen Time relation validation failed")
+            stage = "heartbeat"
+            remaining()
+            publish_http_heartbeat(
+                urls["daily"],
+                {
+                    "run_id": owner,
+                    "completed_at": datetime.now(UTC).isoformat(),
+                    "job_name": DAILY_JOB_NAME,
+                    "status": "succeeded",
+                    "monitor": "daily",
+                },
+            )
+            status = "succeeded"
     except Exception:
-        completed = False
-        LOGGER.exception(
-            "daily reconciliation failed",
-            extra={
-                "event": "reconciliation",
-                "status": "failed",
-                "job_name": DAILY_JOB_NAME,
-            },
-        )
-        return 1
+        LOGGER.exception("daily stage failed: %s", stage)
+        details["failed_stage"] = stage
     finally:
         if timer is not None:
             timer.cancel()
-        if acquired and warehouse.connection_usable:
-            if job_started and not completed:
-                warehouse.finish_job(
-                    owner, succeeded=False, details={**details, "failed_stage": stage}
-                )
-            warehouse.release_job_lock("loader", owner)
-        warehouse.close()
+        if warehouse is not None:
+            try:
+                if acquired and warehouse.connection_usable:
+                    warehouse.release_job_lock("loader", owner)
+            except Exception:
+                status = "failed"
+                details["failed_stage"] = details["failed_stage"] or "release"
+                LOGGER.exception("daily lease release failed")
+            try:
+                warehouse.close()
+            except Exception:
+                status = "failed"
+                details["failed_stage"] = details["failed_stage"] or "close"
+                LOGGER.exception("daily warehouse close failed")
+        details["completed_at"] = datetime.now(UTC).isoformat()
+        event(status)
+    return 0 if status in {"succeeded", "deferred"} else 1

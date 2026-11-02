@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -60,54 +61,44 @@ def apply_migrations(warehouse: Warehouse, migrations: Path | None = None) -> No
     applied = _read_applied(connection, checksums)
     if applied.keys() == checksums.keys():
         return
-    connection.execute("CREATE SCHEMA IF NOT EXISTS ops")
-    connection.execute(
-        """CREATE TABLE IF NOT EXISTS ops.schema_migration (
-            migration_id VARCHAR PRIMARY KEY,
-            checksum VARCHAR NOT NULL,
-            applied_at TIMESTAMPTZ NOT NULL
-        )"""
-    )
     owner = str(uuid4())
     acquired = False
+    deadline = time.monotonic() + 120 * 60
     try:
         for path, sql in prepared:
             applied = _read_applied(connection, checksums)
             if path.name in applied:
                 continue
-            # The initial migration creates job_lock. All later schema changes
-            # share the ingestion lease, including copying and replacing tables.
             if applied and not acquired:
                 acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=125 * 60)
                 if not acquired:
                     raise RuntimeError("schema update requires an idle writer lease")
                 if path.name in _read_applied(connection, checksums):
                     continue
-            try:
-                connection.execute("BEGIN TRANSACTION")
-            except Exception:
-                warehouse.connection_usable = False
-                raise
-            try:
+            # The empty-target baseline creates the lock itself. Every later
+            # migration fences that same existing row within its DDL transaction.
+            transaction = (
+                warehouse._write_transaction(owner, deadline)
+                if acquired
+                else warehouse._transaction("schema baseline")
+            )
+            with transaction:
+                if not applied:
+                    connection.execute("CREATE SCHEMA IF NOT EXISTS ops")
+                    connection.execute(
+                        "CREATE TABLE IF NOT EXISTS ops.schema_migration ("
+                        "migration_id VARCHAR PRIMARY KEY, checksum VARCHAR NOT NULL, "
+                        "applied_at TIMESTAMPTZ NOT NULL)"
+                    )
+                # Concurrent initialization may have completed after the first
+                # empty-target check. Never replay its baseline over loaded data.
+                if path.name in _read_applied(connection, checksums):
+                    continue
                 connection.execute(sql)
                 connection.execute(
                     "INSERT INTO ops.schema_migration VALUES (?, ?, ?)",
                     [path.name, checksums[path.name], datetime.now(UTC)],
                 )
-                if acquired:
-                    warehouse.require_job_lock(owner)
-            except Exception:
-                try:
-                    connection.execute("ROLLBACK")
-                except Exception:
-                    warehouse.connection_usable = False
-                    raise
-                raise
-            try:
-                connection.execute("COMMIT")
-            except Exception:
-                warehouse.connection_usable = False
-                raise
     finally:
         if acquired and warehouse.connection_usable:
             warehouse.release_job_lock("loader", owner)

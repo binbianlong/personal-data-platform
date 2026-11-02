@@ -9,6 +9,7 @@ import pytest
 from personal_data_platform.cli import main
 from personal_data_platform.storage.migrations import DEFAULT_MIGRATIONS
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.warehouse import WarehouseConnectionError
 
 
 @pytest.fixture
@@ -40,6 +41,8 @@ def _insert_event(warehouse):
 
 
 def _ledger(warehouse):
+    if "ops.schema_migration" not in warehouse.relation_names():
+        return []
     return warehouse.query_rows("SELECT * FROM ops.schema_migration ORDER BY migration_id")
 
 
@@ -249,7 +252,7 @@ def test_uncertain_commit_stops_connection_use_until_reconnected(
 
     value.connection = UncertainCommit()
     try:
-        with pytest.raises(OSError, match="migration response lost"):
+        with pytest.raises(WarehouseConnectionError, match="commit outcome unknown"):
             value.migrate(pending_migrations)
         assert value.connection_usable is False
         assert after_failure == []

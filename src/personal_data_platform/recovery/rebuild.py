@@ -66,6 +66,13 @@ def rebuild_inventory(
     }
 
 
+def _require_raw_rebuild_source(source: SourceAdapter) -> None:
+    if source.source_id != "owntracks":
+        raise ValueError(
+            "Screen Time full-history recovery requires a canonical base copy; pending files cannot rebuild its history"
+        )
+
+
 def validate_rebuild_target(target_db: str, production_db: str | None) -> None:
     if not _SAFE_DATABASE.fullmatch(target_db):
         raise ValueError(
@@ -96,6 +103,7 @@ def run_rebuild(
         raise ValueError("--allow-partial-history is required for a retention-limited rebuild")
     validate_rebuild_target(target_db, production_db)
     source = source or get_source()
+    _require_raw_rebuild_source(source)
     prefixes = selected_prefixes(source, prefix)
     snapshot = tuple(
         list_source_raw(repository, source, prefix)
@@ -142,6 +150,7 @@ def run_rebuild_all(
     if len(selectors) != 1:
         raise ValueError("all streams must share one dbt selector")
     for source, repository, observations in inventories:
+        _require_raw_rebuild_source(source)
         validated = tuple(validate_observations(source, observations))
         snapshots[(source.source_id, source.stream)] = _SnapshotRawRepository(repository, validated)
     config = WarehouseConfig(database=target_db, token=token)
@@ -184,6 +193,8 @@ def run_rebuild_from_env(
     )
     for source in sources:
         validate_runtime_policy(source)
+        if not dry_run:
+            _require_raw_rebuild_source(source)
     credentials: AbstractContextManager[None] = nullcontext()
     if sources[0].raw_storage == "gcs":
         adc = RebuildADCConfig.from_env()

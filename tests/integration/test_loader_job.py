@@ -1,9 +1,8 @@
-from __future__ import annotations
+"""Generation-pinned loading retries invalid Raw and preserves shared leases."""
 
-import gzip
-import hashlib
+import time
+from contextlib import closing
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -12,498 +11,98 @@ from personal_data_platform.loader.job import (
     JobAlreadyRunning,
     run_loader,
     run_loader_all,
-    run_loader_from_env,
+    run_loader_objects,
 )
-from personal_data_platform.raw.models import RawObject
-from personal_data_platform.sources.iphone_screen_time.raw import (
-    ScreenTimeRawIdentity,
-    encode_segment_envelope,
-    parse_raw_object_key,
-)
-from personal_data_platform.storage.gcs import GCSRawRepository
+from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-
-
-class _Repository:
-    def __init__(self, observations: list[RawObject], objects: dict[str, bytes]) -> None:
-        self.observations = observations
-        self.objects = objects
-        self.get_calls: list[tuple[str, int]] = []
-
-    def list_raw(self, prefix: str) -> list[RawObject]:
-        return [raw for raw in reversed(self.observations) if raw.key.startswith(prefix)]
-
-    def get_raw(self, key: str, *, generation: int) -> bytes:
-        self.get_calls.append((key, generation))
-        return self.objects[key]
-
-
-def test_all_streams_loader_holds_one_lease_and_processes_both(tmp_path, monkeypatch) -> None:
-    from personal_data_platform.sources.registry import get_source
-
-    now = datetime(2026, 8, 27, tzinfo=UTC)
-    phone = _raw("phone", b"phone", now)
-    mac = replace(
-        _raw("mac", b"mac", now),
-        key="raw/mac_screen_time/v2/"
-        + "b" * 64
-        + "/app-usage/"
-        + "c" * 64
-        + "/20260827T000000000000Z/"
-        + hashlib.sha256(encode_segment_envelope(b"mac")).hexdigest()
-        + ".segb.gz",
-        source_id="mac_screen_time",
-        stream="app-usage",
-        subject_key="b" * 64,
-        logical_key="c" * 64,
-    )
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "both.duckdb"))))
-    warehouse.migrate()
-    seen_leases = []
-
-    class CheckedRepository(_Repository):
-        def get_raw(self, key, *, generation):
-            seen_leases.append(
-                warehouse.query_value("SELECT count(*) FROM ops.job_lock WHERE job_name = 'loader'")
-            )
-            return super().get_raw(key, generation=generation)
-
-    repositories = {
-        "app-in-focus": CheckedRepository(
-            [phone],
-            {phone.key: gzip.compress(encode_segment_envelope(b"phone"))},
-        ),
-        "app-usage": CheckedRepository(
-            [mac],
-            {mac.key: gzip.compress(encode_segment_envelope(b"mac"))},
-        ),
-    }
-    monkeypatch.setattr(
-        "personal_data_platform.sources.iphone_screen_time.adapter.parse_segb_bytes",
-        lambda raw, segment, **kwargs: [],
-    )
-    monkeypatch.setattr(
-        "personal_data_platform.sources.mac_screen_time.adapter.parse_segb_bytes",
-        lambda raw, segment, **kwargs: [],
-    )
-    try:
-        sources = tuple(
-            get_source(source_id) for source_id in ("iphone_screen_time", "mac_screen_time")
-        )
-        summary = run_loader_all(
-            sources,
-            warehouse=warehouse,
-            repository_factory=lambda source: repositories[source.stream],
-        )
-        assert summary.succeeded == 2 and summary.failed == 0
-        assert seen_leases == [1, 1]
-        assert (
-            warehouse.query_value("SELECT count(*) FROM ops.job_lock WHERE job_name = 'loader'")
-            == 0
-        )
-    finally:
-        warehouse.close()
-
-
-def test_all_streams_loader_attempts_mac_after_iphone_inventory_failure(
-    tmp_path, monkeypatch
-) -> None:
-    from personal_data_platform.sources.registry import get_source
-
-    now = datetime(2026, 8, 27, tzinfo=UTC)
-    mac_content = b"mac"
-    mac = replace(
-        _raw("mac", mac_content, now),
-        key="raw/mac_screen_time/v2/"
-        + "b" * 64
-        + "/app-usage/"
-        + "c" * 64
-        + "/20260827T000000000000Z/"
-        + hashlib.sha256(encode_segment_envelope(mac_content)).hexdigest()
-        + ".segb.gz",
-        source_id="mac_screen_time",
-        stream="app-usage",
-        subject_key="b" * 64,
-        logical_key="c" * 64,
-    )
-
-    class FailedRepository:
-        def list_raw(self, _prefix):
-            raise RuntimeError("synthetic inventory failure")
-
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "failure.duckdb"))))
-    warehouse.migrate()
-    monkeypatch.setattr(
-        "personal_data_platform.sources.iphone_screen_time.adapter.parse_segb_bytes",
-        lambda raw, segment, **kwargs: [],
-    )
-    monkeypatch.setattr(
-        "personal_data_platform.sources.mac_screen_time.adapter.parse_segb_bytes",
-        lambda raw, segment, **kwargs: [],
-    )
-    sources = tuple(
-        get_source(source_id) for source_id in ("iphone_screen_time", "mac_screen_time")
-    )
-    repositories = {
-        "app-in-focus": FailedRepository(),
-        "app-usage": _Repository(
-            [mac],
-            {mac.key: gzip.compress(encode_segment_envelope(mac_content))},
-        ),
-    }
-    try:
-        summary = run_loader_all(
-            sources,
-            warehouse=warehouse,
-            repository_factory=lambda source: repositories[source.stream],
-        )
-        assert summary.failed == 1 and summary.succeeded == 1
-        assert warehouse.ingestion_counts(source_id="mac_screen_time", stream="app-usage") == {
-            "succeeded": 1
-        }
-    finally:
-        warehouse.close()
-
-
-def test_scheduled_loader_skips_when_another_run_holds_the_lease(tmp_path, monkeypatch) -> None:
-    database = str(tmp_path / "busy.duckdb")
-    monkeypatch.setattr(
-        "personal_data_platform.loader.job.get_source",
-        lambda source_id, stream: SimpleNamespace(
-            source_id="iphone_screen_time",
-            stream="app-in-focus",
-            repository_from_env=lambda: _Repository([], {}),
-        ),
-    )
-    monkeypatch.setattr("personal_data_platform.loader.job.validate_runtime_policy", lambda _: None)
-    monkeypatch.setattr(
-        "personal_data_platform.storage.factory.WarehouseConfig.from_env",
-        lambda: WarehouseConfig(database),
-    )
-    monkeypatch.setattr(
-        "personal_data_platform.loader.job.run_loader",
-        lambda *args, **kwargs: (_ for _ in ()).throw(JobAlreadyRunning("busy")),
-    )
-
-    assert run_loader_from_env(source_id="iphone_screen_time", stream="app-in-focus") == 0
-
-
-def _raw(
-    key: str,
-    content: bytes,
-    observed_at: datetime,
-    *,
-    storage_generation: int = 1,
-) -> RawObject:
-    identity = ScreenTimeRawIdentity(
-        device_key="a" * 64,
-        stream="app-in-focus",
-        segment_key=hashlib.sha256(key.encode()).hexdigest(),
-        observed_at=observed_at,
-        sha256=hashlib.sha256(encode_segment_envelope(content)).hexdigest(),
-    )
-    return parse_raw_object_key(
-        identity.object_key,
-        storage_created_at=observed_at,
-        storage_generation=storage_generation,
-    )
-
-
-def test_loader_continues_after_poison_object_and_retries_it(tmp_path, monkeypatch) -> None:
-    now = datetime(2026, 8, 27, tzinfo=UTC)
-    good_content = b"good"
-    repaired_content = b"expected"
-    good = _raw("raw/good.segb.gz", good_content, now)
-    poison = _raw("raw/poison.segb.gz", repaired_content, now + timedelta(seconds=1))
-    repository = _Repository(
-        [good, poison],
-        {
-            good.key: gzip.compress(encode_segment_envelope(good_content)),
-            poison.key: gzip.compress(encode_segment_envelope(b"wrong")),
-        },
-    )
-    monkeypatch.setattr(
-        "personal_data_platform.sources.iphone_screen_time.adapter.parse_segb_bytes",
-        lambda raw, segment, **kwargs: [],
-    )
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "loader.duckdb"))))
-    warehouse.migrate()
-    try:
-        first = run_loader(repository, warehouse)
-
-        assert first.succeeded == 1
-        assert first.failed == 1
-        assert not first.ok
-        assert warehouse.ingestion_counts(
-            source_id="iphone_screen_time", stream="app-in-focus"
-        ) == {
-            "failed": 1,
-            "succeeded": 1,
-        }
-
-        repository.objects[poison.key] = gzip.compress(encode_segment_envelope(repaired_content))
-        second = run_loader(repository, warehouse)
-
-        assert second.skipped == 1
-        assert second.succeeded == 1
-        assert second.failed == 0
-        assert second.ok
-        assert warehouse.ingestion_counts(
-            source_id="iphone_screen_time", stream="app-in-focus"
-        ) == {"succeeded": 2}
-    finally:
-        warehouse.close()
-
-
-def test_loader_revalidates_a_recreated_object_generation(tmp_path, monkeypatch) -> None:
-    now = datetime(2026, 8, 27, tzinfo=UTC)
-    content = b"same-content"
-    original = _raw("raw/recreated.segb.gz", content, now, storage_generation=1)
-    repository = _Repository(
-        [original],
-        {original.key: gzip.compress(encode_segment_envelope(content))},
-    )
-    monkeypatch.setattr(
-        "personal_data_platform.sources.iphone_screen_time.adapter.parse_segb_bytes",
-        lambda raw, segment, **kwargs: [],
-    )
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "loader.duckdb"))))
-    warehouse.migrate()
-    try:
-        assert run_loader(repository, warehouse).succeeded == 1
-
-        recreated = replace(
-            original,
-            storage_created_at=now + timedelta(days=91),
-            storage_generation=2,
-        )
-        repository.observations = [recreated]
-
-        second = run_loader(repository, warehouse)
-
-        assert second.skipped == 0
-        assert second.succeeded == 1
-        assert repository.get_calls[-1] == (original.key, 2)
-        assert (
-            warehouse.query_value(
-                "SELECT storage_generation FROM ops.ingestion_metadata WHERE object_key = ?",
-                [original.key],
-            )
-            == 2
-        )
-    finally:
-        warehouse.close()
+from tests.integration.owntracks.test_location_point import Store
 
 
 @pytest.mark.parametrize(
-    "changes",
+    "field,value",
     [
-        {"source_id": "another_source"},
-        {"stream": "another-stream"},
-        {"schema_version": 3},
-        {"subject_key": "b" * 64},
+        ("source_id", "other"),
+        ("stream", "other"),
+        ("schema_version", 3),
+        ("subject_key", "b" * 64),
+        ("logical_key", "wrong"),
     ],
 )
-def test_loader_rejects_mixed_or_inconsistent_metadata_before_reading(tmp_path, changes) -> None:
-    content = b"unread"
-    raw = _raw("identity", content, datetime(2026, 8, 27, tzinfo=UTC))
-    repository = _Repository(
-        [replace(raw, **changes)],
-        {raw.key: gzip.compress(encode_segment_envelope(content))},
-    )
-    warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "rejected.duckdb"))))
-    warehouse.migrate()
-    try:
-        with pytest.raises(ValueError, match="selected source/stream|metadata does not match"):
-            run_loader(repository, warehouse)
-        assert repository.get_calls == []
-        assert warehouse.query_value("SELECT count(*) FROM ops.ingestion_metadata") == 0
-    finally:
-        warehouse.close()
-
-
-class _JsonBatch:
-    parser_version = "synthetic-json-v1"
-    record_count = 1
-
-    def __init__(self, value: int) -> None:
-        self.value = value
-
-
-class _JsonWarehouse(Warehouse):
-    def _write_batch(self, raw, batch, *, loaded_at):
-        if not isinstance(batch, _JsonBatch):
-            return super()._write_batch(raw, batch, loaded_at=loaded_at)
-        self.connection.execute(
-            "INSERT INTO base.synthetic_value VALUES (?, ?, ?, ?)",
-            [raw.key, raw.stream, raw.schema_version, batch.value],
-        )
-
-
-class _JsonSource:
-    parser_version = _JsonBatch.parser_version
-    source_id = "synthetic"
-    schema_versions = (1, 2)
-    raw_prefixes = ("raw/synthetic/v1/", "raw/synthetic/v2/")
-    raw_suffixes = (".json.gz",)
-
-    def __init__(self, stream: str = "activity") -> None:
-        self.stream = stream
-        self.decoded_versions: list[int] = []
-
-    def validate_raw_key(self, key: str) -> None:
-        parts = key.split("/")
-        if (
-            len(parts) != 8
-            or parts[:2] != ["raw", "synthetic"]
-            or parts[2] not in {"v1", "v2"}
-            or parts[4] not in {"activity", "sleep"}
-            or not key.endswith(".json.gz")
-        ):
-            raise ValueError("unsupported synthetic Raw key")
-
-    def parse_raw_key(self, key: str, *, storage_created_at, storage_generation) -> RawObject:
-        self.validate_raw_key(key)
-        parts = key.split("/")
-        return RawObject(
-            key=key,
-            source_id=self.source_id,
-            schema_version=int(parts[2][1:]),
-            subject_key=parts[3],
-            stream=parts[4],
-            logical_key=parts[5],
-            observed_at=datetime.fromisoformat(parts[6]),
-            sha256=parts[7].removesuffix(".json.gz"),
-            storage_created_at=storage_created_at,
-            storage_generation=storage_generation,
-        )
-
-    def decode(self, raw: RawObject, payload: bytes) -> _JsonBatch:
-        import json
-
-        self.decoded_versions.append(raw.schema_version)
-        decoded = json.loads(payload)
-        field = "value" if raw.schema_version == 1 else "measurement"
-        return _JsonBatch(int(decoded[field]))
-
-
-def _json_raw(source, payload: bytes, version: int, now: datetime) -> RawObject:
-    digest = hashlib.sha256(payload).hexdigest()
-    key = (
-        f"raw/synthetic/v{version}/account/{source.stream}/daily/{now.isoformat()}/{digest}.json.gz"
-    )
-    return source.parse_raw_key(key, storage_created_at=now, storage_generation=1)
-
-
-class _SyntheticGCSClient:
-    def __init__(self, observations: list[RawObject], objects: dict[str, bytes]) -> None:
-        self.observations = observations
-        self.objects = objects
-        self.list_calls: list[str] = []
-
-    def bucket(self, name):
-        assert name == "synthetic-bucket"
-        return self
-
-    def list_blobs(self, bucket, *, prefix):
-        assert bucket is self
-        self.list_calls.append(prefix)
-        return SimpleNamespace(
-            pages=[
-                [
-                    SimpleNamespace(
-                        name=raw.key,
-                        time_created=raw.storage_created_at,
-                        generation=raw.storage_generation,
-                    )
-                ]
-                for raw in self.observations
-                if raw.key.startswith(prefix)
-            ]
-        )
-
-    def blob(self, key, *, generation):
-        def download_as_bytes(*, raw_download, if_generation_match):
-            assert raw_download is True
-            assert generation == if_generation_match == 1
-            return self.objects[key]
-
-        return SimpleNamespace(download_as_bytes=download_as_bytes)
-
-
-def test_loader_uses_source_decoder_across_schema_versions_and_preserves_other_stream(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    now = datetime(2026, 8, 27, tzinfo=UTC)
-    source = _JsonSource()
-    v1 = b'{"value": 12}'
-    v2 = b'{"measurement": 34}'
-    first = _json_raw(source, v1, 1, now)
-    second = _json_raw(source, v2, 2, now + timedelta(seconds=1))
-    other_source = _JsonSource(stream="sleep")
-    poison = _json_raw(other_source, b"invalid-json", 1, now)
-    client = _SyntheticGCSClient(
-        [second, poison, first],
-        {
-            first.key: gzip.compress(v1),
-            second.key: gzip.compress(v2),
-            poison.key: gzip.compress(b"invalid-json"),
-        },
-    )
-    repository = GCSRawRepository(client=client, bucket="synthetic-bucket", source=source)
-    warehouse = _JsonWarehouse(connect(WarehouseConfig(str(tmp_path / "synthetic.duckdb"))))
-    warehouse.migrate()
-    warehouse.connection.execute(
-        "CREATE TABLE base.synthetic_value (object_key VARCHAR, stream VARCHAR, "
-        "schema_version INTEGER, value INTEGER)"
-    )
-    try:
-        result = run_loader(repository, warehouse, source=source)
-        assert (result.succeeded, result.records) == (2, 2)
-        assert source.decoded_versions == [1, 2]
-        assert warehouse.query_rows(
-            "SELECT schema_version, value FROM base.synthetic_value ORDER BY schema_version"
-        ) == [(1, 12), (2, 34)]
-        assert run_loader(repository, warehouse, source=source).skipped == 2
-
-        assert set(client.list_calls) == set(source.raw_prefixes)
-        other_repository = GCSRawRepository(
-            client=client, bucket="synthetic-bucket", source=other_source
-        )
-        assert run_loader(other_repository, warehouse, source=other_source).failed == 1
-        assert warehouse.ingestion_counts(source_id="synthetic", stream="activity") == {
-            "succeeded": 2
-        }
-        assert warehouse.ingestion_counts(source_id="synthetic", stream="sleep") == {"failed": 1}
-        assert run_loader(repository, warehouse, source=source).skipped == 2
-        assert warehouse.query_value("SELECT count(*) FROM base.synthetic_value") == 2
-        assert (
-            warehouse.query_value(
-                "SELECT count(*) FROM ops.job_run WHERE job_name = 'loader:synthetic:activity'"
+def test_loader_rejects_inconsistent_metadata_before_reading(field, value):
+    store = Store()
+    raw = store.add()
+    with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
+        warehouse.migrate()
+        with pytest.raises(ValueError):
+            run_loader_objects(
+                store, warehouse, [replace(raw, **{field: value})], source=get_source("owntracks")
             )
-            == 0
-        )
+        assert not store.reads
+        assert not warehouse.location_point_ids()
 
-        phone_content = b"synthetic-segb"
-        phone = _raw("phone", phone_content, now)
-        phone_repository = _Repository(
-            [phone],
-            {phone.key: gzip.compress(encode_segment_envelope(phone_content))},
+
+def test_loader_continues_after_poison_object_and_retries_it():
+    store = Store()
+    first, second = store.add(), store.add(lat=36)
+    original = store.objects[first.key]
+    store.objects[first.key] = first, b"corrupt"
+    with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
+        warehouse.migrate()
+        outcome = run_loader(store, warehouse, source=get_source("owntracks"))
+        assert (outcome.failed, outcome.succeeded, outcome.records) == (1, 1, 1)
+        store.objects[first.key] = original
+        outcome = run_loader(store, warehouse, source=get_source("owntracks"))
+        assert (outcome.failed, outcome.succeeded, outcome.skipped) == (0, 1, 1)
+        assert warehouse.location_point_ids() == {first.logical_key, second.logical_key}
+
+
+def test_scheduled_loader_defers_without_reading_when_shared_lease_is_busy():
+    store = Store()
+    store.add()
+    with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
+        warehouse.migrate()
+        warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
+        with pytest.raises(JobAlreadyRunning):
+            run_loader(store, warehouse, source=get_source("owntracks"))
+        assert not store.reads
+        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "other"
+
+
+def test_all_streams_loader_keeps_a_single_owner_and_stops_on_unknown_commit(monkeypatch):
+    store = Store()
+    store.add()
+    source = get_source("owntracks")
+    with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
+        warehouse.migrate()
+        calls = []
+        connection = warehouse.connection
+
+        class LostCommit:
+            def execute(self, sql, *args):
+                result = connection.execute(sql, *args)
+                if (
+                    sql == "COMMIT"
+                    and connection.execute("SELECT count(*) FROM base.location_point").fetchone()[0]
+                ):
+                    raise OSError("response lost")
+                return result
+
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+        warehouse.connection = LostCommit()
+
+        def repository_factory(source):
+            calls.append(source.source_id)
+            return store
+
+        outcome = run_loader_all(
+            [source, source], warehouse=warehouse, repository_factory=repository_factory
         )
-        monkeypatch.setattr(
-            "personal_data_platform.sources.iphone_screen_time.adapter.parse_segb_bytes",
-            lambda raw, payload, **kwargs: [],
-        )
-        assert run_loader(phone_repository, warehouse).succeeded == 1
-        assert warehouse.ingestion_counts(
-            source_id="iphone_screen_time", stream="app-in-focus"
-        ) == {"succeeded": 1}
-        assert warehouse.ingestion_counts(source_id="synthetic", stream="activity") == {
-            "succeeded": 2
-        }
-    finally:
-        warehouse.close()
+        assert not outcome.ok and not warehouse.connection_usable
+        assert calls == ["owntracks"]
+        assert len(warehouse.location_point_ids()) == 1
+        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") is not None
 
 
 def test_inherited_loader_lease_stops_after_owner_loss(monkeypatch):
@@ -519,7 +118,11 @@ def test_inherited_loader_lease_stops_after_owner_loss(monkeypatch):
     try:
         with pytest.raises(RuntimeError, match="lease"):
             run_loader_objects(
-                SimpleNamespace(), warehouse, (), source=get_source(), _lease_owner="daily"
+                SimpleNamespace(),
+                warehouse,
+                (),
+                source=get_source("owntracks"),
+                _lease_owner="daily",
             )
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "other"
     finally:
@@ -527,7 +130,6 @@ def test_inherited_loader_lease_stops_after_owner_loss(monkeypatch):
 
 
 def test_warehouse_deadline_interrupts_a_blocking_query():
-    import time
 
     import duckdb
 
@@ -547,7 +149,6 @@ def test_warehouse_deadline_interrupts_a_blocking_query():
 
 
 def test_loader_deadline_interrupts_database_work(monkeypatch):
-    import time
 
     from personal_data_platform.loader.deadline import interrupt_after
     from personal_data_platform.loader.job import run_loader_objects
@@ -557,7 +158,7 @@ def test_loader_deadline_interrupts_database_work(monkeypatch):
     warehouse.migrate()
     monkeypatch.setattr(
         warehouse,
-        "succeeded_keys_for",
+        "location_point_ids",
         lambda *args, **kwargs: warehouse.query_value(
             "SELECT sum(i) FROM range(1000000000000) t(i)"
         ),
@@ -570,7 +171,7 @@ def test_loader_deadline_interrupts_database_work(monkeypatch):
                 SimpleNamespace(),
                 warehouse,
                 (),
-                source=get_source(),
+                source=get_source("owntracks"),
                 _deadline=started + 1.2,
             )
         assert time.monotonic() - started < 2

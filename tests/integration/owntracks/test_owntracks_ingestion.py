@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 
 import pytest
 
-from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.loader.job import run_loader
 from personal_data_platform.reconciliation.job import run_reconciliation
 from personal_data_platform.sources.registry import get_source
@@ -66,20 +65,31 @@ def test_loader_commits_one_location_and_redelivery_is_idempotent():
     try:
         warehouse.migrate()
         assert not {"altitude_m", "monitoring_mode", "trigger", "battery_percent"} & {
-            row[0] for row in warehouse.query_rows("DESCRIBE base.owntracks_location")
+            row[0] for row in warehouse.query_rows("DESCRIBE base.location_point")
         }
         assert run_loader(store, warehouse, source=source).records == 1
         assert run_loader(store, warehouse, source=source).skipped == 1
         assert warehouse.query_rows(
-            "SELECT device_key,event_at,latitude,longitude,accuracy_m,velocity_kmh,"
-            "object_key "
-            "FROM base.owntracks_location"
-        ) == [("a" * 64, datetime(2026, 10, 9, tzinfo=UTC), 35.0, 139.0, 7.0, 12.0, key)]
-        assert warehouse.query_rows(
-            "SELECT source_id,status,record_count FROM ops.ingestion_metadata"
-        ) == [("owntracks", "succeeded", 1)]
+            "SELECT device_key,observed_at,latitude,longitude,accuracy_meters,speed_kmh,"
+            "location_point_id "
+            "FROM base.location_point"
+        ) == [
+            (
+                "a" * 64,
+                datetime(2026, 10, 9, tzinfo=UTC),
+                35.0,
+                139.0,
+                7.0,
+                12.0,
+                next(iter(store.list_raw(source.raw_prefixes[0]))).logical_key,
+            )
+        ]
+        assert {r for r in warehouse.relation_names() if r.startswith("ops.")} == {
+            "ops.job_lock",
+            "ops.schema_migration",
+        }
         warehouse.migrate()
-        assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 1
     finally:
         warehouse.close()
 
@@ -100,8 +110,8 @@ def test_failed_batch_rolls_back_location_and_can_be_retried(monkeypatch):
         with monkeypatch.context() as patch:
             patch.setattr(motherduck, "write_batch", interrupted)
             assert run_loader(store, warehouse, source=source).failed == 1
-        assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 0
-        assert warehouse.query_value("SELECT status FROM ops.ingestion_metadata") == "failed"
+        assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 0
+        assert warehouse.location_point_ids() == set()
         assert run_loader(store, warehouse, source=source).records == 1
     finally:
         warehouse.close()
@@ -123,26 +133,27 @@ def test_loader_preserves_motionactivities_and_missing_values(fields, expected):
         warehouse.migrate()
         assert run_loader(store, warehouse, source=source).records == 1
         assert run_loader(store, warehouse, source=source).skipped == 1
-        assert warehouse.query_rows("SELECT motionactivities FROM base.owntracks_location") == [
+        assert warehouse.query_rows("SELECT motion_activities FROM base.location_point") == [
             (expected,)
         ]
     finally:
         warehouse.close()
 
 
-def test_reconciliation_reprocesses_locations_loaded_with_previous_parser():
+def test_parser_correction_requires_explicit_reprocess():
     source, store, _, _ = location_store(motionactivities=["walking"])
     source.parser_version = "owntracks-location-v1"
-    source.required_relations = ("base.owntracks_location",)
+    source.required_relations = ("base.location_point",)
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     try:
         warehouse.migrate()
         assert run_loader(store, warehouse, source=source).records == 1
-        warehouse.connection.execute("UPDATE base.owntracks_location SET motionactivities=NULL")
+        warehouse.connection.execute("UPDATE base.location_point SET motion_activities=NULL")
         source.parser_version = get_source("owntracks").parser_version
 
         assert run_reconciliation(store, warehouse, source=source).ok
-        assert warehouse.query_rows("SELECT motionactivities FROM base.owntracks_location") == [
+        assert run_loader(store, warehouse, source=source, reprocess=True).records == 1
+        assert warehouse.query_rows("SELECT motion_activities FROM base.location_point") == [
             (["walking"],)
         ]
         assert run_loader(store, warehouse, source=source).skipped == 1
@@ -150,34 +161,28 @@ def test_reconciliation_reprocesses_locations_loaded_with_previous_parser():
         warehouse.close()
 
 
-def test_dbt_location_view_uses_tokyo_time(tmp_path, monkeypatch, dbt_project):
-    source, store, _, _ = location_store(motionactivities=["walking", "cycling"])
-    database = tmp_path / "owntracks.duckdb"
-    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
-    warehouse.migrate()
-    run_loader(store, warehouse, source=source)
-    warehouse.close()
-    monkeypatch.setenv("DBT_DUCKDB_PATH", str(database))
-    run_dbt(target="local", project_dir=dbt_project, selector="tag:owntracks")
-    warehouse = Warehouse(connect(WarehouseConfig(str(database))))
+def test_location_observed_at_retains_source_time_instead_of_storage_time():
+    source, store, _, _ = location_store()
+    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     try:
+        warehouse.migrate()
+        assert run_loader(store, warehouse, source=source).records == 1
         assert warehouse.query_rows(
-            "SELECT event_at_jst,activity_date,motionactivities "
-            "FROM marts.owntracks_location_time_series"
-        ) == [(datetime(2026, 10, 9, 9), datetime(2026, 10, 9).date(), ["walking", "cycling"])]
+            "SELECT observed_at AT TIME ZONE 'Asia/Tokyo' FROM base.location_point"
+        ) == [(datetime(2026, 10, 9, 9),)]
     finally:
         warehouse.close()
 
 
 def test_unlimited_raw_audit_repairs_missing_load_and_detects_deleted_raw(monkeypatch):
     source, store, _, _ = location_store()
-    source.required_relations = ("base.owntracks_location",)
+    source.required_relations = ("base.location_point",)
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate()
     try:
         result = run_reconciliation(store, warehouse, source=source)
         assert result.ok
-        assert warehouse.query_value("SELECT count(*) FROM base.owntracks_location") == 1
+        assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 1
         store.objects.clear()
         result = run_reconciliation(store, warehouse, source=source)
         assert not result.ok

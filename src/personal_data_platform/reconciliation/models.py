@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
 
 DAILY_JOB_NAME = "daily-reconciliation"
-DAILY_JOB_HISTORY_NAMES = (DAILY_JOB_NAME, "daily-reconciliation-west")
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,21 +26,3 @@ class ReconciliationResult:
     @property
     def ok(self) -> bool:
         return self.status == "succeeded"
-
-    @property
-    def collector_device_count(self) -> int:
-        return self._detail_count("collector_device_count")
-
-    @property
-    def stale_collector_count(self) -> int:
-        return self._detail_count("stale_collector_count")
-
-    @property
-    def missing_collector_scan_count(self) -> int:
-        return self._detail_count("missing_collector_scan_count")
-
-    def _detail_count(self, key: str) -> int:
-        # Source-specific details have an open schema. Keep dynamic values at
-        # this conversion boundary; int validates them and preserves coercion.
-        value: Any = self.details.get(key, 0)
-        return int(value)

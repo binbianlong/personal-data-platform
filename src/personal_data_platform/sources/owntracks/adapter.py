@@ -20,10 +20,7 @@ class OwnTracksSource:
     parser_version = "owntracks-location-v2"
     raw_prefixes: tuple[str, ...] = (RAW_PREFIX,)
     raw_suffixes: tuple[str, ...] = (".json.gz",)
-    required_relations: tuple[str, ...] = (
-        "base.owntracks_location",
-        "marts.owntracks_location_time_series",
-    )
+    required_relations: tuple[str, ...] = ("base.location_point",)
     dbt_selector = "tag:owntracks"
     monitor_name = "owntracks_reconciliation"
 
