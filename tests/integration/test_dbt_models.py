@@ -240,3 +240,91 @@ def test_tied_boundaries_and_os_totals_are_independent(tmp_path, monkeypatch):
             f"select observed_seconds,total_seconds,unresolved_event_count from marts.daily_{name}_screen_time_total order by activity_date"
         ).fetchall() == [(15, 15, 0), (None, None, 2)]
     warehouse.close()
+
+
+def test_prod_source_only_and_model_fencing_with_local_profile(tmp_path, monkeypatch):
+    import shutil
+
+    import pytest
+
+    from personal_data_platform.dbt_runner import DBT_PROJECT_DIR
+
+    project = tmp_path / "project"
+    shutil.copytree(DBT_PROJECT_DIR, project, ignore=shutil.ignore_patterns("target", "logs"))
+    (project / "profiles.yml").write_text("""personal_data_platform:
+  target: prod
+  outputs:
+    prod:
+      type: duckdb
+      path: "{{ env_var('DBT_DUCKDB_PATH') }}"
+      schema: main
+      threads: 1
+""")
+    path = tmp_path / "catalog.duckdb"
+    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
+    warehouse.migrate()
+    warehouse.connection.execute("create view marts.daily_steps as select 42 as sentinel")
+    warehouse.connection.execute(
+        "insert into ops.job_lock values ('loader','owner',current_timestamp + interval '1 hour')"
+    )
+    before = warehouse.connection.execute("select expires_at from ops.job_lock").fetchone()[0]
+    warehouse.close()
+    monkeypatch.setenv("DBT_DUCKDB_PATH", str(path))
+    monkeypatch.delenv("PDP_DBT_LEASE_OWNER", raising=False)
+    config = WarehouseConfig("dummy", "dummy")
+    run_dbt(target="prod", project_dir=project, selector="tag:owntracks", config=config)
+    with pytest.raises(RuntimeError):
+        run_dbt(target="prod", project_dir=project, selector="daily_steps", config=config)
+    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
+    assert warehouse.connection.execute("select * from marts.daily_steps").fetchall() == [(42,)]
+    assert (
+        warehouse.connection.execute("select expires_at from ops.job_lock").fetchone()[0] == before
+    )
+    warehouse.close()
+    monkeypatch.setenv("PDP_DBT_LEASE_OWNER", "owner")
+    run_dbt(target="prod", project_dir=project, selector="daily_steps", config=config)
+    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
+    assert (
+        warehouse.connection.execute("select expires_at from ops.job_lock").fetchone()[0] < before
+    )
+    assert warehouse.connection.execute("select * from marts.daily_steps").fetchall() == []
+    warehouse.close()
+
+
+def test_owntracks_rebuild_runs_source_tests_with_prod_profile(tmp_path, monkeypatch):
+    import shutil
+    from types import SimpleNamespace
+
+    from personal_data_platform.dbt_runner import DBT_PROJECT_DIR
+    from personal_data_platform.recovery import rebuild
+    from personal_data_platform.sources.registry import get_source
+
+    project = tmp_path / "project"
+    shutil.copytree(DBT_PROJECT_DIR, project, ignore=shutil.ignore_patterns("target", "logs"))
+    (project / "profiles.yml").write_text("""personal_data_platform:
+  target: prod
+  outputs:
+    prod:
+      type: duckdb
+      path: "{{ env_var('DBT_DUCKDB_PATH') }}"
+      schema: main
+      threads: 1
+""")
+    path = tmp_path / "scratch.duckdb"
+    monkeypatch.setenv("DBT_DUCKDB_PATH", str(path))
+    monkeypatch.delenv("PDP_DBT_LEASE_OWNER", raising=False)
+    monkeypatch.setattr(
+        rebuild, "open_warehouse", lambda config: Warehouse(connect(WarehouseConfig(str(path))))
+    )
+    monkeypatch.setattr(rebuild, "run_dbt", lambda **kwargs: run_dbt(project_dir=project, **kwargs))
+    assert (
+        rebuild.run_rebuild(
+            SimpleNamespace(list_raw=lambda prefix: []),
+            target_db="scratch",
+            token="dummy",
+            production_db="production",
+            allow_partial_history=True,
+            source=get_source("owntracks"),
+        )
+        == 0
+    )
