@@ -1,41 +1,34 @@
 # 分析クエリ例
 
-## 日次Screen Timeの参照
+## 日次Screen Time
 
-| 対象 | アプリ別 | 端末別の合計 |
+| 対象 | 利用区間 | 日次合計 |
 |---|---|---|
-| iPhone | `marts.daily_iphone_screen_time` | `marts.daily_iphone_screen_time_total` |
-| Mac | `marts.daily_mac_screen_time` | `marts.daily_mac_screen_time_total` |
+| iPhone | `marts.iphone_screen_time_interval` | `marts.daily_iphone_screen_time_total` |
+| Mac | `marts.mac_screen_time_interval` | `marts.daily_mac_screen_time_total` |
 
-旧`marts.daily_screen_time` / `_total`と`base.screen_time_event` / `_transition` / `_interval`は分割後には存在しない。
-参照するsourceに応じて上表と`base.iphone_screen_time_*` / `base.mac_screen_time_*`へ切り替える。
-日付・品質・欠損の意味は[iPhone](../sources/iphone-screen-time/data-model.md)・[Mac](../sources/mac-screen-time/data-model.md)のデータモデルに従う。
-以下は日本時間の今日を含む直近7日のiPhoneアプリ別使用時間を取得する例で、当日の値は途中経過を含む。
+日次合計はJST日につき1行。同じOSの端末間重複を和集合にし、iPhoneとMacは別々に集計する。
+観測と推定が重なれば観測を優先し、推定で追加された分だけをinferred_secondsに含める。
 
 ```sql
-SELECT
-    activity_date,
-    device_key,
-    bundle_id,
-    complete_seconds,
-    inferred_seconds,
-    total_seconds / 60.0 AS total_minutes
-FROM marts.daily_iphone_screen_time
+SELECT activity_date, observed_seconds, inferred_seconds,
+       total_seconds / 60.0 AS total_minutes, unresolved_event_count
+FROM marts.daily_iphone_screen_time_total
 WHERE activity_date BETWEEN
     CAST(current_timestamp AT TIME ZONE 'Asia/Tokyo' AS DATE) - 6
     AND CAST(current_timestamp AT TIME ZONE 'Asia/Tokyo' AS DATE)
-ORDER BY activity_date DESC, device_key, total_seconds DESC, bundle_id;
+ORDER BY activity_date DESC;
 ```
 
-Macには`marts.daily_mac_screen_time`を使う。端末別合計はそれぞれ`_total`を使い、`bundle_id`を選択・並び順から外す。
-異なる端末の時間を合算しない。区間のない日の不在をゼロに置き換えない。
+当日は途中経過。未解決イベントだけの日の秒数NULLと、記録も区間もない日の行の不在を、利用0と同一視しない。
+baseのBundle IDに表示名を付ける場合は、`base.app`へOSとBundle IDでLEFT JOINする。未登録でも元記録を落とさない。
 
-## Fitbit睡眠との横断分析
+## 健康・位置との組合せ
 
-睡眠開始前2時間の端末別使用時間は`marts.fitbit_sleep_iphone_screen_time`と
-`marts.fitbit_sleep_mac_screen_time`を使う。旧`marts.fitbit_sleep_screen_time`は存在しない。
-重複区間・欠測・日付・端末分離の定義は[Fitbitデータモデル](../sources/fitbit/data-model.md#分析ビュー)に従う。
+歩数・AZM・睡眠詳細には`marts.daily_steps`、`marts.daily_active_zone`、`marts.daily_sleep_detail`を使う。
+睡眠の帰属日は親睡眠の終了JST日、`base.health_daily.source_date`は提供元の日付であり、旅行時などには一致しない。
+睡眠詳細はkind/category別の値で、種類をまたいで実睡眠時間として足さない。
+位置は`base.location_point`、運動は`base.exercise_session`、分心拍は`base.heart_rate_minute`を直接参照する。
+日次と細かい記録をJOINするときは、先に比較する日付・粒度を揃えて行の増殖を防ぐ。
 
-横断モデルはトップレベルの`cross_source`に置き、source単独のdbt selectorには含めない。
-単独実行は`pdp dbt --source iphone_screen_time` / `pdp dbt --source mac_screen_time`を使う。
-横断モデルの更新・検証は全体の`pdp dbt`で行う。
+全7ビューの定義と単位は[データモデル](../platform/data-model.md)を参照する。

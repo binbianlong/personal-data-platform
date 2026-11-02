@@ -54,8 +54,8 @@ jsonPayload.summary.notification_id="<id>"
 
 `fetched_rows`は正規化後の行数で、心拍は分集計、睡眠は親と子の合計となる。
 `submitted_rows`はINSERT/MERGEへ渡した行数であり、変更・削除行数や通信バイト数ではない。
-`range_replaced`は空取得による削除も含み、`unchanged`はデータ行の置換を省略してcoverageだけを更新した状態、
-`stale`は全範囲がより新しい取得で保護された状態を示す。
+`range_replaced`は正常な空取得による削除も含み、`unchanged`は保存済みの実値が同じで書換えを省いた状態を示す。
+取得順位や削除IDの台帳は持たず、再試行ではAPIから取得し直す。
 `succeeded`はCOMMIT確認後だけ記録する。未確定の件数は`null`で、正常な空取得の0件と区別する。
 発行やCOMMITの`unknown`は結果不明を表し、未実行とは限らない。
 
@@ -67,7 +67,7 @@ pdp fitbit sync --from YYYY-MM-DD --to YYYY-MM-DD
 
 終了日は排他的。直近2完了日より前の空白は期間を指定して補修する。
 途中終了時に出る最初の未完了日・種別から再実行する。
-手動同期は`ops.job_run`に履歴を保存せず、標準出力のJSON・終了コードと取得ログで確認する。
+手動同期・日次とも実行結果はJSONログで確認する。DBにjob履歴や最終成功日checkpointは保存しない。
 物理時刻の範囲を日全体へ拡大せず、睡眠・日次指標はproviderのcivil dateを使う。
 通知の再試行条件は[取得仕様](acquisition.md#webhookとpubsub)を参照する。
 
@@ -78,41 +78,18 @@ Schedulerの停止とlease確認は[Platform運用](../../platform/operations.md
 本番DBを空にせず、独立したscratch DBへ期間指定同期とdbtを実行して比較する。
 Fitbitの復旧元はGoogle Health APIであり、Rawは保存しない。
 
-schema 2の歩数通知と暦日coverageを使う間は、worker・日次Jobとも`records-v1`と`records-civil-v1`を認識するwriterが必要となる。
-反映はworker、日次Job、receiverの順とし、receiver更新前に旧writerのJobが終了していることを確認する。
-rollbackではreceiverを先に戻す。キュー内のschema 2通知を読めないworkerや、暦日coverageを認識しないJobへ戻さない。
-schema 1の心拍・legacy通知は引き続き受理する。
+歩数通知のUTC/civilと要求範囲に対応したworker・日次Jobを同じコードで稼働させる。
+新schemaへ切り替えたDBに旧imageを戻さない。通知の保持期間を超える停止や直近2完了日より前の欠落は、期間指定で補修する。
+APIの日次記録が別日へ訂正された場合、旧日付を再取得するまで旧値が残ることがある。
 
-## 指標追加の導入
+## 指標と購読の更新
 
-1. [共通のDB更新手順](../../platform/operations.md#dbの初期化と更新)に従い、Collector・各取込・日次処理を停止し、実行中Jobとloader leaseの終了を確認する。既存checkoutへ追加migrationを配置する前にCollectorを停止する。
-2. migration `011_fitbit_health_metrics.sql`を適用し、Fitbit worker・OwnTracks worker・日次Jobを同じ新しいimageへ更新する。Collectorのcheckoutも更新し、`just sync`を実行する。全取込runtimeが適用済み011を認識し、Fitbit writerが16種類を読める状態を確認した後でreceiverを更新する。
-3. OAuthの`googlehealth.activity_and_fitness.readonly`・`googlehealth.health_metrics_and_measurements.readonly`・`googlehealth.sleep.readonly`を確認する。運動だけ`google-sources`を使う。
-4. Google Healthの既存subscriptionの`dataTypes`へ、既存5種類を残して次の10種類を追加する。`daily-vo2-max`は通知対象に追加しない。
-5. dbtのFitbitモデルとテストを反映し、Collector・各取込・日次処理を再開する。過去分の一括同期は行わず、通知と直近2完了日の再照合を確認する。
+全16取得型は`DATA_TYPES`、通知対象15型は`WEBHOOK_TYPES`を正本とする。日次VO2 maxは通知対象ではなく日次再照合で取得する。
+OAuth scopeと既存subscriptionを確認し、workerが新型に対応してから購読・receiverを変更する。
+運動だけgoogle-sources、他の型はgoogle-wearablesを使う。未知分類は保存し、正常な空取得とAPIエラーを区別する。
 
-追加する通知型:
-
-```text
-daily-heart-rate-variability
-heart-rate-variability
-daily-respiratory-rate
-respiratory-rate-sleep-summary
-daily-oxygen-saturation
-daily-sleep-temperature-derivations
-exercise
-sedentary-period
-distance
-time-in-heart-rate-zone
-```
-
-取得ログの種別・範囲・成功、追加テーブルの件数、`daily_fitbit_health`と睡眠・運動ビューを確認する。
-端末や元データによって返却されない項目もあるため、正常な空取得とAPIエラーを区別する。
-日次VO2 maxは次の日次再照合で確認し、必要な場合だけ直近範囲を型指定で同期する。
-
-rollbackではGoogle Healthの追加10型の購読を外してからreceiverを戻す。
-キューに追加型が残る間は、新しいworker・日次Jobを維持して処理を完了する。
-migrationは削除・巻き戻しせず、適用済み011を認識するコードを使う。
+base変更は追加のforward migrationと対応するwriterを配備し、[DB更新手順](../../platform/operations.md#dbの初期化と更新)で停止・検証・再開する。
+既存の履歴を埋める一括再取得は自動では行わず、必要な型・期間だけ同期する。
 
 ## 60分バッチの確認
 

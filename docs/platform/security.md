@@ -6,7 +6,7 @@
 - Raw object key、GCS metadata、ログに、端末identifierやBundle IDなどの直接値を含めない。
 - ログへ出してよい識別情報は疑似化key、object hash、件数、error codeに限定する。
 - GCS Rawの通常削除権限をCollector、Loader、Reconciliationへ与えない。
-- MacのSQLiteとKeychainは現在userの権限で保持し、SQLiteは最新成功Rawの整理だけを行う。
+- MacのSQLiteとKeychainは現在userの権限で保持し、SQLiteのACK後に確定済みpendingファイルを整理する。未確定bytesは保持する。
 - productionと別のRawを使うtestはGCS bucketとMotherDuck databaseを分離し、権限も共有しない。
   preflightは専用bucketの`test/preflight/`と検証用databaseに権限を限定する。
 
@@ -16,7 +16,7 @@
 
 | 実行主体 | capability |
 |---|---|
-| Local Collector | GCS権限なし。SQLite RawとMotherDuck writer tokenを使う |
+| Local Collector | GCS権限なし。SQLiteの状態・外部pendingファイルとMotherDuck writer tokenを使う |
 | 共通runtime Service Account | worker・日次JobのOAuth/DB secret accessと西部Rawへのlist / read |
 | Fitbit receiver | Webhook検証secretとPub/Sub publisher |
 | OwnTracks receiver | OwnTracks認証secretと`raw/owntracks/v1/`へのcreateだけ |

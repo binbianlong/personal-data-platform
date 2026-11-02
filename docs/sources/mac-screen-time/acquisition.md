@@ -23,7 +23,7 @@ SEGB segmentの元bytesと種別をenvelopeへ格納する。削除記録のsegm
 Collectorは最新segmentも読み、read前後のinode・size・mtimeが一致したbytesを検査する。
 構造不整合や書込途中のCRC不一致があるsnapshotは保存・取り込みを見送り、次周期に再試行する。
 
-未知protobuf fieldと削除済みrecordもRawに残す。既存のCRC不一致RawはLoaderで読めるが、
+未知protobuf fieldと削除済みrecordも送信待ちのRaw bytesに含める。確認済み送信後のRawは残さない。decoderは既存のCRC不一致recordを扱うが、
 CRC正常の未知payload、壊れたSEGB構造、未知record stateは観測全体を取込失敗にし、既存の有効状態を維持する。
 Rawの保持範囲は[データモデル](data-model.md#observation-semantics)を参照する。
 
