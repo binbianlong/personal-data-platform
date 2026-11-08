@@ -33,6 +33,13 @@
       "matchManagers": ["terraform"],
       "dependencyDashboardApproval": true,
       "groupName": null
+    },
+    {
+      "matchDatasources": ["github-releases"],
+      "matchPackageNames": ["hashicorp/terraform"],
+      "dependencyDashboardApproval": true,
+      "groupName": "Terraform CLI",
+      "groupSlug": "terraform-cli"
     }
   ],
   "vulnerabilityAlerts": {
