@@ -2,24 +2,20 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
-import re
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from personal_data_platform.sources.fitbit.models import (
-    DAILY_TYPES,
+from .models import (
     DATE_TYPES,
-    SAMPLE_TYPES,
     HeartRateMinute,
     HeartRateMinuteSnapshot,
     Record,
@@ -27,60 +23,34 @@ from personal_data_platform.sources.fitbit.models import (
     Window,
     aware,
     data_source_family_for,
-    date_cursor,
     object_dict,
-    parse_time,
-    string,
 )
-
-from .details import (
-    ExerciseDetails,
-    HrvDaily,
-    HrvSample,
-    OxygenSaturationDaily,
-    RecordDetails,
-    RespiratorySleepSummary,
-    RespiratoryStats,
-    SleepSummary,
-    SleepTemperatureDaily,
-    Vo2MaxDaily,
+from .normalization import (
+    normalize,
+    normalize_heart_rate_minute,
+    parse_timestamp,
+    utc_text,
 )
 
 DATA_SOURCE_FAMILY = "users/me/dataSourceFamilies/google-wearables"
 LOGGER = logging.getLogger(__name__)
-_FIELDS = {
-    "steps": ("steps", "steps.interval.start_time"),
-    "daily-resting-heart-rate": ("dailyRestingHeartRate", "daily_resting_heart_rate.date"),
-    "active-zone-minutes": ("activeZoneMinutes", "active_zone_minutes.interval.start_time"),
-    "sleep": ("sleep", "sleep.interval.civil_end_time"),
-    "daily-heart-rate-variability": (
-        "dailyHeartRateVariability",
-        "daily_heart_rate_variability.date",
-    ),
-    "heart-rate-variability": (
-        "heartRateVariability",
-        "heart_rate_variability.sample_time.physical_time",
-    ),
-    "daily-respiratory-rate": ("dailyRespiratoryRate", "daily_respiratory_rate.date"),
-    "respiratory-rate-sleep-summary": (
-        "respiratoryRateSleepSummary",
-        "respiratory_rate_sleep_summary.sample_time.physical_time",
-    ),
-    "daily-oxygen-saturation": ("dailyOxygenSaturation", "daily_oxygen_saturation.date"),
-    "daily-sleep-temperature-derivations": (
-        "dailySleepTemperatureDerivations",
-        "daily_sleep_temperature_derivations.date",
-    ),
-    "daily-vo2-max": ("dailyVo2Max", "daily_vo2_max.date"),
-    "exercise": ("exercise", "exercise.interval.civil_start_time"),
-    "sedentary-period": ("sedentaryPeriod", "sedentary_period.interval.start_time"),
-    "distance": ("distance", "distance.interval.start_time"),
-    "time-in-heart-rate-zone": (
-        "timeInHeartRateZone",
-        "time_in_heart_rate_zone.interval.start_time",
-    ),
+_FILTER_FIELDS = {
+    "steps": "steps.interval.start_time",
+    "daily-resting-heart-rate": "daily_resting_heart_rate.date",
+    "active-zone-minutes": "active_zone_minutes.interval.start_time",
+    "sleep": "sleep.interval.civil_end_time",
+    "daily-heart-rate-variability": "daily_heart_rate_variability.date",
+    "heart-rate-variability": "heart_rate_variability.sample_time.physical_time",
+    "daily-respiratory-rate": "daily_respiratory_rate.date",
+    "respiratory-rate-sleep-summary": "respiratory_rate_sleep_summary.sample_time.physical_time",
+    "daily-oxygen-saturation": "daily_oxygen_saturation.date",
+    "daily-sleep-temperature-derivations": "daily_sleep_temperature_derivations.date",
+    "daily-vo2-max": "daily_vo2_max.date",
+    "exercise": "exercise.interval.civil_start_time",
+    "sedentary-period": "sedentary_period.interval.start_time",
+    "distance": "distance.interval.start_time",
+    "time-in-heart-rate-zone": "time_in_heart_rate_zone.interval.start_time",
 }
-_POINT_FIELDS = {field for field, _ in _FIELDS.values()} | {"heartRate"}
 
 
 class HealthError(RuntimeError):
@@ -214,10 +184,6 @@ def request_json(
     return payload
 
 
-def _utc_text(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
 def _chunks(window: Window) -> Iterator[Window]:
     # Reconcile is paginated. These conservative client bounds also stay within
     # the provider's documented 14/90-day limits for aggregation endpoints.
@@ -282,7 +248,7 @@ class HealthClient:
                 for raw_point in raw_points:
                     try:
                         point = object_dict(raw_point)
-                        normalized = _normalize(window.data_type, point, subject_key)
+                        normalized = normalize(window.data_type, point, subject_key)
                     except (KeyError, ValueError, TypeError, OverflowError):
                         raise InvalidResponseError("Malformed Google Health data point") from None
                     for record in normalized:
@@ -345,7 +311,10 @@ class HealthClient:
                 for value in points:
                     try:
                         point = object_dict(value)
-                        left, right = _timestamp(point["startTime"]), _timestamp(point["endTime"])
+                        left, right = (
+                            parse_timestamp(point["startTime"]),
+                            parse_timestamp(point["endTime"]),
+                        )
                         if left.second or left.microsecond or right - left != timedelta(minutes=1):
                             raise ValueError("rollup window is not one UTC minute")
                         if not chunk.start <= left < right <= chunk.end:
@@ -353,21 +322,10 @@ class HealthClient:
                         if left in seen_starts:
                             raise ValueError("duplicate rollup window")
                         seen_starts.add(left)
-                        if any(field in point for field in _ROLLUP_OTHER_FIELDS):
-                            raise ValueError("rollup has a conflicting data type")
-                        if "heartRate" not in point:
+                        minute = normalize_heart_rate_minute(point, start=left, end=right)
+                        if minute is None:
                             continue
-                        stats = object_dict(point["heartRate"])
-                        minutes.append(
-                            HeartRateMinute(
-                                left,
-                                right,
-                                _rollup_number(stats["beatsPerMinuteAvg"]),
-                                _rollup_number(stats["beatsPerMinuteMin"]),
-                                _rollup_number(stats["beatsPerMinuteMax"]),
-                                DATA_SOURCE_FAMILY,
-                            )
-                        )
+                        minutes.append(minute)
                     except (KeyError, ValueError, TypeError, OverflowError):
                         raise InvalidResponseError(
                             "Malformed Google Health heart rate rollup"
@@ -390,7 +348,7 @@ class HealthClient:
         if not isinstance(token, str) or not token.strip():
             raise AuthenticationError("Google Health access token is missing")
         body: dict[str, object] = {
-            "range": {"startTime": _utc_text(window.start), "endTime": _utc_text(window.end)},
+            "range": {"startTime": utc_text(window.start), "endTime": utc_text(window.end)},
             "windowSize": "60s",
             "pageSize": 10_000,
             "dataSourceFamily": DATA_SOURCE_FAMILY,
@@ -412,13 +370,13 @@ class HealthClient:
         )
 
     def _page(self, window: Window, page_token: str) -> dict[str, object]:
-        _, field = _FIELDS[window.data_type]
+        field = _FILTER_FIELDS[window.data_type]
         if window.data_type in DATE_TYPES or window.time_basis == "civil":
             start, end = window.start.date().isoformat(), window.end.date().isoformat()
             if window.time_basis == "civil":
                 field = "steps.interval.civil_start_time"
         else:
-            start, end = _utc_text(window.start), _utc_text(window.end)
+            start, end = utc_text(window.start), utc_text(window.end)
         query: dict[str, str | int] = {
             "filter": f'{field} >= "{start}" AND {field} < "{end}"',
             "pageSize": 25 if window.data_type in ("sleep", "exercise") else 10_000,
@@ -438,419 +396,3 @@ class HealthClient:
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=self._request_timeout(),
         )
-
-
-_ROLLUP_OTHER_FIELDS = (
-    "steps",
-    "floors",
-    "weight",
-    "altitude",
-    "distance",
-    "bodyFat",
-    "totalCalories",
-    "activeZoneMinutes",
-    "sedentaryPeriod",
-    "runVo2Max",
-    "caloriesInHeartRateZone",
-    "activityLevel",
-    "nutritionLog",
-    "hydrationLog",
-    "timeInHeartRateZone",
-    "activeMinutes",
-    "swimLengthsData",
-    "coreBodyTemperature",
-    "activeEnergyBurned",
-    "bloodGlucose",
-)
-
-
-def _rollup_number(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError("heart rate statistic must be numeric")
-    return float(value)
-
-
-def _integer(value: object, *, minimum: int = 0, maximum: int = 2**63 - 1) -> int:
-    if isinstance(value, bool) or not isinstance(value, (str, int)):
-        raise ValueError("expected an integer")
-    if isinstance(value, str) and re.fullmatch(r"-?\d+", value) is None:
-        raise ValueError("expected an integer")
-    result = int(value)
-    if not minimum <= result <= maximum:
-        raise ValueError("integer outside permitted range")
-    return result
-
-
-def _timestamp(value: object) -> datetime:
-    text = string(value)
-    fraction = re.search(r"\.(\d+)", text)
-    if fraction is not None and any(digit != "0" for digit in fraction[1][6:]):
-        raise ValueError("timestamp precision exceeds storage precision")
-    return parse_time(text)
-
-
-def _offset(value: object) -> int:
-    text = string(value)
-    if re.fullmatch(r"-?\d+(?:\.0+)?s", text) is None:
-        raise ValueError("UTC offset must use whole seconds")
-    return _integer(text[:-1].split(".")[0], minimum=-64800, maximum=64800)
-
-
-def _date(value: object) -> date:
-    fields = object_dict(value)
-    return date(
-        _integer(fields["year"], minimum=1, maximum=9999),
-        _integer(fields["month"], minimum=1, maximum=12),
-        _integer(fields["day"], minimum=1, maximum=31),
-    )
-
-
-def _source_date(value: object, instant: datetime, offset: int) -> date:
-    local_date = (instant + timedelta(seconds=offset)).date()
-    if value is None:
-        return local_date
-    provided = _date(object_dict(value)["date"])
-    if provided != local_date:
-        raise ValueError("provider civil date disagrees with time and UTC offset")
-    return provided
-
-
-def _identity(*parts: str) -> str:
-    return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
-
-
-def _alias(fields: dict[str, object], primary: str, alternate: str) -> object:
-    # The REST schema and guide examples use different names. Accept either,
-    # but never silently choose between contradictory provider identities.
-    if (
-        primary in fields
-        and alternate in fields
-        and (
-            type(fields[primary]) is not type(fields[alternate])
-            or fields[primary] != fields[alternate]
-        )
-    ):
-        raise ValueError("conflicting API field aliases")
-    return fields[primary] if primary in fields else fields.get(alternate)
-
-
-def _point_id(point: dict[str, object], data_type: str) -> str | None:
-    name = _alias(point, "dataPointName", "name")
-    if name in (None, ""):
-        return None
-    # Respiratory summaries can return the collection stem without a point ID.
-    if data_type == "respiratory-rate-sleep-summary" and re.fullmatch(
-        r"users/[^/]+/dataTypes/respiratory-rate-sleep-summary/dataPoints/", string(name)
-    ):
-        return None
-    matched = re.fullmatch(
-        rf"users/[^/]+/dataTypes/{re.escape(data_type)}/dataPoints/([^/]+)", string(name)
-    )
-    if matched is None:
-        raise ValueError("invalid data point identity")
-    return matched[1]
-
-
-def _interval(fields: dict[str, object]) -> tuple[datetime, datetime, int, int]:
-    start, end = _timestamp(fields["startTime"]), _timestamp(fields["endTime"])
-    if start >= end:
-        raise ValueError("interval must be positive")
-    return start, end, _offset(fields["startUtcOffset"]), _offset(fields["endUtcOffset"])
-
-
-def _normalize(data_type: str, point: dict[str, object], subject_key: str) -> tuple[Record, ...]:
-    field, _ = _FIELDS[data_type]
-    if any(other != field and other in point for other in _POINT_FIELDS):
-        raise ValueError("data point contains multiple union fields")
-    payload = object_dict(point[field])
-    point_id = _point_id(point, data_type)
-    if data_type == "sleep":
-        if point_id is None:
-            raise ValueError("sleep needs a provider identity")
-        return _sleep(payload, point_id)
-    if data_type == "daily-resting-heart-rate":
-        source_date = _date(payload["date"])
-        cursor = date_cursor(source_date)
-        return (
-            Record(
-                kind=data_type,
-                record_id=point_id or _identity(subject_key, data_type, source_date.isoformat()),
-                cursor=cursor,
-                start=cursor,
-                source_date=source_date,
-                value=float(_integer(payload["beatsPerMinute"], minimum=1, maximum=300)),
-            ),
-        )
-    if data_type not in ("steps", "active-zone-minutes"):
-        return (_health_metric(data_type, payload, point_id, subject_key),)
-    timing = object_dict(payload["interval"])
-    start, end, start_offset, end_offset = _interval(timing)
-    # Steps records omit count for an on-wrist true zero; no record means missing data.
-    raw_value = payload.get("count", 0) if data_type == "steps" else payload["activeZoneMinutes"]
-    value = _integer(raw_value, maximum=1_000_000 if data_type == "steps" else 2**63 - 1)
-    category = None
-    if data_type == "active-zone-minutes":
-        category = string(payload["heartRateZone"]).lower()
-        if category not in ("fat_burn", "cardio", "peak", "heart_rate_zone_unspecified"):
-            raise ValueError("unrecognized heart rate zone")
-    return (
-        Record(
-            kind=data_type,
-            record_id=point_id
-            or _identity(subject_key, data_type, _utc_text(start), _utc_text(end)),
-            cursor=start,
-            start=start,
-            end=end,
-            value=float(value),
-            offset_seconds=start_offset,
-            end_offset_seconds=end_offset,
-            source_date=_source_date(timing.get("civilStartTime"), start, start_offset),
-            category=category,
-        ),
-    )
-
-
-def _sleep(payload: dict[str, object], point_id: str) -> tuple[Record, ...]:
-    timing = object_dict(payload["interval"])
-    start, end, start_offset, end_offset = _interval(timing)
-    source_date = _source_date(timing.get("civilEndTime"), end, end_offset)
-    cursor = date_cursor(source_date)
-    summary = object_dict(payload.get("summary", {}))
-    minutes = summary.get("minutesAsleep")
-    main_sleep = _alias(object_dict(payload.get("metadata", {})), "mainSleep", "main")
-    if main_sleep is not None and not isinstance(main_sleep, bool):
-        raise ValueError("sleep classification must be boolean")
-    category = string(payload["type"]).lower() if "type" in payload else None
-    records = [
-        Record(
-            kind="sleep",
-            record_id=point_id,
-            cursor=cursor,
-            start=start,
-            end=end,
-            offset_seconds=start_offset,
-            end_offset_seconds=end_offset,
-            source_date=source_date,
-            value=float(_integer(minutes)) if minutes is not None else None,
-            is_main_sleep=main_sleep,
-            category=category,
-            details=SleepSummary(
-                _optional_integer(summary, "minutesAwake"),
-                _optional_integer(summary, "minutesInSleepPeriod"),
-                _optional_integer(summary, "minutesToFallAsleep"),
-                _optional_integer(summary, "minutesAfterWakeUp"),
-            ),
-        )
-    ]
-    stage_intervals: list[tuple[datetime, datetime]] = []
-    for field, kind, wake_category in (
-        ("stages", "sleep-stage", None),
-        ("shortAwakenings", "sleep-wake", "short-awakening"),
-        ("outOfBedSegments", "sleep-wake", "out-of-bed"),
-    ):
-        children = payload.get(field, [])
-        if not isinstance(children, list):
-            raise ValueError("sleep details must be an array")
-        for child in children:
-            detail = object_dict(child)
-            child_start, child_end = _timestamp(detail["startTime"]), _timestamp(detail["endTime"])
-            if not start <= child_start < child_end <= end:
-                raise ValueError("sleep detail outside session")
-            detail_category = wake_category or string(detail["type"]).lower()
-            if kind == "sleep-stage":
-                if detail_category not in (
-                    "awake",
-                    "light",
-                    "deep",
-                    "rem",
-                    "asleep",
-                    "restless",
-                    "sleep_stage_type_unspecified",
-                ):
-                    raise ValueError("unrecognized sleep stage")
-                stage_intervals.append((child_start, child_end))
-            # The guide's shortAwakenings objects omit local offsets. Keep them
-            # unknown rather than inferring a timezone across an offset change.
-            child_start_offset = (
-                _offset(detail["startUtcOffset"]) if "startUtcOffset" in detail else None
-            )
-            child_end_offset = _offset(detail["endUtcOffset"]) if "endUtcOffset" in detail else None
-            if field != "shortAwakenings" and (
-                child_start_offset is None or child_end_offset is None
-            ):
-                raise ValueError("sleep detail needs its UTC offsets")
-            records.append(
-                Record(
-                    kind=kind,
-                    record_id=_identity(
-                        point_id,
-                        kind,
-                        wake_category or "",
-                        _utc_text(child_start),
-                        _utc_text(child_end),
-                    ),
-                    cursor=cursor,
-                    start=child_start,
-                    end=child_end,
-                    offset_seconds=child_start_offset,
-                    end_offset_seconds=child_end_offset,
-                    source_date=source_date,
-                    parent_id=point_id,
-                    category=detail_category,
-                    value=(child_end - child_start).total_seconds(),
-                )
-            )
-    ordered_stages = sorted(stage_intervals)
-    for previous, following in zip(ordered_stages, ordered_stages[1:]):
-        if previous[1] > following[0]:
-            raise ValueError("sleep stages must not overlap")
-    return tuple(records)
-
-
-def _number(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        raise ValueError("metric must be a finite number")
-    return float(value)
-
-
-def _optional_number(payload: dict[str, object], field: str) -> float | None:
-    value = payload.get(field)
-    return None if value is None else _number(value)
-
-
-def _optional_integer(payload: dict[str, object], field: str) -> int | None:
-    value = payload.get(field)
-    return None if value is None else _integer(value)
-
-
-def _duration(value: object) -> float:
-    text = string(value)
-    if re.fullmatch(r"\d+(?:\.\d{1,9})?s", text) is None:
-        raise ValueError("duration must be nonnegative seconds")
-    seconds = float(text[:-1])
-    if not math.isfinite(seconds):
-        raise ValueError("duration must be finite")
-    return seconds
-
-
-def _respiratory_stats(value: object) -> RespiratoryStats:
-    fields = object_dict(value)
-    return RespiratoryStats(
-        _number(fields["breathsPerMinute"]),
-        _optional_number(fields, "standardDeviation"),
-        _optional_number(fields, "signalToNoise"),
-    )
-
-
-def _health_metric(
-    kind: str, payload: dict[str, object], point_id: str | None, subject_key: str
-) -> Record:
-    details: RecordDetails | None = None
-    value = None
-    if kind in DAILY_TYPES:
-        source_date = _date(payload["date"])
-        cursor = date_cursor(source_date)
-        if kind == "daily-heart-rate-variability":
-            details = HrvDaily(
-                _optional_number(payload, "averageHeartRateVariabilityMilliseconds"),
-                _optional_number(
-                    payload, "deepSleepRootMeanSquareOfSuccessiveDifferencesMilliseconds"
-                ),
-                _optional_integer(payload, "nonRemHeartRateBeatsPerMinute"),
-                _optional_number(payload, "entropy"),
-            )
-        elif kind == "daily-respiratory-rate":
-            value = _number(payload["breathsPerMinute"])
-        elif kind == "daily-oxygen-saturation":
-            details = OxygenSaturationDaily(
-                _number(payload["averagePercentage"]),
-                _number(payload["lowerBoundPercentage"]),
-                _number(payload["upperBoundPercentage"]),
-                _optional_number(payload, "standardDeviationPercentage"),
-            )
-        elif kind == "daily-sleep-temperature-derivations":
-            details = SleepTemperatureDaily(
-                _number(payload["nightlyTemperatureCelsius"]),
-                _optional_number(payload, "baselineTemperatureCelsius"),
-                _optional_number(payload, "relativeNightlyStddev30dCelsius"),
-            )
-        elif kind == "daily-vo2-max":
-            estimated = payload.get("estimated")
-            if estimated is not None and type(estimated) is not bool:
-                raise ValueError("estimated must be boolean")
-            level = payload.get("cardioFitnessLevel")
-            details = Vo2MaxDaily(
-                _number(payload["vo2Max"]),
-                estimated,
-                string(level) if level is not None else None,
-                _optional_number(payload, "vo2MaxCovariance"),
-            )
-        return Record(
-            kind,
-            point_id or _identity(subject_key, kind, source_date.isoformat()),
-            cursor,
-            cursor,
-            source_date=source_date,
-            value=value,
-            details=details,
-        )
-    if kind in SAMPLE_TYPES:
-        timing = object_dict(payload["sampleTime"])
-        at = _timestamp(timing["physicalTime"])
-        offset = _offset(timing["utcOffset"])
-        source_date = _source_date(timing.get("civilTime"), at, offset)
-        if kind == "heart-rate-variability":
-            details = HrvSample(
-                _optional_number(payload, "rootMeanSquareOfSuccessiveDifferencesMilliseconds"),
-                _optional_number(payload, "standardDeviationMilliseconds"),
-            )
-        else:
-            details = RespiratorySleepSummary(
-                _respiratory_stats(payload["fullSleepStats"]),
-                *(
-                    _respiratory_stats(payload[field]) if field in payload else RespiratoryStats()
-                    for field in ("deepSleepStats", "lightSleepStats", "remSleepStats")
-                ),
-            )
-        return Record(
-            kind,
-            point_id or _identity(subject_key, kind, _utc_text(at)),
-            at,
-            at,
-            offset_seconds=offset,
-            source_date=source_date,
-            details=details,
-        )
-    timing = object_dict(payload["interval"])
-    start, end, start_offset, end_offset = _interval(timing)
-    source_date = _source_date(timing.get("civilStartTime"), start, start_offset)
-    cursor = start
-    category = None
-    if kind == "exercise":
-        if point_id is None:
-            raise ValueError("exercise needs a provider identity")
-        cursor = date_cursor(source_date)
-        duration = payload.get("activeDuration")
-        details = ExerciseDetails(
-            string(payload["exerciseType"]),
-            string(payload["displayName"]),
-            _duration(duration) if duration is not None else None,
-        )
-    elif kind == "distance":
-        # Like steps, the provider can omit the value for an observed true zero.
-        value = _integer(payload.get("millimeters", 0), maximum=1_000_000_000) / 1000
-    elif kind == "time-in-heart-rate-zone":
-        category = string(payload["heartRateZoneType"])
-    return Record(
-        kind,
-        point_id or _identity(subject_key, kind, _utc_text(start), _utc_text(end), category or ""),
-        cursor,
-        start,
-        end,
-        value,
-        start_offset,
-        end_offset,
-        source_date,
-        category=category,
-        details=details,
-    )
