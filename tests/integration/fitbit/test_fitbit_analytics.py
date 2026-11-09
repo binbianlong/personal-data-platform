@@ -60,7 +60,7 @@ def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path)
         HeartRateMinuteSnapshot,
     )
     from personal_data_platform.sources.fitbit.motherduck import FitbitMinuteBatch
-    from tests.unit.fitbit.test_fitbit_api import FakeTransport, client, rollup
+    from tests.fitbit_points import FakeTransport, client, rollup
 
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "partial.duckdb"))))
     warehouse.migrate()

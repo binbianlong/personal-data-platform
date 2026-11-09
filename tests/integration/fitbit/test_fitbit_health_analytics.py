@@ -5,9 +5,8 @@ from datetime import date, timedelta
 from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.sources.fitbit.models import Record, Snapshot, Window
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-from tests.fitbit_points import CASES, DAY, point, snapshot
+from tests.fitbit_points import CASES, DAY, FakeTransport, client, point, sleep_point, snapshot
 from tests.integration.fitbit.test_fitbit_writer import apply
-from tests.unit.fitbit.test_fitbit_api import FakeTransport, client, sleep_point
 
 
 def test_daily_and_session_views_keep_native_values_and_day_boundaries(

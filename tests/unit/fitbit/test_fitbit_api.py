@@ -3,56 +3,24 @@
 import json
 import logging
 import ssl
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from personal_data_platform.sources.fitbit.models import Window
+from tests.fitbit_points import (
+    FakeTransport,
+    client,
+    fetch_points,
+    interval,
+    rollup,
+    sleep_point,
+    steps,
+)
 
 START = datetime(2026, 9, 1, tzinfo=UTC)
-
-
-def interval(start="2026-09-01T00:00:00Z", end="2026-09-01T00:01:00Z"):
-    return {
-        "startTime": start,
-        "endTime": end,
-        "startUtcOffset": "32400s",
-        "endUtcOffset": "32400s",
-    }
-
-
-def steps(count="12", **times):
-    return {"steps": {"interval": interval(**times), "count": count}}
-
-
-class FakeTransport:
-    def __init__(self, responses, *, before_request=None):
-        self.responses = iter(responses)
-        self.calls = []
-        self.before_request = before_request
-
-    def request(self, method, url, *, headers, body=None, timeout):
-        from personal_data_platform.sources.fitbit.api import HttpResponse
-
-        if self.before_request is not None:
-            self.before_request()
-        self.calls.append((method, url, headers, body, timeout))
-        response = next(self.responses)
-        if isinstance(response, Exception):
-            raise response
-        status, payload, response_headers = (
-            response if isinstance(response, tuple) else (200, response, {})
-        )
-        payload_bytes = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
-        return HttpResponse(status, payload_bytes, response_headers)
-
-
-def client(transport, **kwargs):
-    from personal_data_platform.sources.fitbit.api import HealthClient
-
-    return HealthClient(access_token=lambda: "synthetic-token", transport=transport, **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -109,12 +77,6 @@ def test_unbounded_unique_pagination_stops_without_returning_partial_data():
             Window("steps", START, START + timedelta(days=1)), subject_key="self"
         )
     assert len(transport.calls) == 2
-
-
-def fetch_points(data_type, points, *, subject_key="owner"):
-    return client(FakeTransport([{"dataPoints": points}])).fetch_snapshot(
-        Window(data_type, START, START + timedelta(days=1)), subject_key=subject_key
-    )
 
 
 def test_fetch_completes_all_pages_and_keeps_fetch_start():
@@ -374,64 +336,6 @@ def test_scalar_point_rejects_conflicting_heart_rate_field():
         fetch_points("steps", [point])
 
 
-def test_steps_keep_physical_start_cursor_and_both_offsets_and_provider_date():
-    point = steps("15", start="2026-09-01T15:59:00Z", end="2026-09-01T16:01:00Z")
-    point["steps"]["interval"].update(
-        {
-            "startUtcOffset": "28800s",
-            "endUtcOffset": "32400s",
-            "civilStartTime": {
-                "date": {"year": 2026, "month": 9, "day": 1},
-                "time": {"hours": 23, "minutes": 59},
-            },
-        }
-    )
-    (record,) = fetch_points("steps", [point]).records
-    assert record.start == datetime(2026, 9, 1, 15, 59, tzinfo=UTC)
-    assert record.cursor == record.start
-    assert record.end == datetime(2026, 9, 1, 16, 1, tzinfo=UTC)
-    assert (record.offset_seconds, record.end_offset_seconds) == (28800, 32400)
-    assert record.source_date == date(2026, 9, 1)
-
-
-def test_steps_key_uses_interval_and_subject_and_does_not_change_with_value():
-    (original,) = fetch_points("steps", [steps()]).records
-    (changed,) = fetch_points("steps", [steps(count="65")]).records
-    (other,) = fetch_points("steps", [steps()], subject_key="other").records
-    assert original.cursor == original.start == START
-    assert original.end == START + timedelta(minutes=1)
-    assert original.record_id == changed.record_id
-    assert original.record_id != other.record_id
-    assert original.value == 12
-
-
-def test_resting_heart_rate_uses_civil_date_not_a_timezone_shifted_instant():
-    point = {
-        "dailyRestingHeartRate": {
-            "date": {"year": 2026, "month": 9, "day": 1},
-            "beatsPerMinute": "54",
-        }
-    }
-    (record,) = fetch_points("daily-resting-heart-rate", [point]).records
-    assert record.cursor == record.start == START
-    assert record.source_date == date(2026, 9, 1)
-    assert record.offset_seconds is None
-    assert record.value == 54
-
-
-def test_active_zone_minutes_are_already_weighted():
-    point = {
-        "activeZoneMinutes": {
-            "interval": interval(),
-            "heartRateZone": "CARDIO",
-            "activeZoneMinutes": "2",
-        }
-    }
-    (record,) = fetch_points("active-zone-minutes", [point]).records
-    assert record.value == 2
-    assert record.category == "cardio"
-
-
 @pytest.mark.parametrize("bad_value", [None, True, "NaN", "Infinity", "-1", "1.5", "1000001"])
 def test_invalid_steps_values_fail_instead_of_selecting_or_coercing_data(bad_value):
     from personal_data_platform.sources.fitbit.api import InvalidResponseError
@@ -445,97 +349,6 @@ def test_conflicting_same_interval_points_are_rejected_instead_of_picking_one():
 
     with pytest.raises(InvalidResponseError, match="duplicate"):
         fetch_points("steps", [steps(count="60"), steps(count="65")])
-
-
-def sleep_point():
-    return {
-        "dataPointName": "users/synthetic-user/dataTypes/sleep/dataPoints/sleep-001",
-        "sleep": {
-            "interval": interval("2026-08-31T14:00:00Z", "2026-08-31T22:00:00Z"),
-            "type": "STAGES",
-            "stages": [
-                {**interval("2026-08-31T14:00:00Z", "2026-08-31T18:00:00Z"), "type": "LIGHT"},
-                {**interval("2026-08-31T18:00:00Z", "2026-08-31T22:00:00Z"), "type": "DEEP"},
-            ],
-            "shortAwakenings": [
-                {
-                    "startTime": "2026-08-31T16:00:00Z",
-                    "endTime": "2026-08-31T16:00:30Z",
-                    "type": "AWAKE",
-                }
-            ],
-            "outOfBedSegments": [interval("2026-08-31T18:00:00Z", "2026-08-31T18:01:00Z")],
-            "summary": {"minutesAsleep": "470", "minutesAwake": "10"},
-            "metadata": {"mainSleep": True, "processed": True, "nap": False},
-        },
-    }
-
-
-def test_sleep_accepts_consistent_names_used_in_the_official_filter_example():
-    point = sleep_point()
-    point["name"] = point.pop("dataPointName")
-    metadata = point["sleep"]["metadata"]
-    metadata["main"] = metadata.pop("mainSleep")
-    result = fetch_points("sleep", [point])
-    assert result.records[0].record_id == "sleep-001"
-    assert result.records[0].is_main_sleep is True
-
-
-@pytest.mark.parametrize("conflict", ["identity", "main"])
-def test_sleep_rejects_conflicting_alias_values(conflict):
-    from personal_data_platform.sources.fitbit.api import InvalidResponseError
-
-    point = sleep_point()
-    if conflict == "identity":
-        point["name"] = "users/synthetic-user/dataTypes/sleep/dataPoints/other"
-    else:
-        point["sleep"]["metadata"]["main"] = False
-    with pytest.raises(InvalidResponseError):
-        fetch_points("sleep", [point])
-
-
-def test_sleep_preserves_end_civil_date_and_keeps_overlapping_wakes_separate():
-    result = fetch_points("sleep", [sleep_point()])
-    session = result.records[0]
-    assert session.record_id == "sleep-001"
-    assert session.cursor == START
-    assert session.source_date == date(2026, 9, 1)
-    assert session.start == datetime(2026, 8, 31, 14, tzinfo=UTC)
-    assert session.value == 470
-    assert session.is_main_sleep is True
-    stages = [record for record in result.records if record.kind == "sleep-stage"]
-    wakes = [record for record in result.records if record.kind == "sleep-wake"]
-    assert [(row.category, row.value) for row in stages] == [("light", 14400), ("deep", 14400)]
-    assert [(row.category, row.value) for row in wakes] == [
-        ("short-awakening", 30),
-        ("out-of-bed", 60),
-    ]
-    assert all(
-        row.cursor == session.cursor and row.parent_id == "sleep-001" for row in (*stages, *wakes)
-    )
-
-
-def test_missing_sleep_summary_and_main_classification_stay_unknown():
-    point = sleep_point()
-    del point["sleep"]["summary"]
-    point["sleep"]["metadata"] = {"nap": False}
-    session = fetch_points("sleep", [point]).records[0]
-    assert session.value is None
-    assert session.is_main_sleep is None
-
-
-def test_sleep_civil_end_with_changed_offset_controls_replacement_day():
-    point = sleep_point()
-    point["sleep"]["interval"].update(
-        {
-            "startUtcOffset": "28800s",
-            "endUtcOffset": "32400s",
-            "civilEndTime": {"date": {"year": 2026, "month": 9, "day": 1}, "time": {"hours": 7}},
-        }
-    )
-    session = fetch_points("sleep", [point]).records[0]
-    assert (session.offset_seconds, session.end_offset_seconds) == (28800, 32400)
-    assert session.cursor == START
 
 
 @pytest.mark.parametrize(
@@ -567,121 +380,6 @@ def test_invalid_sleep_records_fail_before_becoming_complete(mutation):
         point["sleep"]["shortAwakenings"][0]["startTime"] = "2026-08-31T13:00:00Z"
     with pytest.raises(InvalidResponseError):
         fetch_points("sleep", [point])
-
-
-def test_oauth_refresh_is_form_encoded_and_cached_only_until_safety_margin():
-    from personal_data_platform.sources.fitbit.oauth import GoogleOAuth
-
-    current = [100.0]
-    transport = FakeTransport(
-        [
-            {"access_token": "synthetic-access-1", "expires_in": 3600, "token_type": "Bearer"},
-            {"access_token": "synthetic-access-2", "expires_in": 3600, "token_type": "Bearer"},
-        ]
-    )
-    oauth = GoogleOAuth(
-        client_id="synthetic-client",
-        client_secret="synthetic-secret&+",
-        refresh_token="synthetic-refresh=+",
-        transport=transport,
-        clock=lambda: current[0],
-    )
-    assert oauth() == "synthetic-access-1"
-    current[0] = 3600.0
-    assert oauth() == "synthetic-access-1"
-    assert len(transport.calls) == 1
-    current[0] = 3641.0
-    assert oauth() == "synthetic-access-2"
-    method, url, headers, body, timeout = transport.calls[0]
-    assert (method, url) == ("POST", "https://oauth2.googleapis.com/token")
-    assert headers["Content-Type"] == "application/x-www-form-urlencoded"
-    assert parse_qs(body.decode()) == {
-        "client_id": ["synthetic-client"],
-        "client_secret": ["synthetic-secret&+"],
-        "refresh_token": ["synthetic-refresh=+"],
-        "grant_type": ["refresh_token"],
-    }
-    assert timeout == 30.0
-    assert "synthetic-secret" not in repr(oauth)
-    assert "synthetic-refresh" not in repr(oauth)
-
-
-def test_oauth_reads_only_explicitly_supplied_environment_credentials():
-    import json
-
-    from personal_data_platform.sources.fitbit.oauth import GoogleOAuth
-
-    transport = FakeTransport(
-        [{"access_token": "synthetic-access", "expires_in": 3600, "token_type": "Bearer"}]
-    )
-    config = {
-        "client_id": "synthetic-client",
-        "client_secret": "synthetic-secret",
-        "refresh_token": "synthetic-refresh",
-        "health_user_id": "owner",
-    }
-    oauth = GoogleOAuth.from_env(
-        {"PDP_FITBIT_OAUTH_CONFIG": json.dumps(config)}, transport=transport
-    )
-    assert oauth() == "synthetic-access"
-    del config["refresh_token"]
-    with pytest.raises(ValueError, match="refresh_token"):
-        GoogleOAuth.from_env({"PDP_FITBIT_OAUTH_CONFIG": json.dumps(config)})
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {},
-        {"access_token": "", "expires_in": 3600, "token_type": "Bearer"},
-        {"access_token": "synthetic-token", "expires_in": -1, "token_type": "Bearer"},
-        {"access_token": "synthetic-token", "expires_in": True, "token_type": "Bearer"},
-        {"access_token": "synthetic-token", "expires_in": 3600, "token_type": "other"},
-    ],
-)
-def test_malformed_refresh_does_not_return_or_cache_a_token(payload):
-    from personal_data_platform.sources.fitbit.api import InvalidResponseError
-    from personal_data_platform.sources.fitbit.oauth import GoogleOAuth
-
-    transport = FakeTransport(
-        [payload, {"access_token": "valid-token", "expires_in": 3600, "token_type": "Bearer"}]
-    )
-    oauth = GoogleOAuth(
-        client_id="client", client_secret="secret", refresh_token="refresh", transport=transport
-    )
-    with pytest.raises(InvalidResponseError) as caught:
-        oauth()
-    assert "synthetic-token" not in str(caught.value)
-    assert oauth() == "valid-token"
-
-
-def test_revoked_refresh_token_is_classified_without_exposing_provider_error_body():
-    from personal_data_platform.sources.fitbit.api import AuthenticationError
-    from personal_data_platform.sources.fitbit.oauth import GoogleOAuth
-
-    oauth = GoogleOAuth(
-        client_id="client",
-        client_secret="secret",
-        refresh_token="refresh",
-        transport=FakeTransport(
-            [(400, {"error": "invalid_grant", "error_description": "synthetic-secret"}, {})]
-        ),
-    )
-    with pytest.raises(AuthenticationError) as caught:
-        oauth()
-    assert "synthetic-secret" not in str(caught.value)
-
-
-def rollup(start=START, *, average=60, minimum=55, maximum=65):
-    return {
-        "startTime": start.isoformat(),
-        "endTime": (start + timedelta(minutes=1)).isoformat(),
-        "heartRate": {
-            "beatsPerMinuteAvg": average,
-            "beatsPerMinuteMin": minimum,
-            "beatsPerMinuteMax": maximum,
-        },
-    }
 
 
 def test_rollup_uses_complete_utc_minutes_and_all_pages():

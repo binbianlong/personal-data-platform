@@ -54,7 +54,7 @@ def test_missing_metrics_are_not_filled_with_zero(warehouse):
 
 def test_sleep_summary_columns_preserve_missing_and_zero_values(warehouse):
     from personal_data_platform.sources.fitbit.models import Window
-    from tests.unit.fitbit.test_fitbit_api import FakeTransport, client, sleep_point
+    from tests.fitbit_points import FakeTransport, client, sleep_point
 
     value = sleep_point()
     value["sleep"]["summary"].update(minutesInSleepPeriod="480", minutesToFallAsleep="0")
@@ -213,7 +213,7 @@ def test_daily_range_rollback_restores_removed_and_updated_dates(warehouse):
 
 
 def test_native_scalar_api_fields_reach_separate_base_relations(warehouse):
-    from tests.unit.fitbit.test_fitbit_api import fetch_points, interval, steps
+    from tests.fitbit_points import fetch_points, interval, steps
 
     apply(warehouse, fetch_points("steps", [steps()]))
     apply(
@@ -260,7 +260,7 @@ def test_native_scalar_api_fields_reach_separate_base_relations(warehouse):
     "target", ["daily-resting-heart-rate", *[kind for kind in CASES if kind.startswith("daily-")]]
 )
 def test_empty_daily_group_preserves_every_other_metric(warehouse, target):
-    from tests.unit.fitbit.test_fitbit_api import fetch_points
+    from tests.fitbit_points import fetch_points
 
     resting = fetch_points(
         "daily-resting-heart-rate",
