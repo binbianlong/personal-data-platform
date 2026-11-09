@@ -32,7 +32,7 @@ run "minimum_normal_runtime" {
   }
   assert {
     condition     = alltrue([for job in google_cloud_scheduler_job.runtime : !job.paused]) && !google_cloud_scheduler_job.fitbit_batch.paused && google_monitoring_alert_policy.job_failed.enabled && google_monitoring_alert_policy.pubsub_backlog.enabled
-    error_message = "Normal operation must keep hourly batches, the daily schedule, and monitoring enabled."
+    error_message = "Normal operation must keep 30-minute batches, the daily schedule, and monitoring enabled."
   }
   assert {
     condition     = output.storage_buckets.raw == google_storage_bucket.raw.name && output.storage_buckets.preflight == google_storage_bucket.preflight.name
@@ -232,7 +232,7 @@ run "runtime_pins_and_shared_identity" {
   }
   assert {
     condition     = google_monitoring_alert_policy.job_failed.enabled && length(google_monitoring_alert_policy.pubsub_backlog.conditions) == 2 && google_monitoring_alert_policy.pubsub_backlog.conditions[0].condition_threshold[0].threshold_value == 5400
-    error_message = "Hourly Fitbit batches must retain their 90-minute backlog threshold."
+    error_message = "Fitbit batches must retain their 90-minute backlog threshold."
   }
   assert {
     condition     = google_monitoring_alert_policy.pubsub_backlog.combiner == "OR" && google_monitoring_alert_policy.pubsub_backlog.conditions[1].condition_threshold[0].threshold_value == 900 && alltrue([for condition in google_monitoring_alert_policy.pubsub_backlog.conditions : condition.condition_threshold[0].duration == "300s"]) && strcontains(google_monitoring_alert_policy.pubsub_backlog.conditions[0].condition_threshold[0].filter, "subscription_id = \"pdp-fitbit-west-pull\"") && !strcontains(google_monitoring_alert_policy.pubsub_backlog.conditions[0].condition_threshold[0].filter, "pdp-owntracks-west") && strcontains(google_monitoring_alert_policy.pubsub_backlog.conditions[1].condition_threshold[0].filter, "subscription_id = \"pdp-owntracks-west-push\"") && !strcontains(google_monitoring_alert_policy.pubsub_backlog.conditions[1].condition_threshold[0].filter, "pdp-fitbit-west")

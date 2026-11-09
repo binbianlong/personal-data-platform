@@ -91,9 +91,9 @@ OAuth scopeと既存subscriptionを確認し、workerが新型に対応してか
 base変更は追加のforward migrationと対応するwriterを配備し、[DB更新手順](../../platform/operations.md#dbの初期化と更新)で停止・検証・再開する。
 既存の履歴を埋める一括再取得は自動では行わず、必要な型・期間だけ同期する。
 
-## 60分バッチの確認
+## 30分バッチの確認
 
-Cloud Scheduler `pdp-fitbit-batch-west`がworkerの`POST /notifications/fitbit/drain`を毎時00分にOIDC認証で起動する。
+Cloud Scheduler `pdp-fitbit-batch-west`がworkerの`POST /notifications/fitbit/drain`を毎時00分・30分にOIDC認証で起動する。
 Fitbitの滞留警報は90分超が5分継続した場合に発報する。設定は[Runtime Terraform](../../../infra/terraform/README.md)を参照する。
 
 ```text
