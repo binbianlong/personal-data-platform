@@ -12,7 +12,7 @@ resource "google_cloud_scheduler_job" "fitbit_batch" {
   project          = var.project_id
   region           = var.region
   name             = "pdp-fitbit-batch-west"
-  schedule         = "0 * * * *"
+  schedule         = "*/30 * * * *"
   time_zone        = var.scheduler_time_zone
   paused           = !var.schedulers_enabled
   attempt_deadline = "540s"

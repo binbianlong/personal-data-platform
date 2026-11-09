@@ -23,7 +23,7 @@ workspaceの他DBを自動attachせず、ローカルDuckDBへの接続方法は
 [bootstrap](../../infra/bootstrap/README.md)でstate・registry・WIFを作り、[runtime Terraform](../../infra/terraform/README.md)で通常資産を管理する。
 secret payloadはTerraform外で登録し、数値versionに固定する。
 一時停止はGitHub変数`PDP_SCHEDULERS_ENABLED=false`を設定してDeployを反映するか、手動Terraformで`schedulers_enabled=false`を反映する。
-Fitbitの毎時バッチ・OwnTracksのpush配信・日次Scheduler・native警報が停止し、workerも処理を保留する。receiverからの通知はqueueに保持する。
+Fitbitの30分バッチ・OwnTracksのpush配信・日次Scheduler・native警報が停止し、workerも処理を保留する。receiverからの通知はqueueに保持する。
 
 [Deploy workflow](../../.github/workflows/terraform-deploy.yml)はimage digestを固定してruntimeを更新する。
 アプリdeploy失敗後の再反映には手動deploy、日次全体の実行には手動入力`run_daily`を使う。
@@ -69,7 +69,7 @@ Collectorは起動後にスキーマを初期化し、成功後の周期では�
 
 ## 収集・日次処理
 
-Fitbit通知はPub/Subへ蓄積し、毎時00分に非公開workerがpullしてDB commit後にACKする。
+Fitbit通知はPub/Subへ蓄積し、毎時00分・30分に非公開workerがpullしてDB commit後にACKする。
 OwnTracksのGCS保存完了通知はPub/Subから非公開workerへpushし、DB commit後に204を返す。
 既存martsはViewであり、取込ごとにdbtを実行しなくても次のqueryへ反映される。
 `pdp reconciliation`は日次04:10 Asia/Tokyoの処理全体を実行する。
