@@ -61,5 +61,5 @@ FitbitはRaw adapterへ登録せず、API取得したsnapshotを直接保存す�
 Macの稼働確認はCollectorログを使い、最後のアプリ利用時刻を稼働時刻と解釈しない。
 Cloud Run失敗・Pub/Sub滞留・receiver/worker ERRORの監視は継続する。
 
-[運用](operations.md)、[セキュリティ](security.md)、[旧スキーマからの移行](analytics-migration.md)を参照する。
+[運用](operations.md)、[セキュリティ](security.md)を参照する。
 保存先を追加する場合はWarehouse、source SQL、DDL、dbtに加え、その保存先での排他・確定・訂正反映を検証する。

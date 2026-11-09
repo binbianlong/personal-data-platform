@@ -192,8 +192,6 @@ class Warehouse:
         self,
         snapshot: Snapshot | HeartRateMinuteSnapshot,
         *,
-        source_key: str,
-        loaded_at: datetime,
         owner_id: str,
         deadline: float,
         monotonic: Callable[[], float] = time.monotonic,
@@ -204,7 +202,7 @@ class Warehouse:
             else FitbitBatch(snapshot)
         )
         with self._write_transaction(owner_id, deadline, monotonic=monotonic):
-            return batch.write_snapshot(self.connection, source_key=source_key, loaded_at=loaded_at)
+            return batch.write_snapshot(self.connection)
 
     def commit_screen_time_snapshot(
         self,

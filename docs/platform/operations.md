@@ -13,7 +13,7 @@
 | MotherDuck production | `us-west-2`、`personal_data_platform`、owner `pdp_west_prod` |
 
 MotherDuckはPulse/Pulse・read scaling 1、分析接続はrestricted read-only share `pdp_analytics`を使う。
-分析アカウントの接続名も`personal_data_platform`にそろえる。martsの参照はschema修飾とし、一時catalogに依存させない。
+分析アカウントの接続名も`personal_data_platform`にそろえる。martsの参照はschema修飾とし、特定のcatalogに依存させない。
 preflightは独立したbucket・DB・tokenで手動実行し、本番DB/shareを付与しない。
 アプリのMotherDuck接続とdbtのprod接続は`attach_mode=single`で指定DBだけをattachする。
 workspaceの他DBを自動attachせず、ローカルDuckDBへの接続方法は変更しない。
@@ -60,7 +60,6 @@ pdp migrate --database /private/path/scratch.duckdb
 再実行時にchecksumを照合し、不一致や未対応のスキーマ履歴があるDBへの適用は拒否する。
 未適用SQLは共通の`loader` leaseを使うため、取込が実行中なら終了後に再試行する。
 再構築には空のscratch DBを使い、[Rebuild](#rebuild)の保持範囲を確認する。
-旧001〜012履歴のDBには新しい初期SQLを直接適用せず、[分析スキーマ移行](analytics-migration.md)で別DBへ変換する。
 
 追加DDLはCollector・Fitbitバッチ・OwnTracksのpush配信・日次Schedulerを止め、実行中Jobと`loader` leaseの終了を確認してから適用する。
 MacのCollectorはeditable installのcheckoutを参照するため、そのcheckoutへmigrationを追加する前に停止する。
@@ -166,10 +165,3 @@ SELECT job_name, owner_id, expires_at FROM ops.job_lock;
 
 Fitbitバッチ・OwnTracksのpush配信・日次SchedulerとMacの両Collectorを停止し、実行中worker/Jobの終了を確認する。
 異常終了で残ったleaseは期限後に再試行する。外部ping失敗はログの`failed_stage="heartbeat"`に残り、先に確定したデータは巻き戻らない。
-
-## 分析スキーマ移行
-
-[移行手順](analytics-migration.md)で旧DBから別の空DBへ変換し、全base・SQLite参照・7ビューを比較する。
-最終DB名`personal_data_platform`とshare名`pdp_analytics`は維持する。旧schemaに新しい初期SQLを直接実行しない。
-検証前に古いDB内容やSQLiteを消さず、切替・受入後に一時退避を整理する。
-書込み再開後の単純な巻戻しは新しいデータを失うため、その後の差分も保存して修復する。

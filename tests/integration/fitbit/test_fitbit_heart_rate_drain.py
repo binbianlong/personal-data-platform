@@ -99,9 +99,7 @@ def test_replaces_only_target_minutes_and_preserves_outside_scope_data(tmp_path,
         warehouse.connection.execute("BEGIN")
         FitbitMinuteBatch(
             HeartRateMinuteSnapshot("self", wide, NOW + timedelta(minutes=10), rows)
-        ).write_snapshot(
-            warehouse.connection, source_key="seed", loaded_at=NOW + timedelta(minutes=10)
-        )
+        ).write_snapshot(warehouse.connection)
         warehouse.connection.execute("COMMIT")
     fetched = NOW + timedelta(minutes=11)
     runner.clock = lambda: NOW + timedelta(minutes=11)

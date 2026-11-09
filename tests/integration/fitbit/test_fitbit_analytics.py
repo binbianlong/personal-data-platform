@@ -32,19 +32,19 @@ def test_minute_writer_empty_deletes_only_reacquired_range(tmp_path):
     try:
         FitbitMinuteBatch(
             snapshot(base + timedelta(hours=1), [minute(base), minute(base + timedelta(minutes=1))])
-        ).write_snapshot(warehouse.connection, source_key="first", loaded_at=base)
+        ).write_snapshot(warehouse.connection)
         narrow = Window("heart-rate", base + timedelta(minutes=1), base + timedelta(minutes=2))
         FitbitMinuteBatch(
             snapshot(base + timedelta(hours=3), [minute(narrow.start, 100)], narrow)
-        ).write_snapshot(warehouse.connection, source_key="new", loaded_at=base)
+        ).write_snapshot(warehouse.connection)
         FitbitMinuteBatch(snapshot(base + timedelta(hours=4), [], narrow)).write_snapshot(
-            warehouse.connection, source_key="empty-narrow", loaded_at=base
+            warehouse.connection
         )
         assert warehouse.query_rows("SELECT start_at,mean_bpm FROM base.heart_rate_minute") == [
             (base, 60)
         ]
         FitbitMinuteBatch(snapshot(base + timedelta(hours=4), [])).write_snapshot(
-            warehouse.connection, source_key="empty", loaded_at=base
+            warehouse.connection
         )
         assert warehouse.query_value("SELECT count(*) FROM base.heart_rate_minute") == 0
     finally:
@@ -73,9 +73,7 @@ def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path)
         (HeartRateMinute(base, base + timedelta(minutes=1), 60, 50, 70),),
     )
     try:
-        FitbitMinuteBatch(snapshot).write_snapshot(
-            warehouse.connection, source_key="existing", loaded_at=base
-        )
+        FitbitMinuteBatch(snapshot).write_snapshot(warehouse.connection)
         with pytest.raises(TransientError):
             acquired = client(
                 FakeTransport(
@@ -89,9 +87,7 @@ def test_minute_writer_keeps_existing_rows_when_a_later_api_page_fails(tmp_path)
                 ),
                 clock=lambda: base + timedelta(days=2),
             ).fetch_heart_rate_minutes(window, subject_key="self")
-            FitbitMinuteBatch(acquired).write_snapshot(
-                warehouse.connection, source_key="partial", loaded_at=base
-            )
+            FitbitMinuteBatch(acquired).write_snapshot(warehouse.connection)
         assert warehouse.query_rows("SELECT mean_bpm FROM base.heart_rate_minute") == [(60,)]
     finally:
         warehouse.close()

@@ -206,9 +206,7 @@ def test_daily_range_rollback_restores_removed_and_updated_dates(warehouse):
     warehouse.connection.execute("BEGIN")
     try:
         with pytest.raises(duckdb.ConstraintException, match="daily insert failed"):
-            FitbitBatch(changed).write_snapshot(
-                FailingConnection(), source_key="unused", loaded_at=changed.fetched_at
-            )
+            FitbitBatch(changed).write_snapshot(FailingConnection())
     finally:
         warehouse.connection.execute("ROLLBACK")
     assert warehouse.query_rows("SELECT * FROM base.health_daily ORDER BY source_date") == before

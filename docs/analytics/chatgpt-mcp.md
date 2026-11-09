@@ -17,7 +17,7 @@ https://api.motherduck.com/mcp
 preflightには本番DB/shareへの接続を許可しない。
 
 分析接続の既定aliasは`personal_data_platform`にそろえ、既存shareのURLを使う。
-新しいmartsはschema修飾の参照を使い、一時的な移行DB名へ依存させない。
+martsはschema修飾の参照を使い、特定のdatabase名へ依存させない。
 
 ```sql
 ATTACH '<pdp_analyticsのshare URL>' AS personal_data_platform;
