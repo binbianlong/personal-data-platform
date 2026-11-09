@@ -63,11 +63,7 @@ def snapshot(records, *, start=0, end=1440, version=1):
 def apply(warehouse, data):
     warehouse.connection.execute("BEGIN")
     try:
-        result = FitbitBatch(data).write_snapshot(
-            warehouse.connection,
-            source_key=str(data.fetched_at),
-            loaded_at=data.fetched_at,
-        )
+        result = FitbitBatch(data).write_snapshot(warehouse.connection)
         warehouse.connection.execute("COMMIT")
         return result
     except Exception:
@@ -157,9 +153,7 @@ def test_steps_rollback_restores_deleted_and_updated_rows(warehouse, civil):
     before = warehouse.query_rows("SELECT * FROM base.steps_interval ORDER BY 1")
     data = (civil_snapshot if civil else snapshot)([point("a", 0, 20)])
     warehouse.connection.execute("BEGIN")
-    FitbitBatch(data).write_snapshot(
-        warehouse.connection, source_key="rollback", loaded_at=data.fetched_at
-    )
+    FitbitBatch(data).write_snapshot(warehouse.connection)
     warehouse.connection.execute("ROLLBACK")
     assert warehouse.query_rows("SELECT * FROM base.steps_interval ORDER BY 1") == before
 

@@ -58,8 +58,6 @@ def test_fitbit_commit_rolls_back_if_deadline_expires_after_writing(monkeypatch)
         with pytest.raises(TimeoutError):
             warehouse.commit_fitbit_snapshot(
                 snapshot,
-                source_key="fitbit-api:test",
-                loaded_at=now,
                 owner_id="owner",
                 deadline=110.0,
                 monotonic=lambda: clock[0],

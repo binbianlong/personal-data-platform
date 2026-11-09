@@ -398,7 +398,6 @@ class HeartRateMinuteSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class WriteResult:
-    outcome: Literal["range_replaced", "unchanged", "stale"]
+    outcome: Literal["range_replaced", "unchanged"]
     submitted_rows: int
     accepted_ranges: tuple[tuple[datetime, datetime], ...]
-    protected_records: int = 0

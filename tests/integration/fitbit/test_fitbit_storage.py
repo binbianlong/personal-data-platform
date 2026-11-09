@@ -100,12 +100,12 @@ def test_minutes_and_records_do_not_affect_each_other(warehouse):
         "self", Window("heart-rate", at, at + timedelta(days=1)), at + timedelta(days=1), (minute,)
     )
     apply(warehouse, steps)
-    FitbitMinuteBatch(data).write_snapshot(warehouse.connection, source_key="minute", loaded_at=at)
+    FitbitMinuteBatch(data).write_snapshot(warehouse.connection)
     FitbitMinuteBatch(replace(data, minutes=(), fetched_at=at + timedelta(days=2))).write_snapshot(
-        warehouse.connection, source_key="empty", loaded_at=at
+        warehouse.connection
     )
     assert warehouse.query_value("SELECT count(*) FROM base.heart_rate_minute") == 0
     assert warehouse.query_value("SELECT steps FROM base.steps_interval") == 10
-    FitbitMinuteBatch(data).write_snapshot(warehouse.connection, source_key="fresh", loaded_at=at)
+    FitbitMinuteBatch(data).write_snapshot(warehouse.connection)
     assert warehouse.query_value("SELECT count(*) FROM base.heart_rate_minute") == 1
     assert warehouse.query_value("SELECT steps FROM base.steps_interval") == 10

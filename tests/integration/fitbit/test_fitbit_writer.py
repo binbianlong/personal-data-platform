@@ -42,9 +42,7 @@ def apply(warehouse, data):
 
     warehouse.connection.execute("BEGIN")
     try:
-        result = FitbitBatch(data).write_snapshot(
-            warehouse.connection, source_key=str(data.fetched_at), loaded_at=data.fetched_at
-        )
+        result = FitbitBatch(data).write_snapshot(warehouse.connection)
         warehouse.connection.execute("COMMIT")
         return result
     except Exception:
@@ -132,9 +130,7 @@ def test_writer_does_not_commit_its_callers_transaction(warehouse):
     apply(warehouse, snapshot(10))
     before = warehouse.query_rows("SELECT * FROM base.steps_interval")
     warehouse.connection.execute("BEGIN")
-    FitbitBatch(snapshot(20)).write_snapshot(
-        warehouse.connection, source_key="test", loaded_at=snapshot().fetched_at
-    )
+    FitbitBatch(snapshot(20)).write_snapshot(warehouse.connection)
     assert warehouse.query_value("SELECT steps FROM base.steps_interval") == 20
     warehouse.connection.execute("ROLLBACK")
     assert warehouse.query_rows("SELECT * FROM base.steps_interval") == before
@@ -178,9 +174,7 @@ def test_identical_sleep_reacquisition_has_no_mutations(warehouse):
             statements.append(sql)
             return warehouse.connection.execute(sql, parameters)
 
-    result = FitbitBatch(data).write_snapshot(
-        Connection(), source_key="again", loaded_at=data.fetched_at
-    )
+    result = FitbitBatch(data).write_snapshot(Connection())
     assert result.outcome == "unchanged" and result.submitted_rows == 0
     assert not any(
         sql.lstrip().upper().startswith(("INSERT", "DELETE", "UPDATE", "MERGE"))
@@ -215,7 +209,7 @@ def test_changed_dense_day_uses_bounded_sql_statements(warehouse):
 
     result = FitbitBatch(
         replace(data, records=(replace(records[0], value=61), *records[1:]))
-    ).write_snapshot(Connection(), source_key="new", loaded_at=at)
+    ).write_snapshot(Connection())
     assert result.submitted_rows == 1
     assert warehouse.query_value("SELECT max(steps) FROM base.steps_interval") == 61
     assert len(statements) < 10
@@ -244,9 +238,7 @@ def test_minute_actual_diff_range_and_identity(warehouse):
     )
 
     def write(value, connection=None):
-        return FitbitMinuteBatch(value).write_snapshot(
-            connection or warehouse.connection, source_key="unused", loaded_at=value.fetched_at
-        )
+        return FitbitMinuteBatch(value).write_snapshot(connection or warehouse.connection)
 
     assert write(data).submitted_rows == 65
     assert write(replace(data, subject_key="another")).outcome == "unchanged"
@@ -309,9 +301,7 @@ def test_sleep_failure_after_child_replacement_rolls_back_both_tables(warehouse)
     warehouse.connection.execute("BEGIN")
     try:
         with pytest.raises(duckdb.ConstraintException, match="parent insert failed"):
-            FitbitBatch(data).write_snapshot(
-                FailingConnection(), source_key="unused", loaded_at=data.fetched_at
-            )
+            FitbitBatch(data).write_snapshot(FailingConnection())
     finally:
         warehouse.connection.execute("ROLLBACK")
     for table, rows in before.items():

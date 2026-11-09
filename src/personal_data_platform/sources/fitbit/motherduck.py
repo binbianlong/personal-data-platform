@@ -258,9 +258,7 @@ def _daily(connection: DuckDBPyConnection, snapshot: Snapshot) -> tuple[int, boo
 class FitbitBatch:
     snapshot: Snapshot
 
-    def write_snapshot(
-        self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
-    ) -> WriteResult:
+    def write_snapshot(self, connection: DuckDBPyConnection) -> WriteResult:
         snapshot = self.snapshot
         kind = snapshot.window.data_type
         predicate, parameters = _range(snapshot.window)
@@ -320,9 +318,7 @@ class FitbitBatch:
 class FitbitMinuteBatch:
     snapshot: HeartRateMinuteSnapshot
 
-    def write_snapshot(
-        self, connection: DuckDBPyConnection, *, source_key: str, loaded_at: datetime
-    ) -> WriteResult:
+    def write_snapshot(self, connection: DuckDBPyConnection) -> WriteResult:
         snapshot = self.snapshot
         rows = [
             {

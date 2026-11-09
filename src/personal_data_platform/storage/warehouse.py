@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -54,8 +53,6 @@ class Warehouse(Protocol):
         self,
         snapshot: Snapshot | HeartRateMinuteSnapshot,
         *,
-        source_key: str,
-        loaded_at: datetime,
         owner_id: str,
         deadline: float,
         monotonic: Callable[[], float],

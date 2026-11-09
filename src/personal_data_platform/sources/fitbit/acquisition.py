@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -102,7 +101,6 @@ def _log_acquisition(
                 ]
                 if result
                 else None,
-                "protected_records": result.protected_records if result else None,
                 "error_type": type(error).__name__ if error else None,
                 "reason": reason,
             },
@@ -288,8 +286,6 @@ class AcquisitionRunner:
         try:
             return warehouse.commit_fitbit_snapshot(
                 acquisition,
-                source_key="fitbit-api:" + uuid.uuid4().hex,
-                loaded_at=self.clock(),
                 owner_id=owner,
                 deadline=deadline,
                 monotonic=self.monotonic,
