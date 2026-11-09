@@ -8,8 +8,7 @@ import pytest
 
 from personal_data_platform.sources.fitbit.api import InvalidResponseError
 from personal_data_platform.sources.fitbit.models import Window
-from tests.fitbit_points import CASES, DAY, point, snapshot
-from tests.unit.fitbit.test_fitbit_api import FakeTransport, client
+from tests.fitbit_points import CASES, DAY, FakeTransport, client, point, snapshot
 
 
 @pytest.mark.parametrize("kind", CASES)
@@ -101,7 +100,7 @@ def test_exercise_cursor_uses_provider_start_date_across_midnight():
 
 
 def test_sleep_summary_keeps_zero_and_null_without_reconstructing_from_stages():
-    from tests.unit.fitbit.test_fitbit_api import sleep_point
+    from tests.fitbit_points import sleep_point
 
     value = sleep_point()
     value["sleep"]["summary"].update(
@@ -172,7 +171,7 @@ def test_respiratory_collection_identity_preserves_conflicting_alias_rejection()
     "kind", ["heart-rate-variability", "daily-respiratory-rate", "exercise", "sleep"]
 )
 def test_respiratory_collection_identity_exception_does_not_apply_to_other_types(kind):
-    from tests.unit.fitbit.test_fitbit_api import sleep_point
+    from tests.fitbit_points import sleep_point
 
     value = sleep_point() if kind == "sleep" else point(kind)
     value["dataPointName"] = f"users/synthetic-user/dataTypes/{kind}/dataPoints/"

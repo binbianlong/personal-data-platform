@@ -16,9 +16,9 @@ from personal_data_platform.sources.fitbit.notifications import PubSubNotificati
 from personal_data_platform.sources.fitbit.service import create_pubsub_app, create_worker_app
 from personal_data_platform.sources.fitbit.webhook import GoogleHealthAuthenticator
 from personal_data_platform.storage.motherduck import Warehouse
+from tests.fitbit_points import FakeTransport, client, steps
 from tests.integration.fitbit.helpers import drainer
 from tests.integration.fitbit.test_fitbit_service import NOW
-from tests.unit.fitbit.test_fitbit_api import FakeTransport, client, steps
 from tests.unit.fitbit.test_fitbit_batch import Subscriber, raw_message
 from tests.unit.fitbit.test_fitbit_webhook import Signature, notification
 

@@ -1,11 +1,97 @@
 """Synthetic Google Health records and independently specified stored values."""
 
+import json
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
-from tests.unit.fitbit.test_fitbit_api import FakeTransport, client, interval
+from personal_data_platform.sources.fitbit.models import Window
 
 DAY = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+def interval(start="2026-09-01T00:00:00Z", end="2026-09-01T00:01:00Z"):
+    return {
+        "startTime": start,
+        "endTime": end,
+        "startUtcOffset": "32400s",
+        "endUtcOffset": "32400s",
+    }
+
+
+def steps(count="12", **times):
+    return {"steps": {"interval": interval(**times), "count": count}}
+
+
+class FakeTransport:
+    def __init__(self, responses, *, before_request=None):
+        self.responses = iter(responses)
+        self.calls = []
+        self.before_request = before_request
+
+    def request(self, method, url, *, headers, body=None, timeout):
+        from personal_data_platform.sources.fitbit.api import HttpResponse
+
+        if self.before_request is not None:
+            self.before_request()
+        self.calls.append((method, url, headers, body, timeout))
+        response = next(self.responses)
+        if isinstance(response, Exception):
+            raise response
+        status, payload, response_headers = (
+            response if isinstance(response, tuple) else (200, response, {})
+        )
+        payload_bytes = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        return HttpResponse(status, payload_bytes, response_headers)
+
+
+def client(transport, **kwargs):
+    from personal_data_platform.sources.fitbit.api import HealthClient
+
+    return HealthClient(access_token=lambda: "synthetic-token", transport=transport, **kwargs)
+
+
+def fetch_points(data_type, points, *, subject_key="owner"):
+    return client(FakeTransport([{"dataPoints": points}])).fetch_snapshot(
+        Window(data_type, DAY, DAY + timedelta(days=1)), subject_key=subject_key
+    )
+
+
+def sleep_point():
+    return {
+        "dataPointName": "users/synthetic-user/dataTypes/sleep/dataPoints/sleep-001",
+        "sleep": {
+            "interval": interval("2026-08-31T14:00:00Z", "2026-08-31T22:00:00Z"),
+            "type": "STAGES",
+            "stages": [
+                {**interval("2026-08-31T14:00:00Z", "2026-08-31T18:00:00Z"), "type": "LIGHT"},
+                {**interval("2026-08-31T18:00:00Z", "2026-08-31T22:00:00Z"), "type": "DEEP"},
+            ],
+            "shortAwakenings": [
+                {
+                    "startTime": "2026-08-31T16:00:00Z",
+                    "endTime": "2026-08-31T16:00:30Z",
+                    "type": "AWAKE",
+                }
+            ],
+            "outOfBedSegments": [interval("2026-08-31T18:00:00Z", "2026-08-31T18:01:00Z")],
+            "summary": {"minutesAsleep": "470", "minutesAwake": "10"},
+            "metadata": {"mainSleep": True, "processed": True, "nap": False},
+        },
+    }
+
+
+def rollup(start=DAY, *, average=60, minimum=55, maximum=65):
+    return {
+        "startTime": start.isoformat(),
+        "endTime": (start + timedelta(minutes=1)).isoformat(),
+        "heartRate": {
+            "beatsPerMinuteAvg": average,
+            "beatsPerMinuteMin": minimum,
+            "beatsPerMinuteMax": maximum,
+        },
+    }
+
+
 DATE = {"year": 2026, "month": 9, "day": 1}
 SAMPLE_TIME = {"physicalTime": "2026-09-01T01:02:03Z", "utcOffset": "32400s"}
 TIMING = interval(start="2026-09-01T14:59:00Z", end="2026-09-01T15:01:00Z")
@@ -145,8 +231,6 @@ def point(kind, *, payload=None, identity="record-1"):
 
 
 def snapshot(kind, *, points=None, fetched_at=None, day=DAY):
-    from personal_data_platform.sources.fitbit.models import Window
-
     transport = FakeTransport([{"dataPoints": [point(kind)] if points is None else points}])
     return client(transport, clock=lambda: fetched_at or DAY + timedelta(days=4)).fetch_snapshot(
         Window(kind, day, day + timedelta(days=1)), subject_key="self"

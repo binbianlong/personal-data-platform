@@ -11,9 +11,9 @@ from personal_data_platform.sources.fitbit.models import (
     Window,
 )
 from personal_data_platform.sources.fitbit.motherduck import FitbitMinuteBatch
+from tests.fitbit_points import FakeTransport, client, rollup
 from tests.integration.fitbit.helpers import drain_notification
 from tests.integration.fitbit.test_fitbit_acquisition import NOW, direct_setup
-from tests.unit.fitbit.test_fitbit_api import FakeTransport, client, rollup
 from tests.unit.fitbit.test_fitbit_batch import Subscriber
 
 
