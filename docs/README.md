@@ -4,7 +4,6 @@
 |---|---|
 | 全体構成・Raw/Loader契約・source追加 | [アーキテクチャ](platform/architecture.md) |
 | 基礎表・ビュー・カラムの定義 | [データモデル](platform/data-model.md) |
-| 旧分析スキーマの変換・切替 | [分析スキーマ移行](platform/analytics-migration.md) |
 | Deploy・DB更新・日次処理・監視・Rebuild | [Platform運用](platform/operations.md) |
 | IAM・secret・個人情報 | [セキュリティ](platform/security.md) |
 | 分析接続・SQL例 | [ChatGPT/MCP](analytics/chatgpt-mcp.md)・[クエリ例](analytics/queries.md) |

@@ -15,7 +15,8 @@ pdp mac-screen-time collect --once
 pdp mac-screen-time collect --watch
 ```
 
-初回の空base確認または参照移行が完了した状態で、各snapshotを外部pendingファイルへ保存してから送信する。
+新規SQLiteでの初回は、共有lease内でこのsourceのbaseが空と確認してから取得する。
+初期化済みのSQLiteでは、各snapshotを外部pendingファイルへ保存してから送信する。
 JSONの`event="screen_time_collection"`、`result`、`stage`、`loaded`と、SQLiteのpendingを確認する。
 初期化済みなら接続障害・lease競合中も取得を続け、`--watch`で順に再送する。
 同じsourceのprocess lockと、他sourceと共有するDBのloader leaseを使う。
@@ -99,4 +100,4 @@ launchctl bootout "gui/$(id -u)" "$collector_plist"
 
 送信済みのRawは残さず、全履歴の正本はMotherDuckのbase。pendingだけによる全履歴rebuildは拒否する。
 DB移行ではbaseのイベント・有効状態とSQLiteの参照を引き継ぎ、両Collectorを停止して検証する。
-旧SQLiteを新しいstateとして空初期化せず、[分析スキーマ移行](../../platform/analytics-migration.md)に従う。
+SQLiteを失った場合は空のstateで再開せず、baseと整合する参照と初期化済み状態を復元・検証する。
