@@ -195,6 +195,7 @@ class BatchSummary:
     acked: int = 0
     session_opens: int = 0
     elapsed_seconds: float = 0
+    lock_unavailable: bool = False
 
     @property
     def ok(self) -> bool:
@@ -270,6 +271,7 @@ class NotificationDrainer:
                 return summary
             acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=600)
             if not acquired:
+                summary.lock_unavailable = True
                 summary.deferred += len(units)
                 return summary
             for index, unit in enumerate(units):

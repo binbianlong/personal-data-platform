@@ -2,11 +2,13 @@ import logging
 from contextlib import closing
 
 import pytest
+from fastapi.testclient import TestClient
 
 from personal_data_platform.sources.fitbit.models import Notification
-from tests.integration.fitbit.helpers import drain_notification
+from personal_data_platform.sources.fitbit.service import create_worker_app
+from tests.integration.fitbit.helpers import drain_notification, drainer
 from tests.integration.fitbit.test_fitbit_acquisition import NOW, WINDOW, direct_setup
-from tests.unit.fitbit.test_fitbit_batch import Subscriber
+from tests.unit.fitbit.test_fitbit_batch import Subscriber, raw_message
 
 
 def notice():
@@ -75,28 +77,44 @@ def test_drain_failed_api_keeps_existing_data_and_retry_refetches(tmp_path, monk
         assert warehouse.query_value("SELECT steps FROM base.steps_interval") == 20
 
 
-def test_drain_busy_preserves_owner_and_expired_lease_can_retry(tmp_path, caplog):
+@pytest.mark.parametrize(("include_invalid", "status_code"), [(False, 202), (True, 503)])
+def test_drain_busy_preserves_owner_and_expired_lease_can_retry(
+    tmp_path, caplog, include_invalid, status_code
+):
     runner, api, factory = direct_setup(tmp_path)
-    subscriber = Subscriber()
+    message = raw_message("notice")
+    messages = [message]
+    if include_invalid:
+        messages.append(raw_message("invalid", payload=b"not-json"))
+    subscriber = Subscriber([messages])
+    worker = TestClient(create_worker_app(drainer=drainer(runner, subscriber)))
     with closing(factory()) as warehouse:
         warehouse.migrate()
         warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
-    assert not drain_notification(runner, notice(), subscriber=subscriber).ok
+
+    response = worker.post("/notifications/fitbit/drain")
+
+    assert response.status_code == status_code
+    assert response.json()["lock_unavailable"] is True
     assert api.calls == [] and subscriber.acks == []
+    batch = next(r for r in caplog.records if getattr(r, "event", None) == "fitbit_batch")
+    assert batch.summary["lock_unavailable"] is True
     entries = [
         r for r in caplog.records if getattr(r, "event", None) == "fitbit_notification_processed"
     ]
     assert len(entries) == 1
     assert entries[0].status == "retry"
-    assert entries[0].summary["pubsub_message_id"] == "message"
+    assert entries[0].summary["pubsub_message_id"] == "message-notice"
     assert entries[0].summary["deferred_scopes"] == 1
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
         warehouse.connection.execute(
             "UPDATE ops.job_lock SET expires_at=current_timestamp - INTERVAL '1 second'"
         )
-    assert drain_notification(runner, notice(), subscriber=subscriber).ok
+    subscriber.responses.append([message])
+    assert worker.post("/notifications/fitbit/drain").status_code == 200
+    assert subscriber.acks == ["secret-ack-notice"]
 
 
 def test_drain_paused_does_not_open_warehouse(tmp_path):
