@@ -68,6 +68,57 @@ def test_each_api_page_checks_lease_once_and_uses_its_remaining_budget(method, k
     assert [call[-1] for call in transport.calls] == [0.25, 0.25]
 
 
+@pytest.mark.parametrize(
+    ("method", "kind", "page", "records"),
+    [
+        ("fetch_snapshot", "steps", {"dataPoints": [steps()]}, "records"),
+        ("fetch_heart_rate_minutes", "heart-rate", {"rollupDataPoints": [rollup()]}, "minutes"),
+    ],
+)
+def test_503_retries_only_the_failed_page(method, kind, page, records, monkeypatch, caplog):
+    from personal_data_platform.sources.fitbit import api
+
+    delays = []
+    monkeypatch.setattr(api.time, "sleep", delays.append)
+    transport = FakeTransport([{"nextPageToken": "next"}, (503, {}, {}), page])
+    health = client(transport, clock=lambda: START + timedelta(days=2))
+    health.request_guard = iter((15.0, 10.0, 8.0, 6.0)).__next__
+    caplog.set_level(logging.INFO, logger=api.__name__)
+
+    result = getattr(health, method)(
+        Window(kind, START, START + timedelta(days=1)), subject_key="self"
+    )
+
+    assert len(getattr(result, records)) == 1
+    first, failed, retried = transport.calls
+    assert failed[:4] != first[:4]
+    assert retried[:4] == failed[:4]
+    assert retried[-1] == 6.0
+    assert delays == [2.0]
+    assert any(getattr(r, "event", None) == "fitbit_request_recovered" for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("response_code", "remaining", "attempts"), [(503, 2.0, 1), (503, 10.0, 2), (429, 10.0, 1)]
+)
+def test_retry_preserves_failures_and_respects_budget(
+    response_code, remaining, attempts, monkeypatch
+):
+    from personal_data_platform.sources.fitbit import api
+
+    delays = []
+    monkeypatch.setattr(api.time, "sleep", delays.append)
+    transport = FakeTransport([(response_code, {}, {})] * 3)
+    health = client(transport)
+    health.request_guard = lambda: remaining
+
+    with pytest.raises(api.RateLimitError if response_code == 429 else api.TransientError):
+        health.fetch_snapshot(Window("steps", START, START + timedelta(days=1)), subject_key="self")
+
+    assert len(transport.calls) == attempts
+    assert delays == [2.0] * (attempts - 1)
+
+
 def test_unbounded_unique_pagination_stops_without_returning_partial_data():
     from personal_data_platform.sources.fitbit.api import InvalidResponseError
 
