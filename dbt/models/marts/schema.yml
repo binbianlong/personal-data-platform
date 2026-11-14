@@ -1,155 +1,155 @@
 version: 2
 models:
 - name: iphone_screen_time_interval
-  description: iphone_screen_time_interval の分析ビュー。
+  description: iPhoneの端末別アプリ前面利用区間。
   columns:
   - name: start_event_key
-    description: start_event_key。
+    description: 利用開始イベントの識別子。
   - name: device_key
-    description: device_key。
+    description: ソース内の端末キー。
   - name: bundle_id
-    description: bundle_id。
+    description: 前面利用したアプリのBundle ID。
   - name: started_at
-    description: started_at。
+    description: 前面利用の開始時刻。タイムゾーン付きの絶対時刻。
   - name: ended_at
-    description: ended_at。
+    description: 前面利用の終了時刻。タイムゾーン付きの絶対時刻。
   - name: duration_seconds
-    description: duration_seconds。
+    description: 利用区間の長さ（秒）。
   - name: is_inferred
-    description: is_inferred。
+    description: 次の開始イベントから終了時刻を推定した場合はTRUE。
   - name: boundary_event_key
-    description: boundary_event_key。
+    description: 終了時刻の根拠となったイベントの識別子。
 - name: daily_iphone_screen_time_total
-  description: daily_iphone_screen_time_total の分析ビュー。
+  description: JST日別のiPhone利用時間と未解決イベント件数。利用時間は端末間の重複を除いて集計する。
   columns:
   - name: activity_date
-    description: activity_date。
+    description: JSTの集計日。
   - name: observed_seconds
-    description: observed_seconds。
+    description: 観測された利用時間（秒）。利用区間がない日はNULL。
   - name: inferred_seconds
-    description: inferred_seconds。
+    description: 観測区間との重複を除いた推定利用時間（秒）。利用区間がない日はNULL。
   - name: total_seconds
-    description: total_seconds。
+    description: 観測分と推定分の合計利用時間（秒）。利用区間がない日はNULL。
   - name: unresolved_event_count
-    description: unresolved_event_count。
+    description: 利用区間に対応付けられなかった有効イベントの件数。
 - name: mac_screen_time_interval
-  description: mac_screen_time_interval の分析ビュー。
+  description: Macの端末別アプリ前面利用区間。
   columns:
   - name: start_event_key
-    description: start_event_key。
+    description: 利用開始イベントの識別子。
   - name: device_key
-    description: device_key。
+    description: ソース内の端末キー。
   - name: bundle_id
-    description: bundle_id。
+    description: 前面利用したアプリのBundle ID。
   - name: started_at
-    description: started_at。
+    description: 前面利用の開始時刻。タイムゾーン付きの絶対時刻。
   - name: ended_at
-    description: ended_at。
+    description: 前面利用の終了時刻。タイムゾーン付きの絶対時刻。
   - name: duration_seconds
-    description: duration_seconds。
+    description: 利用区間の長さ（秒）。
   - name: is_inferred
-    description: is_inferred。
+    description: 次の開始イベントから終了時刻を推定した場合はTRUE。
   - name: boundary_event_key
-    description: boundary_event_key。
+    description: 終了時刻の根拠となったイベントの識別子。
 - name: daily_mac_screen_time_total
-  description: daily_mac_screen_time_total の分析ビュー。
+  description: JST日別のMac利用時間と未解決イベント件数。利用時間は端末間の重複を除いて集計する。
   columns:
   - name: activity_date
-    description: activity_date。
+    description: JSTの集計日。
   - name: observed_seconds
-    description: observed_seconds。
+    description: 観測された利用時間（秒）。利用区間がない日はNULL。
   - name: inferred_seconds
-    description: inferred_seconds。
+    description: 観測区間との重複を除いた推定利用時間（秒）。利用区間がない日はNULL。
   - name: total_seconds
-    description: total_seconds。
+    description: 観測分と推定分の合計利用時間（秒）。利用区間がない日はNULL。
   - name: unresolved_event_count
-    description: unresolved_event_count。
+    description: 利用区間に対応付けられなかった有効イベントの件数。
 - name: daily_steps
-  description: daily_steps の分析ビュー。
+  description: JST日別の歩数。日をまたぐ区間の歩数は時間に比例して配分する。
   columns:
   - name: activity_date
-    description: activity_date。
+    description: JSTの集計日。
   - name: steps
-    description: steps。
+    description: 日またぎ区間の按分を含む合計歩数。
   - name: interval_part_count
-    description: interval_part_count。
+    description: JST日境界で分割した後の集計対象区間数。
   - name: has_prorated_intervals
-    description: has_prorated_intervals。
+    description: 日をまたぐ区間を1件以上按分した場合はTRUE。
 - name: daily_active_zone
-  description: daily_active_zone の分析ビュー。
+  description: JST日別のアクティブゾーン分数（AZM）と心拍ゾーン別の内訳。日をまたぐ区間のAZMは時間に比例して配分する。
   columns:
   - name: activity_date
-    description: activity_date。
+    description: JSTの集計日。
   - name: active_zone_minutes
-    description: active_zone_minutes。
+    description: 日またぎ区間の按分を含む合計AZM。提供元で重み付け済み。
   - name: fat_burn_azm_minutes
-    description: fat_burn_azm_minutes。
+    description: 脂肪燃焼ゾーン（fat_burn）のAZM。該当区間がない日はNULL。
   - name: cardio_azm_minutes
-    description: cardio_azm_minutes。
+    description: 有酸素運動ゾーン（cardio）のAZM。該当区間がない日はNULL。
   - name: peak_azm_minutes
-    description: peak_azm_minutes。
+    description: ピークゾーン（peak）のAZM。該当区間がない日はNULL。
   - name: unspecified_azm_minutes
-    description: unspecified_azm_minutes。
+    description: 分類未指定（heart_rate_zone_unspecified）のAZM。該当区間がない日はNULL。
   - name: interval_part_count
-    description: interval_part_count。
+    description: JST日境界で分割した後の集計対象区間数。
   - name: has_prorated_intervals
-    description: has_prorated_intervals。
+    description: 日をまたぐ区間を1件以上按分した場合はTRUE。
 - name: daily_sleep
-  description: 終了JST日ごとにFitbitの主睡眠1件を選ぶ。実睡眠分数が長い記録を優先する。
+  description: JSTの睡眠終了日ごとに選んだFitbitの主睡眠記録。実睡眠時間が最も長い記録を1件採用する。
   columns:
   - name: sleep_date
     description: 主睡眠が終了したJST日。
   - name: sleep_session_id
-    description: 採用した主睡眠のセッションID。
+    description: 主睡眠のセッションID。
   - name: start_at
-    description: 提供元の睡眠開始時刻。TIMESTAMPTZ。
+    description: 主睡眠の開始時刻。タイムゾーン付きの絶対時刻。
   - name: end_at
-    description: 提供元の睡眠終了時刻。TIMESTAMPTZ。
+    description: 主睡眠の終了時刻。タイムゾーン付きの絶対時刻。
   - name: sleep_minutes
-    description: 提供元が報告した実睡眠分数。未提供はNULL。
+    description: 提供元が報告した主睡眠の実睡眠時間（分）。未提供はNULL。
   - name: awake_minutes
-    description: 提供元が報告した睡眠期間内の覚醒分数。未提供はNULL。
+    description: 主睡眠の睡眠期間内の覚醒時間（分）。未提供はNULL。
 - name: daily_sleep_detail
-  description: daily_sleep_detail の分析ビュー。
+  description: JSTの睡眠終了日・詳細種別・分類ごとの睡眠詳細の集計。昼寝を含む。
   columns:
   - name: sleep_date
-    description: sleep_date。
+    description: 親の睡眠セッションが終了したJST日。
   - name: kind
-    description: kind。
+    description: 睡眠詳細の種別（sleep-stage、sleep-wakeなど）。
   - name: category
-    description: category。
+    description: 詳細区間の分類（deep、rem、short-awakeningなど）。未提供はNULL。
   - name: total_minutes
-    description: total_minutes。
+    description: 同じ日・種別・分類内で重複を除いた区間の合計時間（分）。
 - name: daily_life
-  description: 主睡眠、歩数、AZM、iPhone・Macの利用時間をJST日ごとに並べる。いずれかに記録がある日を含む。
+  description: JST日別の主睡眠、歩数、アクティブゾーン分数（AZM）、iPhone・Macの利用時間。いずれかに記録がある日を含む。
   columns:
   - name: activity_date
     description: JSTの集計日。主睡眠は終了日で対応する。
   - name: sleep_start_at
-    description: 主睡眠の開始時刻。TIMESTAMPTZ。
+    description: 主睡眠の開始時刻。タイムゾーン付きの絶対時刻。
   - name: sleep_end_at
-    description: 主睡眠の終了時刻。TIMESTAMPTZ。
+    description: 主睡眠の終了時刻。タイムゾーン付きの絶対時刻。
   - name: sleep_minutes
-    description: 主睡眠の実睡眠分数。未提供はNULL。
+    description: 提供元が報告した主睡眠の実睡眠時間（分）。未提供はNULL。
   - name: awake_minutes
-    description: 主睡眠の睡眠期間内の覚醒分数。未提供はNULL。
+    description: 主睡眠の睡眠期間内の覚醒時間（分）。未提供はNULL。
   - name: steps
-    description: 日またぎ区間を按分した歩数。記録がない日はNULL。
+    description: 日またぎ区間の按分を含む合計歩数。記録がない日はNULL。
   - name: active_zone_minutes
-    description: 日またぎ区間を按分したアクティブゾーン時間（AZM）。記録がない日はNULL。
+    description: 日またぎ区間の按分を含む合計AZM。提供元で重み付け済み。記録がない日はNULL。
   - name: iphone_observed_seconds
-    description: iPhoneで観測された利用秒数。
+    description: 観測されたiPhoneの利用時間（秒）。利用区間がない日はNULL。
   - name: iphone_inferred_seconds
-    description: iPhoneで推定によって追加された利用秒数。
+    description: 観測区間との重複を除いたiPhoneの推定利用時間（秒）。利用区間がない日はNULL。
   - name: iphone_total_seconds
-    description: iPhoneの合計利用秒数。利用区間がない日はNULL。
+    description: iPhoneの観測分と推定分の合計利用時間（秒）。利用区間がない日はNULL。
   - name: iphone_unresolved_event_count
-    description: iPhoneの未解決イベント件数。日次集計行がない日はNULL。
+    description: 利用区間に対応付けられなかったiPhoneの有効イベントの件数。iPhoneの記録がない日はNULL。
   - name: mac_observed_seconds
-    description: Macで観測された利用秒数。
+    description: 観測されたMacの利用時間（秒）。利用区間がない日はNULL。
   - name: mac_inferred_seconds
-    description: Macで推定によって追加された利用秒数。
+    description: 観測区間との重複を除いたMacの推定利用時間（秒）。利用区間がない日はNULL。
   - name: mac_total_seconds
-    description: Macの合計利用秒数。利用区間がない日はNULL。
+    description: Macの観測分と推定分の合計利用時間（秒）。利用区間がない日はNULL。
   - name: mac_unresolved_event_count
-    description: Macの未解決イベント件数。日次集計行がない日はNULL。
+    description: 利用区間に対応付けられなかったMacの有効イベントの件数。Macの記録がない日はNULL。
