@@ -219,6 +219,11 @@ def create_worker_app(*, drainer: NotificationDrainer) -> FastAPI:
     @app.post("/notifications/fitbit/drain")
     async def drain() -> Response:
         result = await run_in_threadpool(drainer.run)
-        return JSONResponse(asdict(result), status_code=200 if result.ok else 503)
+        status_code = 503
+        if result.ok:
+            status_code = 200
+        elif result.lock_unavailable and result.failed == 0:
+            status_code = 202
+        return JSONResponse(asdict(result), status_code=status_code)
 
     return app

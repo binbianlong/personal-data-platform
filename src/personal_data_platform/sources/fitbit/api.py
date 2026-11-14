@@ -34,6 +34,7 @@ from .normalization import (
 
 DATA_SOURCE_FAMILY = "users/me/dataSourceFamilies/google-wearables"
 LOGGER = logging.getLogger(__name__)
+_UNAVAILABLE_RETRY_DELAY_SECONDS = 2.0
 _FILTER_FIELDS = {
     "steps": "steps.interval.start_time",
     "daily-resting-heart-rate": "daily_resting_heart_rate.date",
@@ -149,15 +150,24 @@ def request_json(
     body: bytes | None = None,
     timeout: float,
     oauth: bool = False,
+    retry_timeout: Callable[[], float | None] | None = None,
 ) -> dict[str, object]:
     """Validate and classify an API or refresh response without exposing its body."""
-    try:
-        response = transport.request(method, url, headers=headers, body=body, timeout=timeout)
-    except (URLError, OSError) as error:
-        _log_request_failure(oauth=oauth, error=error)
-        raise TransientError("Google Health transport failed") from None
-    if not 200 <= response.status < 300:
+    for attempt in range(2):
+        try:
+            response = transport.request(method, url, headers=headers, body=body, timeout=timeout)
+        except (URLError, OSError) as error:
+            _log_request_failure(oauth=oauth, error=error)
+            raise TransientError("Google Health transport failed") from None
+        if 200 <= response.status < 300:
+            break
         _log_request_failure(oauth=oauth, http_status=response.status)
+        if attempt or response.status != 503 or retry_timeout is None:
+            break
+        remaining = retry_timeout()
+        if remaining is None:
+            break
+        timeout = remaining
     if response.status in (401, 403) or (oauth and response.status == 400):
         raise AuthenticationError("Google Health authorization failed")
     if response.status == 429:
@@ -181,6 +191,11 @@ def request_json(
         raise InvalidResponseError("Google Health response must be a JSON object") from None
     if "error" in payload:
         raise InvalidResponseError("Google Health response contains an error")
+    if attempt:
+        LOGGER.info(
+            "fitbit request recovered after retry",
+            extra={"event": "fitbit_request_recovered"},
+        )
     return payload
 
 
@@ -198,8 +213,8 @@ def _chunks(window: Window) -> Iterator[Window]:
 class HealthClient:
     """Return a snapshot only after every chunk and page has been validated.
 
-    ``window`` is the actual cursor range to replace. Retries are completed by the
-    acquisition runner, so a failed page never produces a snapshot.
+    ``window`` is the actual cursor range to replace. An unrecovered page failure
+    aborts the acquisition without producing a partial snapshot.
     """
 
     def __init__(
@@ -225,6 +240,13 @@ class HealthClient:
     def _request_timeout(self) -> float:
         remaining = self.request_guard() if self.request_guard is not None else None
         return self._timeout if remaining is None else min(self._timeout, remaining)
+
+    def _retry_timeout(self) -> float | None:
+        remaining = self.request_guard() if self.request_guard is not None else None
+        if remaining is None or remaining <= _UNAVAILABLE_RETRY_DELAY_SECONDS:
+            return None
+        time.sleep(_UNAVAILABLE_RETRY_DELAY_SECONDS)
+        return self._request_timeout()
 
     def fetch_snapshot(self, window: Window, *, subject_key: str) -> Snapshot:
         if window.data_type == "heart-rate":
@@ -367,6 +389,7 @@ class HealthClient:
             },
             body=json.dumps(body, separators=(",", ":")).encode(),
             timeout=self._request_timeout(),
+            retry_timeout=self._retry_timeout,
         )
 
     def _page(self, window: Window, page_token: str) -> dict[str, object]:
@@ -395,4 +418,5 @@ class HealthClient:
             f"/dataPoints:reconcile?{urlencode(query)}",
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=self._request_timeout(),
+            retry_timeout=self._retry_timeout,
         )
