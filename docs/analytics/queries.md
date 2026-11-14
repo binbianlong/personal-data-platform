@@ -25,10 +25,10 @@ baseのBundle IDに表示名を付ける場合は、`base.app`へOSとBundle ID�
 
 ## 健康・位置との組合せ
 
-歩数・AZM・睡眠詳細には`marts.daily_steps`、`marts.daily_active_zone`、`marts.daily_sleep_detail`を使う。
+歩数・AZMには`marts.daily_steps`、`marts.daily_active_zone`を使う。主睡眠の開始・終了時刻と実睡眠・覚醒分数は`marts.daily_sleep`、段階別の内訳は`marts.daily_sleep_detail`を参照する。
 睡眠の帰属日は親睡眠の終了JST日、`base.health_daily.source_date`は提供元の日付であり、旅行時などには一致しない。
 睡眠詳細はkind/category別の値で、種類をまたいで実睡眠時間として足さない。
 位置は`base.location_point`、運動は`base.exercise_session`、分心拍は`base.heart_rate_minute`を直接参照する。
 日次と細かい記録をJOINするときは、先に比較する日付・粒度を揃えて行の増殖を防ぐ。
 
-全7ビューの定義と単位は[データモデル](../platform/data-model.md)を参照する。
+ビューの定義と単位は[データモデル](../platform/data-model.md)を参照する。

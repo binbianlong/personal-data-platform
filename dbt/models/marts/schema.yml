@@ -94,6 +94,21 @@ models:
     description: interval_part_count。
   - name: has_prorated_intervals
     description: has_prorated_intervals。
+- name: daily_sleep
+  description: 終了JST日ごとにFitbitの主睡眠1件を選ぶ。実睡眠分数が長い記録を優先する。
+  columns:
+  - name: sleep_date
+    description: 主睡眠が終了したJST日。
+  - name: sleep_session_id
+    description: 採用した主睡眠のセッションID。
+  - name: start_at
+    description: 提供元の睡眠開始時刻。TIMESTAMPTZ。
+  - name: end_at
+    description: 提供元の睡眠終了時刻。TIMESTAMPTZ。
+  - name: sleep_minutes
+    description: 提供元が報告した実睡眠分数。未提供はNULL。
+  - name: awake_minutes
+    description: 提供元が報告した睡眠期間内の覚醒分数。未提供はNULL。
 - name: daily_sleep_detail
   description: daily_sleep_detail の分析ビュー。
   columns:
