@@ -48,6 +48,7 @@ SNRは確率や%として扱わない。欠けた値と返却された0を区別
 
 - `marts.daily_steps`: JST日境界で時間比例配分した歩数。分割片数と配分有無を保持する。
 - `marts.daily_active_zone`: 同様に配分したAZM。既に重み付け済みなので強度を再度掛けない。
+- `marts.daily_sleep`: 主睡眠の終了JST日につき1行。主睡眠が複数ある日は、実睡眠分数の降順（NULLは最後）、終了時刻の降順、IDの昇順で1件を選ぶ。睡眠・覚醒分数は提供元の値を保持する。
 - `marts.daily_sleep_detail`: 親睡眠の終了JST日×kind×categoryごとの区間和集合分数。昼寝を含め、種類をまたいで足さない。
 
 提供元日次値はsampleから再計算しない。provider日付とJST日付は旅行時などに異なる。

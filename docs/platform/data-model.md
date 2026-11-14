@@ -52,7 +52,7 @@
 
 ## marts
 
-分析の公開先は`iphone_screen_time_interval`、`mac_screen_time_interval`、`daily_steps`、`daily_active_zone`、`daily_iphone_screen_time_total`、`daily_mac_screen_time_total`、`daily_sleep_detail`の7ビューである。dbtがビュー定義と更新を管理する。Screen Timeの区間化と日次集計、日またぎ区間の按分、睡眠詳細の重複除去などの計算をここで行う。
+分析の公開先は`iphone_screen_time_interval`、`mac_screen_time_interval`、`daily_steps`、`daily_active_zone`、`daily_iphone_screen_time_total`、`daily_mac_screen_time_total`、`daily_sleep`、`daily_sleep_detail`、`daily_life`の9ビューである。dbtがビュー定義と更新を管理する。Screen Timeの区間化と日次集計、日またぎ区間の按分、睡眠詳細の重複除去などの計算をここで行う。
 
 ## 初期化と履歴保護
 

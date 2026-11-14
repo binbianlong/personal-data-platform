@@ -2,7 +2,7 @@ from personal_data_platform.dbt_runner import run_dbt
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 
-def test_seven_views_are_built_from_physical_base(tmp_path, monkeypatch):
+def test_views_are_built_from_physical_base(tmp_path, monkeypatch):
     path = tmp_path / "catalog.duckdb"
     warehouse = Warehouse(connect(WarehouseConfig(str(path))))
     warehouse.migrate()
@@ -20,7 +20,9 @@ def test_seven_views_are_built_from_physical_base(tmp_path, monkeypatch):
             "daily_steps",
             "daily_active_zone",
             "daily_iphone_screen_time_total",
+            "daily_life",
             "daily_mac_screen_time_total",
+            "daily_sleep",
             "daily_sleep_detail",
         ]
     )
@@ -30,7 +32,14 @@ def test_seven_views_are_built_from_physical_base(tmp_path, monkeypatch):
         "daily_steps": "activity_date steps interval_part_count has_prorated_intervals",
         "daily_active_zone": "activity_date active_zone_minutes fat_burn_azm_minutes cardio_azm_minutes peak_azm_minutes unspecified_azm_minutes interval_part_count has_prorated_intervals",
         "daily_iphone_screen_time_total": "activity_date observed_seconds inferred_seconds total_seconds unresolved_event_count",
+        "daily_life": (
+            "activity_date sleep_start_at sleep_end_at sleep_minutes awake_minutes "
+            "steps active_zone_minutes "
+            "iphone_observed_seconds iphone_inferred_seconds iphone_total_seconds iphone_unresolved_event_count "
+            "mac_observed_seconds mac_inferred_seconds mac_total_seconds mac_unresolved_event_count"
+        ),
         "daily_mac_screen_time_total": "activity_date observed_seconds inferred_seconds total_seconds unresolved_event_count",
+        "daily_sleep": "sleep_date sleep_session_id start_at end_at sleep_minutes awake_minutes",
         "daily_sleep_detail": "sleep_date kind category total_minutes",
     }
     for table, columns in expected.items():
@@ -44,6 +53,96 @@ def test_seven_views_are_built_from_physical_base(tmp_path, monkeypatch):
             [table],
         ).fetchone() == (len(actual),)
     warehouse.close()
+
+
+def test_daily_sleep_selects_main_sleep_by_jst_wake_date(tmp_path, monkeypatch, dbt_project):
+    path = tmp_path / "sleep.duckdb"
+    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
+    warehouse.migrate()
+    warehouse.connection.execute("""
+        insert into base.sleep_session
+            (sleep_session_id, start_at, end_at, source_date, sleep_minutes, awake_minutes, is_main_sleep)
+        values
+            ('main', '2026-01-01 14:30:00+00', '2026-01-01 22:30:00+00', '2026-01-01', 420, 15, true),
+            ('earlier', '2026-01-01 13:00:00+00', '2026-01-01 21:00:00+00', '2026-01-01', 420, 20, true),
+            ('short', '2026-01-01 23:00:00+00', '2026-01-02 01:00:00+00', '2026-01-02', 100, 0, true),
+            ('missing', '2026-01-02 14:00:00+00', '2026-01-02 22:00:00+00', NULL, NULL, 0, true),
+            ('nap', '2026-01-04 03:00:00+00', '2026-01-04 04:00:00+00', NULL, 50, NULL, false),
+            ('unknown', '2026-01-04 14:00:00+00', '2026-01-04 22:00:00+00', NULL, 430, 10, NULL)
+    """)
+    warehouse.close()
+    monkeypatch.setenv("DBT_DUCKDB_PATH", str(path))
+    run_dbt(target="local", project_dir=dbt_project, selector="tag:fitbit")
+    with connect(WarehouseConfig(str(path))) as connection:
+        rows = connection.execute("""
+            select sleep_date::varchar, sleep_session_id,
+                   (start_at at time zone 'Asia/Tokyo')::varchar,
+                   (end_at at time zone 'Asia/Tokyo')::varchar,
+                   sleep_minutes, awake_minutes
+            from marts.daily_sleep
+            order by sleep_date
+        """).fetchall()
+    assert rows == [
+        ("2026-01-02", "main", "2026-01-01 23:30:00", "2026-01-02 07:30:00", 420, 15),
+        ("2026-01-03", "missing", "2026-01-02 23:00:00", "2026-01-03 07:00:00", None, 0),
+    ]
+
+
+def test_daily_life_keeps_dates_and_missing_values_from_each_source(
+    tmp_path, monkeypatch, dbt_project
+):
+    path = tmp_path / "life.duckdb"
+    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
+    warehouse.migrate()
+    warehouse.connection.execute("""
+        insert into base.sleep_session
+            (sleep_session_id, start_at, end_at, sleep_minutes, awake_minutes, is_main_sleep)
+        values
+            ('main', '2026-01-01 14:30:00+00', '2026-01-01 22:30:00+00', 420, 15, true),
+            ('later', '2026-01-04 14:00:00+00', '2026-01-04 22:00:00+00', 400, NULL, true);
+        insert into base.steps_interval (steps_interval_id, start_at, end_at, steps) values
+            ('s1', '2026-01-02 01:00:00+00', '2026-01-02 01:01:00+00', 100),
+            ('s2', '2026-01-03 01:00:00+00', '2026-01-03 01:01:00+00', 0);
+        insert into base.active_zone_interval
+            (active_zone_interval_id, start_at, end_at, active_zone_minutes, category)
+        values
+            ('a1', '2026-01-02 01:00:00+00', '2026-01-02 01:01:00+00', 12, 'cardio'),
+            ('a2', '2026-01-04 01:00:00+00', '2026-01-04 01:01:00+00', 0, 'cardio');
+        insert into base.iphone_screen_time_event values
+            ('i1', 'phone', 'app', '2026-01-02 00:00:00+00', 'start', true),
+            ('i2', 'phone', 'app', '2026-01-02 00:00:10+00', 'end', true),
+            ('i3', 'phone', 'app', '2026-01-02 00:00:20+00', 'start', true),
+            ('i4', 'phone', 'next', '2026-01-02 00:00:25+00', 'start', true),
+            ('i5', 'phone', 'next', '2026-01-02 00:00:30+00', 'end', true),
+            ('i6', 'phone', 'other', '2026-01-07 00:00:00+00', 'end', true);
+        insert into base.mac_screen_time_event values
+            ('m1', 'mac', 'app', '2026-01-02 00:00:00+00', 'start', true),
+            ('m2', 'mac', 'app', '2026-01-02 00:00:30+00', 'end', true),
+            ('m3', 'mac', 'app', '2026-01-08 00:00:00+00', 'start', true),
+            ('m4', 'mac', 'app', '2026-01-08 00:00:10+00', 'end', true);
+    """)
+    warehouse.close()
+    monkeypatch.setenv("DBT_DUCKDB_PATH", str(path))
+    run_dbt(target="local", project_dir=dbt_project)
+    with connect(WarehouseConfig(str(path))) as connection:
+        rows = connection.execute("""
+            select activity_date::varchar, sleep_minutes, awake_minutes, steps, active_zone_minutes,
+                   (iphone_observed_seconds, iphone_inferred_seconds, iphone_total_seconds,
+                    iphone_unresolved_event_count),
+                   (mac_observed_seconds, mac_inferred_seconds, mac_total_seconds,
+                    mac_unresolved_event_count)
+            from marts.daily_life
+            order by activity_date
+        """).fetchall()
+    no_screen_record = (None, None, None, None)
+    assert rows == [
+        ("2026-01-02", 420, 15, 100, 12, (15, 5, 20, 0), (30, 0, 30, 0)),
+        ("2026-01-03", None, None, 0, None, no_screen_record, no_screen_record),
+        ("2026-01-04", None, None, None, 0, no_screen_record, no_screen_record),
+        ("2026-01-05", 400, None, None, None, no_screen_record, no_screen_record),
+        ("2026-01-07", None, None, None, None, (None, None, None, 1), no_screen_record),
+        ("2026-01-08", None, None, None, None, no_screen_record, (10, 0, 10, 0)),
+    ]
 
 
 def test_screen_union_midnight_unresolved_and_correction(tmp_path, monkeypatch):
@@ -122,6 +221,7 @@ def test_interval_marts_and_portable_catalog(tmp_path, monkeypatch):
         "iphone_screen_time_interval",
         "mac_screen_time_interval",
         "daily_iphone_screen_time_total",
+        "daily_life",
         "daily_mac_screen_time_total",
     ]:
         warehouse.connection.execute(f"select * from marts.{table}").fetchall()
