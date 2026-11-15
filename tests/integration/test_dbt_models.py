@@ -22,7 +22,6 @@ def test_views_are_built_from_physical_base(tmp_path, monkeypatch):
             "daily_iphone_screen_time_total",
             "daily_life",
             "daily_mac_screen_time_total",
-            "daily_sleep",
             "daily_sleep_detail",
         ]
     )
@@ -33,13 +32,12 @@ def test_views_are_built_from_physical_base(tmp_path, monkeypatch):
         "daily_active_zone": "activity_date active_zone_minutes fat_burn_azm_minutes cardio_azm_minutes peak_azm_minutes unspecified_azm_minutes interval_part_count has_prorated_intervals",
         "daily_iphone_screen_time_total": "activity_date observed_seconds inferred_seconds total_seconds unresolved_event_count",
         "daily_life": (
-            "activity_date sleep_start_at sleep_end_at sleep_minutes awake_minutes "
+            "activity_date sleep_start_at sleep_end_at sleep_minutes awake_minutes nap_minutes "
             "steps active_zone_minutes "
-            "iphone_observed_seconds iphone_inferred_seconds iphone_total_seconds iphone_unresolved_event_count "
-            "mac_observed_seconds mac_inferred_seconds mac_total_seconds mac_unresolved_event_count"
+            "iphone_total_seconds iphone_unresolved_event_count "
+            "mac_total_seconds mac_unresolved_event_count"
         ),
         "daily_mac_screen_time_total": "activity_date observed_seconds inferred_seconds total_seconds unresolved_event_count",
-        "daily_sleep": "sleep_date sleep_session_id start_at end_at sleep_minutes awake_minutes",
         "daily_sleep_detail": "sleep_date kind category total_minutes",
     }
     for table, columns in expected.items():
@@ -55,11 +53,13 @@ def test_views_are_built_from_physical_base(tmp_path, monkeypatch):
     warehouse.close()
 
 
-def test_daily_sleep_selects_main_sleep_by_jst_wake_date(tmp_path, monkeypatch, dbt_project):
+def test_daily_life_aggregates_sleep_by_jst_wake_date(tmp_path, monkeypatch, dbt_project):
     path = tmp_path / "sleep.duckdb"
     warehouse = Warehouse(connect(WarehouseConfig(str(path))))
     warehouse.migrate()
     warehouse.connection.execute("""
+        create view marts.daily_sleep as select * from base.sleep_session;
+        create view marts.daily_life as select * from marts.daily_sleep;
         insert into base.sleep_session
             (sleep_session_id, start_at, end_at, source_date, sleep_minutes, awake_minutes, is_main_sleep)
         values
@@ -67,24 +67,36 @@ def test_daily_sleep_selects_main_sleep_by_jst_wake_date(tmp_path, monkeypatch, 
             ('earlier', '2026-01-01 13:00:00+00', '2026-01-01 21:00:00+00', '2026-01-01', 420, 20, true),
             ('short', '2026-01-01 23:00:00+00', '2026-01-02 01:00:00+00', '2026-01-02', 100, 0, true),
             ('missing', '2026-01-02 14:00:00+00', '2026-01-02 22:00:00+00', NULL, NULL, 0, true),
+            ('nap-with-main', '2026-01-02 03:00:00+00', '2026-01-02 03:30:00+00', NULL, 25, NULL, false),
+            ('nap-overnight', '2026-01-03 14:45:00+00', '2026-01-03 15:15:00+00', '2026-01-03', 20, NULL, false),
             ('nap', '2026-01-04 03:00:00+00', '2026-01-04 04:00:00+00', NULL, 50, NULL, false),
-            ('unknown', '2026-01-04 14:00:00+00', '2026-01-04 22:00:00+00', NULL, 430, 10, NULL)
+            ('nap-zero', '2026-01-05 03:00:00+00', '2026-01-05 03:10:00+00', NULL, 0, NULL, false),
+            ('nap-known', '2026-01-06 03:00:00+00', '2026-01-06 03:30:00+00', NULL, 25, NULL, false),
+            ('nap-missing', '2026-01-06 07:00:00+00', '2026-01-06 07:30:00+00', NULL, NULL, NULL, false),
+            ('unknown', '2026-01-07 03:00:00+00', '2026-01-07 04:00:00+00', NULL, 50, NULL, NULL)
     """)
     warehouse.close()
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(path))
-    run_dbt(target="local", project_dir=dbt_project, selector="tag:fitbit")
+    run_dbt(target="local", project_dir=dbt_project, selector="+daily_life")
     with connect(WarehouseConfig(str(path))) as connection:
+        assert connection.execute("""
+            select count(*) from information_schema.views
+            where table_schema = 'marts' and table_name = 'daily_sleep'
+        """).fetchone() == (0,)
         rows = connection.execute("""
-            select sleep_date::varchar, sleep_session_id,
-                   (start_at at time zone 'Asia/Tokyo')::varchar,
-                   (end_at at time zone 'Asia/Tokyo')::varchar,
-                   sleep_minutes, awake_minutes
-            from marts.daily_sleep
-            order by sleep_date
+            select activity_date::varchar,
+                   (sleep_start_at at time zone 'Asia/Tokyo')::varchar,
+                   (sleep_end_at at time zone 'Asia/Tokyo')::varchar,
+                   sleep_minutes, awake_minutes, nap_minutes
+            from marts.daily_life
+            order by activity_date
         """).fetchall()
     assert rows == [
-        ("2026-01-02", "main", "2026-01-01 23:30:00", "2026-01-02 07:30:00", 420, 15),
-        ("2026-01-03", "missing", "2026-01-02 23:00:00", "2026-01-03 07:00:00", None, 0),
+        ("2026-01-02", "2026-01-01 23:30:00", "2026-01-02 07:30:00", 420, 15, 25),
+        ("2026-01-03", "2026-01-02 23:00:00", "2026-01-03 07:00:00", None, 0, 0),
+        ("2026-01-04", None, None, None, None, 70),
+        ("2026-01-05", None, None, None, None, 0),
+        ("2026-01-06", None, None, None, None, None),
     ]
 
 
@@ -126,22 +138,21 @@ def test_daily_life_keeps_dates_and_missing_values_from_each_source(
     run_dbt(target="local", project_dir=dbt_project)
     with connect(WarehouseConfig(str(path))) as connection:
         rows = connection.execute("""
-            select activity_date::varchar, sleep_minutes, awake_minutes, steps, active_zone_minutes,
-                   (iphone_observed_seconds, iphone_inferred_seconds, iphone_total_seconds,
-                    iphone_unresolved_event_count),
-                   (mac_observed_seconds, mac_inferred_seconds, mac_total_seconds,
-                    mac_unresolved_event_count)
+            select activity_date::varchar, sleep_minutes, awake_minutes, nap_minutes,
+                   steps, active_zone_minutes,
+                   (iphone_total_seconds, iphone_unresolved_event_count),
+                   (mac_total_seconds, mac_unresolved_event_count)
             from marts.daily_life
             order by activity_date
         """).fetchall()
-    no_screen_record = (None, None, None, None)
+    no_screen_record = (None, None)
     assert rows == [
-        ("2026-01-02", 420, 15, 100, 12, (15, 5, 20, 0), (30, 0, 30, 0)),
-        ("2026-01-03", None, None, 0, None, no_screen_record, no_screen_record),
-        ("2026-01-04", None, None, None, 0, no_screen_record, no_screen_record),
-        ("2026-01-05", 400, None, None, None, no_screen_record, no_screen_record),
-        ("2026-01-07", None, None, None, None, (None, None, None, 1), no_screen_record),
-        ("2026-01-08", None, None, None, None, no_screen_record, (10, 0, 10, 0)),
+        ("2026-01-02", 420, 15, 0, 100, 12, (20, 0), (30, 0)),
+        ("2026-01-03", None, None, 0, 0, None, no_screen_record, no_screen_record),
+        ("2026-01-04", None, None, 0, None, 0, no_screen_record, no_screen_record),
+        ("2026-01-05", 400, None, 0, None, None, no_screen_record, no_screen_record),
+        ("2026-01-07", None, None, 0, None, None, (None, 1), no_screen_record),
+        ("2026-01-08", None, None, 0, None, None, no_screen_record, (10, 0)),
     ]
 
 
