@@ -119,7 +119,7 @@ models:
   - name: awake_minutes
     description: 主睡眠の睡眠期間内の覚醒時間（分）。未提供はNULL。
   - name: nap_minutes
-    description: 提供元が主睡眠ではないと分類したセッションの実睡眠時間の合計（分）。該当する記録がない日、または該当する実睡眠時間に欠測がある日はNULL。
+    description: 提供元が主睡眠ではないと分類したセッションの実睡眠時間の合計（分）。該当する記録がない日は0、該当する実睡眠時間に欠測がある日はNULL。
   - name: steps
     description: 日またぎ区間の按分を含む合計歩数。記録がない日はNULL。
   - name: active_zone_minutes

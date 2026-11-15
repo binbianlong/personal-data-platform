@@ -33,7 +33,7 @@ select
     main_sleep.end_at as sleep_end_at,
     main_sleep.sleep_minutes,
     main_sleep.awake_minutes,
-    naps.nap_minutes,
+    case when naps.activity_date is null then 0 else naps.nap_minutes end as nap_minutes,
     step_totals.steps,
     zone_totals.active_zone_minutes,
     iphone.total_seconds as iphone_total_seconds,
