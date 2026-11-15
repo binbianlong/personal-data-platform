@@ -32,7 +32,7 @@ def test_views_are_built_from_physical_base(tmp_path, monkeypatch):
         "daily_active_zone": "activity_date active_zone_minutes fat_burn_azm_minutes cardio_azm_minutes peak_azm_minutes unspecified_azm_minutes interval_part_count has_prorated_intervals",
         "daily_iphone_screen_time_total": "activity_date observed_seconds inferred_seconds total_seconds unresolved_event_count",
         "daily_life": (
-            "activity_date sleep_start_at sleep_end_at sleep_minutes awake_minutes "
+            "activity_date sleep_start_at sleep_end_at sleep_minutes awake_minutes nap_minutes "
             "steps active_zone_minutes "
             "iphone_total_seconds iphone_unresolved_event_count "
             "mac_total_seconds mac_unresolved_event_count"
@@ -53,7 +53,7 @@ def test_views_are_built_from_physical_base(tmp_path, monkeypatch):
     warehouse.close()
 
 
-def test_daily_life_selects_main_sleep_by_jst_wake_date(tmp_path, monkeypatch, dbt_project):
+def test_daily_life_aggregates_sleep_by_jst_wake_date(tmp_path, monkeypatch, dbt_project):
     path = tmp_path / "sleep.duckdb"
     warehouse = Warehouse(connect(WarehouseConfig(str(path))))
     warehouse.migrate()
@@ -67,8 +67,13 @@ def test_daily_life_selects_main_sleep_by_jst_wake_date(tmp_path, monkeypatch, d
             ('earlier', '2026-01-01 13:00:00+00', '2026-01-01 21:00:00+00', '2026-01-01', 420, 20, true),
             ('short', '2026-01-01 23:00:00+00', '2026-01-02 01:00:00+00', '2026-01-02', 100, 0, true),
             ('missing', '2026-01-02 14:00:00+00', '2026-01-02 22:00:00+00', NULL, NULL, 0, true),
+            ('nap-with-main', '2026-01-02 03:00:00+00', '2026-01-02 03:30:00+00', NULL, 25, NULL, false),
+            ('nap-overnight', '2026-01-03 14:45:00+00', '2026-01-03 15:15:00+00', '2026-01-03', 20, NULL, false),
             ('nap', '2026-01-04 03:00:00+00', '2026-01-04 04:00:00+00', NULL, 50, NULL, false),
-            ('unknown', '2026-01-04 14:00:00+00', '2026-01-04 22:00:00+00', NULL, 430, 10, NULL)
+            ('nap-zero', '2026-01-05 03:00:00+00', '2026-01-05 03:10:00+00', NULL, 0, NULL, false),
+            ('nap-known', '2026-01-06 03:00:00+00', '2026-01-06 03:30:00+00', NULL, 25, NULL, false),
+            ('nap-missing', '2026-01-06 07:00:00+00', '2026-01-06 07:30:00+00', NULL, NULL, NULL, false),
+            ('unknown', '2026-01-07 03:00:00+00', '2026-01-07 04:00:00+00', NULL, 50, NULL, NULL)
     """)
     warehouse.close()
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(path))
@@ -82,13 +87,16 @@ def test_daily_life_selects_main_sleep_by_jst_wake_date(tmp_path, monkeypatch, d
             select activity_date::varchar,
                    (sleep_start_at at time zone 'Asia/Tokyo')::varchar,
                    (sleep_end_at at time zone 'Asia/Tokyo')::varchar,
-                   sleep_minutes, awake_minutes
+                   sleep_minutes, awake_minutes, nap_minutes
             from marts.daily_life
             order by activity_date
         """).fetchall()
     assert rows == [
-        ("2026-01-02", "2026-01-01 23:30:00", "2026-01-02 07:30:00", 420, 15),
-        ("2026-01-03", "2026-01-02 23:00:00", "2026-01-03 07:00:00", None, 0),
+        ("2026-01-02", "2026-01-01 23:30:00", "2026-01-02 07:30:00", 420, 15, 25),
+        ("2026-01-03", "2026-01-02 23:00:00", "2026-01-03 07:00:00", None, 0, None),
+        ("2026-01-04", None, None, None, None, 70),
+        ("2026-01-05", None, None, None, None, 0),
+        ("2026-01-06", None, None, None, None, None),
     ]
 
 

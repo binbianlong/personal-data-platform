@@ -106,10 +106,10 @@ models:
   - name: total_minutes
     description: 同じ日・種別・分類内で重複を除いた区間の合計時間（分）。
 - name: daily_life
-  description: JST日別の主睡眠、歩数、アクティブゾーン分数（AZM）、iPhone・Macの利用時間。いずれかに記録がある日を含む。
+  description: JST日別の主睡眠、昼寝、歩数、アクティブゾーン分数（AZM）、iPhone・Macの利用時間。いずれかに記録がある日を含む。
   columns:
   - name: activity_date
-    description: JSTの集計日。主睡眠は終了日で対応する。
+    description: JSTの集計日。主睡眠と昼寝は終了日で対応する。
   - name: sleep_start_at
     description: 主睡眠の開始時刻。タイムゾーン付きの絶対時刻。
   - name: sleep_end_at
@@ -118,6 +118,8 @@ models:
     description: 提供元が報告した主睡眠の実睡眠時間（分）。未提供はNULL。
   - name: awake_minutes
     description: 主睡眠の睡眠期間内の覚醒時間（分）。未提供はNULL。
+  - name: nap_minutes
+    description: 提供元が主睡眠ではないと分類したセッションの実睡眠時間の合計（分）。該当する記録がない日、または該当する実睡眠時間に欠測がある日はNULL。
   - name: steps
     description: 日またぎ区間の按分を含む合計歩数。記録がない日はNULL。
   - name: active_zone_minutes
