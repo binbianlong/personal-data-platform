@@ -16,12 +16,8 @@ select
     sleep.awake_minutes,
     step_totals.steps,
     zone_totals.active_zone_minutes,
-    iphone.observed_seconds as iphone_observed_seconds,
-    iphone.inferred_seconds as iphone_inferred_seconds,
     iphone.total_seconds as iphone_total_seconds,
     iphone.unresolved_event_count as iphone_unresolved_event_count,
-    mac.observed_seconds as mac_observed_seconds,
-    mac.inferred_seconds as mac_inferred_seconds,
     mac.total_seconds as mac_total_seconds,
     mac.unresolved_event_count as mac_unresolved_event_count
 from sleep

@@ -35,8 +35,8 @@ def test_views_are_built_from_physical_base(tmp_path, monkeypatch):
         "daily_life": (
             "activity_date sleep_start_at sleep_end_at sleep_minutes awake_minutes "
             "steps active_zone_minutes "
-            "iphone_observed_seconds iphone_inferred_seconds iphone_total_seconds iphone_unresolved_event_count "
-            "mac_observed_seconds mac_inferred_seconds mac_total_seconds mac_unresolved_event_count"
+            "iphone_total_seconds iphone_unresolved_event_count "
+            "mac_total_seconds mac_unresolved_event_count"
         ),
         "daily_mac_screen_time_total": "activity_date observed_seconds inferred_seconds total_seconds unresolved_event_count",
         "daily_sleep": "sleep_date sleep_session_id start_at end_at sleep_minutes awake_minutes",
@@ -127,21 +127,19 @@ def test_daily_life_keeps_dates_and_missing_values_from_each_source(
     with connect(WarehouseConfig(str(path))) as connection:
         rows = connection.execute("""
             select activity_date::varchar, sleep_minutes, awake_minutes, steps, active_zone_minutes,
-                   (iphone_observed_seconds, iphone_inferred_seconds, iphone_total_seconds,
-                    iphone_unresolved_event_count),
-                   (mac_observed_seconds, mac_inferred_seconds, mac_total_seconds,
-                    mac_unresolved_event_count)
+                   (iphone_total_seconds, iphone_unresolved_event_count),
+                   (mac_total_seconds, mac_unresolved_event_count)
             from marts.daily_life
             order by activity_date
         """).fetchall()
-    no_screen_record = (None, None, None, None)
+    no_screen_record = (None, None)
     assert rows == [
-        ("2026-01-02", 420, 15, 100, 12, (15, 5, 20, 0), (30, 0, 30, 0)),
+        ("2026-01-02", 420, 15, 100, 12, (20, 0), (30, 0)),
         ("2026-01-03", None, None, 0, None, no_screen_record, no_screen_record),
         ("2026-01-04", None, None, None, 0, no_screen_record, no_screen_record),
         ("2026-01-05", 400, None, None, None, no_screen_record, no_screen_record),
-        ("2026-01-07", None, None, None, None, (None, None, None, 1), no_screen_record),
-        ("2026-01-08", None, None, None, None, no_screen_record, (10, 0, 10, 0)),
+        ("2026-01-07", None, None, None, None, (None, 1), no_screen_record),
+        ("2026-01-08", None, None, None, None, no_screen_record, (10, 0)),
     ]
 
 

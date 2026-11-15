@@ -137,18 +137,10 @@ models:
     description: 日またぎ区間の按分を含む合計歩数。記録がない日はNULL。
   - name: active_zone_minutes
     description: 日またぎ区間の按分を含む合計AZM。提供元で重み付け済み。記録がない日はNULL。
-  - name: iphone_observed_seconds
-    description: 観測されたiPhoneの利用時間（秒）。利用区間がない日はNULL。
-  - name: iphone_inferred_seconds
-    description: 観測区間との重複を除いたiPhoneの推定利用時間（秒）。利用区間がない日はNULL。
   - name: iphone_total_seconds
     description: iPhoneの観測分と推定分の合計利用時間（秒）。利用区間がない日はNULL。
   - name: iphone_unresolved_event_count
     description: 利用区間に対応付けられなかったiPhoneの有効イベントの件数。iPhoneの記録がない日はNULL。
-  - name: mac_observed_seconds
-    description: 観測されたMacの利用時間（秒）。利用区間がない日はNULL。
-  - name: mac_inferred_seconds
-    description: 観測区間との重複を除いたMacの推定利用時間（秒）。利用区間がない日はNULL。
   - name: mac_total_seconds
     description: Macの観測分と推定分の合計利用時間（秒）。利用区間がない日はNULL。
   - name: mac_unresolved_event_count
