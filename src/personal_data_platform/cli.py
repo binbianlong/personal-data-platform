@@ -132,9 +132,9 @@ def _dispatch(args: argparse.Namespace) -> int:
 
         return _run_job(run_dbt_from_env, source_id=args.source_id, stream=args.stream)
     if args.command == "reconciliation":
-        from personal_data_platform.reconciliation.job import run_reconciliation_from_env
+        from personal_data_platform.daily.job import run_daily_from_env
 
-        return _run_job(run_reconciliation_from_env)
+        return _run_job(run_daily_from_env)
     if args.command == "preflight":
         from personal_data_platform.preflight import run_preflight_from_env
 

@@ -4,8 +4,8 @@ from datetime import UTC, datetime
 
 import pytest
 
+from personal_data_platform.daily.reconciliation import reconcile_owntracks
 from personal_data_platform.loader.job import run_loader
-from personal_data_platform.reconciliation.job import run_reconciliation
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
@@ -151,7 +151,7 @@ def test_parser_correction_requires_explicit_reprocess():
         warehouse.connection.execute("UPDATE base.location_point SET motion_activities=NULL")
         source.parser_version = get_source("owntracks").parser_version
 
-        assert run_reconciliation(store, warehouse, source=source).ok
+        assert reconcile_owntracks(store, warehouse, source=source).ok
         assert run_loader(store, warehouse, source=source, reprocess=True).records == 1
         assert warehouse.query_rows("SELECT motion_activities FROM base.location_point") == [
             (["walking"],)
@@ -180,11 +180,11 @@ def test_unlimited_raw_audit_repairs_missing_load_and_detects_deleted_raw(monkey
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate()
     try:
-        result = run_reconciliation(store, warehouse, source=source)
+        result = reconcile_owntracks(store, warehouse, source=source)
         assert result.ok
         assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 1
         store.objects.clear()
-        result = run_reconciliation(store, warehouse, source=source)
+        result = reconcile_owntracks(store, warehouse, source=source)
         assert not result.ok
         assert result.details["missing_raw_object_count"] == 1
     finally:

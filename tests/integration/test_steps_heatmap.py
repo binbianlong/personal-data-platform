@@ -1,7 +1,7 @@
 from datetime import date
 from xml.etree import ElementTree
 
-from personal_data_platform.reconciliation import steps_heatmap
+from personal_data_platform import profile_steps
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
 SVG = "{http://www.w3.org/2000/svg}"
@@ -30,7 +30,7 @@ def test_publishes_both_themes_with_the_calendar_window(monkeypatch):
             return Blob(name)
 
     uploads = {}
-    monkeypatch.setattr(steps_heatmap, "Client", Client)
+    monkeypatch.setattr(profile_steps, "Client", Client)
     with connect(WarehouseConfig(":memory:")) as connection:
         connection.execute("CREATE SCHEMA marts")
         connection.execute("""
@@ -42,7 +42,7 @@ def test_publishes_both_themes_with_the_calendar_window(monkeypatch):
                 ('2026-01-21', 8), ('2026-11-14', 100), ('2026-11-15', 999)
             ) rows(date, steps)
         """)
-        steps_heatmap.publish(Warehouse(connection), date(2026, 11, 14), "profile", timeout=10)
+        profile_steps.publish(Warehouse(connection), date(2026, 11, 14), "profile", timeout=10)
 
     assert set(uploads) == {"daily-steps-light.svg", "daily-steps-dark.svg"}
     for theme, background, palette in (

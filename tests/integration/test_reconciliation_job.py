@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from personal_data_platform.reconciliation import job
+from personal_data_platform.daily import job
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
 
@@ -42,7 +42,7 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
     from personal_data_platform import dbt_runner
     from personal_data_platform.sources.fitbit import runtime
 
-    logger = logging.getLogger("personal_data_platform.reconciliation")
+    logger = logging.getLogger("personal_data_platform.daily")
     monkeypatch.setattr(logger, "handlers", [])
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "test")
     monkeypatch.setenv("PDP_PROFILE_BUCKET", "profile")
@@ -89,7 +89,7 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
         return int(failure == "dbt")
 
     monkeypatch.setattr(dbt_runner, "run_dbt_from_env", dbt)
-    monkeypatch.setattr(job, "run_reconciliation", lambda *a, **kw: run_stage("owntracks", kw))
+    monkeypatch.setattr(job, "reconcile_owntracks", lambda *a, **kw: run_stage("owntracks", kw))
     monkeypatch.setattr(type(get_source("owntracks")), "repository_from_env", lambda _: object())
     monkeypatch.setattr(job, "publish_http_heartbeat", lambda *a: pings.append(a))
 
@@ -100,7 +100,7 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
         if failure == "steps_heatmap":
             broken()
 
-    monkeypatch.setattr(job.steps_heatmap, "publish", publish_steps)
+    monkeypatch.setattr(job.profile_steps, "publish", publish_steps)
 
     if failure == "logging":
         monkeypatch.setenv("LOG_LEVEL", "bad-level")
@@ -131,7 +131,7 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
     if failure == "release":
         monkeypatch.setattr(warehouse, "release_job_lock", broken)
     try:
-        result = job.run_reconciliation_from_env()
+        result = job.run_daily_from_env()
         assert result == int(failure not in {"none", "busy"})
         entries = [json.loads(line) for line in capfd.readouterr().err.splitlines()]
         events = [entry for entry in entries if entry.get("event") == "reconciliation"]
@@ -164,7 +164,7 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
         }
         if failure == "none":
             # A repeated same-day run performs its fixed repair again without a checkpoint.
-            assert job.run_reconciliation_from_env() == 0
+            assert job.run_daily_from_env() == 0
             assert phases == ["fitbit", "dbt", "owntracks", "steps_heatmap"] * 2
         if failure == "busy":
             assert not phases
@@ -193,8 +193,8 @@ def test_daily_execution_history_is_independent_of_detail_log_level(
     monkeypatch.setenv("LOG_LEVEL", level)
     test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd, outcome)
     # Required events do not lower the configured level for ordinary messages.
-    assert logging.getLogger(
-        "personal_data_platform.reconciliation"
-    ).getEffectiveLevel() == getattr(logging, level)
-    logging.getLogger("personal_data_platform.reconciliation").info("ordinary detail")
+    assert logging.getLogger("personal_data_platform.daily").getEffectiveLevel() == getattr(
+        logging, level
+    )
+    logging.getLogger("personal_data_platform.daily").info("ordinary detail")
     assert ("ordinary detail" in capfd.readouterr().err) == (level in {"DEBUG", "INFO"})

@@ -125,8 +125,8 @@ def test_dbt_command_lazily_calls_job(monkeypatch) -> None:
     [
         (
             "reconciliation",
-            "personal_data_platform.reconciliation.job",
-            "run_reconciliation_from_env",
+            "personal_data_platform.daily.job",
+            "run_daily_from_env",
         ),
         ("preflight", "personal_data_platform.preflight", "run_preflight_from_env"),
     ],
