@@ -11,11 +11,14 @@ locals {
   }
   runtime_jobs = {
     daily = {
-      name        = "reconciliation-west"
-      args        = ["reconciliation"]
-      timeout     = "6000s"
-      environment = merge(local.runtime_common_environment, { GCS_BUCKET = local.raw_bucket_name })
-      secrets     = { MOTHERDUCK_TOKEN = "motherduck_token", PDP_FITBIT_OAUTH_CONFIG = "fitbit_oauth_config", PDP_HEARTBEAT_CONFIG = "heartbeat_config" }
+      name    = "reconciliation-west"
+      args    = ["reconciliation"]
+      timeout = "6000s"
+      environment = merge(local.runtime_common_environment, {
+        GCS_BUCKET         = local.raw_bucket_name
+        PDP_PROFILE_BUCKET = google_storage_bucket.profile.name
+      })
+      secrets = { MOTHERDUCK_TOKEN = "motherduck_token", PDP_FITBIT_OAUTH_CONFIG = "fitbit_oauth_config", PDP_HEARTBEAT_CONFIG = "heartbeat_config" }
     }
   }
   runtime_job_secret_access = { for key in toset(flatten([for job in values(local.runtime_jobs) : values(job.secrets)])) : key => key }
@@ -111,7 +114,7 @@ resource "google_cloud_run_v2_job" "runtime" {
       }
     }
   }
-  depends_on = [google_service_account_iam_member.processing_deployer, google_secret_manager_secret_iam_member.jobs, google_storage_bucket_iam_policy.raw, google_storage_bucket_iam_policy.preflight]
+  depends_on = [google_service_account_iam_member.processing_deployer, google_secret_manager_secret_iam_member.jobs, google_storage_bucket_iam_policy.raw, google_storage_bucket_iam_policy.preflight, google_storage_bucket_iam_binding.profile_writer]
 }
 resource "google_service_account" "fitbit_receiver" {
   project      = var.project_id
