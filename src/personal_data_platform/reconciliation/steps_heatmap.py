@@ -1,4 +1,4 @@
-"""Publish the rolling annual step calendar used on the GitHub profile."""
+"""Publish the rolling nine-month step calendar used on the GitHub profile."""
 
 from __future__ import annotations
 
@@ -40,8 +40,9 @@ _PALETTES = {
 
 def publish(warehouse: Warehouse, end: date, bucket_name: str, *, timeout: int) -> None:
     today = end + timedelta(days=1)
-    year = today.year - 1
-    start = today.replace(year=year, day=min(today.day, monthrange(year, today.month)[1]))
+    year, month_index = divmod(today.year * 12 + today.month - 1 - 9, 12)
+    month = month_index + 1
+    start = date(year, month, min(today.day, monthrange(year, month)[1]))
     steps: dict[date, float | None] = dict(
         warehouse.query_rows(
             "SELECT activity_date, steps FROM marts.daily_steps WHERE activity_date BETWEEN ? AND ?",
@@ -79,7 +80,10 @@ def _render(
     offset = (start.weekday() + 1) % 7
     weeks = (days + offset + 6) // 7
     width = 48 + (weeks - 1) * 15 + 11 + 17
-    period = f"{start:%b} {start.day}, {start.year} – {end:%b} {end.day}, {end.year} · JST"
+    start_label = f"{start:%b} {start.day}"
+    if start.year != end.year:
+        start_label += f", {start.year}"
+    period = f"{start_label} – {end:%b} {end.day}, {end.year} · JST"
     background, border, ink, muted, stroke, *colors = _PALETTES[theme]
 
     def label(x: int, y: int, value: str, *, color: str = ink, size: int = 12) -> str:

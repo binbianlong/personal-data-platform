@@ -37,9 +37,9 @@ def test_publishes_both_themes_with_the_calendar_window(monkeypatch):
             CREATE TABLE marts.daily_steps AS
             SELECT date::DATE AS activity_date, steps::DOUBLE AS steps
             FROM (VALUES
-                ('2025-11-14', 999), ('2025-11-15', 0), ('2025-11-17', NULL),
-                ('2025-11-18', 2), ('2025-11-19', 4), ('2025-11-20', 6),
-                ('2025-11-21', 8), ('2026-11-14', 100), ('2026-11-15', 999)
+                ('2026-02-14', 999), ('2026-02-15', 0), ('2026-02-16', NULL),
+                ('2026-02-17', 2), ('2026-02-18', 4), ('2026-02-19', 6),
+                ('2026-02-20', 8), ('2026-11-14', 100), ('2026-11-15', 999)
             ) rows(date, steps)
         """)
         steps_heatmap.publish(Warehouse(connection), date(2026, 11, 14), "profile", timeout=10)
@@ -53,16 +53,16 @@ def test_publishes_both_themes_with_the_calendar_window(monkeypatch):
         assert content_type == "image/svg+xml"
         assert cache_control == "public, max-age=3600"
         svg = ElementTree.fromstring(document)
-        assert svg.get("width") == "856"
+        assert svg.get("width") == "646"
         assert svg.find(f"{SVG}rect").get("fill") == background
         cells = svg.findall(f'{SVG}g/{SVG}rect[@width="11"]')
         assert [(cell.get("x"), cell.get("y"), cell.get("fill")) for cell in cells] == [
-            ("48", "146", palette[0]),
-            ("63", "86", palette[1]),
-            ("63", "101", palette[2]),
-            ("63", "116", palette[3]),
-            ("63", "131", palette[3]),
-            ("828", "146", palette[3]),
+            ("48", "56", palette[0]),
+            ("48", "86", palette[1]),
+            ("48", "101", palette[2]),
+            ("48", "116", palette[3]),
+            ("48", "131", palette[3]),
+            ("618", "146", palette[3]),
         ]
         labels = [n.text for n in svg.findall(f"{SVG}g/{SVG}text")]
         assert [label for label in labels if label in ("Mon", "Wed", "Fri")] == [
@@ -70,5 +70,5 @@ def test_publishes_both_themes_with_the_calendar_window(monkeypatch):
             "Wed",
             "Fri",
         ]
-        assert "Nov 15, 2025 – Nov 14, 2026 · JST" in labels
+        assert "Feb 15 – Nov 14, 2026 · JST" in labels
         assert "No data" not in document and "0 steps" not in document
