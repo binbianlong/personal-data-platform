@@ -30,35 +30,45 @@ def test_publishes_both_themes_with_the_calendar_window(monkeypatch):
             return Blob(name)
 
     uploads = {}
-    monkeypatch.setattr(steps_heatmap.storage, "Client", Client)
+    monkeypatch.setattr(steps_heatmap, "Client", Client)
     with connect(WarehouseConfig(":memory:")) as connection:
         connection.execute("CREATE SCHEMA marts")
         connection.execute("""
             CREATE TABLE marts.daily_steps AS
             SELECT date::DATE AS activity_date, steps::DOUBLE AS steps
             FROM (VALUES
-                ('2026-05-14', 999), ('2026-05-15', 0), ('2026-05-17', NULL),
-                ('2026-05-18', 2), ('2026-05-19', 4), ('2026-05-20', 6),
-                ('2026-05-21', 8), ('2026-11-14', 100), ('2026-11-15', 999)
+                ('2025-11-14', 999), ('2025-11-15', 0), ('2025-11-17', NULL),
+                ('2025-11-18', 2), ('2025-11-19', 4), ('2025-11-20', 6),
+                ('2025-11-21', 8), ('2026-11-14', 100), ('2026-11-15', 999)
             ) rows(date, steps)
         """)
         steps_heatmap.publish(Warehouse(connection), date(2026, 11, 14), "profile", timeout=10)
 
     assert set(uploads) == {"daily-steps-light.svg", "daily-steps-dark.svg"}
-    for theme, background in [("light", "#ffffff"), ("dark", "#0d1117")]:
+    for theme, background, palette in (
+        ("light", "#ffffff", ["#eff2f5", "#4ac26b", "#2da44e", "#116329"]),
+        ("dark", "#0d1117", ["#151b23", "#196c2e", "#2ea043", "#56d364"]),
+    ):
         document, content_type, cache_control = uploads[f"daily-steps-{theme}.svg"]
         assert content_type == "image/svg+xml"
         assert cache_control == "public, max-age=3600"
         svg = ElementTree.fromstring(document)
-        cells = svg.findall(f'{SVG}rect[@width="14"]')
-        assert [(cell.get("x"), cell.get("y"), cell.get("class")) for cell in cells] == [
-            ("62", "174", "zero"),
-            ("80", "102", "g2"),
-            ("80", "120", "g3"),
-            ("80", "138", "g4"),
-            ("80", "156", "g4"),
-            ("530", "192", "g4"),
+        assert svg.get("width") == "856"
+        assert svg.find(f"{SVG}rect").get("fill") == background
+        cells = svg.findall(f'{SVG}g/{SVG}rect[@width="11"]')
+        assert [(cell.get("x"), cell.get("y"), cell.get("fill")) for cell in cells] == [
+            ("48", "146", palette[0]),
+            ("63", "86", palette[1]),
+            ("63", "101", palette[2]),
+            ("63", "116", palette[3]),
+            ("63", "131", palette[3]),
+            ("828", "146", palette[3]),
         ]
-        assert background in svg.find(f"{SVG}style").text
-        assert "May 15 – Nov 14, 2026 · JST" in document
+        labels = [n.text for n in svg.findall(f"{SVG}g/{SVG}text")]
+        assert [label for label in labels if label in ("Mon", "Wed", "Fri")] == [
+            "Mon",
+            "Wed",
+            "Fri",
+        ]
+        assert "Nov 15, 2025 – Nov 14, 2026 · JST" in labels
         assert "No data" not in document and "0 steps" not in document
