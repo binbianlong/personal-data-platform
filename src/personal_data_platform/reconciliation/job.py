@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import asdict, is_dataclass
@@ -25,6 +26,7 @@ from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.factory import WarehouseConfig, open_warehouse
 from personal_data_platform.storage.warehouse import Warehouse
 
+from . import steps_heatmap
 from .heartbeat import daily_heartbeat_urls, publish_http_heartbeat
 from .models import DAILY_JOB_NAME, ReconciliationResult
 
@@ -255,6 +257,10 @@ def _run_daily_reconciliation() -> int:
                     }
                     if missing or failed:
                         raise _StageFailed("required Screen Time relation validation failed")
+            if bucket := os.environ.get("PDP_PROFILE_BUCKET"):
+                stage = "steps_heatmap"
+                with network_phase("daily_steps_heatmap"):
+                    steps_heatmap.publish(warehouse, target_date, bucket, timeout=remaining())
             stage = "heartbeat"
             remaining()
             publish_http_heartbeat(

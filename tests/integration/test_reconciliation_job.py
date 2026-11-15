@@ -31,6 +31,7 @@ from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig
         "owntracks-exception",
         "missing-relation",
         "relation-query",
+        "steps_heatmap",
         "heartbeat",
         "release",
         "close",
@@ -44,6 +45,7 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
     logger = logging.getLogger("personal_data_platform.reconciliation")
     monkeypatch.setattr(logger, "handlers", [])
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "test")
+    monkeypatch.setenv("PDP_PROFILE_BUCKET", "profile")
     monkeypatch.setenv("PDP_HEARTBEAT_CONFIG", '{"daily":"https://example.test/daily"}')
     warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
     warehouse.migrate()
@@ -90,6 +92,16 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
     monkeypatch.setattr(job, "run_reconciliation", lambda *a, **kw: run_stage("owntracks", kw))
     monkeypatch.setattr(type(get_source("owntracks")), "repository_from_env", lambda _: object())
     monkeypatch.setattr(job, "publish_http_heartbeat", lambda *a: pings.append(a))
+
+    def publish_steps(current_warehouse, target_date, bucket, *, timeout):
+        assert current_warehouse is warehouse and bucket == "profile" and timeout > 0
+        assert target_date.isoformat()
+        phases.append("steps_heatmap")
+        if failure == "steps_heatmap":
+            broken()
+
+    monkeypatch.setattr(job.steps_heatmap, "publish", publish_steps)
+
     if failure == "logging":
         monkeypatch.setenv("LOG_LEVEL", "bad-level")
     if failure == "close":
@@ -143,6 +155,8 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
         )
         if "owntracks" in phases and failure != "owntracks-exception":
             assert summary["owntracks"] == {"raw_object_count": 3}
+        if failure == "steps_heatmap":
+            assert summary["failed_stage"] == "steps_heatmap"
         assert len(pings) == int(failure in {"none", "release", "close"})
         assert {r for r in warehouse.relation_names() if r.startswith("ops.")} == {
             "ops.job_lock",
@@ -151,7 +165,7 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
         if failure == "none":
             # A repeated same-day run performs its fixed repair again without a checkpoint.
             assert job.run_reconciliation_from_env() == 0
-            assert phases == ["fitbit", "dbt", "owntracks"] * 2
+            assert phases == ["fitbit", "dbt", "owntracks", "steps_heatmap"] * 2
         if failure == "busy":
             assert not phases
             assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "competitor"
