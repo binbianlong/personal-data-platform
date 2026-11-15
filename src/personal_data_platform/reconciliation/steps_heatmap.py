@@ -1,4 +1,4 @@
-"""Publish the rolling nine-month step calendar used on the GitHub profile."""
+"""Publish the rolling ten-month step calendar used on the GitHub profile."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ _PALETTES = {
 
 def publish(warehouse: Warehouse, end: date, bucket_name: str, *, timeout: int) -> None:
     today = end + timedelta(days=1)
-    year, month_index = divmod(today.year * 12 + today.month - 1 - 9, 12)
+    year, month_index = divmod(today.year * 12 + today.month - 1 - 10, 12)
     month = month_index + 1
     start = date(year, month, min(today.day, monthrange(year, month)[1]))
     steps: dict[date, float | None] = dict(
