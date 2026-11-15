@@ -1,11 +1,18 @@
+{{ config(post_hook='drop view if exists {{ this.include(database=false, identifier=false) }}.daily_sleep') }}
+
 with sleep as (
     select
-        sleep_date as activity_date,
+        (end_at at time zone 'Asia/Tokyo')::date as activity_date,
         start_at,
         end_at,
         sleep_minutes,
         awake_minutes
-    from {{ ref('daily_sleep').include(database=false) }}
+    from {{ source('base', 'sleep_session').include(database=false) }}
+    where is_main_sleep is true
+    qualify row_number() over (
+        partition by activity_date
+        order by sleep_minutes desc nulls last, end_at desc, sleep_session_id
+    ) = 1
 )
 
 select

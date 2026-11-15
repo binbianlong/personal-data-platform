@@ -94,21 +94,6 @@ models:
     description: JST日境界で分割した後の集計対象区間数。
   - name: has_prorated_intervals
     description: 日をまたぐ区間を1件以上按分した場合はTRUE。
-- name: daily_sleep
-  description: JSTの睡眠終了日ごとに選んだFitbitの主睡眠記録。実睡眠時間が最も長い記録を1件採用する。
-  columns:
-  - name: sleep_date
-    description: 主睡眠が終了したJST日。
-  - name: sleep_session_id
-    description: 主睡眠のセッションID。
-  - name: start_at
-    description: 主睡眠の開始時刻。タイムゾーン付きの絶対時刻。
-  - name: end_at
-    description: 主睡眠の終了時刻。タイムゾーン付きの絶対時刻。
-  - name: sleep_minutes
-    description: 提供元が報告した主睡眠の実睡眠時間（分）。未提供はNULL。
-  - name: awake_minutes
-    description: 主睡眠の睡眠期間内の覚醒時間（分）。未提供はNULL。
 - name: daily_sleep_detail
   description: JSTの睡眠終了日・詳細種別・分類ごとの睡眠詳細の集計。昼寝を含む。
   columns:

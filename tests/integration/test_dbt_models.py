@@ -22,7 +22,6 @@ def test_views_are_built_from_physical_base(tmp_path, monkeypatch):
             "daily_iphone_screen_time_total",
             "daily_life",
             "daily_mac_screen_time_total",
-            "daily_sleep",
             "daily_sleep_detail",
         ]
     )
@@ -39,7 +38,6 @@ def test_views_are_built_from_physical_base(tmp_path, monkeypatch):
             "mac_total_seconds mac_unresolved_event_count"
         ),
         "daily_mac_screen_time_total": "activity_date observed_seconds inferred_seconds total_seconds unresolved_event_count",
-        "daily_sleep": "sleep_date sleep_session_id start_at end_at sleep_minutes awake_minutes",
         "daily_sleep_detail": "sleep_date kind category total_minutes",
     }
     for table, columns in expected.items():
@@ -55,11 +53,13 @@ def test_views_are_built_from_physical_base(tmp_path, monkeypatch):
     warehouse.close()
 
 
-def test_daily_sleep_selects_main_sleep_by_jst_wake_date(tmp_path, monkeypatch, dbt_project):
+def test_daily_life_selects_main_sleep_by_jst_wake_date(tmp_path, monkeypatch, dbt_project):
     path = tmp_path / "sleep.duckdb"
     warehouse = Warehouse(connect(WarehouseConfig(str(path))))
     warehouse.migrate()
     warehouse.connection.execute("""
+        create view marts.daily_sleep as select * from base.sleep_session;
+        create view marts.daily_life as select * from marts.daily_sleep;
         insert into base.sleep_session
             (sleep_session_id, start_at, end_at, source_date, sleep_minutes, awake_minutes, is_main_sleep)
         values
@@ -72,19 +72,23 @@ def test_daily_sleep_selects_main_sleep_by_jst_wake_date(tmp_path, monkeypatch, 
     """)
     warehouse.close()
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(path))
-    run_dbt(target="local", project_dir=dbt_project, selector="tag:fitbit")
+    run_dbt(target="local", project_dir=dbt_project, selector="+daily_life")
     with connect(WarehouseConfig(str(path))) as connection:
+        assert connection.execute("""
+            select count(*) from information_schema.views
+            where table_schema = 'marts' and table_name = 'daily_sleep'
+        """).fetchone() == (0,)
         rows = connection.execute("""
-            select sleep_date::varchar, sleep_session_id,
-                   (start_at at time zone 'Asia/Tokyo')::varchar,
-                   (end_at at time zone 'Asia/Tokyo')::varchar,
+            select activity_date::varchar,
+                   (sleep_start_at at time zone 'Asia/Tokyo')::varchar,
+                   (sleep_end_at at time zone 'Asia/Tokyo')::varchar,
                    sleep_minutes, awake_minutes
-            from marts.daily_sleep
-            order by sleep_date
+            from marts.daily_life
+            order by activity_date
         """).fetchall()
     assert rows == [
-        ("2026-01-02", "main", "2026-01-01 23:30:00", "2026-01-02 07:30:00", 420, 15),
-        ("2026-01-03", "missing", "2026-01-02 23:00:00", "2026-01-03 07:00:00", None, 0),
+        ("2026-01-02", "2026-01-01 23:30:00", "2026-01-02 07:30:00", 420, 15),
+        ("2026-01-03", "2026-01-02 23:00:00", "2026-01-03 07:00:00", None, 0),
     ]
 
 
