@@ -5,9 +5,15 @@ on:
     branches:
       - main
     paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "dbt/**"
       - "infra/terraform/**"
-      - ".github/workflows/terraform-plan.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/**"
       - ".github/workflows/terraform-deploy.yml"
+      - ".github/workflows/terraform-plan.yml"
   workflow_dispatch:
 
 permissions:
