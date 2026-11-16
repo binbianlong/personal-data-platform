@@ -96,6 +96,10 @@ OwnTracksのGCS保存完了通知はPub/Subから非公開workerへpushし、DB 
 4. 歩数ヒートマップを生成し、Healthchecksへ外部成功pingを1回送る。
 5. 成功・失敗・延期と各段階の結果をJSONログへ残す。
 
+Fitbitの取得やOwnTracksの補修で失敗結果が返っても、接続とleaseが有効なら残りのソースを検査する。
+失敗があれば歩数ヒートマップの更新と成功pingを省き、結果を残してジョブを失敗で終了する。
+接続やleaseが失われた場合は後続処理を止める。
+
 Screen Timeの収集・保存・取り込みはMacの独立した2つのCollectorが各30分周期で実行する。
 DBのjob履歴・source heartbeat・最終成功日checkpointは持たない。日次は同じ日でも再実行できる。
 通常補修より古いFitbit欠落は、過去の実行ログを確認して期間指定で補修する。

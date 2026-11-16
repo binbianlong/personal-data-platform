@@ -32,10 +32,6 @@ def run_daily_from_env() -> int:
         return _run_daily()
 
 
-class _StageFailed(RuntimeError):
-    """A stage returned an explicit failure outcome."""
-
-
 def _run_daily() -> int:
     from zoneinfo import ZoneInfo
 
@@ -65,6 +61,10 @@ def _run_daily() -> int:
         assert warehouse is not None
         warehouse.require_job_lock(owner, remaining_seconds=seconds)
         return seconds
+
+    def record_failure(message: str) -> None:
+        LOGGER.error("daily stage failed: %s (%s)", stage, message)
+        details["failed_stage"] = details["failed_stage"] or stage
 
     def event(value: str) -> None:
         # Execution history must survive filters for ordinary diagnostic logs.
@@ -111,7 +111,7 @@ def _run_daily() -> int:
                 else {"ok": repair.ok}
             )
             if not repair.ok:
-                raise _StageFailed("Fitbit repair failed")
+                record_failure("Fitbit repair failed")
             stage = "owntracks"
             remaining()
             with network_phase("daily_owntracks"):
@@ -120,7 +120,7 @@ def _run_daily() -> int:
                 )
             details["owntracks"] = owntracks_result.details
             if not owntracks_result.ok:
-                raise _StageFailed("OwnTracks Raw reconciliation failed")
+                record_failure("OwnTracks Raw reconciliation failed")
             for source in sources:
                 stage = "relations:" + source.source_id
                 remaining()
@@ -132,7 +132,9 @@ def _run_daily() -> int:
                         "collector_liveness": "local_logs",
                     }
                     if missing or failed:
-                        raise _StageFailed("required Screen Time relation validation failed")
+                        record_failure("required Screen Time relation validation failed")
+            if details["failed_stage"] is not None:
+                return 1
             if bucket := os.environ.get("PDP_PROFILE_BUCKET"):
                 stage = "steps_heatmap"
                 with network_phase("daily_steps_heatmap"):

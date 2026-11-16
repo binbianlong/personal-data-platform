@@ -9,6 +9,7 @@ import pytest
 from personal_data_platform.daily import job
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
+from personal_data_platform.storage.warehouse import WarehouseConnectionError
 
 
 @pytest.mark.parametrize(
@@ -24,6 +25,7 @@ from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig
         "busy",
         "fitbit",
         "fitbit-exception",
+        "fitbit-connection",
         "fitbit-dataclass",
         "owntracks",
         "owntracks-exception",
@@ -67,6 +69,9 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
     monkeypatch.setattr(warehouse, "close", lambda: None)
 
     def repair(**kw):
+        if failure == "fitbit-connection":
+            warehouse.connection_usable = False
+            raise WarehouseConnectionError("injected connection failure")
         if failure == "fitbit-dataclass":
             from datetime import UTC, datetime, timedelta
 
@@ -148,6 +153,15 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
         )
         if "owntracks" in phases and failure != "owntracks-exception":
             assert summary["owntracks"] == {"raw_object_count": 3}
+        if failure in {"fitbit", "fitbit-dataclass", "owntracks"}:
+            assert summary["failed_stage"] == ("owntracks" if failure == "owntracks" else "fitbit")
+            assert summary["owntracks"] == {"raw_object_count": 3}
+            for source_id in ("iphone_screen_time", "mac_screen_time"):
+                assert summary[source_id]["missing_relations"] == []
+            assert "steps_heatmap" not in phases
+        if failure in {"fitbit-exception", "fitbit-connection"}:
+            assert summary["failed_stage"] == "fitbit"
+            assert "owntracks" not in phases
         if failure == "steps_heatmap":
             assert summary["failed_stage"] == "steps_heatmap"
         assert len(pings) == int(failure in {"none", "release", "close"})
