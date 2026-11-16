@@ -105,14 +105,16 @@ models:
     description: 詳細区間の分類（deep、rem、short-awakeningなど）。未提供はNULL。
   - name: total_minutes
     description: 同じ日・種別・分類内で重複を除いた区間の合計時間（分）。
-- name: daily_life
-  description: JST日別の主睡眠、昼寝、歩数、アクティブゾーン分数（AZM）、iPhone・Macの利用時間。いずれかに記録がある日を含む。
+- name: daily_sleep
+  description: 睡眠の終了JST日ごとの主睡眠と昼寝。いずれかに記録がある日を含む。
   columns:
-  - name: activity_date
-    description: JSTの集計日。主睡眠と昼寝は終了日で対応する。
-  - name: sleep_start_at
+  - name: sleep_date
+    description: 睡眠セッションが終了したJST日。
+  - name: sleep_session_id
+    description: その日の主睡眠セッションの識別子。主睡眠がない日はNULL。
+  - name: start_at
     description: 主睡眠の開始時刻。タイムゾーン付きの絶対時刻。
-  - name: sleep_end_at
+  - name: end_at
     description: 主睡眠の終了時刻。タイムゾーン付きの絶対時刻。
   - name: sleep_minutes
     description: 提供元が報告した主睡眠の実睡眠時間（分）。未提供はNULL。
@@ -120,15 +122,3 @@ models:
     description: 主睡眠の睡眠期間内の覚醒時間（分）。未提供はNULL。
   - name: nap_minutes
     description: 提供元が主睡眠ではないと分類したセッションの実睡眠時間の合計（分）。該当する記録がない日は0、該当する実睡眠時間に欠測がある日はNULL。
-  - name: steps
-    description: 日またぎ区間の按分を含む合計歩数。記録がない日はNULL。
-  - name: active_zone_minutes
-    description: 日またぎ区間の按分を含む合計AZM。提供元で重み付け済み。記録がない日はNULL。
-  - name: iphone_total_seconds
-    description: iPhoneの観測分と推定分の合計利用時間（秒）。利用区間がない日はNULL。
-  - name: iphone_unresolved_event_count
-    description: 利用区間に対応付けられなかったiPhoneの有効イベントの件数。iPhoneの記録がない日はNULL。
-  - name: mac_total_seconds
-    description: Macの観測分と推定分の合計利用時間（秒）。利用区間がない日はNULL。
-  - name: mac_unresolved_event_count
-    description: 利用区間に対応付けられなかったMacの有効イベントの件数。Macの記録がない日はNULL。
