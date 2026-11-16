@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import runpy
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -92,6 +94,7 @@ def test_analytics_day_boundaries_are_not_advertised_as_configurable() -> None:
 
 IMAGE_PATH = "us-west1-docker.pkg.dev/example-project/runtime/runtime"
 CURRENT_DIGEST = f"{IMAGE_PATH}@sha256:" + "a" * 64
+NEXT_DIGEST = f"{IMAGE_PATH}@sha256:" + "b" * 64
 
 
 def _runtime_job(name: str, image: str) -> dict:
@@ -177,15 +180,20 @@ def test_runtime_workflows_require_numeric_pins_before_cloud_work(
 
 
 @pytest.mark.parametrize(
-    ("event", "job_list_ok", "expected_image"),
+    ("event", "job_list_ok", "current_image_present", "expected_image"),
     [
-        ("push", True, CURRENT_DIGEST),
-        ("workflow_dispatch", True, f"{IMAGE_PATH}@sha256:" + "b" * 64),
-        ("push", False, None),
+        ("push", True, True, CURRENT_DIGEST),
+        ("push", True, False, NEXT_DIGEST),
+        ("workflow_dispatch", True, True, NEXT_DIGEST),
+        ("push", False, True, None),
     ],
 )
-def test_deploy_prepares_image_without_retaining_history(
-    tmp_path: Path, event: str, job_list_ok: bool, expected_image: str | None
+def test_deploy_prepares_and_protects_image(
+    tmp_path: Path,
+    event: str,
+    job_list_ok: bool,
+    current_image_present: bool,
+    expected_image: str | None,
 ) -> None:
     gcloud = tmp_path / "gcloud"
     gcloud.write_text(
@@ -199,8 +207,12 @@ def test_deploy_prepares_image_without_retaining_history(
         "  exit 0\n"
         "fi\n"
         'if [[ "$1 $2 $3 $4" == "artifacts docker images describe" ]]; then\n'
+        '  if [[ "$5" == "$CURRENT_DIGEST" ]]; then [[ "$CURRENT_IMAGE_PRESENT" == "true" ]]; exit; fi\n'
         '  [[ "$5" == "$IMAGE_PATH:$GITHUB_SHA" ]] || exit 90\n'
         '  printf "%s\\n" "$NEW_DIGEST"; exit 0\n'
+        "fi\n"
+        'if [[ "$1 $2 $3 $4" == "artifacts docker tags add" ]]; then\n'
+        '  printf "%s %s\\n" "$5" "$6" > "$TAG_LOG"; exit 0\n'
         "fi\nexit 90\n"
     )
     gcloud.chmod(0o755)
@@ -212,6 +224,7 @@ def test_deploy_prepares_image_without_retaining_history(
     )
     docker.chmod(0o755)
     docker_log = tmp_path / "docker-log"
+    tag_log = tmp_path / "tag-log"
     output = tmp_path / "github-env"
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     result = subprocess.run(
@@ -222,14 +235,18 @@ def test_deploy_prepares_image_without_retaining_history(
                 ".github/workflows/terraform-deploy.yml", "Prepare runtime image"
             ),
         ],
+        cwd=ROOT,
         env={
             **os.environ,
             "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
             "JOBS_JSON": json.dumps([_runtime_job("reconciliation-west", CURRENT_DIGEST)]),
             "JOB_LIST_OK": str(job_list_ok).lower(),
+            "CURRENT_DIGEST": CURRENT_DIGEST,
+            "CURRENT_IMAGE_PRESENT": str(current_image_present).lower(),
             "NEW_DIGEST": "sha256:" + "b" * 64,
             "IMAGE_PATH": IMAGE_PATH,
             "DOCKER_LOG": str(docker_log),
+            "TAG_LOG": str(tag_log),
             "GCP_PROJECT_ID": "example-project",
             "GCP_REGION": "us-west1",
             "ARTIFACT_REPOSITORY": "runtime",
@@ -247,16 +264,98 @@ def test_deploy_prepares_image_without_retaining_history(
         assert result.returncode == 7
         assert not output.exists()
         assert not docker_log.exists()
+        assert not tag_log.exists()
         return
     assert result.returncode == 0, result.stderr
     assert output.read_text() == f"TF_VAR_runtime_image_uri={expected_image}\n"
-    if event == "workflow_dispatch":
+    assert tag_log.read_text() == (
+        f"{expected_image} {IMAGE_PATH}:deployed-live-{expected_image.rsplit(':', 1)[1]}\n"
+    )
+    if expected_image == NEXT_DIGEST:
         assert docker_log.read_text().splitlines() == [
             f"build --tag {IMAGE_PATH}:{sha} .",
             f"push {IMAGE_PATH}:{sha}",
         ]
     else:
         assert not docker_log.exists()
+
+
+def test_deploy_retains_images_during_partial_updates(monkeypatch: pytest.MonkeyPatch) -> None:
+    main = runpy.run_path(str(ROOT / ".github/scripts/runtime-image-tags.py"))["main"]
+    for key, value in {
+        "GCP_PROJECT_ID": "example-project",
+        "GCP_REGION": "us-west1",
+        "ARTIFACT_REPOSITORY": "runtime",
+        "IMAGE_NAME": "runtime",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    traffic_digest = f"{IMAGE_PATH}@sha256:" + "c" * 64
+    daily_image = CURRENT_DIGEST
+    tags = {"regular-build-tag": CURRENT_DIGEST}
+
+    def fake_gcloud(*args: str) -> str:
+        if args[:3] == ("run", "jobs", "list"):
+            return json.dumps([_runtime_job("reconciliation-west", daily_image)])
+        if args[:3] == ("run", "services", "list"):
+            return json.dumps(
+                [
+                    {
+                        "spec": {"template": {"spec": {"containers": [{"image": NEXT_DIGEST}]}}},
+                        "status": {"traffic": [{"revisionName": "older", "percent": 100}]},
+                    }
+                ]
+            )
+        if args[:4] == ("run", "revisions", "describe", "older"):
+            return json.dumps(
+                {
+                    "spec": {"containers": [{"image": traffic_digest}]},
+                    "status": {"imageDigest": traffic_digest},
+                }
+            )
+        if args[:4] == ("artifacts", "docker", "images", "list"):
+            return "\n".join(
+                image.split("@")[1] for image in (CURRENT_DIGEST, NEXT_DIGEST, traffic_digest)
+            )
+        if args[:4] == ("artifacts", "docker", "tags", "list"):
+            return json.dumps(
+                [
+                    {"tag": f"tags/{tag}", "version": f"versions/{image.split('@')[1]}"}
+                    for tag, image in tags.items()
+                ]
+            )
+        if args[:4] == ("artifacts", "docker", "tags", "add"):
+            tags[args[5].rsplit(":", 1)[1]] = args[4]
+            return ""
+        if args[:4] == ("artifacts", "docker", "tags", "delete"):
+            del tags[args[4].rsplit(":", 1)[1]]
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setitem(main.__globals__, "gcloud", fake_gcloud)
+    monkeypatch.setattr(sys, "argv", ["runtime-image-tags.py", "protect"])
+    main()
+    assert set(tags.values()) == {CURRENT_DIGEST, NEXT_DIGEST, traffic_digest}
+    assert tags["deployed-current"] == CURRENT_DIGEST
+    assert tags["deployed-live-" + "c" * 64] == traffic_digest
+
+    monkeypatch.setattr(sys, "argv", ["runtime-image-tags.py", "finish", NEXT_DIGEST])
+    protected_tags = tags.copy()
+    with pytest.raises(RuntimeError, match="daily job does not reference"):
+        main()
+    assert tags == protected_tags
+
+    daily_image = NEXT_DIGEST
+    main()
+    assert tags == {
+        "regular-build-tag": CURRENT_DIGEST,
+        "deployed-current": NEXT_DIGEST,
+        "deployed-rollback": CURRENT_DIGEST,
+        "deployed-live-" + "b" * 64: NEXT_DIGEST,
+        "deployed-live-" + "c" * 64: traffic_digest,
+    }
+    main()
+    assert tags["deployed-rollback"] == CURRENT_DIGEST
 
 
 @pytest.mark.parametrize("fallback_region", ["us-central1", "us-west1"])

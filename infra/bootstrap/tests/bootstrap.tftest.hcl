@@ -49,8 +49,8 @@ run "secure_bootstrap_contract" {
   }
 
   assert {
-    condition     = length(google_artifact_registry_repository.runtime.cleanup_policies) == 2
-    error_message = "Cleanup must have only one expiration rule and one latest-version exception."
+    condition     = length(google_artifact_registry_repository.runtime.cleanup_policies) == 3
+    error_message = "Cleanup must expire old versions and retain latest and deployed versions."
   }
 
   assert {
@@ -70,6 +70,17 @@ run "secure_bootstrap_contract" {
       )
     ])
     error_message = "Cleanup must expire old SHA-tagged images as well as untagged images after one day."
+  }
+
+  assert {
+    condition = anytrue([
+      for policy in google_artifact_registry_repository.runtime.cleanup_policies :
+      policy.action == "KEEP" && try(
+        policy.condition[0].tag_state == "TAGGED" &&
+        toset(policy.condition[0].tag_prefixes) == toset(["deployed-"]), false
+      )
+    ]) && toset(google_project_iam_custom_role.runtime_image_tag_delete.permissions) == toset(["artifactregistry.tags.delete"])
+    error_message = "Deployed images must be protected by tag and deploy may remove tags without permission to delete images."
   }
 
   assert {

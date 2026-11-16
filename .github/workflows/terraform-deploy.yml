@@ -13,6 +13,7 @@ on:
       - "uv.lock"
       - "src/**"
       - ".github/workflows/terraform-deploy.yml"
+      - ".github/scripts/runtime-image-tags.py"
   workflow_dispatch:
     inputs:
       run_daily:
@@ -88,6 +89,9 @@ jobs:
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
+      - name: Protect images in use
+        run: python3 .github/scripts/runtime-image-tags.py protect
+
       - name: Prepare runtime image
         shell: bash
         env:
@@ -101,7 +105,10 @@ jobs:
           build=true
           if [[ "${GITHUB_EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
             changed="$(git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" -- Dockerfile .dockerignore pyproject.toml uv.lock src/ dbt/)"
-            if [[ -z "${changed}" && -n "${current_image}" ]]; then build=false; fi
+            if [[ -z "${changed}" && -n "${current_image}" ]] &&
+              gcloud artifacts docker images describe "${current_image}" >/dev/null 2>&1; then
+              build=false
+            fi
           fi
           if [[ "${build}" == "true" ]]; then
             gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
@@ -111,6 +118,7 @@ jobs:
             current_image="${image_path}@${digest}"
           fi
           [[ "${current_image}" == "${image_path}@"* && "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
+          python3 .github/scripts/runtime-image-tags.py protect "${current_image}"
           echo "TF_VAR_runtime_image_uri=${current_image}" >> "${GITHUB_ENV}"
 
       - name: Set up Terraform
@@ -133,6 +141,9 @@ jobs:
 
       - name: Apply runtime changes
         run: terraform -chdir=infra/terraform apply -input=false -auto-approve runtime.tfplan
+
+      - name: Finalize image retention
+        run: python3 .github/scripts/runtime-image-tags.py finish "${TF_VAR_runtime_image_uri}"
 
       - name: Run combined daily job
         if: ${{ inputs.run_daily }}

@@ -29,6 +29,17 @@ Fitbitの30分バッチ・OwnTracksのpush配信・日次Scheduler・native警�
 アプリdeploy失敗後の再反映には手動deploy、日次全体の実行には手動入力`run_daily`を使う。
 rollbackには[Fitbitの通知・取得方式の互換性](../sources/fitbit/operations.md#停止と復旧)と現行DBスキーマに対応したimageを使い、削除済みなら再build・登録する。
 workflowが停止中の場合はローカルで`linux/amd64` imageを登録し、digestを指定してTerraformを反映する。
+手動切替も、登録前に稼働中のimage、切替前に新しいdigestを保護する。
+`GCP_PROJECT_ID`・`GCP_REGION`・`ARTIFACT_REPOSITORY`・`IMAGE_NAME` を設定し、次のコマンドを使う。
+
+```bash
+python3 .github/scripts/runtime-image-tags.py protect
+# imageをbuild・pushしてdigestを確認した後
+python3 .github/scripts/runtime-image-tags.py protect "$image_digest_uri"
+```
+
+全runtimeを切り替えた手動デプロイは、確認後に同じスクリプトを `finish "$image_digest_uri"` で実行する。
+一部のサービスだけ切り替えた場合、保護の整理は全runtimeの次回Deployに任せる。
 
 ## 依存関係の更新
 
