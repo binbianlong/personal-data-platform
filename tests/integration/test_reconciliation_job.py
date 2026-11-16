@@ -25,8 +25,6 @@ from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig
         "fitbit",
         "fitbit-exception",
         "fitbit-dataclass",
-        "dbt",
-        "dbt-exception",
         "owntracks",
         "owntracks-exception",
         "missing-relation",
@@ -39,7 +37,6 @@ from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig
     ],
 )
 def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd, failure):
-    from personal_data_platform import dbt_runner
     from personal_data_platform.sources.fitbit import runtime
 
     logger = logging.getLogger("personal_data_platform.daily")
@@ -84,11 +81,6 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
 
     monkeypatch.setattr(runtime, "run_daily_repair", repair)
 
-    def dbt(**kw):
-        run_stage("dbt", kw)
-        return int(failure == "dbt")
-
-    monkeypatch.setattr(dbt_runner, "run_dbt_from_env", dbt)
     monkeypatch.setattr(job, "reconcile_owntracks", lambda *a, **kw: run_stage("owntracks", kw))
     monkeypatch.setattr(type(get_source("owntracks")), "repository_from_env", lambda _: object())
     monkeypatch.setattr(job, "publish_http_heartbeat", lambda *a: pings.append(a))
@@ -146,6 +138,7 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
         assert events[0]["severity"] == ("ERROR" if failure == "logging" else "INFO")
         assert events[-1]["severity"] == ("INFO" if failure in {"none", "busy"} else "ERROR")
         summary = events[-1]["summary"]
+        assert "dbt" not in summary
         assert summary["run_id"] == events[0]["summary"]["run_id"]
         assert summary["target_date"] and summary["started_at"] and summary["completed_at"]
         assert (
@@ -165,7 +158,7 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
         if failure == "none":
             # A repeated same-day run performs its fixed repair again without a checkpoint.
             assert job.run_daily_from_env() == 0
-            assert phases == ["fitbit", "dbt", "owntracks", "steps_heatmap"] * 2
+            assert phases == ["fitbit", "owntracks", "steps_heatmap"] * 2
         if failure == "busy":
             assert not phases
             assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "competitor"

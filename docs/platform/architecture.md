@@ -8,8 +8,9 @@ Mac Collector    -> 専用SQLite + pendingファイル -> base.mac_screen_time_e
 OwnTracks -> receiver -> GCS Raw -> Pub/Sub -> worker -> base.location_point
 Google Health Webhook -> receiver -> Pub/Sub -> worker -> API完全取得 -> base
 
-base 18物理表 -> dbt marts 7ビュー -> read-only share / Remote MCP
-日次Job -> Fitbit直近2日補修 -> dbt -> OwnTracks差分修復 -> relation検査 -> Healthchecks
+base 18物理表 -> dbt marts 8ビュー -> read-only share / Remote MCP
+Deploy -> ビュー定義が変わったときにdbt run/test
+日次Job -> Fitbit直近2日補修 -> OwnTracks差分修復 -> relation検査 -> Healthchecks
 実行結果 -> JSONログ
 ```
 
@@ -18,7 +19,7 @@ base 18物理表 -> dbt marts 7ビュー -> read-only share / Remote MCP
 | 配置 | 所有者・内容 |
 |---|---|
 | `base` | Pythonのsource writerが保存する提供元の記録・日次値・手動設定。18物理表 |
-| `marts` | dbtが定義する利用区間・日次集計。7ビューで、元データの変更をquery時に反映する |
+| `marts` | dbtが定義する利用区間・日次集計。8ビューで、元データの変更をquery時に反映する |
 | `ops.job_lock` | 全writerが共有する期限付きlease |
 | `ops.schema_migration` | 適用済みSQLとchecksum |
 | 各CollectorのSQLite | `file_state`と`event_reference`。送信待ちと確定済み参照 |

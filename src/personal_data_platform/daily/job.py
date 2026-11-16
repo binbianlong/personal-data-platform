@@ -39,7 +39,6 @@ class _StageFailed(RuntimeError):
 def _run_daily() -> int:
     from zoneinfo import ZoneInfo
 
-    from personal_data_platform.dbt_runner import run_dbt_from_env
     from personal_data_platform.network_diagnostics import network_phase
     from personal_data_platform.sources.fitbit.runtime import run_daily_repair
 
@@ -113,14 +112,6 @@ def _run_daily() -> int:
             )
             if not repair.ok:
                 raise _StageFailed("Fitbit repair failed")
-            stage = "dbt"
-            with network_phase("daily_dbt"):
-                dbt_status = run_dbt_from_env(
-                    lease_owner=owner, timeout_seconds=remaining(), config=config
-                )
-            details["dbt"] = {"exit_status": dbt_status}
-            if dbt_status:
-                raise _StageFailed("dbt failed")
             stage = "owntracks"
             remaining()
             with network_phase("daily_owntracks"):
