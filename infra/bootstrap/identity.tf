@@ -152,3 +152,18 @@ resource "google_artifact_registry_repository_iam_member" "github_deploy_writer"
   role       = "roles/artifactregistry.writer"
   member     = "serviceAccount:${google_service_account.github_deploy.email}"
 }
+
+resource "google_project_iam_custom_role" "runtime_image_tag_delete" {
+  project     = var.project_id
+  role_id     = "pdpRuntimeImageTagDelete"
+  title       = "PDP runtime image tag deletion"
+  permissions = ["artifactregistry.tags.delete"]
+}
+
+resource "google_artifact_registry_repository_iam_member" "github_deploy_tag_delete" {
+  project    = var.project_id
+  location   = google_artifact_registry_repository.runtime.location
+  repository = google_artifact_registry_repository.runtime.name
+  role       = google_project_iam_custom_role.runtime_image_tag_delete.name
+  member     = "serviceAccount:${google_service_account.github_deploy.email}"
+}

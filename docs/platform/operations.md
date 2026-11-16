@@ -26,9 +26,25 @@ secret payloadはTerraform外で登録し、数値versionに固定する。
 Fitbitの30分バッチ・OwnTracksのpush配信・日次Scheduler・native警報が停止し、workerも処理を保留する。receiverからの通知はqueueに保持する。
 
 [Deploy workflow](../../.github/workflows/terraform-deploy.yml)はimage digestを固定してruntimeを更新する。
-アプリdeploy失敗後の再反映には手動deploy、日次全体の実行には手動入力`run_daily`を使う。
+本番DBに対して最後に反映できた `dbt/` の内容が変わったときは、更新した日次Jobを `dbt` 引数で一度実行し、ビューを作成・テストする。
+反映した版は成功後にstate bucketの `personal-data-platform/deploy/dbt-version` に記録する。記録がない初回も実行する。
+再反映には手動deployを使い、ビューの強制再適用は `run_dbt`、日次全体の実行は `run_daily` を選ぶ。
 rollbackには[Fitbitの通知・取得方式の互換性](../sources/fitbit/operations.md#停止と復旧)と現行DBスキーマに対応したimageを使い、削除済みなら再build・登録する。
 workflowが停止中の場合はローカルで`linux/amd64` imageを登録し、digestを指定してTerraformを反映する。
+手動切替も、登録前に稼働中のimage、切替前に新しいdigestを保護する。
+`GCP_PROJECT_ID`・`GCP_REGION`・`ARTIFACT_REPOSITORY`・`IMAGE_NAME` を設定し、次のコマンドを使う。
+
+```bash
+python3 .github/scripts/runtime-image-tags.py protect
+# imageをbuild・pushしてdigestを確認した後
+python3 .github/scripts/runtime-image-tags.py protect "$image_digest_uri"
+```
+
+全runtimeを切り替えた手動デプロイは、確認後に同じスクリプトを `finish "$image_digest_uri"` で実行する。
+一部のサービスだけ切り替えた場合、保護の整理は全runtimeの次回Deployに任せる。
+手動デプロイやrollbackでビュー定義も切り替える場合は、state bucketの反映記録を削除してから、
+切り替えた `reconciliation-west` を `gcloud run jobs execute reconciliation-west --args=dbt --wait` で実行する。
+次回のDeployはビュー定義を再適用して記録し直す。
 
 ## 依存関係の更新
 
@@ -75,11 +91,14 @@ OwnTracksのGCS保存完了通知はPub/Subから非公開workerへpushし、DB 
 `pdp reconciliation`は日次04:10 Asia/Tokyoの処理全体を実行する。
 
 1. Fitbit APIから16種別のTokyo直近2完了日を再照合する。
-2. dbt run/testを実行する。
-3. OwnTracksの無期限Rawとbase IDを照合し、未取込分を補修する。
-4. iPhone・Macの必須relationが存在しqueryできることを検査する。Macの稼働鮮度の監査ではない。
-5. Healthchecksへ外部成功pingを1回送る。
-6. 成功・失敗・延期と各段階の結果をJSONログへ残す。
+2. OwnTracksの無期限Rawとbase IDを照合し、未取込分を補修する。
+3. iPhone・Macの必須relationが存在しqueryできることを検査する。Macの稼働鮮度の監査ではない。
+4. 歩数ヒートマップを生成し、Healthchecksへ外部成功pingを1回送る。
+5. 成功・失敗・延期と各段階の結果をJSONログへ残す。
+
+Fitbitの取得やOwnTracksの補修で失敗結果が返っても、接続とleaseが有効なら残りのソースを検査する。
+失敗があれば歩数ヒートマップの更新と成功pingを省き、結果を残してジョブを失敗で終了する。
+接続やleaseが失われた場合は後続処理を止める。
 
 Screen Timeの収集・保存・取り込みはMacの独立した2つのCollectorが各30分周期で実行する。
 DBのjob履歴・source heartbeat・最終成功日checkpointは持たない。日次は同じ日でも再実行できる。

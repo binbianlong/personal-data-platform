@@ -13,8 +13,13 @@ on:
       - "uv.lock"
       - "src/**"
       - ".github/workflows/terraform-deploy.yml"
+      - ".github/scripts/runtime-image-tags.py"
   workflow_dispatch:
     inputs:
+      run_dbt:
+        description: Reapply dbt views even if the definitions match the last successful deployment
+        type: boolean
+        default: false
       run_daily:
         description: Run combined daily processing after deployment
         required: true
@@ -88,6 +93,25 @@ jobs:
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
+      - name: Protect images in use
+        run: python3 .github/scripts/runtime-image-tags.py protect
+
+      - name: Check dbt definitions
+        shell: bash
+        env:
+          FORCE_DBT: ${{ inputs.run_dbt }}
+        run: |
+          set -euo pipefail
+          marker="gs://${TF_STATE_BUCKET}/personal-data-platform/deploy/dbt-version"
+          version="${TF_VAR_motherduck_database} $(git rev-parse "${GITHUB_SHA}:dbt")"
+          applied="$(gcloud storage cat "${marker}" 2>/dev/null || true)"
+          required=true
+          if [[ "${applied}" == "${version}" && "${FORCE_DBT:-false}" != "true" ]]; then
+            required=false
+          fi
+          printf 'DBT_DEPLOY_REQUIRED=%s\nDBT_DEPLOY_MARKER=%s\nDBT_DEPLOY_VERSION=%s\n' \
+            "${required}" "${marker}" "${version}" >> "${GITHUB_ENV}"
+
       - name: Prepare runtime image
         shell: bash
         env:
@@ -101,7 +125,10 @@ jobs:
           build=true
           if [[ "${GITHUB_EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
             changed="$(git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" -- Dockerfile .dockerignore pyproject.toml uv.lock src/ dbt/)"
-            if [[ -z "${changed}" && -n "${current_image}" ]]; then build=false; fi
+            if [[ "${DBT_DEPLOY_REQUIRED}" == "false" && -z "${changed}" && -n "${current_image}" ]] &&
+              gcloud artifacts docker images describe "${current_image}" >/dev/null 2>&1; then
+              build=false
+            fi
           fi
           if [[ "${build}" == "true" ]]; then
             gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
@@ -111,6 +138,7 @@ jobs:
             current_image="${image_path}@${digest}"
           fi
           [[ "${current_image}" == "${image_path}@"* && "${current_image}" =~ @sha256:[0-9a-f]{64}$ ]] || exit 1
+          python3 .github/scripts/runtime-image-tags.py protect "${current_image}"
           echo "TF_VAR_runtime_image_uri=${current_image}" >> "${GITHUB_ENV}"
 
       - name: Set up Terraform
@@ -133,6 +161,23 @@ jobs:
 
       - name: Apply runtime changes
         run: terraform -chdir=infra/terraform apply -input=false -auto-approve runtime.tfplan
+
+      - name: Apply dbt definitions
+        if: ${{ env.DBT_DEPLOY_REQUIRED == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          executed_image="$(gcloud run jobs execute reconciliation-west \
+            --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --args=dbt --wait \
+            --format='value(spec.template.spec.containers[0].image)')"
+          if [[ "${executed_image}" != "${TF_VAR_runtime_image_uri}" ]]; then
+            echo "dbt ran with an unexpected runtime image: ${executed_image}" >&2
+            exit 1
+          fi
+          printf '%s\n' "${DBT_DEPLOY_VERSION}" | gcloud storage cp - "${DBT_DEPLOY_MARKER}"
+
+      - name: Finalize image retention
+        run: python3 .github/scripts/runtime-image-tags.py finish "${TF_VAR_runtime_image_uri}"
 
       - name: Run combined daily job
         if: ${{ inputs.run_daily }}

@@ -93,5 +93,14 @@ resource "google_artifact_registry_repository" "runtime" {
     }
   }
 
+  cleanup_policies {
+    id     = "keep-deployed-images"
+    action = "KEEP"
+    condition {
+      tag_state    = "TAGGED"
+      tag_prefixes = ["deployed-"]
+    }
+  }
+
   depends_on = [google_project_service.bootstrap]
 }
