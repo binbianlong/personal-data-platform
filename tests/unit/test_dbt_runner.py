@@ -41,7 +41,7 @@ def test_cloud_dbt_initializes_schema_and_leaves_fitbit_lease_untouched(monkeypa
     warehouse = Warehouse(duckdb.connect())
     if fitbit_busy:
         warehouse.migrate()
-        assert warehouse.acquire_job_lock("loader", "fitbit", lease_seconds=600)
+        assert warehouse.acquire_fitbit_lease("fitbit", lease_seconds=600)
     owner = "fitbit" if fitbit_busy else None
     calls = []
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")

@@ -1,6 +1,6 @@
 # データモデル
 
-`base`は提供元の記録と本人が登録した固定情報を保存する18の物理表で構成する。`ops`には排他leaseとschema migration台帳だけを保存する。`marts`はdbtによる分析ビューの領域で、baseline migrationではビューを作らない。
+`base`は提供元の記録と本人が登録した固定情報を保存する18の物理表で構成する。`ops`にはFitbitの排他leaseとschema migration台帳だけを保存する。`marts`はdbtによる分析ビューの領域で、baseline migrationではビューを作らない。
 
 ## 時刻・欠測・識別子
 
@@ -45,7 +45,7 @@
 
 | 表 | 列 | 用途 |
 |---|---|---|
-| `job_lock` | `job_name`, `owner_id`, `expires_at` | 期限付きの共有writer lease。所有者と失効時刻を保持する。 |
+| `job_lock` | `job_name`, `owner_id`, `expires_at` | Fitbit取得の所有者と失効時刻。旧版のFitbitとも排他できるよう、行のキーは `loader` を引き継ぐ。 |
 | `schema_migration` | `migration_id`, `checksum`, `applied_at` | 適用済みSQLファイルとSHA-256、適用時刻。変更済み・未知の履歴は拒否する。 |
 
 実行結果や失敗段階はJSONログへ記録する。

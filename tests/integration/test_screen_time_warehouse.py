@@ -24,7 +24,7 @@ def test_both_collectors_preserve_pending_until_real_warehouse_commit(
     path = str(tmp_path / "warehouse.duckdb")
     warehouse = Warehouse(connect(WarehouseConfig(path)))
     warehouse.migrate()
-    assert warehouse.acquire_job_lock("loader", "fitbit", lease_seconds=600)
+    assert warehouse.acquire_fitbit_lease("fitbit", lease_seconds=600)
     lease = warehouse.query_rows("SELECT * FROM ops.job_lock")
     ack = state.mark_loaded
     if failure == "ack":

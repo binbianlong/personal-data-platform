@@ -269,7 +269,7 @@ class NotificationDrainer:
             if self.runner.monotonic() >= work_deadline:
                 summary.deferred += len(units)
                 return summary
-            acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=600)
+            acquired = warehouse.acquire_fitbit_lease(owner, lease_seconds=600)
             if not acquired:
                 summary.lock_unavailable = True
                 summary.deferred += len(units)
@@ -339,7 +339,7 @@ class NotificationDrainer:
             if warehouse is not None:
                 try:
                     if acquired and warehouse.connection_usable:
-                        warehouse.release_job_lock("loader", owner)
+                        warehouse.release_fitbit_lease(owner)
                 except Exception as error:
                     summary.failed += 1
                     LOGGER.error(

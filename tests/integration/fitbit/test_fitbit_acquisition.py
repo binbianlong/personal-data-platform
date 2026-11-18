@@ -56,14 +56,14 @@ def direct_setup(tmp_path, states=(10, 10, 20, 10, None)):
 def run_range(runner, factory, windows=(WINDOW,), timeout=100):
     with closing(factory()) as warehouse:
         warehouse.migrate()
-        assert warehouse.acquire_job_lock("loader", "manual", lease_seconds=7500)
+        assert warehouse.acquire_fitbit_lease("manual", lease_seconds=7500)
         try:
             return runner.run_windows(
                 windows, warehouse=warehouse, lease_owner="manual", timeout_seconds=timeout
             )
         finally:
             if warehouse.connection_usable:
-                warehouse.release_job_lock("loader", "manual")
+                warehouse.release_fitbit_lease("manual")
 
 
 @pytest.mark.parametrize("kind", ["steps", "heart-rate"])
@@ -77,7 +77,7 @@ def test_paginated_acquisition_checks_lease_per_request_and_write_boundary(
     window = Window(kind, WINDOW.start, WINDOW.end)
     with closing(factory()) as warehouse, closing(factory()) as competitor:
         warehouse.migrate()
-        assert warehouse.acquire_job_lock("loader", "manual", lease_seconds=7500)
+        assert warehouse.acquire_fitbit_lease("manual", lease_seconds=7500)
         table = "steps_interval" if kind == "steps" else "heart_rate_minute"
         if kind == "steps":
             warehouse.connection.execute(
@@ -92,12 +92,12 @@ def test_paginated_acquisition_checks_lease_per_request_and_write_boundary(
 
         def during_request():
             # An independent connection sees the lease throughout API acquisition.
-            competitor.require_job_lock("manual")
+            competitor.require_fitbit_lease("manual")
             if takeover:
                 competitor.connection.execute(
                     "UPDATE ops.job_lock SET expires_at=now()-INTERVAL 1 SECOND"
                 )
-                assert competitor.acquire_job_lock("loader", "other", lease_seconds=7500)
+                assert competitor.acquire_fitbit_lease("other", lease_seconds=7500)
 
         transport = FakeTransport([{"nextPageToken": "next"}, {}], before_request=during_request)
         runner.client = client(transport, clock=lambda: NOW + timedelta(hours=1))
@@ -115,7 +115,7 @@ def test_paginated_acquisition_checks_lease_per_request_and_write_boundary(
         # An incomplete page sequence neither deletes existing data nor reaches a later scope.
         assert warehouse.query_value(f"SELECT count(*) FROM base.{table}") == int(takeover)
         if takeover:
-            competitor.require_job_lock("other")
+            competitor.require_fitbit_lease("other")
         assert runner.client.request_guard is None
 
 
@@ -129,7 +129,7 @@ def test_lease_loss_still_stops_api_or_rolls_back_the_acquisition(
     runner, _, factory = direct_setup(tmp_path)
     with closing(factory()) as warehouse:
         warehouse.migrate()
-        assert warehouse.acquire_job_lock("loader", "manual", lease_seconds=7500)
+        assert warehouse.acquire_fitbit_lease("manual", lease_seconds=7500)
 
         def lose():
             if loss == "owner":
@@ -227,7 +227,7 @@ def test_uncertain_transaction_stops_processing(tmp_path, monkeypatch, stage, ca
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
     with closing(factory()) as warehouse:
         warehouse.migrate()
-        warehouse.acquire_job_lock("loader", "manual", lease_seconds=7500)
+        warehouse.acquire_fitbit_lease("manual", lease_seconds=7500)
         connection = warehouse.connection
 
         class UncertainConnection:
@@ -364,7 +364,7 @@ def test_borrowed_notification_uses_existing_session_and_preserves_owner(tmp_pat
     runner, api, factory = direct_setup(tmp_path)
     with closing(factory()) as warehouse:
         warehouse.migrate()
-        warehouse.acquire_job_lock("loader", "batch", lease_seconds=600)
+        warehouse.acquire_fitbit_lease("batch", lease_seconds=600)
         runner.warehouse_factory = lambda: pytest.fail("must borrow session")
         result = runner.process_notification(
             Notification("borrowed", "self", (WINDOW,), NOW),

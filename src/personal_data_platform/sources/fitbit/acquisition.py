@@ -156,9 +156,9 @@ class AcquisitionRunner:
     def _check(self, warehouse: Warehouse, owner: str, deadline: float) -> float:
         seconds = self._remaining(deadline)
         try:
-            warehouse.require_job_lock(owner, remaining_seconds=max(1, int(seconds)))
+            warehouse.require_fitbit_lease(owner, remaining_seconds=max(1, int(seconds)))
         except RuntimeError:
-            raise AcquisitionDeferred("shared loader ownership lost") from None
+            raise AcquisitionDeferred("Fitbit lease ownership lost") from None
         return seconds
 
     def process_notification(
@@ -291,7 +291,7 @@ class AcquisitionRunner:
                 monotonic=self.monotonic,
             )
         except WarehouseLeaseError:
-            raise AcquisitionDeferred("shared loader ownership lost") from None
+            raise AcquisitionDeferred("Fitbit lease ownership lost") from None
         except TimeoutError as error:
             raise AcquisitionDeferred(str(error)) from None
 

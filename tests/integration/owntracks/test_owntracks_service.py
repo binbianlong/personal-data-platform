@@ -167,7 +167,7 @@ def test_worker_rejects_mismatched_storage_metadata_without_writing(tmp_path, fi
 def test_worker_commits_while_fitbit_holds_the_lease(tmp_path):
     store, _, client, factory = setup_worker(tmp_path)
     with closing(factory()) as warehouse:
-        assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
+        assert warehouse.acquire_fitbit_lease("daily", lease_seconds=7500)
     assert client.post("/notifications/owntracks", json=notification(store)).status_code == 204
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
@@ -195,6 +195,8 @@ def test_worker_retries_after_a_concurrent_loader_commits_the_same_point(tmp_pat
     warehouse.connection = ConcurrentCommit()
     processor.warehouse_factory = lambda: warehouse
     assert client.post("/notifications/owntracks", json=notification(store)).status_code == 503
+    with closing(factory()) as other:
+        assert other.query_value("SELECT count(*) FROM base.location_point") == 1
     processor.warehouse_factory = factory
     assert client.post("/notifications/owntracks", json=notification(store)).status_code == 204
     with closing(factory()) as other:

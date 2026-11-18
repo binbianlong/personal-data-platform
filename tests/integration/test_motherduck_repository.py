@@ -31,18 +31,20 @@ def test_cloud_connection_is_scoped_to_the_requested_database(monkeypatch):
     ]
 
 
-def test_job_lease_rejects_a_second_owner(tmp_path) -> None:
+def test_fitbit_lease_preserves_an_owner_from_the_previous_runtime(tmp_path) -> None:
     warehouse = Warehouse(connect(WarehouseConfig(str(tmp_path / "test.duckdb"))))
     try:
         warehouse.migrate()
-        assert warehouse.acquire_job_lock("loader", "first", lease_seconds=60)
-        assert not warehouse.acquire_job_lock("loader", "second", lease_seconds=60)
+        warehouse.connection.execute(
+            "INSERT INTO ops.job_lock VALUES ('loader', 'first', now() + INTERVAL '1 minute')"
+        )
+        assert not warehouse.acquire_fitbit_lease("second", lease_seconds=60)
 
-        warehouse.release_job_lock("loader", "not-the-owner")
-        assert not warehouse.acquire_job_lock("loader", "second", lease_seconds=60)
+        warehouse.release_fitbit_lease("not-the-owner")
+        assert not warehouse.acquire_fitbit_lease("second", lease_seconds=60)
 
-        warehouse.release_job_lock("loader", "first")
-        assert warehouse.acquire_job_lock("loader", "second", lease_seconds=60)
+        warehouse.release_fitbit_lease("first")
+        assert warehouse.acquire_fitbit_lease("second", lease_seconds=60)
     finally:
         warehouse.close()
 

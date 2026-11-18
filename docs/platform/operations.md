@@ -96,18 +96,18 @@ OwnTracksのGCS保存完了通知はPub/Subから非公開workerへpushし、DB 
 4. 歩数ヒートマップを生成し、Healthchecksへ外部成功pingを1回送る。
 5. 成功・失敗・延期と各段階の結果をJSONログへ残す。
 
-Fitbitの取得やOwnTracksの補修で失敗結果が返っても、接続とleaseが有効なら残りのソースを検査する。
+Fitbitの取得やOwnTracksの補修で失敗結果が返っても、DB接続が利用できれば残りのソースを検査する。
 失敗があれば歩数ヒートマップの更新と成功pingを省き、結果を残してジョブを失敗で終了する。
-接続やleaseが失われた場合は後続処理を止める。
+DB接続が使えなくなった場合は後続処理を止める。
 
 Screen Timeの収集・保存・取り込みはMacの独立した2つのCollectorが各30分周期で実行する。
 DBのjob履歴・source heartbeat・最終成功日checkpointは持たない。日次は同じ日でも再実行できる。
 通常補修より古いFitbit欠落は、過去の実行ログを確認して期間指定で補修する。
 
 workerは最小0・最大1instance、同時処理1。処理予算480秒、サービスtimeout540秒。
-Fitbit workerのleaseは600秒、共通Loaderを使うOwnTracks workerのleaseは125分である。
-日次Jobは1task/parallelism1、100分の予算、125分のleaseを使う。全処理を単一`loader` leaseで直列化する。
-競合はINFOで延期し、成功pingを送らない。dbt・手動取得・Loaderも同じleaseを使う。
+Fitbitのleaseは通知workerが600秒、日次補修と手動同期が125分で、処理終了時に解放する。
+日次Jobは1task/parallelism1、全体の予算は100分。Fitbit補修が終わるとleaseを解放してOwnTracksの補修に進む。
+別のFitbit処理がleaseを保持していればFitbit補修だけを延期し、OwnTracksの補修とScreen Timeの検査を実行する。他に失敗がなければジョブの結果は `deferred` となり、歩数ヒートマップの更新と成功pingを省く。
 
 ## 監視とLogging
 
@@ -176,11 +176,11 @@ Cloud Monitoringの`run.googleapis.com/container/network/sent_bytes_count`（`ki
 | OwnTracks | workerログ・Pub/Sub滞留・Raw/base ID差分 | Rawを残し、欠落修復または明示reprocessを行う |
 | iPhone / Mac Collector | Macの各Collector stdout/stderrとSQLiteのpending | 同じbytesを保持し再送する。Mac停止をDBイベント時刻から判定しない |
 
-競合が続く場合だけ`ops.job_lock`の所有者と有効期限を確認する。別ownerや稼働中のleaseを削除しない。
+Fitbitの競合が続く場合は`ops.job_lock`の所有者と有効期限を確認する。別ownerや稼働中のleaseを削除しない。
 
 ```sql
 SELECT job_name, owner_id, expires_at FROM ops.job_lock;
 ```
 
 Fitbitバッチ・OwnTracksのpush配信・日次SchedulerとMacの両Collectorを停止し、実行中worker/Jobの終了を確認する。
-異常終了で残ったleaseは期限後に再試行する。外部ping失敗はログの`failed_stage="heartbeat"`に残り、先に確定したデータは巻き戻らない。
+Fitbitの異常終了でleaseが残った場合は期限後に再試行する。外部ping失敗はログの`failed_stage="heartbeat"`に残り、先に確定したデータは巻き戻らない。

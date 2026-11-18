@@ -119,7 +119,7 @@ def test_manual_old_narrow_range_keeps_exact_bounds(manual_env, capsys):
 def test_daily_paused_leaves_existing_data_and_shared_owner(manual_env, monkeypatch):
     monkeypatch.setenv("PDP_FITBIT_PROCESSING_PAUSED", "true")
     warehouse = manual_env.warehouse()
-    assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
+    assert warehouse.acquire_fitbit_lease("daily", lease_seconds=7500)
     try:
         result = runtime.run_daily_repair(
             now=NOW, warehouse=warehouse, lease_owner="daily", timeout_seconds=6000
@@ -132,12 +132,12 @@ def test_daily_paused_leaves_existing_data_and_shared_owner(manual_env, monkeypa
 
 
 def test_manual_busy_does_not_release_competing_owner(manual_env):
-    from personal_data_platform.loader.job import JobAlreadyRunning
+    from personal_data_platform.sources.fitbit.runtime import FitbitLeaseBusy
 
     warehouse = manual_env.warehouse()
-    assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
+    assert warehouse.acquire_fitbit_lease("other", lease_seconds=7500)
     warehouse.close()
-    with pytest.raises(JobAlreadyRunning):
+    with pytest.raises(FitbitLeaseBusy):
         runtime.run_sync_from_env(start=NOW, end=NOW + timedelta(hours=1), data_types=("steps",))
     assert manual_env.api.calls == []
     warehouse = manual_env.warehouse()
@@ -166,7 +166,7 @@ def test_daily_repair_fetches_all_types_using_shared_warehouse_and_owner(tmp_pat
     )
     warehouse = factory()
     warehouse.migrate()
-    assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
+    assert warehouse.acquire_fitbit_lease("daily", lease_seconds=7500)
     try:
         result = runtime.run_daily_repair(
             now=now, warehouse=warehouse, lease_owner="daily", timeout_seconds=6000
@@ -225,7 +225,7 @@ def test_old_notification_still_fetches_its_historical_range(manual_env, mode):
         "historical", "self", (window,), start + timedelta(days=2), acquisition_mode=mode
     )
     warehouse = manual_env.warehouse()
-    assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
+    assert warehouse.acquire_fitbit_lease("daily", lease_seconds=7500)
     try:
         result = manual_env.runner.process_notification(
             notification, warehouse=warehouse, lease_owner="daily", timeout_seconds=6000

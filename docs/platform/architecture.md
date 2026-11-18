@@ -20,7 +20,7 @@ Deploy -> ビュー定義が変わったときにdbt run/test
 |---|---|
 | `base` | Pythonのsource writerが保存する提供元の記録・日次値・手動設定。18物理表 |
 | `marts` | dbtが定義する利用区間・日次集計。8ビューで、元データの変更をquery時に反映する |
-| `ops.job_lock` | 全writerが共有する期限付きlease |
+| `ops.job_lock` | Fitbitの通知処理・日次補修・手動同期が共有する期限付きlease |
 | `ops.schema_migration` | 適用済みSQLとchecksum |
 | 各CollectorのSQLite | `file_state`と`event_reference`。送信待ちと確定済み参照 |
 | GCS | OwnTracksの不変Raw。無期限保持 |
@@ -30,11 +30,11 @@ coreレイヤーやsource別の取り込み台帳は持たない。本人設定�
 
 ## 保存と再試行
 
-共通Warehouseは接続・transaction・leaseを所有し、型付きbatchからsource固有の保存処理を呼ぶ。
+共通Warehouseは接続とtransactionを管理し、型付きbatchからsource固有の保存処理を呼ぶ。
 各sourceのSQLは`src/personal_data_platform/sources/<source>/motherduck.py`に置き、source writer自身はcommitしない。
 
-leaseはAPI取得前から保存まで保持する。書込みtransactionでは所有者と期限を条件に同じlease行へ実際に書き込み、
-別所有者への引き継ぎと競合させる。初回の空DB作成以外のDDLも同じleaseに従う。
+FitbitはAPI取得前から保存までleaseを保持する。Fitbitの書込みtransactionでは所有者と期限を条件に同じlease行へ実際に書き込み、
+別所有者への引き継ぎと競合させる。既存DBのスキーマ更新は全writerを停止してから適用する。
 COMMIT結果不明やROLLBACK失敗では接続を再利用せず、後続の保存・ACKを止める。
 
 | source | 再試行・復旧 |
@@ -51,7 +51,7 @@ Screen Timeの送信完了bytesは残さず、元ファイルの消失だけでb
 
 `iphone_screen_time`と`mac_screen_time`は別の取得処理・設定・SQLite・base table・LaunchAgentを持つ。
 `biome/`はSEGB、envelope、疑似化、pending state、収集engineの共通処理を持つ。
-片方の取得・送信失敗は他方のローカル状態を変更しない。DBへの書込みは共通leaseで直列化する。
+片方の取得・送信失敗は他方のローカル状態を変更しない。各Collectorは自分のSQLiteのローカルロックを取得し、収集・DBへの送信・送信済み記録を順に行う。
 
 FitbitはRaw adapterへ登録せず、API取得したsnapshotを直接保存する。新しいsourceには取得・型付きbatch・source writer、
 必要なbase定義、selectorと必須relation、再試行テストを追加する。適用済みmigrationは変更せず、変更分のSQLを追記する。

@@ -26,11 +26,6 @@ from .deadline import interrupt_after
 from .models import LoadSummary, RawDecodeError
 
 LOGGER = logging.getLogger(__name__)
-LOADER_LEASE_SECONDS = 125 * 60
-
-
-class JobAlreadyRunning(RuntimeError):
-    """Raised when an unexpired warehouse lease belongs to another run."""
 
 
 def _decompress_and_verify(raw: RawObject, stored: bytes) -> bytes:

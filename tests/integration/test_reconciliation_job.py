@@ -23,6 +23,7 @@ from personal_data_platform.storage.warehouse import WarehouseConnectionError
         "migrate",
         "acquire",
         "busy",
+        "busy-owntracks",
         "fitbit",
         "fitbit-exception",
         "fitbit-connection",
@@ -59,11 +60,16 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
 
     def run_stage(name, kwargs):
         if name == "fitbit":
-            warehouse.require_job_lock(kwargs["lease_owner"])
+            warehouse.require_fitbit_lease(kwargs["lease_owner"])
+        elif name == "owntracks":
+            expected = "competitor" if failure.startswith("busy") else None
+            assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == expected
         phases.append(name)
         if failure == name + "-exception":
             broken()
-        return SimpleNamespace(ok=failure != name, details={"raw_object_count": 3})
+        return SimpleNamespace(
+            ok=failure not in (name, "busy-" + name), details={"raw_object_count": 3}
+        )
 
     monkeypatch.setattr(job, "open_warehouse", lambda config=None: warehouse)
     monkeypatch.setattr(warehouse, "close", lambda: None)
@@ -114,9 +120,9 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
     if failure == "migrate":
         monkeypatch.setattr(warehouse, "migrate", broken)
     if failure == "acquire":
-        monkeypatch.setattr(warehouse, "acquire_job_lock", broken)
-    if failure == "busy":
-        warehouse.acquire_job_lock("loader", "competitor", lease_seconds=7500)
+        monkeypatch.setattr(warehouse, "acquire_fitbit_lease", broken)
+    if failure.startswith("busy"):
+        warehouse.acquire_fitbit_lease("competitor", lease_seconds=7500)
     if failure == "missing-relation":
         warehouse.connection.execute("DROP VIEW marts.daily_iphone_screen_time_total")
     if failure == "relation-query":
@@ -126,7 +132,7 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
     if failure == "heartbeat":
         monkeypatch.setattr(job, "publish_http_heartbeat", broken)
     if failure == "release":
-        monkeypatch.setattr(warehouse, "release_job_lock", broken)
+        monkeypatch.setattr(warehouse, "release_fitbit_lease", broken)
     try:
         result = job.run_daily_from_env()
         assert result == int(failure not in {"none", "busy"})
@@ -164,7 +170,7 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
             assert "owntracks" not in phases
         if failure == "steps_heatmap":
             assert summary["failed_stage"] == "steps_heatmap"
-        assert len(pings) == int(failure in {"none", "release", "close"})
+        assert len(pings) == int(failure in {"none", "close"})
         assert {r for r in warehouse.relation_names() if r.startswith("ops.")} == {
             "ops.job_lock",
             "ops.schema_migration",
@@ -173,8 +179,13 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
             # A repeated same-day run performs its fixed repair again without a checkpoint.
             assert job.run_daily_from_env() == 0
             assert phases == ["fitbit", "owntracks", "steps_heatmap"] * 2
-        if failure == "busy":
-            assert not phases
+        if failure.startswith("busy"):
+            assert phases == ["owntracks"]
+            assert summary["fitbit"] == {"status": "deferred", "reason": "lease_busy"}
+            for source_id in ("iphone_screen_time", "mac_screen_time"):
+                assert summary[source_id]["missing_relations"] == []
+            if failure == "busy-owntracks":
+                assert summary["failed_stage"] == "owntracks"
             assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "competitor"
     finally:
         warehouse.connection.close()

@@ -60,7 +60,7 @@ def test_scheduled_loader_writes_while_fitbit_holds_the_lease():
     store.add()
     with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
         warehouse.migrate()
-        warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
+        warehouse.acquire_fitbit_lease("other", lease_seconds=7500)
         summary = run_loader(store, warehouse, source=get_source("owntracks"))
         assert summary.succeeded == len(store.reads) == 1
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "other"

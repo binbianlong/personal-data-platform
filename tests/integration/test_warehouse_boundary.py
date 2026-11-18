@@ -52,7 +52,7 @@ def test_fitbit_commit_rolls_back_if_deadline_expires_after_writing(monkeypatch)
     monkeypatch.setattr(FitbitBatch, "write_snapshot", expire_after_write)
     with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
         warehouse.migrate()
-        assert warehouse.acquire_job_lock("loader", "owner", lease_seconds=60)
+        assert warehouse.acquire_fitbit_lease("owner", lease_seconds=60)
         with pytest.raises(TimeoutError):
             warehouse.commit_fitbit_snapshot(
                 snapshot,
