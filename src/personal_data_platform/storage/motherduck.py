@@ -134,7 +134,7 @@ class Warehouse:
                     "PRIMARY KEY or UNIQUE constraint violation" in str(error)
                     and "duplicate key" in str(error)
                 ):
-                    # A rejected lease INSERT is known not to have committed.
+                    # A rejected INSERT is known not to have committed.
                     # Confirm that its transaction ended before reusing this connection.
                     try:
                         self.connection.execute("BEGIN TRANSACTION")
@@ -183,9 +183,11 @@ class Warehouse:
         return max(1, math.ceil(seconds))
 
     @contextmanager
-    def _timed_write(self, deadline: float) -> Iterator[None]:
+    def _timed_write(
+        self, deadline: float, *, defer_commit_conflict: bool = False
+    ) -> Iterator[None]:
         self._remaining(deadline, time.monotonic)
-        with self._transaction("source write"):
+        with self._transaction("source write", defer_commit_conflict=defer_commit_conflict):
             yield
             self._remaining(deadline, time.monotonic)
 
@@ -264,8 +266,16 @@ class Warehouse:
             raise ValueError(
                 "object loader supports only OwnTracks; Screen Time uses its local pending queue"
             )
-        with self._timed_write(deadline):
-            return owntracks.write_batch(self.connection, raw, batch, reprocess=reprocess)
+        import duckdb
+
+        try:
+            with self._timed_write(deadline, defer_commit_conflict=not reprocess):
+                return owntracks.write_batch(self.connection, raw, batch, reprocess=reprocess)
+        except (duckdb.TransactionException, duckdb.ConstraintException) as error:
+            if not reprocess and "duplicate key" in str(error).lower():
+                if raw.logical_key in self.location_point_ids([raw.logical_key]):
+                    return 0
+            raise
 
     def acquire_fitbit_lease(self, owner_id: str, *, lease_seconds: int) -> bool:
         import duckdb
