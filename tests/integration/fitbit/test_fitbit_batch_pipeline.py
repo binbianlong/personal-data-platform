@@ -310,7 +310,7 @@ def test_one_hundred_independent_units_share_lifecycle_and_preserve_each_commit(
     def counted_factory():
         calls["connect"] += 1
         warehouse = factory()
-        for name in ("migrate", "acquire_job_lock", "release_job_lock", "close"):
+        for name in ("migrate", "acquire_fitbit_lease", "release_fitbit_lease", "close"):
             method = getattr(warehouse, name)
 
             def counted(*args, _method=method, _name=name, **kwargs):
@@ -335,8 +335,8 @@ def test_one_hundred_independent_units_share_lifecycle_and_preserve_each_commit(
     assert calls == {
         "connect": 1,
         "migrate": 1,
-        "acquire_job_lock": 1,
-        "release_job_lock": 1,
+        "acquire_fitbit_lease": 1,
+        "release_fitbit_lease": 1,
         "close": 1,
     }
 

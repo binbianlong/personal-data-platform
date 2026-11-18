@@ -78,7 +78,7 @@ def test_daily_repair_uses_two_completed_tokyo_days_without_device_cursor(
 
     warehouse = Warehouse(duckdb.connect())
     warehouse.migrate()
-    warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
+    warehouse.acquire_fitbit_lease("daily", lease_seconds=7500)
     calls = []
 
     class Runner:

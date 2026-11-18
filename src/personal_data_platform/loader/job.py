@@ -7,7 +7,6 @@ import hashlib
 import logging
 import os
 import time
-import uuid
 import zlib
 from collections.abc import Callable, Iterable, Mapping
 
@@ -27,11 +26,6 @@ from .deadline import interrupt_after
 from .models import LoadSummary, RawDecodeError
 
 LOGGER = logging.getLogger(__name__)
-LOADER_LEASE_SECONDS = 125 * 60
-
-
-class JobAlreadyRunning(RuntimeError):
-    """Raised when an unexpired warehouse lease belongs to another run."""
 
 
 def _decompress_and_verify(raw: RawObject, stored: bytes) -> bytes:
@@ -56,7 +50,6 @@ def run_loader(
     source: SourceAdapter | None = None,
     prefix: str | None = None,
     reprocess: bool = False,
-    _lease_owner: str | None = None,
     _deadline: float | None = None,
 ) -> LoadSummary:
     """Load pending observations for one source and stream across supported schemas."""
@@ -68,7 +61,6 @@ def run_loader(
         refs,
         source=source,
         reprocess=reprocess,
-        _lease_owner=_lease_owner,
         _deadline=_deadline,
     )
 
@@ -80,7 +72,6 @@ def run_loader_objects(
     *,
     source: SourceAdapter,
     reprocess: bool = False,
-    _lease_owner: str | None = None,
     buffered_payloads: Mapping[str, bytes] | None = None,
     _deadline: float | None = None,
 ) -> LoadSummary:
@@ -90,35 +81,26 @@ def run_loader_objects(
             "object loader supports OwnTracks only; Screen Time uses its local pending queue"
         )
     refs = validate_observations(source, observations)
-    run_id = str(uuid.uuid4())
-    # All source streams share one warehouse write lease. Source selection does not
-    # change the database's concurrency contract.
-    own_lease = _lease_owner is None
-    deadline = _deadline if _deadline is not None else time.monotonic() + 50 * 60
-    if own_lease and not warehouse.acquire_job_lock(
-        "loader", run_id, lease_seconds=LOADER_LEASE_SECONDS
-    ):
-        raise JobAlreadyRunning("loader already has an unexpired job lease")
+    deadline = time.monotonic() + 50 * 60
+    if _deadline is not None:
+        deadline = min(deadline, _deadline)
     succeeded = 0
     failed = 0
     record_count = 0
-    timer = None
 
-    def guard() -> None:
-        seconds = int(deadline - time.monotonic())
-        if seconds <= 0:
+    def check_deadline() -> None:
+        if time.monotonic() >= deadline:
             raise TimeoutError("loader execution deadline exceeded")
-        warehouse.require_job_lock(_lease_owner or run_id, remaining_seconds=seconds)
 
+    check_deadline()
+    timer = interrupt_after(warehouse, deadline - time.monotonic())
     try:
-        guard()
-        timer = interrupt_after(warehouse, deadline - time.monotonic())
         already_loaded = (
             set() if reprocess else warehouse.location_point_ids(raw.logical_key for raw in refs)
         )
         pending = [raw for raw in refs if raw.logical_key not in already_loaded]
         for raw in pending:
-            guard()
+            check_deadline()
             try:
                 stored = (
                     buffered_payloads[raw.key]
@@ -127,15 +109,15 @@ def run_loader_objects(
                 )
                 payload = _decompress_and_verify(raw, stored)
                 batch = source.decode(raw, payload)
-                guard()
+                check_deadline()
                 record_count += warehouse.load_object(
-                    raw, batch=batch, owner_id=_lease_owner or run_id, deadline=deadline
+                    raw, batch=batch, reprocess=reprocess, deadline=deadline
                 )
                 succeeded += 1
             except (WarehouseConnectionError, TimeoutError):
                 raise
             except Exception:
-                guard()
+                check_deadline()
                 failed += 1
                 LOGGER.exception("failed to load raw object %s", raw.key)
         summary = LoadSummary(
@@ -145,13 +127,11 @@ def run_loader_objects(
             failed=failed,
             records=record_count,
         )
-        guard()
+        check_deadline()
         return summary
     finally:
-        if timer is not None:
-            timer.cancel()
-        if own_lease and warehouse.connection_usable:
-            warehouse.release_job_lock("loader", run_id)
+        timer.cancel()
+        timer.join()
 
 
 def run_loader_all(
@@ -160,42 +140,31 @@ def run_loader_all(
     warehouse: Warehouse,
     repository_factory: Callable[[SourceAdapter], RawRepository],
 ) -> LoadSummary:
-    """Keep one loader lease while attempting every registered stream."""
-    owner_id = str(uuid.uuid4())
-    if not warehouse.acquire_job_lock("loader", owner_id, lease_seconds=LOADER_LEASE_SECONDS):
-        raise JobAlreadyRunning("loader already has an unexpired job lease")
+    """Attempt every registered stream while the connection remains usable."""
     totals = LoadSummary(discovered=0, skipped=0, succeeded=0, failed=0, records=0)
-    try:
-        for source in sources:
-            try:
-                summary = run_loader(
-                    repository_factory(source), warehouse, source=source, _lease_owner=owner_id
-                )
-            except Exception:
-                LOGGER.exception(
-                    "failed to load source=%s stream=%s", source.source_id, source.stream
-                )
-                totals = LoadSummary(
-                    discovered=totals.discovered,
-                    skipped=totals.skipped,
-                    succeeded=totals.succeeded,
-                    failed=totals.failed + 1,
-                    records=totals.records,
-                )
-                if not warehouse.connection_usable:
-                    break
-                continue
+    for source in sources:
+        try:
+            summary = run_loader(repository_factory(source), warehouse, source=source)
+        except Exception:
+            LOGGER.exception("failed to load source=%s stream=%s", source.source_id, source.stream)
             totals = LoadSummary(
-                discovered=totals.discovered + summary.discovered,
-                skipped=totals.skipped + summary.skipped,
-                succeeded=totals.succeeded + summary.succeeded,
-                failed=totals.failed + summary.failed,
-                records=totals.records + summary.records,
+                discovered=totals.discovered,
+                skipped=totals.skipped,
+                succeeded=totals.succeeded,
+                failed=totals.failed + 1,
+                records=totals.records,
             )
-        return totals
-    finally:
-        if warehouse.connection_usable:
-            warehouse.release_job_lock("loader", owner_id)
+            if not warehouse.connection_usable:
+                break
+            continue
+        totals = LoadSummary(
+            discovered=totals.discovered + summary.discovered,
+            skipped=totals.skipped + summary.skipped,
+            succeeded=totals.succeeded + summary.succeeded,
+            failed=totals.failed + summary.failed,
+            records=totals.records + summary.records,
+        )
+    return totals
 
 
 def run_loader_from_env(
@@ -220,27 +189,20 @@ def run_loader_from_env(
     warehouse = open_warehouse()
     try:
         warehouse.migrate()
-        try:
-            if all_streams:
-                summary = run_loader_all(
-                    sources,
-                    warehouse=warehouse,
-                    repository_factory=lambda source: source.repository_from_env(),
-                )
-            else:
-                summary = run_loader(
-                    sources[0].repository_from_env(),
-                    warehouse,
-                    source=sources[0],
-                    prefix=prefix,
-                    reprocess=reprocess,
-                )
-        except JobAlreadyRunning:
-            LOGGER.info(
-                "loader skipped source=%s: another run is active",
-                sources[0].source_id,
+        if all_streams:
+            summary = run_loader_all(
+                sources,
+                warehouse=warehouse,
+                repository_factory=lambda source: source.repository_from_env(),
             )
-            return 0
+        else:
+            summary = run_loader(
+                sources[0].repository_from_env(),
+                warehouse,
+                source=sources[0],
+                prefix=prefix,
+                reprocess=reprocess,
+            )
         LOGGER.info(
             "loader complete source=%s streams=%s discovered=%d skipped=%d "
             "succeeded=%d failed=%d records=%d",

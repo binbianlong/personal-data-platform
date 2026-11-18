@@ -7,12 +7,12 @@ import pytest
 from personal_data_platform.biome import runtime
 from personal_data_platform.sources.registry import get_source
 from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-from personal_data_platform.storage.warehouse import WarehouseConnectionError, WarehouseLeaseError
+from personal_data_platform.storage.warehouse import WarehouseConnectionError
 from tests.contract.test_mac_app_usage_collector import _collectors
 
 
 @pytest.mark.parametrize("index", [0, 1])
-@pytest.mark.parametrize("failure", [None, "expiry", "commit-after", "ack"])
+@pytest.mark.parametrize("failure", [None, "deadline", "commit-after", "ack"])
 def test_both_collectors_preserve_pending_until_real_warehouse_commit(
     tmp_path, monkeypatch, index, failure
 ):
@@ -24,21 +24,26 @@ def test_both_collectors_preserve_pending_until_real_warehouse_commit(
     path = str(tmp_path / "warehouse.duckdb")
     warehouse = Warehouse(connect(WarehouseConfig(path)))
     warehouse.migrate()
+    assert warehouse.acquire_fitbit_lease("fitbit", lease_seconds=600)
+    lease = warehouse.query_rows("SELECT * FROM ops.job_lock")
     ack = state.mark_loaded
     if failure == "ack":
         monkeypatch.setattr(
             state, "mark_loaded", lambda *a, **k: (_ for _ in ()).throw(OSError("ACK failed"))
         )
-    if failure == "expiry":
+    if failure == "deadline":
+        from types import SimpleNamespace
+
         from personal_data_platform.sources.iphone_screen_time import motherduck as phone
         from personal_data_platform.sources.mac_screen_time import motherduck as mac
+        from personal_data_platform.storage import motherduck
 
         module = phone if index == 0 else mac
         write = module.write_state
 
         def expire(connection, *args, **kwargs):
             count = write(connection, *args, **kwargs)
-            connection.execute("UPDATE ops.job_lock SET expires_at=TIMESTAMPTZ '2000-01-01'")
+            monkeypatch.setattr(motherduck, "time", SimpleNamespace(monotonic=lambda: float("inf")))
             return count
 
         monkeypatch.setattr(module, "write_state", expire)
@@ -63,7 +68,7 @@ def test_both_collectors_preserve_pending_until_real_warehouse_commit(
         warehouse.connection = LostCommitResponse()
     try:
         if failure:
-            with pytest.raises((OSError, WarehouseLeaseError, WarehouseConnectionError)):
+            with pytest.raises((OSError, TimeoutError, WarehouseConnectionError)):
                 runtime.load_pending(state, warehouse, source=source)
             assert [p.identity for p in state.pending()] == [pending.identity]
             assert state.pending()[0].compressed_payload == pending.compressed_payload
@@ -75,16 +80,15 @@ def test_both_collectors_preserve_pending_until_real_warehouse_commit(
             assert not state.pending()
     finally:
         warehouse.close()
-    if failure == "expiry":
-        monkeypatch.setattr(module, "write_state", write)
+    if failure == "deadline":
+        monkeypatch.undo()
     if failure == "ack":
         monkeypatch.setattr(state, "mark_loaded", ack)
-    # Reopening clears unknown connection state; an outstanding lease is not bypassed.
     with closing(Warehouse(connect(WarehouseConfig(path)))) as fresh:
-        fresh.connection.execute("UPDATE ops.job_lock SET expires_at=TIMESTAMPTZ '2000-01-01'")
         runtime.load_pending(state, fresh, source=source)
         runtime.load_pending(state, fresh, source=source)
         assert not state.pending()
+        assert fresh.query_rows("SELECT * FROM ops.job_lock") == lease
         assert fresh.query_value(f"SELECT count(*) FROM base.{source.source_id}_event") == 1
         other = states[1 - index].source_id
         assert fresh.query_value(f"SELECT count(*) FROM base.{other}_event") == 0

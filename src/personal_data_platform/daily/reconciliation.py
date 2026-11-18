@@ -67,7 +67,7 @@ def reconcile_owntracks(
     repair_missing: bool = True,
     now: datetime | None = None,
     raw_objects: tuple[RawObject, ...] | None = None,
-    _lease_owner: str | None = None,
+    deadline: float | None = None,
 ) -> ReconciliationResult:
     """Compare complete GCS logical IDs directly with base, repairing missing points."""
     source = source or get_source("owntracks")
@@ -80,8 +80,6 @@ def reconcile_owntracks(
     started_at = now or datetime.now(UTC)
     if started_at.tzinfo is None:
         raise ValueError("reconciliation time must be timezone-aware")
-    if _lease_owner is not None:
-        warehouse.require_job_lock(_lease_owner)
     refs = (
         list(validate_observations(source, raw_objects))
         if raw_objects is not None
@@ -92,9 +90,7 @@ def reconcile_owntracks(
     missing_before = raw_ids - loaded_ids
     repair_summary = None
     if missing_before and repair_missing:
-        summary = run_loader_objects(
-            repository, warehouse, refs, source=source, _lease_owner=_lease_owner
-        )
+        summary = run_loader_objects(repository, warehouse, refs, source=source, _deadline=deadline)
         repair_summary = asdict(summary)
     loaded_ids = warehouse.location_point_ids()
     # A worker may have loaded an upload newer than the initial inventory.

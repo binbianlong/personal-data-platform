@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING
@@ -14,7 +16,6 @@ from zoneinfo import ZoneInfo
 import uvicorn
 
 from personal_data_platform.config import secret_config
-from personal_data_platform.loader.job import JobAlreadyRunning
 from personal_data_platform.logging_config import configure_logging
 from personal_data_platform.storage.factory import open_warehouse
 from personal_data_platform.storage.warehouse import Warehouse
@@ -129,37 +130,46 @@ def sync_windows(start: datetime, end: datetime, data_types: tuple[str, ...]) ->
     return tuple(windows)
 
 
+class FitbitLeaseBusy(RuntimeError):
+    """Another Fitbit run is acquiring data."""
+
+
+@contextmanager
+def fitbit_sync_lease(warehouse: Warehouse, owner: str) -> Iterator[None]:
+    """Hold the acquisition lease for daily repair or manual range sync."""
+    if not warehouse.acquire_fitbit_lease(owner, lease_seconds=125 * 60):
+        raise FitbitLeaseBusy("another Fitbit sync holds the lease")
+    try:
+        yield
+    finally:
+        if warehouse.connection_usable:
+            warehouse.release_fitbit_lease(owner)
+
+
 def run_sync_from_env(
     *, start: datetime, end: datetime, data_types: tuple[str, ...] = DATA_TYPES
 ) -> int:
     """Acquire an explicit range; progress lives in committed ranges and coverage."""
-    from personal_data_platform.loader.job import LOADER_LEASE_SECONDS
-
     configure_logging("personal_data_platform.sources.fitbit")
     if start.tzinfo is None or end.tzinfo is None or start >= end or not data_types:
         raise ValueError("sync needs an increasing timezone-aware range and data types")
     warehouse = _warehouse()
     owner = str(uuid4())
-    acquired = False
     try:
         warehouse.migrate()
-        acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=LOADER_LEASE_SECONDS)
-        if not acquired:
-            raise JobAlreadyRunning("loader already has an unexpired job lease")
-        result = _acquisition_runner().run_windows(
-            sync_windows(start, end, data_types),
-            warehouse=warehouse,
-            lease_owner=owner,
-            timeout_seconds=50 * 60,
-        )
+        with fitbit_sync_lease(warehouse, owner):
+            result = _acquisition_runner().run_windows(
+                sync_windows(start, end, data_types),
+                warehouse=warehouse,
+                lease_owner=owner,
+                timeout_seconds=50 * 60,
+            )
         payload = json.loads(json.dumps(asdict(result), default=str))
         if payload["first_incomplete"] is not None:
             payload["first_incomplete"].pop("time_basis", None)
         print(json.dumps(payload, sort_keys=True))
         return int(not result.ok)
     finally:
-        if acquired and warehouse.connection_usable:
-            warehouse.release_job_lock("loader", owner)
         warehouse.close()
 
 

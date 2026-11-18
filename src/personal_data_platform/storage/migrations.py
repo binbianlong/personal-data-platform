@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
@@ -50,7 +48,9 @@ def _read_applied(connection: DuckDBPyConnection, checksums: dict[str, str]) -> 
     return applied
 
 
-def apply_migrations(warehouse: Warehouse, migrations: Path | None = None) -> None:
+def apply_migrations(
+    warehouse: Warehouse, migrations: Path | None = None, *, allow_upgrade: bool = False
+) -> None:
     connection = warehouse.connection
     migrations = migrations or DEFAULT_MIGRATIONS
     paths = sorted(migrations.glob("*.sql"))
@@ -59,46 +59,32 @@ def apply_migrations(warehouse: Warehouse, migrations: Path | None = None) -> No
     prepared = [(path, path.read_text(encoding="utf-8")) for path in paths]
     checksums = {path.name: hashlib.sha256(sql.encode()).hexdigest() for path, sql in prepared}
     applied = _read_applied(connection, checksums)
-    if applied.keys() == checksums.keys():
+    pending = [(path, sql) for path, sql in prepared if path.name not in applied]
+    if not pending:
         return
-    owner = str(uuid4())
-    acquired = False
-    deadline = time.monotonic() + 120 * 60
-    try:
-        for path, sql in prepared:
+
+    # Publish a fresh schema atomically at startup. Explicit maintenance keeps
+    # each migration and its ledger entry in their own transaction.
+    batches = [[migration] for migration in pending] if allow_upgrade else [pending]
+    for batch in batches:
+        with warehouse._transaction("schema migration"):
+            if not applied:
+                connection.execute("CREATE SCHEMA IF NOT EXISTS ops")
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS ops.schema_migration ("
+                    "migration_id VARCHAR PRIMARY KEY, checksum VARCHAR NOT NULL, "
+                    "applied_at TIMESTAMPTZ NOT NULL)"
+                )
+            # A concurrent initializer may have committed since the first read.
             applied = _read_applied(connection, checksums)
-            if path.name in applied:
-                continue
-            if applied and not acquired:
-                acquired = warehouse.acquire_job_lock("loader", owner, lease_seconds=125 * 60)
-                if not acquired:
-                    raise RuntimeError("schema update requires an idle writer lease")
-                if path.name in _read_applied(connection, checksums):
-                    continue
-            # The empty-target baseline creates the lock itself. Every later
-            # migration fences that same existing row within its DDL transaction.
-            transaction = (
-                warehouse._write_transaction(owner, deadline)
-                if acquired
-                else warehouse._transaction("schema baseline")
-            )
-            with transaction:
-                if not applied:
-                    connection.execute("CREATE SCHEMA IF NOT EXISTS ops")
-                    connection.execute(
-                        "CREATE TABLE IF NOT EXISTS ops.schema_migration ("
-                        "migration_id VARCHAR PRIMARY KEY, checksum VARCHAR NOT NULL, "
-                        "applied_at TIMESTAMPTZ NOT NULL)"
-                    )
-                # Concurrent initialization may have completed after the first
-                # empty-target check. Never replay its baseline over loaded data.
-                if path.name in _read_applied(connection, checksums):
+            if applied and applied != checksums and not allow_upgrade:
+                raise RuntimeError("pending schema migrations: stop writers and run pdp migrate")
+            for path, sql in batch:
+                if path.name in applied:
                     continue
                 connection.execute(sql)
                 connection.execute(
                     "INSERT INTO ops.schema_migration VALUES (?, ?, ?)",
                     [path.name, checksums[path.name], datetime.now(UTC)],
                 )
-    finally:
-        if acquired and warehouse.connection_usable:
-            warehouse.release_job_lock("loader", owner)
+                applied[path.name] = checksums[path.name]

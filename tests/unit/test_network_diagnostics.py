@@ -192,9 +192,9 @@ def test_warehouse_profiles_connect_schema_and_lock_without_changing_results(cou
     with net.network_run("test") as profile:
         warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
         warehouse.migrate()
-        assert warehouse.acquire_job_lock("loader", "owner", lease_seconds=600)
-        warehouse.require_job_lock("owner")
-        warehouse.release_job_lock("loader", "owner")
+        assert warehouse.acquire_fitbit_lease("owner", lease_seconds=600)
+        warehouse.require_fitbit_lease("owner")
+        warehouse.release_fitbit_lease("owner")
         assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
         warehouse.close()
     phases = {row["phase"] for row in profile.summary()["phases"]}

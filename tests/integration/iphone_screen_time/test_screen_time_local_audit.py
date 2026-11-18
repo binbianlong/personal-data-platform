@@ -75,17 +75,17 @@ def test_lock_contention_logs_deferred_before_capture(tmp_path, monkeypatch, cap
     assert (summary["result"], summary["stage"]) == ("deferred", "lock")
 
 
-def test_initial_bootstrap_is_serialized_with_warehouse_writers(tmp_path, monkeypatch):
+def test_initial_bootstrap_holds_source_process_lock(tmp_path, monkeypatch):
     collector, state, _, _ = _collector(tmp_path)
 
-    class LeaseCheckedWarehouse(ScreenTimeWarehouse):
+    class LockCheckedWarehouse(ScreenTimeWarehouse):
         def has_screen_time_events(self, *, source_id):
-            if not self.locked:
-                raise RuntimeError("bootstrap read requires warehouse lease")
+            with pytest.raises(RuntimeError, match="collector already running"), state.lock():
+                pytest.fail("bootstrap released the local source lock")
             return super().has_screen_time_events(source_id=source_id)
 
     monkeypatch.setattr(
-        runtime, "open_warehouse", lambda config: LeaseCheckedWarehouse(config.database)
+        runtime, "open_warehouse", lambda config: LockCheckedWarehouse(config.database)
     )
     assert (
         runtime.collect(

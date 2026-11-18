@@ -90,7 +90,7 @@ def test_drain_busy_preserves_owner_and_expired_lease_can_retry(
     worker = TestClient(create_worker_app(drainer=drainer(runner, subscriber)))
     with closing(factory()) as warehouse:
         warehouse.migrate()
-        warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
+        warehouse.acquire_fitbit_lease("daily", lease_seconds=7500)
     caplog.set_level("INFO", logger="personal_data_platform.sources.fitbit")
 
     response = worker.post("/notifications/fitbit/drain")

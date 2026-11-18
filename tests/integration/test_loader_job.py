@@ -1,4 +1,4 @@
-"""Generation-pinned loading retries invalid Raw and preserves shared leases."""
+"""Generation-pinned loading retries invalid Raw and preserves committed points."""
 
 import time
 from contextlib import closing
@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 from personal_data_platform.loader.job import (
-    JobAlreadyRunning,
     run_loader,
     run_loader_all,
     run_loader_objects,
@@ -56,19 +55,18 @@ def test_loader_continues_after_poison_object_and_retries_it():
         assert warehouse.location_point_ids() == {first.logical_key, second.logical_key}
 
 
-def test_scheduled_loader_defers_without_reading_when_shared_lease_is_busy():
+def test_scheduled_loader_writes_while_fitbit_holds_the_lease():
     store = Store()
     store.add()
     with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
         warehouse.migrate()
-        warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
-        with pytest.raises(JobAlreadyRunning):
-            run_loader(store, warehouse, source=get_source("owntracks"))
-        assert not store.reads
+        warehouse.acquire_fitbit_lease("other", lease_seconds=7500)
+        summary = run_loader(store, warehouse, source=get_source("owntracks"))
+        assert summary.succeeded == len(store.reads) == 1
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "other"
 
 
-def test_all_streams_loader_keeps_a_single_owner_and_stops_on_unknown_commit(monkeypatch):
+def test_all_streams_loader_stops_on_unknown_commit():
     store = Store()
     store.add()
     source = get_source("owntracks")
@@ -102,31 +100,7 @@ def test_all_streams_loader_keeps_a_single_owner_and_stops_on_unknown_commit(mon
         assert not outcome.ok and not warehouse.connection_usable
         assert calls == ["owntracks"]
         assert len(warehouse.location_point_ids()) == 1
-        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") is not None
-
-
-def test_inherited_loader_lease_stops_after_owner_loss(monkeypatch):
-    from types import SimpleNamespace
-
-    from personal_data_platform.loader.job import run_loader_objects
-    from personal_data_platform.sources.registry import get_source
-    from personal_data_platform.storage.motherduck import Warehouse, WarehouseConfig, connect
-
-    warehouse = Warehouse(connect(WarehouseConfig(":memory:")))
-    warehouse.migrate()
-    assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
-    try:
-        with pytest.raises(RuntimeError, match="lease"):
-            run_loader_objects(
-                SimpleNamespace(),
-                warehouse,
-                (),
-                source=get_source("owntracks"),
-                _lease_owner="daily",
-            )
-        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "other"
-    finally:
-        warehouse.close()
+        assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
 
 
 def test_warehouse_deadline_interrupts_a_blocking_query():

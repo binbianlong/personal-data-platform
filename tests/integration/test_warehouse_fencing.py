@@ -1,4 +1,4 @@
-"""Shared writer transactions reject stale leases without operational receipts."""
+"""Fitbit transactions reject stale owners; Screen Time commits independently."""
 
 import time
 from datetime import UTC, datetime, timedelta
@@ -20,24 +20,21 @@ def warehouse():
     value.close()
 
 
-def test_screen_commit_requires_live_owner_and_has_events_whitelist(warehouse):
+def test_screen_commit_is_independent_of_fitbit_lease_and_has_events_whitelist(warehouse):
     raw = _raw()
     batch = IPhoneScreenTimeBatch([_record(raw)])
     assert not warehouse.has_screen_time_events(source_id=raw.source_id)
     with pytest.raises(ValueError):
         warehouse.has_screen_time_events(source_id="location_point")
-    assert warehouse.acquire_job_lock("loader", "owner", lease_seconds=120)
-    with pytest.raises(WarehouseLeaseError):
-        warehouse.commit_screen_time_snapshot(
-            raw, batch, invalidated_event_keys=(), owner_id="old", deadline=time.monotonic() + 10
-        )
+    assert warehouse.acquire_fitbit_lease("owner", lease_seconds=120)
     assert (
         warehouse.commit_screen_time_snapshot(
-            raw, batch, invalidated_event_keys=(), owner_id="owner", deadline=time.monotonic() + 10
+            raw, batch, invalidated_event_keys=(), deadline=time.monotonic() + 10
         )
         == 1
     )
     assert warehouse.has_screen_time_events(source_id=raw.source_id)
+    warehouse.require_fitbit_lease("owner")
     assert warehouse.relation_names() & {"ops.job_lock", "ops.schema_migration"} == {
         "ops.job_lock",
         "ops.schema_migration",
@@ -46,9 +43,9 @@ def test_screen_commit_requires_live_owner_and_has_events_whitelist(warehouse):
 
 
 def test_release_does_not_delete_other_owner(warehouse):
-    assert warehouse.acquire_job_lock("loader", "new", lease_seconds=120)
-    warehouse.release_job_lock("loader", "old")
-    warehouse.require_job_lock("new")
+    assert warehouse.acquire_fitbit_lease("new", lease_seconds=120)
+    warehouse.release_fitbit_lease("old")
+    warehouse.require_fitbit_lease("new")
 
 
 @pytest.mark.parametrize("takeover_first", [False, True])
@@ -58,18 +55,18 @@ def test_independent_connections_fence_takeover(tmp_path, takeover_first):
     first.migrate()
     second = Warehouse(connect(WarehouseConfig(path)))
     try:
-        assert first.acquire_job_lock("loader", "old", lease_seconds=120)
+        assert first.acquire_fitbit_lease("old", lease_seconds=120)
         first.connection.execute("BEGIN")
-        first.require_job_lock("old")
+        first.require_fitbit_lease("old")
         if takeover_first:
             second.connection.execute(
                 "UPDATE ops.job_lock SET expires_at=?", [datetime.now(UTC) - timedelta(seconds=1)]
             )
-            assert second.acquire_job_lock("loader", "new", lease_seconds=120)
+            assert second.acquire_fitbit_lease("new", lease_seconds=120)
             with pytest.raises((duckdb.TransactionException, WarehouseLeaseError)):
-                first.fence_job_lock("old")
+                first._fence_fitbit_lease("old")
         else:
-            first.fence_job_lock("old")
+            first._fence_fitbit_lease("old")
             with pytest.raises(duckdb.TransactionException):
                 second.connection.execute(
                     "UPDATE ops.job_lock SET owner_id='new', expires_at=expires_at + INTERVAL 1 SECOND"
@@ -77,9 +74,9 @@ def test_independent_connections_fence_takeover(tmp_path, takeover_first):
         first.connection.execute("ROLLBACK")
         if takeover_first:
             with pytest.raises(WarehouseLeaseError):
-                first.require_job_lock("old")
-            first.release_job_lock("loader", "old")
-            second.require_job_lock("new")
+                first.require_fitbit_lease("old")
+            first.release_fitbit_lease("old")
+            second.require_fitbit_lease("new")
     finally:
         first.close()
         second.close()
@@ -87,7 +84,6 @@ def test_independent_connections_fence_takeover(tmp_path, takeover_first):
 
 @pytest.mark.parametrize("phase", ["BEGIN TRANSACTION", "COMMIT", "ROLLBACK"])
 def test_uncertain_screen_transaction_stops_connection(warehouse, monkeypatch, phase):
-    assert warehouse.acquire_job_lock("loader", "owner", lease_seconds=120)
     connection = warehouse.connection
 
     class Uncertain:
@@ -99,8 +95,7 @@ def test_uncertain_screen_transaction_stops_connection(warehouse, monkeypatch, p
     warehouse.connection = Uncertain()
     if phase == "ROLLBACK":
         monkeypatch.setattr(
-            warehouse,
-            "fence_job_lock",
+            "personal_data_platform.sources.iphone_screen_time.motherduck.write_state",
             lambda *a, **kw: (_ for _ in ()).throw(ValueError("bad write")),
         )
     try:
@@ -109,7 +104,6 @@ def test_uncertain_screen_transaction_stops_connection(warehouse, monkeypatch, p
                 _raw(),
                 IPhoneScreenTimeBatch([_record(_raw())]),
                 invalidated_event_keys=(),
-                owner_id="owner",
                 deadline=time.monotonic() + 10,
             )
         assert not warehouse.connection_usable
@@ -119,33 +113,6 @@ def test_uncertain_screen_transaction_stops_connection(warehouse, monkeypatch, p
             connection.execute("ROLLBACK")
         except duckdb.TransactionException:
             pass
-
-
-def test_later_migration_fences_same_lease_and_rolls_back_on_expiry(
-    warehouse, tmp_path, monkeypatch
-):
-    import shutil
-
-    from personal_data_platform.storage.migrations import DEFAULT_MIGRATIONS
-
-    for sql in DEFAULT_MIGRATIONS.glob("*.sql"):
-        shutil.copy(sql, tmp_path / sql.name)
-    (tmp_path / "002_more.sql").write_text("CREATE TABLE base.extra(value INTEGER)")
-    calls = []
-    fence = warehouse.fence_job_lock
-
-    def expire(owner, **kwargs):
-        calls.append(owner)
-        if len(calls) == 2:
-            raise WarehouseLeaseError("expired during DDL")
-        return fence(owner, **kwargs)
-
-    monkeypatch.setattr(warehouse, "fence_job_lock", expire)
-    with pytest.raises(WarehouseLeaseError):
-        warehouse.migrate(tmp_path)
-    assert len(calls) == 2
-    assert "base.extra" not in warehouse.relation_names()
-    assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 1
 
 
 @pytest.mark.parametrize("race", ["after_select", "before_commit"])
@@ -159,10 +126,10 @@ def test_competing_acquisition_defers_without_poisoning_connection(tmp_path, rac
     class CompetingAcquisition:
         def execute(self, sql, *args):
             if race == "before_commit" and sql == "COMMIT":
-                assert second.acquire_job_lock("loader", "second", lease_seconds=120)
+                assert second.acquire_fitbit_lease("second", lease_seconds=120)
             result = original.execute(sql, *args)
             if race == "after_select" and sql.startswith("SELECT owner_id, expires_at"):
-                assert second.acquire_job_lock("loader", "second", lease_seconds=120)
+                assert second.acquire_fitbit_lease("second", lease_seconds=120)
             return result
 
         def __getattr__(self, name):
@@ -170,13 +137,13 @@ def test_competing_acquisition_defers_without_poisoning_connection(tmp_path, rac
 
     first.connection = CompetingAcquisition()
     try:
-        assert not first.acquire_job_lock("loader", "first", lease_seconds=120)
+        assert not first.acquire_fitbit_lease("first", lease_seconds=120)
         assert first.connection_usable
-        second.require_job_lock("second")
+        second.require_fitbit_lease("second")
         # The losing transaction was aborted, and a new transaction is usable.
         first.connection = original
-        second.release_job_lock("loader", "second")
-        assert first.acquire_job_lock("loader", "retry", lease_seconds=120)
+        second.release_fitbit_lease("second")
+        assert first.acquire_fitbit_lease("retry", lease_seconds=120)
     finally:
         first.close()
         second.close()
@@ -195,20 +162,20 @@ def test_fence_shortening_preserves_required_remaining_time(
         def now(cls, tz=None):
             return now
 
-    assert warehouse.acquire_job_lock("loader", "owner", lease_seconds=120)
+    assert warehouse.acquire_fitbit_lease("owner", lease_seconds=120)
     expires = now + timedelta(seconds=1, microseconds=margin)
     warehouse.connection.execute("UPDATE ops.job_lock SET expires_at=?", [expires])
     monkeypatch.setattr(motherduck, "datetime", Clock)
     if allowed:
         with warehouse._transaction("fencing margin"):
-            warehouse.fence_job_lock("owner", remaining_seconds=1)
+            warehouse._fence_fitbit_lease("owner", remaining_seconds=1)
         result = warehouse.query_value("SELECT expires_at FROM ops.job_lock")
         assert result == expires - timedelta(microseconds=1)
         assert result > now + timedelta(seconds=1)
     else:
         with pytest.raises(WarehouseLeaseError):
             with warehouse._transaction("fencing margin"):
-                warehouse.fence_job_lock("owner", remaining_seconds=1)
+                warehouse._fence_fitbit_lease("owner", remaining_seconds=1)
         assert warehouse.query_value("SELECT expires_at FROM ops.job_lock") == expires
 
 
@@ -239,9 +206,9 @@ def test_unknown_lease_acquisition_commit_keeps_connection_unusable(
     warehouse.connection = LostResponse()
     try:
         with pytest.raises(WarehouseConnectionError, match="commit outcome unknown"):
-            warehouse.acquire_job_lock("loader", "owner", lease_seconds=120)
+            warehouse.acquire_fitbit_lease("owner", lease_seconds=120)
         assert not warehouse.connection_usable
-        warehouse.release_job_lock("loader", "owner")
+        warehouse.release_fitbit_lease("owner")
         assert statements_after_loss == []
     finally:
         warehouse.connection = original

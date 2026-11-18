@@ -1,4 +1,4 @@
-"""Transactional MotherDuck/DuckDB persistence under a shared writer lease."""
+"""Transactional MotherDuck/DuckDB persistence for source records."""
 
 from __future__ import annotations
 
@@ -34,6 +34,10 @@ from personal_data_platform.storage.warehouse import WarehouseConnectionError, W
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
+
+
+# Keep the persisted key so old and new Fitbit clients exclude one another during rollout.
+_FITBIT_LEASE_KEY = "loader"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,8 +99,8 @@ class Warehouse:
     def close(self) -> None:
         self.connection.close()
 
-    def migrate(self, migrations: Path | None = None) -> None:
-        apply_migrations(self, migrations)
+    def migrate(self, migrations: Path | None = None, *, allow_upgrade: bool = False) -> None:
+        apply_migrations(self, migrations, allow_upgrade=allow_upgrade)
 
     @contextmanager
     def _transaction(
@@ -130,7 +134,7 @@ class Warehouse:
                     "PRIMARY KEY or UNIQUE constraint violation" in str(error)
                     and "duplicate key" in str(error)
                 ):
-                    # A rejected lease INSERT is known not to have committed.
+                    # A rejected INSERT is known not to have committed.
                     # Confirm that its transaction ended before reusing this connection.
                     try:
                         self.connection.execute("BEGIN TRANSACTION")
@@ -144,21 +148,21 @@ class Warehouse:
             self.connection_usable = False
             raise WarehouseConnectionError(f"{operation} commit outcome unknown") from error
 
-    def require_job_lock(self, owner_id: str, *, remaining_seconds: int = 1) -> None:
-        """Read-only preflight; transactional writers must also fence the lease."""
+    def require_fitbit_lease(self, owner_id: str, *, remaining_seconds: int = 1) -> None:
+        """Check ownership before a Fitbit API request or snapshot transaction."""
         if not self.connection_usable:
             raise WarehouseConnectionError("reopen warehouse after an uncertain transaction")
         row = self.connection.execute(
-            "SELECT owner_id, expires_at FROM ops.job_lock WHERE job_name='loader'"
+            "SELECT owner_id, expires_at FROM ops.job_lock WHERE job_name=?", [_FITBIT_LEASE_KEY]
         ).fetchone()
         if (
             row is None
             or row[0] != owner_id
             or row[1] <= datetime.now(UTC) + timedelta(seconds=remaining_seconds)
         ):
-            raise WarehouseLeaseError("loader lease ownership lost or insufficient time remains")
+            raise WarehouseLeaseError("Fitbit lease ownership lost or insufficient time remains")
 
-    def fence_job_lock(self, owner_id: str, *, remaining_seconds: int = 1) -> None:
+    def _fence_fitbit_lease(self, owner_id: str, *, remaining_seconds: int = 1) -> None:
         """Write the shared row inside a transaction to conflict with takeover."""
         threshold = datetime.now(UTC) + timedelta(seconds=remaining_seconds)
         # A real expiry-column write establishes the dependency on takeover.
@@ -166,11 +170,11 @@ class Warehouse:
         # The one-microsecond reduction never extends the lease.
         row = self.connection.execute(
             "UPDATE ops.job_lock SET expires_at=expires_at - INTERVAL 1 MICROSECOND "
-            "WHERE job_name='loader' AND owner_id=? AND expires_at>?",
-            [owner_id, threshold + timedelta(microseconds=1)],
+            "WHERE job_name=? AND owner_id=? AND expires_at>?",
+            [_FITBIT_LEASE_KEY, owner_id, threshold + timedelta(microseconds=1)],
         ).fetchone()
         if row is None or row[0] != 1:
-            raise WarehouseLeaseError("loader lease ownership lost or insufficient time remains")
+            raise WarehouseLeaseError("Fitbit lease ownership lost or insufficient time remains")
 
     def _remaining(self, deadline: float, monotonic: Callable[[], float]) -> int:
         seconds = deadline - monotonic()
@@ -179,14 +183,13 @@ class Warehouse:
         return max(1, math.ceil(seconds))
 
     @contextmanager
-    def _write_transaction(
-        self, owner_id: str, deadline: float, *, monotonic: Callable[[], float] = time.monotonic
+    def _timed_write(
+        self, deadline: float, *, defer_commit_conflict: bool = False
     ) -> Iterator[None]:
-        self.require_job_lock(owner_id, remaining_seconds=self._remaining(deadline, monotonic))
-        with self._transaction("source write"):
-            self.fence_job_lock(owner_id, remaining_seconds=self._remaining(deadline, monotonic))
+        self._remaining(deadline, time.monotonic)
+        with self._transaction("source write", defer_commit_conflict=defer_commit_conflict):
             yield
-            self.fence_job_lock(owner_id, remaining_seconds=self._remaining(deadline, monotonic))
+            self._remaining(deadline, time.monotonic)
 
     def commit_fitbit_snapshot(
         self,
@@ -201,8 +204,16 @@ class Warehouse:
             if isinstance(snapshot, HeartRateMinuteSnapshot)
             else FitbitBatch(snapshot)
         )
-        with self._write_transaction(owner_id, deadline, monotonic=monotonic):
-            return batch.write_snapshot(self.connection)
+        self.require_fitbit_lease(owner_id, remaining_seconds=self._remaining(deadline, monotonic))
+        with self._transaction("Fitbit snapshot"):
+            self._fence_fitbit_lease(
+                owner_id, remaining_seconds=self._remaining(deadline, monotonic)
+            )
+            result = batch.write_snapshot(self.connection)
+            self._fence_fitbit_lease(
+                owner_id, remaining_seconds=self._remaining(deadline, monotonic)
+            )
+            return result
 
     def commit_screen_time_snapshot(
         self,
@@ -210,16 +221,15 @@ class Warehouse:
         batch: DecodedBatch,
         *,
         invalidated_event_keys: Sequence[str],
-        owner_id: str,
         deadline: float,
     ) -> int:
         if isinstance(batch, IPhoneScreenTimeBatch) and raw.source_id == "iphone_screen_time":
-            with self._write_transaction(owner_id, deadline):
+            with self._timed_write(deadline):
                 return iphone_screen_time.write_state(
                     self.connection, raw, batch, invalidated_event_keys=invalidated_event_keys
                 )
         if isinstance(batch, MacScreenTimeBatch) and raw.source_id == "mac_screen_time":
-            with self._write_transaction(owner_id, deadline):
+            with self._timed_write(deadline):
                 return mac_screen_time.write_state(
                     self.connection, raw, batch, invalidated_event_keys=invalidated_event_keys
                 )
@@ -250,16 +260,24 @@ class Warehouse:
         return {str(row[0]) for row in rows}
 
     def load_object(
-        self, raw: RawObject, *, batch: DecodedBatch, owner_id: str, deadline: float
+        self, raw: RawObject, *, batch: DecodedBatch, reprocess: bool, deadline: float
     ) -> int:
         if not isinstance(batch, OwnTracksBatch) or raw.source_id != "owntracks":
             raise ValueError(
                 "object loader supports only OwnTracks; Screen Time uses its local pending queue"
             )
-        with self._write_transaction(owner_id, deadline):
-            return owntracks.write_batch(self.connection, raw, batch)
+        import duckdb
 
-    def acquire_job_lock(self, job_name: str, owner_id: str, *, lease_seconds: int) -> bool:
+        try:
+            with self._timed_write(deadline, defer_commit_conflict=not reprocess):
+                return owntracks.write_batch(self.connection, raw, batch, reprocess=reprocess)
+        except (duckdb.TransactionException, duckdb.ConstraintException) as error:
+            if not reprocess and "duplicate key" in str(error).lower():
+                if raw.logical_key in self.location_point_ids([raw.logical_key]):
+                    return 0
+            raise
+
+    def acquire_fitbit_lease(self, owner_id: str, *, lease_seconds: int) -> bool:
         import duckdb
 
         now = datetime.now(UTC)
@@ -267,30 +285,32 @@ class Warehouse:
         try:
             with self._transaction("lease acquisition", defer_commit_conflict=True):
                 current = self.connection.execute(
-                    "SELECT owner_id, expires_at FROM ops.job_lock WHERE job_name=?", [job_name]
+                    "SELECT owner_id, expires_at FROM ops.job_lock WHERE job_name=?",
+                    [_FITBIT_LEASE_KEY],
                 ).fetchone()
                 if current is not None and current[0] != owner_id and current[1] > now:
                     return False
                 if current is None:
                     self.connection.execute(
                         "INSERT INTO ops.job_lock VALUES (?, ?, ?)",
-                        [job_name, owner_id, expires_at],
+                        [_FITBIT_LEASE_KEY, owner_id, expires_at],
                     )
                 else:
                     self.connection.execute(
                         "UPDATE ops.job_lock SET owner_id=?, expires_at=? WHERE job_name=?",
-                        [owner_id, expires_at, job_name],
+                        [owner_id, expires_at, _FITBIT_LEASE_KEY],
                     )
         except (duckdb.TransactionException, duckdb.ConstraintException):
             return False
         return True
 
-    def release_job_lock(self, job_name: str, owner_id: str) -> None:
+    def release_fitbit_lease(self, owner_id: str) -> None:
         if not self.connection_usable:
             return
         with self._transaction("lease release"):
             self.connection.execute(
-                "DELETE FROM ops.job_lock WHERE job_name=? AND owner_id=?", [job_name, owner_id]
+                "DELETE FROM ops.job_lock WHERE job_name=? AND owner_id=?",
+                [_FITBIT_LEASE_KEY, owner_id],
             )
 
     def interrupt(self) -> None:

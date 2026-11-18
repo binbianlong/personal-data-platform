@@ -6,11 +6,9 @@ import os
 import subprocess
 import sys
 import time
-import uuid
 from pathlib import Path
 
 from personal_data_platform.config import temporary_environment
-from personal_data_platform.loader.job import LOADER_LEASE_SECONDS, JobAlreadyRunning
 from personal_data_platform.network_diagnostics import network_phase
 from personal_data_platform.storage.factory import WarehouseConfig, dbt_environment, open_warehouse
 
@@ -73,7 +71,6 @@ def run_dbt_from_env(
     *,
     source_id: str | None = None,
     stream: str | None = None,
-    lease_owner: str | None = None,
     timeout_seconds: int = 50 * 60,
     config: WarehouseConfig | None = None,
 ) -> int:
@@ -88,27 +85,9 @@ def run_dbt_from_env(
 
     config = config if config is not None else WarehouseConfig.from_env()
     warehouse = open_warehouse(config)
-    owner = lease_owner or str(uuid.uuid4())
-    acquired = False
     try:
         warehouse.migrate()
-        if lease_owner is None:
-            acquired = warehouse.acquire_job_lock(
-                "loader", owner, lease_seconds=LOADER_LEASE_SECONDS
-            )
-            if not acquired:
-                raise JobAlreadyRunning("loader already has an unexpired job lease")
-        warehouse.require_job_lock(owner, remaining_seconds=timeout_seconds)
-        with temporary_environment({"PDP_DBT_LEASE_OWNER": owner}):
-            run_dbt(
-                target=target,
-                timeout_seconds=timeout_seconds,
-                selector=selector,
-                config=config,
-            )
-        warehouse.require_job_lock(owner)
-        return 0
     finally:
-        if acquired and warehouse.connection_usable:
-            warehouse.release_job_lock("loader", owner)
         warehouse.close()
+    run_dbt(target=target, timeout_seconds=timeout_seconds, selector=selector, config=config)
+    return 0

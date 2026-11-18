@@ -15,11 +15,11 @@ pdp iphone-screen-time collect --once
 pdp iphone-screen-time collect --watch
 ```
 
-新規SQLiteでの初回は、共有lease内でこのsourceのbaseが空と確認してから取得する。
+新規SQLiteでの初回は、同じSQLiteのローカルロックを取ってこのsourceのbaseが空と確認してから取得する。
 初期化済みのSQLiteでは、各snapshotを外部pendingファイルへ保存してから送信する。
 JSONの`event="screen_time_collection"`、`result`、`stage`、`loaded`と、SQLiteのpendingを確認する。
-初期化済みなら接続障害・lease競合中も取得を続け、`--watch`で順に再送する。
-同じsourceのprocess lockと、他sourceと共有するDBのloader leaseを使う。
+初期化済みならDB接続障害中も取得を続け、`--watch`で順に再送する。
+収集からDB確定・送信済み記録まで、同じsourceのSQLiteに対応するローカルロックを保持する。
 
 ## Crash recoveryと監視
 

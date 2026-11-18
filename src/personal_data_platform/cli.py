@@ -93,7 +93,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         config = WarehouseConfig(args.database) if args.database else WarehouseConfig.from_env()
         warehouse = open_warehouse(config)
         try:
-            warehouse.migrate()
+            warehouse.migrate(allow_upgrade=True)
         finally:
             warehouse.close()
         return 0

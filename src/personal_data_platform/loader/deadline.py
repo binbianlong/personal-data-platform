@@ -1,4 +1,4 @@
-"""Bound active database work without allowing a writer to outlive its lease."""
+"""Interrupt active database work at the execution deadline."""
 
 from __future__ import annotations
 
