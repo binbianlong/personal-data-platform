@@ -76,7 +76,7 @@ def test_repair_rechecks_new_uploads_before_classifying_orphans(monkeypatch):
     repository = Repository([first])
     warehouse = Warehouse()
 
-    def repair(repository, warehouse, refs, *, source, _lease_owner):
+    def repair(repository, warehouse, refs, *, source, _deadline):
         assert list(refs) == [first]
         repository.refs.extend([second, third])
         warehouse.loaded.update([first.logical_key, second.logical_key])
@@ -93,7 +93,7 @@ def test_supplied_inventory_is_not_refreshed_and_generation_refs_reach_repair(mo
     first = raw()
     warehouse = Warehouse()
 
-    def repair(repository, warehouse, refs, *, source, _lease_owner):
+    def repair(repository, warehouse, refs, *, source, _deadline):
         assert refs == [first]
         assert refs[0].storage_generation == 1
         warehouse.loaded.add(first.logical_key)

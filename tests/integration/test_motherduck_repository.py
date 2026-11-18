@@ -83,8 +83,7 @@ def test_source_writer_failure_rolls_back_without_changing_existing_points(
     batch = source.decode(raw, payload)
     with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
         warehouse.migrate()
-        assert warehouse.acquire_job_lock("loader", "owner", lease_seconds=120)
-        kwargs = {"owner_id": "owner", "deadline": time.monotonic() + 10}
+        kwargs = {"reprocess": True, "deadline": time.monotonic() + 10}
         if previously_loaded:
             warehouse.load_object(raw, batch=batch, **kwargs)
         before = warehouse.query_rows("SELECT * FROM base.location_point")

@@ -88,6 +88,21 @@ def test_reprocess_is_explicit_and_updates_existing_point(warehouse):
     ]
 
 
+def test_delayed_delivery_preserves_a_reprocessed_point(warehouse, monkeypatch):
+    store = Store()
+    store.add(motionactivities=["walking"])
+    source = OwnTracksSource()
+    run_loader(store, warehouse, source=source)
+    warehouse.connection.execute("UPDATE base.location_point SET motion_activities=['cycling']")
+    # A delivery that checked before the reprocess committed still sees the ID as missing.
+    monkeypatch.setattr(warehouse, "location_point_ids", lambda ids: set())
+    result = run_loader(store, warehouse, source=source)
+    assert result.ok and result.records == 0
+    assert warehouse.query_rows("SELECT motion_activities FROM base.location_point") == [
+        (["cycling"],)
+    ]
+
+
 @pytest.mark.parametrize("damage", ["hash", "deflate", "generation"])
 def test_corrupt_or_changed_raw_never_creates_base_row(warehouse, damage):
     store = Store()

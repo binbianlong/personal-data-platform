@@ -164,19 +164,43 @@ def test_worker_rejects_mismatched_storage_metadata_without_writing(tmp_path, fi
         assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 0
 
 
-def test_worker_lease_conflict_retries_and_preserves_competing_owner(tmp_path, caplog):
+def test_worker_commits_while_fitbit_holds_the_lease(tmp_path):
     store, _, client, factory = setup_worker(tmp_path)
     with closing(factory()) as warehouse:
         assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
-    with caplog.at_level(logging.INFO):
-        response = client.post("/notifications/owntracks", json=notification(store))
-    assert response.status_code == 429
-    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+    assert client.post("/notifications/owntracks", json=notification(store)).status_code == 204
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
-        assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 0
-        warehouse.release_job_lock("loader", "daily")
+        assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 1
+
+
+def test_worker_retries_after_a_concurrent_loader_commits_the_same_point(tmp_path):
+    from personal_data_platform.loader.job import run_loader
+
+    store, processor, client, factory = setup_worker(tmp_path)
+    source = get_source("owntracks")
+    warehouse = factory()
+    connection = warehouse.connection
+
+    class ConcurrentCommit:
+        def execute(self, sql, *args):
+            if sql == "COMMIT":
+                with closing(factory()) as other:
+                    assert run_loader(store, other, source=source).succeeded == 1
+            return connection.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(connection, name)
+
+    warehouse.connection = ConcurrentCommit()
+    processor.warehouse_factory = lambda: warehouse
+    assert client.post("/notifications/owntracks", json=notification(store)).status_code == 503
+    processor.warehouse_factory = factory
     assert client.post("/notifications/owntracks", json=notification(store)).status_code == 204
+    with closing(factory()) as other:
+        assert other.query_rows("SELECT latitude, longitude FROM base.location_point") == [
+            (LOCATION["lat"], LOCATION["lon"])
+        ]
 
 
 def test_paused_worker_does_not_open_warehouse(tmp_path):
@@ -194,14 +218,10 @@ def test_worker_unknown_commit_retries_from_durable_success(tmp_path):
         connection = warehouse.connection
 
         class Uncertain:
-            commits = 0
-
             def execute(self, sql, *args, **kwargs):
                 result = connection.execute(sql, *args, **kwargs)
                 if sql == "COMMIT":
-                    self.commits += 1
-                    if self.commits == 2:
-                        raise RuntimeError("commit response lost")
+                    raise RuntimeError("commit response lost")
                 return result
 
             def __getattr__(self, name):
@@ -214,7 +234,6 @@ def test_worker_unknown_commit_retries_from_durable_success(tmp_path):
     assert client.post("/notifications/owntracks", json=notification(store)).status_code == 503
     with closing(factory()) as warehouse:
         assert warehouse.query_value("SELECT count(*) FROM base.location_point") == 1
-        warehouse.connection.execute("UPDATE ops.job_lock SET expires_at=now()-INTERVAL '1 second'")
     processor.warehouse_factory = factory
     assert client.post("/notifications/owntracks", json=notification(store)).status_code == 204
     with closing(factory()) as warehouse:

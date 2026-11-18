@@ -17,7 +17,6 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic
 from starlette.concurrency import run_in_threadpool
 
-from personal_data_platform.loader.job import JobAlreadyRunning
 from personal_data_platform.raw.models import RawObject
 
 from .adapter import OwnTracksSource
@@ -148,9 +147,6 @@ def create_worker_app(
         try:
             ok = await run_in_threadpool(processor.process, raw)
             return Response(status_code=204 if ok else 503)
-        except JobAlreadyRunning:
-            LOGGER.info("OwnTracks ingestion deferred: shared writer busy")
-            return Response(status_code=429)
         except Exception as error:
             LOGGER.error("OwnTracks ingestion failed (%s)", type(error).__name__)
             return Response(status_code=503)

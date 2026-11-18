@@ -58,8 +58,8 @@ def test_daily_terminal_event_includes_all_available_outcomes(monkeypatch, capfd
         raise RuntimeError("injected failure")
 
     def run_stage(name, kwargs):
-        owner = kwargs.get("_lease_owner", kwargs.get("lease_owner"))
-        warehouse.require_job_lock(owner)
+        if name == "fitbit":
+            warehouse.require_job_lock(kwargs["lease_owner"])
         phases.append(name)
         if failure == name + "-exception":
             broken()

@@ -34,7 +34,7 @@ class Warehouse(Protocol):
     def location_point_ids(self, ids: Iterable[str] | None = None) -> set[str]: ...
 
     def load_object(
-        self, raw: RawObject, *, batch: DecodedBatch, owner_id: str, deadline: float
+        self, raw: RawObject, *, batch: DecodedBatch, reprocess: bool, deadline: float
     ) -> int: ...
 
     def commit_screen_time_snapshot(

@@ -12,17 +12,23 @@ if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
 
 
-def write_batch(connection: DuckDBPyConnection, raw: RawObject, batch: OwnTracksBatch) -> int:
-    connection.execute(
-        """INSERT INTO base.location_point (
-            location_point_id, device_key, observed_at, latitude, longitude,
-            accuracy_meters, speed_kmh, motion_activities
-        ) VALUES (?,?,?,?,?,?,?,?)
-        ON CONFLICT (location_point_id) DO UPDATE SET
+def write_batch(
+    connection: DuckDBPyConnection, raw: RawObject, batch: OwnTracksBatch, *, reprocess: bool
+) -> int:
+    # A delayed first delivery must preserve a point already written by a reprocess.
+    on_conflict = "DO NOTHING"
+    if reprocess:
+        on_conflict = """DO UPDATE SET
             device_key=excluded.device_key, observed_at=excluded.observed_at,
             latitude=excluded.latitude, longitude=excluded.longitude,
             accuracy_meters=excluded.accuracy_meters, speed_kmh=excluded.speed_kmh,
-            motion_activities=excluded.motion_activities""",
+            motion_activities=excluded.motion_activities"""
+    result = connection.execute(
+        f"""INSERT INTO base.location_point (
+            location_point_id, device_key, observed_at, latitude, longitude,
+            accuracy_meters, speed_kmh, motion_activities
+        ) VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT (location_point_id) {on_conflict}""",
         [
             raw.logical_key,
             raw.subject_key,
@@ -34,4 +40,6 @@ def write_batch(connection: DuckDBPyConnection, raw: RawObject, batch: OwnTracks
             batch.message.get("motionactivities"),
         ],
     )
-    return 1
+    row = result.fetchone()
+    assert row is not None
+    return int(row[0])

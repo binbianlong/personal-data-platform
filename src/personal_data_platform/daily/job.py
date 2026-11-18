@@ -116,7 +116,7 @@ def _run_daily() -> int:
             remaining()
             with network_phase("daily_owntracks"):
                 owntracks_result = reconcile_owntracks(
-                    owntracks.repository_from_env(), warehouse, source=owntracks, _lease_owner=owner
+                    owntracks.repository_from_env(), warehouse, source=owntracks, deadline=deadline
                 )
             details["owntracks"] = owntracks_result.details
             if not owntracks_result.ok:

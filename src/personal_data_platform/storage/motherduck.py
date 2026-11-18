@@ -179,6 +179,13 @@ class Warehouse:
         return max(1, math.ceil(seconds))
 
     @contextmanager
+    def _timed_write(self, deadline: float) -> Iterator[None]:
+        self._remaining(deadline, time.monotonic)
+        with self._transaction("source write"):
+            yield
+            self._remaining(deadline, time.monotonic)
+
+    @contextmanager
     def _write_transaction(
         self, owner_id: str, deadline: float, *, monotonic: Callable[[], float] = time.monotonic
     ) -> Iterator[None]:
@@ -250,14 +257,14 @@ class Warehouse:
         return {str(row[0]) for row in rows}
 
     def load_object(
-        self, raw: RawObject, *, batch: DecodedBatch, owner_id: str, deadline: float
+        self, raw: RawObject, *, batch: DecodedBatch, reprocess: bool, deadline: float
     ) -> int:
         if not isinstance(batch, OwnTracksBatch) or raw.source_id != "owntracks":
             raise ValueError(
                 "object loader supports only OwnTracks; Screen Time uses its local pending queue"
             )
-        with self._write_transaction(owner_id, deadline):
-            return owntracks.write_batch(self.connection, raw, batch)
+        with self._timed_write(deadline):
+            return owntracks.write_batch(self.connection, raw, batch, reprocess=reprocess)
 
     def acquire_job_lock(self, job_name: str, owner_id: str, *, lease_seconds: int) -> bool:
         import duckdb

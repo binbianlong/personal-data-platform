@@ -28,30 +28,15 @@ def test_loader_retries_and_skips_using_a_connection_free_warehouse():
 
     class MemoryWarehouse:
         connection_usable = True
-        owner = None
         loaded = set()
         locations = {}
         interrupted = Event()
 
-        def acquire_job_lock(self, job_name, owner_id, *, lease_seconds):
-            assert job_name == "loader"
-            if self.owner is not None:
-                return False
-            self.owner = owner_id
-            return True
-
-        def require_job_lock(self, owner_id, *, remaining_seconds):
-            assert self.owner == owner_id and remaining_seconds > 0
-
-        def release_job_lock(self, job_name, owner_id):
-            assert self.owner == owner_id
-            self.owner = None
-
         def location_point_ids(self, ids=None):
             return set(ids or ()) & self.loaded
 
-        def load_object(self, value, *, batch, owner_id, deadline):
-            assert value == raw and owner_id == self.owner and deadline > 0
+        def load_object(self, value, *, batch, reprocess, deadline):
+            assert value == raw and not reprocess and deadline > 0
             self.locations[value.logical_key] = (batch.message["lat"], batch.message["lon"])
             self.loaded.add(value.logical_key)
             return batch.record_count
@@ -65,7 +50,6 @@ def test_loader_retries_and_skips_using_a_connection_free_warehouse():
     assert (first.succeeded, first.failed, first.records) == (1, 0, 1)
     assert (repeated.succeeded, repeated.skipped) == (0, 1)
     assert warehouse.locations == {raw.logical_key: (35, 139)}
-    assert warehouse.owner is None
     timer = interrupt_after(warehouse, 0.01)
     timer.join(timeout=1)
     assert warehouse.interrupted.is_set()
