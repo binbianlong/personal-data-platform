@@ -217,16 +217,15 @@ class Warehouse:
         batch: DecodedBatch,
         *,
         invalidated_event_keys: Sequence[str],
-        owner_id: str,
         deadline: float,
     ) -> int:
         if isinstance(batch, IPhoneScreenTimeBatch) and raw.source_id == "iphone_screen_time":
-            with self._write_transaction(owner_id, deadline):
+            with self._timed_write(deadline):
                 return iphone_screen_time.write_state(
                     self.connection, raw, batch, invalidated_event_keys=invalidated_event_keys
                 )
         if isinstance(batch, MacScreenTimeBatch) and raw.source_id == "mac_screen_time":
-            with self._write_transaction(owner_id, deadline):
+            with self._timed_write(deadline):
                 return mac_screen_time.write_state(
                     self.connection, raw, batch, invalidated_event_keys=invalidated_event_keys
                 )

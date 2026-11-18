@@ -1,4 +1,4 @@
-"""Serialized local collection and ordered, fenced Screen Time delivery."""
+"""Serialized local collection and ordered Screen Time delivery."""
 
 from __future__ import annotations
 
@@ -7,12 +7,10 @@ import json
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import cast
 
-from personal_data_platform.loader.job import LOADER_LEASE_SECONDS, JobAlreadyRunning
 from personal_data_platform.sources.contracts import SourceAdapter
 from personal_data_platform.storage.factory import WarehouseConfig, open_warehouse
 from personal_data_platform.storage.warehouse import Warehouse
@@ -81,8 +79,7 @@ def collect(
                         schema_initialized = True
                     if stats is None:
                         stage = "bootstrap"
-                        with _warehouse_lease(warehouse):
-                            _ensure_initialized(state, warehouse)
+                        _ensure_initialized(state, warehouse)
                         stats = capture()
                     stage = "delivery"
                     details["loaded"] = _load_pending(state, warehouse, source=source)
@@ -93,9 +90,6 @@ def collect(
                     result = "succeeded"
                 finally:
                     warehouse.close()
-        except JobAlreadyRunning:
-            result = "deferred"
-            raise
         finally:
             if stage == "lock" and result == "failed":
                 result = "deferred"
@@ -144,50 +138,29 @@ def _load_pending(state: CollectorState, warehouse: Warehouse, *, source: Source
     if state.source_id != source.source_id:
         raise ValueError("collector state belongs to a different source")
     loaded = 0
-    with _warehouse_lease(warehouse) as (owner, deadline):
-        _ensure_initialized(state, warehouse)
-        state.cleanup_sent_payloads()
-        for pending in state.pending(stream=source.stream):
-            if time.monotonic() >= deadline:
-                raise TimeoutError("Screen Time delivery deadline exceeded")
-            identity = pending.identity
-            if (
-                pending.parser_version is not None
-                and pending.parser_version != source.parser_version
-            ):
-                raise RuntimeError("pending parser version requires compatible replay")
-            raw = source.parse_raw_key(
-                identity.object_key, storage_created_at=identity.observed_at, storage_generation=1
-            )
-            batch = source.decode(raw, gzip.decompress(pending.compressed_payload))
-            if batch.parser_version != source.parser_version:
-                raise RuntimeError("decoded parser version does not match pinned pending version")
-            records = adopted_records(cast(BiomeBatch, batch))
-            keys = [r.event_key for r in records if r.event_key is not None]
-            state.pin_parser(identity.object_key, source.parser_version)
-            invalidated = state.invalidated_event_keys(raw.key, keys)
-            warehouse.commit_screen_time_snapshot(
-                raw, batch, invalidated_event_keys=invalidated, owner_id=owner, deadline=deadline
-            )
-            # Exceptions, including an unknown COMMIT outcome, leave this payload pending.
-            state.mark_loaded(raw.key, event_keys=keys)
-            loaded += 1
-        return loaded
-
-
-@contextmanager
-def _warehouse_lease(warehouse: Warehouse) -> Iterator[tuple[str, float]]:
-    owner = str(uuid.uuid4())
-    if not warehouse.acquire_job_lock("loader", owner, lease_seconds=LOADER_LEASE_SECONDS):
-        raise JobAlreadyRunning("loader already has an unexpired job lease")
-    try:
-        yield owner, time.monotonic() + 20 * 60
-    finally:
-        if warehouse.connection_usable:
-            failure = sys.exception()
-            try:
-                warehouse.release_job_lock("loader", owner)
-            except Exception:
-                if failure is None:
-                    raise
-                failure.add_note("loader lease cleanup also failed")
+    deadline = time.monotonic() + 20 * 60
+    _ensure_initialized(state, warehouse)
+    state.cleanup_sent_payloads()
+    for pending in state.pending(stream=source.stream):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Screen Time delivery deadline exceeded")
+        identity = pending.identity
+        if pending.parser_version is not None and pending.parser_version != source.parser_version:
+            raise RuntimeError("pending parser version requires compatible replay")
+        raw = source.parse_raw_key(
+            identity.object_key, storage_created_at=identity.observed_at, storage_generation=1
+        )
+        batch = source.decode(raw, gzip.decompress(pending.compressed_payload))
+        if batch.parser_version != source.parser_version:
+            raise RuntimeError("decoded parser version does not match pinned pending version")
+        records = adopted_records(cast(BiomeBatch, batch))
+        keys = [r.event_key for r in records if r.event_key is not None]
+        state.pin_parser(identity.object_key, source.parser_version)
+        invalidated = state.invalidated_event_keys(raw.key, keys)
+        warehouse.commit_screen_time_snapshot(
+            raw, batch, invalidated_event_keys=invalidated, deadline=deadline
+        )
+        # Exceptions, including an unknown COMMIT outcome, leave this payload pending.
+        state.mark_loaded(raw.key, event_keys=keys)
+        loaded += 1
+    return loaded

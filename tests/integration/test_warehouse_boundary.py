@@ -21,13 +21,11 @@ def test_raw_batch_cannot_take_control_of_database_execution():
 
     with closing(Warehouse(connect(WarehouseConfig(":memory:")))) as warehouse:
         warehouse.migrate()
-        assert warehouse.acquire_job_lock("loader", "owner", lease_seconds=120)
         assert (
             warehouse.commit_screen_time_snapshot(
                 _raw(),
                 DataBatch([_record(_raw())]),
                 invalidated_event_keys=(),
-                owner_id="owner",
                 deadline=time.monotonic() + 10,
             )
             == 1

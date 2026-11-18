@@ -20,24 +20,21 @@ def warehouse():
     value.close()
 
 
-def test_screen_commit_requires_live_owner_and_has_events_whitelist(warehouse):
+def test_screen_commit_is_independent_of_fitbit_lease_and_has_events_whitelist(warehouse):
     raw = _raw()
     batch = IPhoneScreenTimeBatch([_record(raw)])
     assert not warehouse.has_screen_time_events(source_id=raw.source_id)
     with pytest.raises(ValueError):
         warehouse.has_screen_time_events(source_id="location_point")
     assert warehouse.acquire_job_lock("loader", "owner", lease_seconds=120)
-    with pytest.raises(WarehouseLeaseError):
-        warehouse.commit_screen_time_snapshot(
-            raw, batch, invalidated_event_keys=(), owner_id="old", deadline=time.monotonic() + 10
-        )
     assert (
         warehouse.commit_screen_time_snapshot(
-            raw, batch, invalidated_event_keys=(), owner_id="owner", deadline=time.monotonic() + 10
+            raw, batch, invalidated_event_keys=(), deadline=time.monotonic() + 10
         )
         == 1
     )
     assert warehouse.has_screen_time_events(source_id=raw.source_id)
+    warehouse.require_job_lock("owner")
     assert warehouse.relation_names() & {"ops.job_lock", "ops.schema_migration"} == {
         "ops.job_lock",
         "ops.schema_migration",
@@ -87,7 +84,6 @@ def test_independent_connections_fence_takeover(tmp_path, takeover_first):
 
 @pytest.mark.parametrize("phase", ["BEGIN TRANSACTION", "COMMIT", "ROLLBACK"])
 def test_uncertain_screen_transaction_stops_connection(warehouse, monkeypatch, phase):
-    assert warehouse.acquire_job_lock("loader", "owner", lease_seconds=120)
     connection = warehouse.connection
 
     class Uncertain:
@@ -99,8 +95,7 @@ def test_uncertain_screen_transaction_stops_connection(warehouse, monkeypatch, p
     warehouse.connection = Uncertain()
     if phase == "ROLLBACK":
         monkeypatch.setattr(
-            warehouse,
-            "fence_job_lock",
+            "personal_data_platform.sources.iphone_screen_time.motherduck.write_state",
             lambda *a, **kw: (_ for _ in ()).throw(ValueError("bad write")),
         )
     try:
@@ -109,7 +104,6 @@ def test_uncertain_screen_transaction_stops_connection(warehouse, monkeypatch, p
                 _raw(),
                 IPhoneScreenTimeBatch([_record(_raw())]),
                 invalidated_event_keys=(),
-                owner_id="owner",
                 deadline=time.monotonic() + 10,
             )
         assert not warehouse.connection_usable

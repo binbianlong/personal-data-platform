@@ -177,7 +177,6 @@ class ScreenTimeWarehouse:
             )
         self.connection_usable = True
         self.fail_at = fail_at
-        self.locked = False
 
     def migrate(self):
         pass
@@ -187,21 +186,9 @@ class ScreenTimeWarehouse:
             f"SELECT EXISTS (SELECT 1 FROM base.{source_id}_event)"
         ).fetchone()[0]
 
-    def acquire_job_lock(self, job, owner, *, lease_seconds):
-        if self.locked:
-            return False
-        self.locked = True
-        return True
-
-    def release_job_lock(self, job, owner):
-        self.locked = False
-
-    def commit_screen_time_snapshot(
-        self, raw, batch, *, invalidated_event_keys, owner_id, deadline
-    ):
+    def commit_screen_time_snapshot(self, raw, batch, *, invalidated_event_keys, deadline):
         from personal_data_platform.biome.motherduck import write_state
 
-        assert self.locked
         self.connection.execute("BEGIN")
         try:
             count = write_state(

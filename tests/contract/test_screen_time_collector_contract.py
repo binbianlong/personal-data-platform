@@ -124,18 +124,19 @@ def test_crc_valid_unsupported_payload_remains_pending_for_parser_recovery(tmp_p
         wh.close()
 
 
-def test_competing_lease_preserves_pending_and_does_not_publish_heartbeat(tmp_path):
+def test_competing_local_collector_preserves_pending(tmp_path):
     collector, state, _, remote = _collector(tmp_path)
     (remote / "100").write_bytes(segb(event("a"))[0])
     collector.collect_once(parser_version=IPhoneScreenTimeSource.parser_version)
     wh = ScreenTimeWarehouse()
     wh.migrate()
     try:
-        wh.acquire_job_lock("loader", "competitor", lease_seconds=7500)
-        with pytest.raises(RuntimeError, match="lease"):
+        with state.lock(), pytest.raises(RuntimeError, match="collector already running"):
             load_pending(state, wh)
         assert len(state.pending()) == 1
-        assert wh.locked
+        assert wh.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 0
+        load_pending(state, wh)
+        assert not state.pending()
     finally:
         wh.close()
 

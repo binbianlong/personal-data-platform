@@ -12,7 +12,7 @@ from tests.screen_time_helpers import ScreenTimeWarehouse as Warehouse
 from tests.screen_time_helpers import event, segb
 
 
-@pytest.mark.parametrize("failure", [None, "connection", "migration", "lease"])
+@pytest.mark.parametrize("failure", [None, "connection", "migration"])
 def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatch, failure):
     sync = tmp_path / "sync.db"
     with sqlite3.connect(sync) as connection:
@@ -45,9 +45,7 @@ def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatc
 
     connections = []
     migrations = []
-    leases = []
     real_migrate = Warehouse.migrate
-    real_acquire = Warehouse.acquire_job_lock
 
     def open_connection(config):
         connections.append(config)
@@ -61,12 +59,6 @@ def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatc
             raise ConnectionError("migration unavailable")
         real_migrate(warehouse)
 
-    def acquire(warehouse, *args, **kwargs):
-        leases.append(warehouse)
-        if failure == "lease" and len(leases) == 1:
-            return False
-        return real_acquire(warehouse, *args, **kwargs)
-
     scans = []
 
     def next_scan(seconds):
@@ -79,7 +71,6 @@ def test_watch_initializes_schema_once_and_recovers_pending(tmp_path, monkeypatc
 
     monkeypatch.setattr(biome_runtime, "open_warehouse", open_connection)
     monkeypatch.setattr(Warehouse, "migrate", migrate)
-    monkeypatch.setattr(Warehouse, "acquire_job_lock", acquire)
     monkeypatch.setattr(biome_runtime.time, "sleep", next_scan)
 
     assert runtime.collect(watch=True) == 0

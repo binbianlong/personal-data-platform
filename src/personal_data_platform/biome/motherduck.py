@@ -1,4 +1,4 @@
-"""Source event statements executed inside the warehouse's fenced transaction."""
+"""Source event statements executed inside the warehouse transaction."""
 
 from __future__ import annotations
 

@@ -24,7 +24,7 @@ COMMIT不明やACK失敗では同じbytesとIDを再送し、後続snapshotは�
 解析に成功した後、最初のDB試行前にparserを固定する。未知parserで失敗したbytesは対応版で再解析できる。
 DB試行済みのpendingを互換性のないparserで暗黙再解釈しない。
 
-新規SQLiteのuser_version=0では、共有lease内でこのsourceのbaseが空と確認してからuser_version=1にして取得を始める。
+新規SQLiteのuser_version=0では、ローカルロックを保持してこのsourceのbaseが空と確認してからuser_version=1にして取得を始める。
 既存baseへ接続する場合は、整合する参照と初期化済み状態（user_version=1）を備えたSQLiteが必要。
 検証済みのuser_version=1では、DB障害中もローカル取得を続けてpendingを残す。
 ファイル永続化後・pending登録前のクラッシュで生じた未参照ファイルは、自動削除せず手動で確認する。

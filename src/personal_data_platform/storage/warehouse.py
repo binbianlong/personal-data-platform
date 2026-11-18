@@ -43,7 +43,6 @@ class Warehouse(Protocol):
         batch: DecodedBatch,
         *,
         invalidated_event_keys: Sequence[str],
-        owner_id: str,
         deadline: float,
     ) -> int: ...
 
