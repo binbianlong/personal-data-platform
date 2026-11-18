@@ -115,33 +115,6 @@ def test_uncertain_screen_transaction_stops_connection(warehouse, monkeypatch, p
             pass
 
 
-def test_later_migration_fences_same_lease_and_rolls_back_on_expiry(
-    warehouse, tmp_path, monkeypatch
-):
-    import shutil
-
-    from personal_data_platform.storage.migrations import DEFAULT_MIGRATIONS
-
-    for sql in DEFAULT_MIGRATIONS.glob("*.sql"):
-        shutil.copy(sql, tmp_path / sql.name)
-    (tmp_path / "002_more.sql").write_text("CREATE TABLE base.extra(value INTEGER)")
-    calls = []
-    fence = warehouse.fence_job_lock
-
-    def expire(owner, **kwargs):
-        calls.append(owner)
-        if len(calls) == 2:
-            raise WarehouseLeaseError("expired during DDL")
-        return fence(owner, **kwargs)
-
-    monkeypatch.setattr(warehouse, "fence_job_lock", expire)
-    with pytest.raises(WarehouseLeaseError):
-        warehouse.migrate(tmp_path)
-    assert len(calls) == 2
-    assert "base.extra" not in warehouse.relation_names()
-    assert warehouse.query_value("SELECT count(*) FROM ops.schema_migration") == 1
-
-
 @pytest.mark.parametrize("race", ["after_select", "before_commit"])
 def test_competing_acquisition_defers_without_poisoning_connection(tmp_path, race):
     path = str(tmp_path / "acquire.duckdb")

@@ -145,7 +145,7 @@ def test_failed_migration_rolls_back_schema_data_and_ledger(warehouse, tmp_path,
         table = "next"
     path.write_text(sql + "\nSELECT error('interrupted migration');")
     with pytest.raises(duckdb.InvalidInputException, match="interrupted migration"):
-        warehouse.migrate(tmp_path)
+        warehouse.migrate(tmp_path, allow_upgrade=True)
     assert _ledger(warehouse) == before
     assert (
         warehouse.query_value(
@@ -155,69 +155,35 @@ def test_failed_migration_rolls_back_schema_data_and_ledger(warehouse, tmp_path,
         == 0
     )
     path.write_text(sql)
-    warehouse.migrate(tmp_path)
+    warehouse.migrate(tmp_path, allow_upgrade=True)
     assert len(_ledger(warehouse)) == len(before) + 1
     if not initial:
         assert warehouse.query_rows("SELECT * FROM base.next") == [(1,)]
     ledger = _ledger(warehouse)
-    warehouse.migrate(tmp_path)
+    warehouse.migrate(tmp_path, allow_upgrade=True)
     assert _ledger(warehouse) == ledger
 
 
-def test_pending_migration_preserves_active_writer_and_retries_after_release(
-    warehouse, pending_migrations
-):
-    warehouse.migrate()
-    warehouse.acquire_job_lock("loader", "collector", lease_seconds=7500)
-    lease = warehouse.query_rows("SELECT * FROM ops.job_lock")
-    before = _ledger(warehouse)
-    with pytest.raises(RuntimeError, match="writer lease"):
+def test_runtime_bootstrap_rolls_back_all_files_on_error(warehouse, pending_migrations):
+    (pending_migrations / "999_pending.sql").write_text("SELECT error('invalid forward SQL')")
+    with pytest.raises(duckdb.InvalidInputException, match="invalid forward SQL"):
         warehouse.migrate(pending_migrations)
-    assert warehouse.query_rows("SELECT * FROM ops.job_lock") == lease
+    assert _ledger(warehouse) == []
+    assert "base.location_point" not in warehouse.relation_names()
+
+
+def test_runtime_refuses_pending_migrations_until_explicit_upgrade(warehouse, pending_migrations):
+    warehouse.migrate()
+    before = _ledger(warehouse)
+    with pytest.raises(RuntimeError, match="stop writers and run pdp migrate"):
+        warehouse.migrate(pending_migrations)
     assert _ledger(warehouse) == before
-    warehouse.release_job_lock("loader", "collector")
+    assert "base.migration_probe" not in warehouse.relation_names()
+
+    warehouse.migrate(pending_migrations, allow_upgrade=True)
     warehouse.migrate(pending_migrations)
-    assert warehouse.query_rows("SELECT * FROM ops.job_lock") == []
     assert warehouse.query_rows("SELECT * FROM base.migration_probe") == [(1,)]
-
-
-@pytest.mark.parametrize("stage", ["apply", "commit"])
-def test_migration_excludes_new_writers_until_commit(tmp_path, pending_migrations, stage):
-    database = str(tmp_path / "concurrent.duckdb")
-    value = Warehouse(connect(WarehouseConfig(database)))
-    value.migrate()
-    writer = Warehouse(connect(WarehouseConfig(database)))
-    connection = value.connection
-    attempted = []
-
-    class ConcurrentWriter:
-        applying = False
-
-        def execute(self, sql, *args):
-            apply = "CREATE TABLE base.migration_probe" in sql
-            if apply:
-                self.applying = True
-            if not attempted and (
-                (stage == "apply" and apply)
-                or (stage == "commit" and self.applying and sql == "COMMIT")
-            ):
-                attempted.append(writer.acquire_job_lock("loader", "worker", lease_seconds=7500))
-            return connection.execute(sql, *args)
-
-        def __getattr__(self, name):
-            return getattr(connection, name)
-
-    value.connection = ConcurrentWriter()
-    try:
-        value.migrate(pending_migrations)
-        assert attempted == [False]
-        assert writer.acquire_job_lock("loader", "worker", lease_seconds=7500)
-        _insert_event(writer)
-        writer.release_job_lock("loader", "worker")
-        assert writer.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 1
-    finally:
-        value.close()
-        writer.close()
+    assert warehouse.query_rows("SELECT * FROM ops.job_lock") == []
 
 
 @pytest.mark.parametrize("committed", [False, True])
@@ -253,7 +219,7 @@ def test_uncertain_commit_stops_connection_use_until_reconnected(
     value.connection = UncertainCommit()
     try:
         with pytest.raises(WarehouseConnectionError, match="commit outcome unknown"):
-            value.migrate(pending_migrations)
+            value.migrate(pending_migrations, allow_upgrade=True)
         assert value.connection_usable is False
         assert after_failure == []
     finally:
@@ -264,11 +230,8 @@ def test_uncertain_commit_stops_connection_use_until_reconnected(
             "SELECT count(*) FROM ops.schema_migration WHERE migration_id='999_pending.sql'"
         ) == int(committed)
         assert value.query_value("SELECT count(*) FROM base.iphone_screen_time_event") == 1
-        assert value.query_value("SELECT count(*) FROM ops.job_lock") == 1
-        value.connection.execute("UPDATE ops.job_lock SET expires_at=now()-INTERVAL '1 second'")
-        value.migrate(pending_migrations)
-        assert value.acquire_job_lock("loader", "retry", lease_seconds=120)
-        value.release_job_lock("loader", "retry")
+        value.migrate(pending_migrations, allow_upgrade=True)
+        assert value.query_rows("SELECT * FROM base.migration_probe") == [(1,)]
         assert value.query_rows("SELECT * FROM ops.job_lock") == []
     finally:
         value.close()
@@ -333,12 +296,20 @@ def test_fresh_target_ignores_an_attached_database(warehouse):
     assert warehouse.query_rows("SELECT * FROM unrelated.ops.schema_migration") == before
 
 
-def test_platform_migrate_initializes_a_local_database(tmp_path):
+def test_platform_migrate_initializes_and_upgrades_a_local_database(
+    tmp_path, pending_migrations, monkeypatch
+):
     database = tmp_path / "local.duckdb"
     assert main(["migrate", "--database", str(database)]) == 0
     with duckdb.connect(str(database)) as connection:
         assert connection.execute("SELECT count(*) FROM ops.schema_migration").fetchone() == (1,)
         assert connection.execute("SELECT count(*) FROM base.sleep_session").fetchone() == (0,)
+    monkeypatch.setattr(
+        "personal_data_platform.storage.migrations.DEFAULT_MIGRATIONS", pending_migrations
+    )
+    assert main(["migrate", "--database", str(database)]) == 0
+    with duckdb.connect(str(database)) as connection:
+        assert connection.execute("SELECT * FROM base.migration_probe").fetchall() == [(1,)]
 
 
 def test_platform_migrate_rejects_nonlocal_database(capsys):

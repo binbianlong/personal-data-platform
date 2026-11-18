@@ -74,10 +74,10 @@ pdp migrate --database /private/path/scratch.duckdb
 `--database`を省略すると`MOTHERDUCK_DATABASE`・`MOTHERDUCK_TOKEN`の接続先へ適用する。
 各SQLとchecksum記録は同じtransactionで確定する。適用済みSQLや台帳は変更せず、新しいforward migrationを追加する。
 再実行時にchecksumを照合し、不一致や未対応のスキーマ履歴があるDBへの適用は拒否する。
-未適用SQLは共通の`loader` leaseを使うため、取込が実行中なら終了後に再試行する。
+通常の取込とdbtは空のDBを初期化できる。既存DBに未適用SQLがあると開始時の照合で停止する。
 再構築には空のscratch DBを使い、[Rebuild](#rebuild)の保持範囲を確認する。
 
-追加DDLはCollector・Fitbitバッチ・OwnTracksのpush配信・日次Schedulerを止め、実行中Jobと`loader` leaseの終了を確認してから適用する。
+既存DBのスキーマを更新するときは、両Collector・Fitbitバッチ・OwnTracksのpush配信・日次Schedulerを止める。手動同期やdbtを含め実行中の処理が終了してから、新しい版で`pdp migrate`を実行する。
 MacのCollectorはeditable installのcheckoutを参照するため、そのcheckoutへmigrationを追加する前に停止する。
 適用済みmigrationを認識しない旧コードはDB接続時のschema照合で失敗するため、再開前に全Cloud Run runtimeのimageとCollectorのcheckout・依存を更新する。
 Collectorは起動後にスキーマを初期化し、成功後の周期では省略する。DDL・コード・接続設定の変更後は再起動し、

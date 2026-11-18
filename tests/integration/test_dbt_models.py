@@ -180,69 +180,6 @@ def test_interval_marts_and_portable_catalog(tmp_path, monkeypatch):
     warehouse.close()
 
 
-def test_lease_loss_fails_before_view_mutation(tmp_path, monkeypatch):
-    import pytest
-
-    path = tmp_path / "catalog.duckdb"
-    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
-    warehouse.migrate()
-    warehouse.connection.execute(
-        "insert into ops.job_lock values ('loader','owner',current_timestamp + interval '1 hour')"
-    )
-    warehouse.close()
-    monkeypatch.setenv("DBT_DUCKDB_PATH", str(path))
-    monkeypatch.setenv("PDP_DBT_LEASE_OWNER", "owner")
-    run_dbt(target="local", selector="daily_steps")
-    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
-    warehouse.connection.execute(
-        "create or replace view marts.daily_steps as select 42 as sentinel"
-    )
-    warehouse.connection.execute("update ops.job_lock set owner_id='other'")
-    warehouse.close()
-    with pytest.raises(RuntimeError):
-        run_dbt(target="local", selector="daily_steps")
-    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
-    assert warehouse.connection.execute("select * from marts.daily_steps").fetchall() == [(42,)]
-    warehouse.connection.execute(
-        "update ops.job_lock set owner_id='owner', expires_at=current_timestamp - interval '1 second'"
-    )
-    warehouse.close()
-    with pytest.raises(RuntimeError):
-        run_dbt(target="local", selector="daily_steps")
-    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
-    assert warehouse.connection.execute("select * from marts.daily_steps").fetchall() == [(42,)]
-    warehouse.close()
-
-
-def test_lease_update_rolls_back_with_model_failure(tmp_path, monkeypatch):
-    import shutil
-
-    import pytest
-
-    from personal_data_platform.dbt_runner import DBT_PROJECT_DIR
-
-    project = tmp_path / "project"
-    shutil.copytree(DBT_PROJECT_DIR, project, ignore=shutil.ignore_patterns("target", "logs"))
-    (project / "models/marts/daily_steps.sql").write_text(
-        "select no_such_column from missing_table"
-    )
-    path = tmp_path / "fenced.duckdb"
-    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
-    warehouse.migrate()
-    warehouse.connection.execute(
-        "insert into ops.job_lock values ('loader','owner',current_timestamp + interval '1 hour')"
-    )
-    before = warehouse.connection.execute("select expires_at from ops.job_lock").fetchone()
-    warehouse.close()
-    monkeypatch.setenv("DBT_DUCKDB_PATH", str(path))
-    monkeypatch.setenv("PDP_DBT_LEASE_OWNER", "owner")
-    with pytest.raises(RuntimeError):
-        run_dbt(target="local", project_dir=project, selector="daily_steps")
-    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
-    assert warehouse.connection.execute("select expires_at from ops.job_lock").fetchone() == before
-    warehouse.close()
-
-
 def test_source_selectors_work_without_unrelated_tables(tmp_path, monkeypatch):
 
     for selector in ("iphone_screen_time", "mac_screen_time", "fitbit", "owntracks"):
@@ -294,10 +231,8 @@ def test_tied_boundaries_and_os_totals_are_independent(tmp_path, monkeypatch):
     warehouse.close()
 
 
-def test_prod_source_only_and_model_fencing_with_local_profile(tmp_path, monkeypatch):
+def test_prod_dbt_builds_views_while_fitbit_holds_the_lease(tmp_path, monkeypatch):
     import shutil
-
-    import pytest
 
     from personal_data_platform.dbt_runner import DBT_PROJECT_DIR
 
@@ -319,27 +254,15 @@ def test_prod_source_only_and_model_fencing_with_local_profile(tmp_path, monkeyp
     warehouse.connection.execute(
         "insert into ops.job_lock values ('loader','owner',current_timestamp + interval '1 hour')"
     )
-    before = warehouse.connection.execute("select expires_at from ops.job_lock").fetchone()[0]
+    lease = warehouse.query_rows("SELECT * FROM ops.job_lock")
     warehouse.close()
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(path))
-    monkeypatch.delenv("PDP_DBT_LEASE_OWNER", raising=False)
     config = WarehouseConfig("dummy", "dummy")
     run_dbt(target="prod", project_dir=project, selector="tag:owntracks", config=config)
-    with pytest.raises(RuntimeError):
-        run_dbt(target="prod", project_dir=project, selector="daily_steps", config=config)
-    warehouse = Warehouse(connect(WarehouseConfig(str(path))))
-    assert warehouse.connection.execute("select * from marts.daily_steps").fetchall() == [(42,)]
-    assert (
-        warehouse.connection.execute("select expires_at from ops.job_lock").fetchone()[0] == before
-    )
-    warehouse.close()
-    monkeypatch.setenv("PDP_DBT_LEASE_OWNER", "owner")
     run_dbt(target="prod", project_dir=project, selector="daily_steps", config=config)
     warehouse = Warehouse(connect(WarehouseConfig(str(path))))
-    assert (
-        warehouse.connection.execute("select expires_at from ops.job_lock").fetchone()[0] < before
-    )
-    assert warehouse.connection.execute("select * from marts.daily_steps").fetchall() == []
+    assert warehouse.query_rows("SELECT * FROM marts.daily_steps") == []
+    assert warehouse.query_rows("SELECT * FROM ops.job_lock") == lease
     warehouse.close()
 
 
@@ -364,7 +287,6 @@ def test_owntracks_rebuild_runs_source_tests_with_prod_profile(tmp_path, monkeyp
 """)
     path = tmp_path / "scratch.duckdb"
     monkeypatch.setenv("DBT_DUCKDB_PATH", str(path))
-    monkeypatch.delenv("PDP_DBT_LEASE_OWNER", raising=False)
     monkeypatch.setattr(
         rebuild, "open_warehouse", lambda config: Warehouse(connect(WarehouseConfig(str(path))))
     )

@@ -1,5 +1,4 @@
 import os
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -33,12 +32,17 @@ def test_fitbit_dbt_selector_does_not_require_a_raw_adapter(monkeypatch, stream)
         warehouse.connection.close()
 
 
-def test_cloud_dbt_migrates_before_models(monkeypatch) -> None:
+@pytest.mark.parametrize("fitbit_busy", [False, True])
+def test_cloud_dbt_initializes_schema_and_leaves_fitbit_lease_untouched(monkeypatch, fitbit_busy):
     import duckdb
 
     from personal_data_platform.storage.motherduck import Warehouse
 
     warehouse = Warehouse(duckdb.connect())
+    if fitbit_busy:
+        warehouse.migrate()
+        assert warehouse.acquire_job_lock("loader", "fitbit", lease_seconds=600)
+    owner = "fitbit" if fitbit_busy else None
     calls = []
     monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
     monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
@@ -49,16 +53,14 @@ def test_cloud_dbt_migrates_before_models(monkeypatch) -> None:
         assert warehouse.query_rows(
             "SELECT migration_id FROM ops.schema_migration ORDER BY migration_id"
         ) == [(path.name,) for path in sorted(DEFAULT_MIGRATIONS.glob("*.sql"))]
-        assert (
-            warehouse.query_value("SELECT count(*) FROM ops.job_lock WHERE expires_at > now()") == 1
-        )
+        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == owner
         calls.append(kwargs["target"])
 
     monkeypatch.setattr(dbt_runner, "run_dbt", run_models)
     try:
         assert dbt_runner.run_dbt_from_env() == 0
         assert calls == ["prod"]
-        assert warehouse.query_value("SELECT count(*) FROM ops.job_lock") == 0
+        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == owner
     finally:
         warehouse.connection.close()
 
@@ -128,49 +130,6 @@ def test_selected_dbt_models_and_tests_use_the_same_scope(monkeypatch):
     )
 
 
-def test_all_writers_share_loader_lease(monkeypatch):
-    import duckdb
-
-    from personal_data_platform.storage.motherduck import Warehouse
-
-    warehouse = Warehouse(duckdb.connect(":memory:"))
-    warehouse.migrate()
-    assert warehouse.acquire_job_lock("loader", "other", lease_seconds=7500)
-    monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
-    monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
-    monkeypatch.setattr(warehouse, "close", lambda: None)
-    monkeypatch.setattr(dbt_runner, "run_dbt", lambda **kwargs: pytest.fail("dbt was invoked"))
-    try:
-        with pytest.raises(RuntimeError, match="lease"):
-            dbt_runner.run_dbt_from_env()
-        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "other"
-    finally:
-        warehouse.connection.close()
-
-
-def test_inherited_dbt_lease_is_checked_and_not_released(monkeypatch):
-    import duckdb
-
-    from personal_data_platform.storage.motherduck import Warehouse
-
-    warehouse = Warehouse(duckdb.connect(":memory:"))
-    warehouse.migrate()
-    assert warehouse.acquire_job_lock("loader", "daily", lease_seconds=7500)
-    monkeypatch.setenv("MOTHERDUCK_DATABASE", "production")
-    monkeypatch.setenv("MOTHERDUCK_TOKEN", "synthetic-token")
-    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
-    monkeypatch.setattr(warehouse, "close", lambda: None)
-    calls = []
-    monkeypatch.setattr(dbt_runner, "run_dbt", lambda **kwargs: calls.append(kwargs))
-    try:
-        assert dbt_runner.run_dbt_from_env(lease_owner="daily") == 0
-        assert len(calls) == 1
-        assert warehouse.query_value("SELECT owner_id FROM ops.job_lock") == "daily"
-    finally:
-        warehouse.connection.close()
-
-
 def test_bounded_dbt_subprocess_uses_remaining_deadline(monkeypatch):
     commands = []
     monkeypatch.setattr(
@@ -214,19 +173,3 @@ def test_explicit_dbt_config_uses_scratch_target_and_restores_environment(
     assert os.environ["MOTHERDUCK_DATABASE"] == "production"
     assert os.environ["MOTHERDUCK_TOKEN"] == "production-token"
     assert os.environ["DBT_ENV_SECRET_MOTHERDUCK_TOKEN"] == "previous-secret"
-
-
-def test_cloud_dbt_passes_lease_owner_to_models(monkeypatch):
-    warehouse = MagicMock()
-    warehouse.acquire_job_lock.return_value = True
-    warehouse.connection_usable = True
-    monkeypatch.setattr(dbt_runner, "open_warehouse", lambda config=None: warehouse)
-    monkeypatch.setattr(
-        dbt_runner, "run_dbt", lambda **kwargs: calls.append(os.environ.get("PDP_DBT_LEASE_OWNER"))
-    )
-    calls = []
-    with patch.dict(os.environ, {"DBT_TARGET": "prod"}):
-        dbt_runner.run_dbt_from_env(
-            lease_owner="owner-a", config=dbt_runner.WarehouseConfig("scratch")
-        )
-    assert calls == ["owner-a"]

@@ -95,8 +95,8 @@ class Warehouse:
     def close(self) -> None:
         self.connection.close()
 
-    def migrate(self, migrations: Path | None = None) -> None:
-        apply_migrations(self, migrations)
+    def migrate(self, migrations: Path | None = None, *, allow_upgrade: bool = False) -> None:
+        apply_migrations(self, migrations, allow_upgrade=allow_upgrade)
 
     @contextmanager
     def _transaction(

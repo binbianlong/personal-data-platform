@@ -10,4 +10,3 @@ models:
     +schema: marts
     +materialized: view
     +persist_docs: {relation: true, columns: true}
-    +pre-hook: "{{ lease_fence() }}"
