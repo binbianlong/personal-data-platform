@@ -1,6 +1,7 @@
 # アーキテクチャ
 
 行動・健康の分析履歴はMotherDuckの`personal_data_platform`へ保存する。分析用shareは`pdp_analytics`。
+ChatGPTのプラグインからBigQueryを使えないため、実行環境はGCPでも保存先にはMotherDuckを使う。
 
 ```text
 iPhone Collector -> 専用SQLite + pendingファイル -> base.iphone_screen_time_event

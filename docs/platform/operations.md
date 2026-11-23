@@ -138,7 +138,7 @@ pdp rebuild --source owntracks --target-db <scratch-db> --allow-partial-history
 本番と同名・既存データのあるtargetへの再生は拒否する。固定したgenerationのRawを使い、検証後に参照先を切り替える。
 parserの修正は`pdp loader --source owntracks --prefix raw/owntracks/v1/... --reprocess`で明示する。
 
-FitbitはRawを持たない。scratch DBへ`pdp fitbit sync --from ... --to ...`でAPI取得し直し、dbtとbaseの値を検証する。
+FitbitのRawはこの基盤の外の別の場所で保持し、rebuildの入力にはしない。scratch DBへ`pdp fitbit sync --from ... --to ...`でAPI取得し直し、dbtとbaseの値を検証する。
 Screen Timeのpendingファイルは送信後に削除するため、全履歴を再構築する入力ではない。
 Screen Timeの全履歴移行では、canonical baseと各SQLiteの参照情報を引き継ぐ。Rawだけを再生するrebuildは実行しない。
 保持したRaw・APIで再取得できる範囲・既存baseで、復元可能なデータは異なる。
