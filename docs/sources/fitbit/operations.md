@@ -76,7 +76,7 @@ pdp fitbit sync --from YYYY-MM-DD --to YYYY-MM-DD
 Schedulerの停止とlease確認は[Platform運用](../../platform/operations.md)に従う。receiverを止めなければ通知は7日保持される。
 通常のAPI・DB失敗は次回バッチと日次再照合で再試行する。不正通知は原因を修正し、必要な期間を手動同期する。
 本番DBを空にせず、独立したscratch DBへ期間指定同期とdbtを実行して比較する。
-Fitbitの復旧元はGoogle Health APIであり、Rawは保存しない。
+Fitbitの復旧元はGoogle Health APIであり、この基盤ではRawを保存しない。Rawはこの基盤の外の別の場所で保持している。
 
 歩数通知のUTC/civilと要求範囲に対応したworker・日次Jobを同じコードで稼働させる。
 新schemaへ切り替えたDBに旧imageを戻さない。通知の保持期間を超える停止や直近2完了日より前の欠落は、期間指定で補修する。
